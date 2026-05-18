@@ -30,9 +30,8 @@ class LLMDefaults:
     GEMINI_CHAT_HEAVY = "gemini-3.1-pro"
     GEMINI_EMBED = "text-embedding-004"
 
-    MISTRAL_CHAT_LIGHT = "mistral-small-4-latest"
-    MISTRAL_CHAT_VISION = "mistral-medium-3-5-latest"
-    MISTRAL_CHAT_HEAVY = "magistral-medium-1.2-latest"
+    MISTRAL_CHAT_LIGHT = "mistral-small-latest"
+    MISTRAL_CHAT_HEAVY = "magistral-medium-latest"
     MISTRAL_EMBED = "mistral-embed"
     MISTRAL_STT = "voxtral-mini-transcribe-latest"
 

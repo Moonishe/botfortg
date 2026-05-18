@@ -70,12 +70,13 @@ class TranscriptionService:
         return await asyncio.to_thread(_run)
 
     async def _transcribe_mistral(self, path: Path, mistral_key: str, language: str | None) -> str:
+        from src.config import LLMDefaults
         import httpx
 
         suffix = path.suffix.lstrip(".") or "ogg"
         mime = f"audio/{suffix}" if suffix != "oga" else "audio/ogg"
 
-        data = {"model": "voxtral-mini-transcribe-latest"}
+        data = {"model": LLMDefaults.MISTRAL_STT}
         if language:
             data["language"] = language
 
