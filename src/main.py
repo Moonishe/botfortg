@@ -17,7 +17,9 @@ from src.core.sleep_tracker import sleep_tracker_loop
 from src.core.smart_digest import smart_digest_loop
 from src.core.weekly_summarizer import weekly_summary_loop
 from src.core.knowledge_distiller import distillation_loop
+from src.core.conflict_predictor import conflict_predictor_loop
 from src.core.conflict_resolver import conflict_check_loop
+from src.core.habit_tracker import habit_tracker_loop
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -91,6 +93,10 @@ async def main() -> None:
         asyncio.create_task(
             conflict_check_loop(settings.owner_telegram_id),
             name="conflict-check",
+        ),
+        asyncio.create_task(
+            conflict_predictor_loop(settings.owner_telegram_id),
+            name="conflict-predictor",
         ),
     ]
 

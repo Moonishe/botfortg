@@ -423,6 +423,20 @@ async def cmd_remember(
     await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
 
 
+@router.message(Command("habits"))
+async def cmd_habits(message: Message) -> None:
+    """Показать обнаруженные привычки на основе повторяющихся фактов."""
+    from src.core.habit_tracker import find_habit_candidates, format_habits
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        memories = await list_memories(session, owner)
+        active = [m for m in memories if m.is_active and m.created_at]
+    habits = find_habit_candidates(active)
+    text = format_habits(habits)
+    await message.answer(text)
+
+
 @router.message(Command("insights"))
 async def cmd_insights(message: Message) -> None:
     from src.core.memory_patterns import detect_patterns, format_insights
@@ -597,6 +611,19 @@ async def cmd_conflicts(message: Message) -> None:
 
     conflicts = await find_conflicts(message.from_user.id)
     text = format_conflicts(conflicts)
+    await message.answer(text)
+
+
+@router.message(Command("warnings"))
+async def cmd_warnings(message: Message) -> None:
+    """Показать активные предупреждения о риске конфликтов."""
+    from src.core.conflict_predictor import (
+        detect_silence_triggers,
+        format_conflict_warnings,
+    )
+
+    triggers = await detect_silence_triggers(message.from_user.id)
+    text = format_conflict_warnings(triggers) or "✅ Нет рисков конфликтов."
     await message.answer(text)
 
 
