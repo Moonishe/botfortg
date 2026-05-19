@@ -1038,3 +1038,33 @@ async def get_conversation_state(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def link_memories(
+    session: AsyncSession, memory_id: int, related_id: int, relation_type: str
+) -> None:
+    """Создать связь между двумя фактами памяти."""
+    mem = await session.get(Memory, memory_id)
+    if mem:
+        mem.related_memory_id = related_id
+        mem.relation_type = relation_type
+        await session.flush()
+
+
+async def get_linked_memories(
+    session: AsyncSession, user: User, memory_id: int, limit: int = 5
+) -> list[Memory]:
+    """Получить факты, связанные с данным (в обе стороны)."""
+    result = await session.execute(
+        select(Memory)
+        .where(
+            Memory.user_id == user.id,
+            or_(
+                Memory.id == memory_id,
+                Memory.related_memory_id == memory_id,
+            ),
+        )
+        .order_by(Memory.created_at.desc())
+        .limit(limit + 1)
+    )
+    return [m for m in result.scalars().all() if m.id != memory_id][:limit]

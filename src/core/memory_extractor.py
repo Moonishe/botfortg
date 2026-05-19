@@ -7,8 +7,8 @@ from sqlalchemy import select
 
 from src.core.chat_service import message_to_text
 from src.core.vector_store import vector_store
-from src.db.models import Contact, Message, User
-from src.db.repo import add_memory
+from src.db.models import Contact, Memory, Message, User
+from src.db.repo import add_memory, link_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
 
@@ -25,7 +25,9 @@ MEMORIES_SYSTEM = (
     '  {"fact": "краткий факт одной фразой на русском",\n'
     '   "sentiment": "positive" | "negative" | "neutral",\n'
     '   "importance": 7,\n'
-    '   "decay_rate": 0.05}\n'
+    '   "decay_rate": 0.05,\n'
+    '   "relation_type": "cause" | null,\n'
+    '   "relation_to_index": 0 | null}\n'
     "]\n"
     "importance (1-10):\n"
     "  1-3 — мелкая деталь, быстро забывается\n"
@@ -36,6 +38,10 @@ MEMORIES_SYSTEM = (
     "  0.07 — норма (неделя-две)\n"
     "  0.15 — быстро устаревает (настроения, планы на день)\n"
     "  0.30 — моментально (погода, «я поел»)\n"
+    "Для каждого факта укажи связь с ПРЕДЫДУЩИМИ фактами из того же диалога, если она есть:\n"
+    '- "relation_type": "cause" (причина), "effect" (следствие), "contradicts" (противоречие), '
+    '"supports" (подтверждение), "continues" (продолжение темы), "example_of" (пример)\n'
+    '- "relation_to_index": индекс предыдущего факта (0-based) в этом же ответе, с которым связан\n'
     "Если значимых фактов нет — пустой массив [].\n"
     "Не выдумывай то, чего нет в переписке. Пиши на русском."
 )
@@ -61,7 +67,7 @@ async def extract_and_save_memories(
     user_id: int,
     contact: Contact | None,
     messages: list[Message],
-) -> list[dict]:
+) -> list[Memory]:
     """Извлекает факты о контакте из переписки и сохраняет в БД (fire-and-forget)."""
     if not messages or contact is None:
         return []
@@ -89,7 +95,7 @@ async def extract_and_save_memories(
     if not items:
         return []
 
-    saved: list[dict] = []
+    saved: list[Memory | None] = []
     async with get_session() as session:
         # Подтягиваем User по telegram_id
         result = await session.execute(select(User).where(User.id == user_id))
@@ -100,7 +106,9 @@ async def extract_and_save_memories(
 
         if not isinstance(items, list):
             logger.warning("LLM returned non-list for memory extraction: %s", items)
-            return saved
+            return [m for m in saved if m is not None]
+
+        # Первый проход: сохранение фактов
         for item in items:
             if not isinstance(item, dict):
                 continue  # пропустить строки/не-словари
@@ -132,7 +140,7 @@ async def extract_and_save_memories(
                     "Failed to embed fact, skipping vector dedup: %r", fact[:60]
                 )
 
-            await add_memory(
+            mem = await add_memory(
                 session,
                 user,
                 fact=fact,
@@ -145,13 +153,31 @@ async def extract_and_save_memories(
                 importance=importance,
                 decay_rate=decay_rate,
             )
-            saved.append(item)
+            saved.append(mem)
 
-    if saved:
+        # Второй проход: установка связей между фактами
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            rel_type = (item.get("relation_type") or "").strip()
+            rel_idx = item.get("relation_to_index")
+            if rel_type and isinstance(rel_idx, int) and 0 <= rel_idx < len(saved):
+                mem = saved[i]
+                target = saved[rel_idx]
+                if (
+                    mem is not None
+                    and target is not None
+                    and hasattr(mem, "id")
+                    and hasattr(target, "id")
+                ):
+                    await link_memories(session, mem.id, target.id, rel_type)
+
+    valid = [m for m in saved if m is not None]
+    if valid:
         logger.info(
             "Saved %d memories for user %d, contact %s",
-            len(saved),
+            len(valid),
             user_id,
             contact.display_name,
         )
-    return saved
+    return valid

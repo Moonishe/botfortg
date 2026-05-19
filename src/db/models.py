@@ -386,6 +386,12 @@ class Memory(Base):
     memory_tier: Mapped[int] = mapped_column(
         Integer, default=1
     )  # 1=эпизод, 2=недельное, 3=месячное
+    related_memory_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, index=True
+    )  # ссылка на другой Memory.id
+    relation_type: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )  # cause, effect, contradicts, supports, continues, example_of
 
 
 class MemoryCluster(Base):

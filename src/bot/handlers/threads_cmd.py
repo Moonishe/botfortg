@@ -12,13 +12,16 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
+from src.core.memory_fuel import format_fuel_line, get_fuel_stats
 from src.db.repo import (
     fetch_chat_messages,
     get_contact,
+    get_linked_memories,
     get_or_create_user,
     list_active_conversations,
     list_contacts,
     list_folders,
+    list_memories,
 )
 from src.db.session import get_session
 
@@ -39,6 +42,10 @@ STATUS_EMOJI = {
 @router.message(Command("threads"))
 async def cmd_threads(message: Message, command: CommandObject | None = None) -> None:
     """Показать активные переписки. /threads — все, /threads Работа — по папке."""
+    # Индикатор топлива памяти
+    fuel = await get_fuel_stats(message.from_user.id)
+    fuel_line = format_fuel_line(fuel)
+
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
 
@@ -84,7 +91,7 @@ async def cmd_threads(message: Message, command: CommandObject | None = None) ->
                 await message.answer("📭 Нет активных переписок.")
             return
 
-        lines = [title, ""]
+        lines = [title, "", fuel_line, ""]
         kb_rows = []
         for i, conv in enumerate(convos[:15]):
             contact = await get_contact(session, owner, conv.peer_id)
@@ -153,7 +160,32 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
             lines.append("")
             lines.append("<b>🧠 Память о контакте:</b>")
             for m in memories[:5]:
-                lines.append(f"• {m.fact}")
+                rel_icon = {
+                    "cause": "🎯",
+                    "effect": "⚡",
+                    "contradicts": "⚠️",
+                    "supports": "✅",
+                    "continues": "➡️",
+                    "example_of": "📌",
+                }.get(m.relation_type or "", "")
+                prefix = f"{rel_icon} " if rel_icon else "• "
+                lines.append(f"{prefix}{m.fact}")
+
+            # Загружаем связанные факты (если есть хоть один с relation_type)
+            linked = await get_linked_memories(session, owner, memories[0].id, limit=3)
+            if linked:
+                lines.append("")
+                lines.append("<b>🔗 Связанные факты:</b>")
+                for lm in linked[:3]:
+                    rel_label = {
+                        "cause": "причина",
+                        "effect": "следствие",
+                        "contradicts": "противоречие",
+                        "supports": "подтверждение",
+                        "continues": "продолжение",
+                        "example_of": "пример",
+                    }.get(lm.relation_type or "", lm.relation_type or "связь")
+                    lines.append(f"  {lm.relation_type}: «{lm.fact}»")
 
     lines.append("")
     lines.append("<i>Ответь в Telegram или через /send</i>")

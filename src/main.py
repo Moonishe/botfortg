@@ -7,6 +7,7 @@ from src.core.auto_sync import auto_sync_loop
 from src.core.digest import digest_scheduler_loop
 from src.core.follow_up import follow_up_loop
 from src.core.memory_checker import memory_decay_loop
+from src.core.memory_patterns import patterns_loop
 from src.core.news import news_scheduler_loop
 from src.core.proactive_briefing import proactive_briefing_loop
 from src.core.reminders import reminders_loop
@@ -70,6 +71,9 @@ async def main() -> None:
         ),
         asyncio.create_task(
             weekly_summary_loop(settings.owner_telegram_id), name="weekly-summary"
+        ),
+        asyncio.create_task(
+            patterns_loop(settings.owner_telegram_id), name="memory-patterns"
         ),
     ]
 

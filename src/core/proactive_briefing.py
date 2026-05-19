@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from src.core.memory_fuel import get_fuel_stats
 from src.core.notifier import notifier
 from src.db.repo import (
     get_memory_stats,
@@ -25,6 +26,7 @@ class BriefingData:
     today_commitments: list = None  # list[dict]
     recent_memories: int = 0
     memory_stats: dict = None  # статистика по памяти
+    fuel_stats: dict = None  # статистика топлива памяти
 
     def __post_init__(self) -> None:
         if self.waiting_reply is None:
@@ -75,6 +77,9 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
         # Общая статистика памяти
         result.memory_stats = await get_memory_stats(session, owner)
 
+    # Статистика топлива памяти (открывает свою сессию)
+    result.fuel_stats = await get_fuel_stats(owner_id)
+
     return result
 
 
@@ -119,6 +124,16 @@ def format_briefing(data: BriefingData, title: str) -> str:
         )
         if weekly_facts:
             lines.append(f"   📊 Из них {weekly_facts} с недельного саммари")
+
+    # Индикатор топлива памяти
+    if data.fuel_stats:
+        from src.core.memory_fuel import format_depleted_contacts, format_fuel_line
+
+        lines.append("")
+        lines.append(format_fuel_line(data.fuel_stats))
+        depleted_text = format_depleted_contacts(data.fuel_stats)
+        if depleted_text:
+            lines.append(depleted_text)
 
     lines.append("\n💬 <i>/threads — просмотреть переписки</i>")
     return "\n".join(lines)

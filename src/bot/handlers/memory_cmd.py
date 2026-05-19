@@ -11,9 +11,15 @@ from aiogram.types import (
 
 from src.bot.filters import OwnerOnly
 from src.core.contact_resolver import resolve
+from src.core.memory_fuel import (
+    format_depleted_contacts,
+    format_fuel_line,
+    get_fuel_stats,
+)
 from src.db.repo import (
     add_memory,
     delete_memory,
+    get_linked_memories,
     get_memory_stats,
     get_or_create_user,
     list_memories,
@@ -65,6 +71,11 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     neu = stats["by_sentiment"].get("neutral", 0)
     stat_line = f"🧠 <b>Память{label}</b>: {stats['total']} фактов ({pos} позитивных, {neg} негативных, {neu} нейтральных)\n"
 
+    # Индикатор топлива памяти
+    fuel = await get_fuel_stats(message.from_user.id)
+    fuel_line = format_fuel_line(fuel)
+    fuel_depleted = format_depleted_contacts(fuel)
+
     # Группировка по sentiment
     positive_lines: list[str] = []
     negative_lines: list[str] = []
@@ -75,7 +86,16 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
         sent = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
             m.sentiment or "", "⚪"
         )
-        line = f"• {sent} [{date_str}] {m.fact}"
+        rel_icon = {
+            "cause": "🎯",
+            "effect": "⚡",
+            "contradicts": "⚠️",
+            "supports": "✅",
+            "continues": "➡️",
+            "example_of": "📌",
+        }.get(m.relation_type or "", "")
+        rel_prefix = f"{rel_icon} " if rel_icon else ""
+        line = f"• {sent} [{date_str}]{rel_prefix} {m.fact}"
         if m.sentiment == "positive":
             positive_lines.append(line)
         elif m.sentiment == "negative":
@@ -83,7 +103,9 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
         else:
             neutral_lines.append(line)
 
-    body_parts = [stat_line]
+    body_parts = [stat_line, fuel_line]
+    if fuel_depleted:
+        body_parts.append(fuel_depleted)
     if positive_lines:
         body_parts.append(f"\n<b>🟢 Позитивные ({len(positive_lines)}):</b>")
         body_parts.extend(positive_lines[:10])
@@ -163,6 +185,14 @@ async def cb_memory_stats(callback: CallbackQuery) -> None:
         ]
     )
 
+    # Индикатор топлива памяти
+    fuel = await get_fuel_stats(callback.from_user.id)
+    lines.append("")
+    lines.append(format_fuel_line(fuel))
+    depleted_text = format_depleted_contacts(fuel)
+    if depleted_text:
+        lines.append(depleted_text)
+
     if callback.message:
         await callback.message.answer("\n".join(lines))
     await callback.answer()
@@ -210,6 +240,15 @@ async def cmd_remember(
         )
 
     await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
+
+
+@router.message(Command("insights"))
+async def cmd_insights(message: Message) -> None:
+    from src.core.memory_patterns import detect_patterns, format_insights
+
+    insights = await detect_patterns(message.from_user.id)
+    text = format_insights(insights)
+    await message.answer(text)
 
 
 @router.message(Command("forget"))
