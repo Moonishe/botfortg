@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 
 from sqlalchemy import (
@@ -323,3 +325,14 @@ class Memory(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class AgentCache(Base):
+    """Кэш результатов сабагентов."""
+
+    __tablename__ = "agent_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    result_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ttl_seconds: Mapped[int] = mapped_column(Integer, default=0)

@@ -33,14 +33,16 @@ def _check_rate_limit(user_id: int, max_per_hour: int) -> bool:
     return True
 
 
-def should_suggest(settings: "UserSettings", user_id: int, text: str) -> bool:
+async def should_suggest(
+    settings: "UserSettings", user_id: int, text: str, provider=None
+) -> bool:
     """Проверяет, нужно ли предлагать черновик на это входящее сообщение."""
     if not settings.draft_suggestions_enabled:
         return False
     if settings.draft_only_important:
-        from src.core.urgency_classifier import classify_message
+        from src.core.urgency_classifier import classify_urgency
 
-        urgency = classify_message(text)
+        urgency = await classify_urgency(text, provider=provider)
         if urgency == "normal":
             return False
     return _check_rate_limit(user_id, settings.draft_max_per_hour)

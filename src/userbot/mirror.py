@@ -145,14 +145,26 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                 # Urgent notification
                 if not msg.out and msg.text:
                     if owner.settings.urgent_notify_enabled:
-                        from src.core.urgency_classifier import classify_message
+                        from src.core.urgency_classifier import classify_urgency
+                        from src.llm.router import build_provider
 
-                        urgency = classify_message(msg.text)
+                        provider = await build_provider(session, owner)
+                        urgency = await classify_urgency(
+                            msg.text, provider=provider, sender_name=sender_name
+                        )
                         if urgency == "urgent":
                             sender_name_local = sender_name or str(peer_id)
                             await notifier.notify(
                                 f"🔴 <b>СРОЧНОЕ от {sender_name_local}!</b>\n\n"
                                 f"<i>{msg.text[:300]}</i>"
+                            )
+                        if urgency != "urgent":
+                            # для отладки: логируем что LLM сказал про сообщение
+                            logger.debug(
+                                "Message from %s classified as %s: %s",
+                                sender_name,
+                                urgency,
+                                msg.text[:80],
                             )
 
                 # Draft suggestion
@@ -176,18 +188,19 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                                 store_draft,
                             )
                             from src.core.text_sanitizer import sanitize_html
+                            from src.llm.router import build_provider as _build_provider
 
-                            if should_suggest(
+                            _provider = await _build_provider(
+                                inner_session, inner_owner
+                            )
+
+                            if await should_suggest(
                                 inner_owner.settings,
                                 inner_owner.id,
                                 msg.text,
+                                provider=_provider,
                             ):
-                                from src.llm.router import build_provider
-
-                                provider = await build_provider(
-                                    inner_session, inner_owner
-                                )
-                                if provider:
+                                if _provider:
                                     from src.db.repo import (
                                         fetch_chat_messages,
                                         get_contact,
@@ -204,7 +217,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                                             limit=10,
                                         )
                                         draft = await suggest_draft(
-                                            provider,
+                                            _provider,
                                             inner_owner.id,
                                             peer_id,
                                             contact,

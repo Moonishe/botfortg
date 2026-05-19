@@ -14,6 +14,7 @@ from src.bot.filters import OwnerOnly
 from src.config import settings as app_settings
 from src.core.agent import route_intent
 from src.core.chat_service import load_chat
+from src.core.maestro import process as maestro_process
 from src.core.commitment_extractor import extract_and_save_commitments
 from src.core.contact_resolver import resolve
 from src.core.news import build_news_digest
@@ -567,6 +568,21 @@ async def _process_text(
                 )
     except Exception:
         pass
+
+    # Сначала пробуем Maestro — он может ответить сам (болтовня, простые вопросы)
+    try:
+        maestro_result = await maestro_process(
+            provider,
+            raw,
+            history_block=history_block,
+            memory_context=memory_context,
+            global_style=getattr(owner, "global_style_profile", None),
+        )
+        if maestro_result.get("final_response"):
+            await message.answer(maestro_result["final_response"])
+            return
+    except Exception:
+        logger.debug("Maestro not applicable, falling back to route_intent")
 
     try:
         intent = await route_intent(
