@@ -63,7 +63,7 @@ class UserSettings(Base):
     news_window_hours: Mapped[int] = mapped_column(Integer, default=24)
     news_digest_time: Mapped[str] = mapped_column(String(5), default="08:00")  # HH:MM в UTC
     auto_sync_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    auto_sync_interval_min: Mapped[int] = mapped_column(Integer, default=120)
+    auto_sync_interval_sec: Mapped[int] = mapped_column(Integer, default=7200)
 
     user: Mapped[User] = relationship(back_populates="settings")
 

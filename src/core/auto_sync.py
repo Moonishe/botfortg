@@ -22,7 +22,7 @@ async def auto_sync_loop() -> None:
             async with get_session() as session:
                 owner = await get_or_create_user(session, app_settings.owner_telegram_id)
                 enabled = owner.settings.auto_sync_enabled
-                interval_sec = max(60, owner.settings.auto_sync_interval_min * 60)
+                interval_sec = max(30, getattr(owner.settings, "auto_sync_interval_sec", 7200))
 
             if not enabled:
                 await asyncio.sleep(300)

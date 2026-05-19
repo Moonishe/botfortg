@@ -45,7 +45,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         "⚙ <b>Настройки</b>\n\n"
         f"🌍 Часовой пояс: <b>{tz_short(s.timezone)}</b>\n"
         f"🔄 Авто-ответ: {_check(s.auto_reply_enabled)} (кулдаун {s.auto_reply_cooldown_min}м)\n"
-        f"🔄 Авто-синк: {_check(getattr(s, 'auto_sync_enabled', True))} (каждые {getattr(s, 'auto_sync_interval_min', 120)}м)\n"
+        f"🔄 Авто-синк: {_check(getattr(s, 'auto_sync_enabled', True))} (каждые {getattr(s, 'auto_sync_interval_sec', 7200)}с)\n"
         f"☀ Дайджест: {_check(s.digest_enabled)} ({s.digest_time})\n"
         f"⏰ Напоминания: {_check(s.reminders_enabled)} (за {s.reminder_lead_hours}ч; просрочки {_check(s.reminder_overdue_enabled)})\n"
         f"📰 Новости: {_check(s.news_enabled)} (окно {s.news_window_hours}ч)\n"
@@ -132,7 +132,7 @@ NUMERIC_KEYS = {
     "auto_reply_cooldown_min",
     "reminder_lead_hours",
     "news_window_hours",
-    "auto_sync_interval_min",
+    "auto_sync_interval_sec",
 }
 
 
@@ -442,24 +442,29 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
 
     elif section == "sync":
         sync_enabled = getattr(s, "auto_sync_enabled", True)
-        sync_interval = getattr(s, "auto_sync_interval_min", 120)
+        sync_sec = getattr(s, "auto_sync_interval_sec", 7200)
+        if sync_sec >= 3600:
+            intv = f"{sync_sec // 3600}ч"
+        elif sync_sec >= 60:
+            intv = f"{sync_sec // 60}м"
+        else:
+            intv = f"{sync_sec}с"
         text = (
             "🔄 <b>Авто-синхронизация</b>\n\n"
-            "Раз в указанный интервал бот обновляет список контактов и архивный статус. "
-            "Нужно для случаев, когда mirror-хендлер мог пропустить изменения.\n\n"
+            "Раз в указанный интервал бот обновляет список контактов и архивный статус.\n\n"
             f"Статус: <b>{'ВКЛ' if sync_enabled else 'ВЫКЛ'}</b>\n"
-            f"Интервал: <b>{sync_interval} мин</b>"
+            f"Интервал: <b>{intv} ({sync_sec} сек)</b>"
         )
         kb.row(InlineKeyboardButton(
             text=f"{_check(sync_enabled)} Включить авто-синк",
             callback_data="set:tog:auto_sync_enabled",
         ))
-        kb.row(*[
-            InlineKeyboardButton(
-                text=("• " if sync_interval == m else "") + f"{m}м",
-                callback_data=f"set:choose:auto_sync_interval_min:{m}",
-            ) for m in (60, 120, 360, 720, 1440)
-        ])
+        for v, label in [(60, "1м"), (300, "5м"), (1800, "30м"), (3600, "1ч"), (7200, "2ч"), (14400, "4ч"), (86400, "24ч")]:
+            kb.row(InlineKeyboardButton(
+                text=("• " if sync_sec == v else "") + label,
+                callback_data=f"set:choose:auto_sync_interval_sec:{v}",
+            ))
+        kb.row(InlineKeyboardButton(text="✏ Свой интервал…", callback_data="set:input:auto_sync_interval"))
         kb.row(*_back_row())
 
     elif section == "keys":
@@ -526,6 +531,15 @@ async def cb_input_auto_reply(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.message.answer(
         "Пришли новый текст автоответа. Будет отправляться, когда ты оффлайн "
         "(в режиме «заготовка»). /cancel — отмена."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:auto_sync_interval")
+async def cb_input_sync_interval(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_sync_interval)
+    await callback.message.answer(
+        "Введи интервал в секундах (минимум 30). Например: 3600 = 1 час, 7200 = 2 часа. /cancel — отмена."
     )
     await callback.answer()
 
@@ -685,3 +699,17 @@ async def step_timezone(message: Message, state: FSMContext) -> None:
         owner.settings.timezone = tz_value
     await state.clear()
     await message.answer(f"✅ Часовой пояс: <b>{tz_short(tz_value)}</b>")
+
+
+@router.message(SettingsStates.waiting_sync_interval)
+async def step_sync_interval(message: Message, state: FSMContext) -> None:
+    val = (message.text or "").strip()
+    if not val.isdigit():
+        await message.answer("Ожидаю число (секунд). Повтори или /cancel.")
+        return
+    secs = max(30, int(val))
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        owner.settings.auto_sync_interval_sec = secs
+    await state.clear()
+    await message.answer(f"✅ Интервал авто-синка: <b>{secs} сек</b>")

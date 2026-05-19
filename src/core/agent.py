@@ -69,7 +69,7 @@ AGENT_SYSTEM = """\
       - "transcription_mode"        : "local" | "api" | "hybrid"
       - "transcription_api_provider": "openai" | "gemini" | "mistral"
       - "auto_sync_enabled"          : true/false
-      - "auto_sync_interval_min"     : int (минут, 60–1440)
+      - "auto_sync_interval_sec"     : int (секунд, мин 30, макс 86400)
       - "timezone"                  : IANA (Europe/Moscow и т.п.)
    Используй для фраз: «включи Х», «выключи Х», «дайджест в 7 утра», «часовой пояс Лондон»,
    «новости в 9», «не показывай архив», «переключись на gemini», «текст автоответа: …» и т.п.
