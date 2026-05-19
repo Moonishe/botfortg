@@ -673,6 +673,12 @@ def _summarize_intent_for_memory(intent: dict) -> str:
         return "извлёк факты из переписки"
     if kind == "check_memories":
         return "проверил актуальность памяти"
+    if kind == "change_auto_mode":
+        return "изменил авто-режим"
+    if kind == "set_quiet_hours":
+        return "настроил тихие часы"
+    if kind == "show_inbox":
+        return "посмотрел входящие"
     return kind or ""
 
 
@@ -785,6 +791,15 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     if kind == "check_memories":
         await _exec_check_memories(intent, message)
+        return
+    if kind == "change_auto_mode":
+        await _exec_change_auto_mode(intent, message)
+        return
+    if kind == "set_quiet_hours":
+        await _exec_set_quiet_hours(intent, message)
+        return
+    if kind == "show_inbox":
+        await _exec_show_inbox(intent, message, userbot_manager)
         return
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
 
@@ -1089,6 +1104,70 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
 
     count = await extract_and_save_memories(provider, owner.id, contact, messages)
     await message.answer(f"✅ Извлечено фактов: {count}")
+
+
+async def _exec_change_auto_mode(intent, message) -> None:
+    mode = (intent.get("mode") or "").strip()
+    if mode not in ("offline_only", "always", "smart"):
+        await message.answer("❌ Укажи режим: offline_only, always или smart")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        owner.settings.auto_mode = mode
+        await session.flush()
+    labels = {"offline_only": "только оффлайн", "always": "всегда", "smart": "умный"}
+    await message.answer(f"✅ Режим авто-ответа: <b>{labels[mode]}</b>")
+
+
+async def _exec_set_quiet_hours(intent, message) -> None:
+    start = (intent.get("start") or "").strip()
+    end = (intent.get("end") or "").strip()
+    if not _HM_RE.match(start) or not _HM_RE.match(end):
+        await message.answer("❌ Укажи время в формате HH:MM (например 23:00 и 07:00)")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        owner.settings.quiet_hours_start = start
+        owner.settings.quiet_hours_end = end
+        await session.flush()
+    await message.answer(f"✅ Тихие часы: <b>{start} – {end}</b>")
+
+
+async def _exec_show_inbox(intent, message, userbot_manager) -> None:
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.repo import list_active_conversations
+
+        conversations = await list_active_conversations(session, owner, status="active")
+        waiting = await list_active_conversations(
+            session, owner, status="waiting_reply"
+        )
+
+    if not conversations and not waiting:
+        await message.answer("📭 Нет активных переписок.")
+        return
+
+    lines = ["📬 <b>Входящие:</b>", ""]
+    if conversations:
+        lines.append(f"🟢 Активные ({len(conversations)}):")
+        for c in conversations[:10]:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, message.from_user.id)
+                contact = await get_contact(session, owner, c.peer_id)
+            name = contact.display_name if contact else str(c.peer_id)
+            unread = f" ({c.unread_count})" if c.unread_count > 1 else ""
+            lines.append(f"  • {name}{unread}")
+
+    if waiting:
+        lines.append(f"🟡 Ждут ответа ({len(waiting)}):")
+        for c in waiting[:10]:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, message.from_user.id)
+                contact = await get_contact(session, owner, c.peer_id)
+            name = contact.display_name if contact else str(c.peer_id)
+            lines.append(f"  • {name}")
+
+    await message.answer("\n".join(lines))
 
 
 async def _exec_check_memories(intent, message) -> None:

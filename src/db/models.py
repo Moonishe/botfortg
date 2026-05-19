@@ -117,6 +117,15 @@ class UserSettings(Base):
     )  # JSON: ["Работа", "Семья"]
     monitor_only_selected_folders: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Inbox / auto‑mode
+    auto_mode: Mapped[str] = mapped_column(
+        String(16), default="offline_only"
+    )  # offline_only | always | smart
+    quiet_hours_start: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    quiet_hours_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    auto_reply_close_contacts: Mapped[bool] = mapped_column(Boolean, default=True)
+    notify_on_auto_reply: Mapped[bool] = mapped_column(Boolean, default=True)
+
     user: Mapped[User] = relationship(back_populates="settings")
 
 
@@ -363,6 +372,31 @@ class AgentCache(Base):
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
     ttl_seconds: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ConversationState(Base):
+    """Состояние диалога с контактом: непрочитанные, последние события."""
+
+    __tablename__ = "conversation_states"
+    __table_args__ = (
+        UniqueConstraint("user_id", "peer_id", name="uq_convstate_user_peer"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    peer_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    status: Mapped[str] = mapped_column(
+        String(16), default="active"
+    )  # active | waiting_reply | archived
+    unread_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_incoming_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_outgoing_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_auto_reply_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class Folder(Base):

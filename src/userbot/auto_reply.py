@@ -265,6 +265,20 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
             await event.respond(reply)
 
+            # Обновить ConversationState
+            async with get_session() as _ar_session:
+                _ar_owner = await get_or_create_user(_ar_session, owner_telegram_id)
+                from src.db.repo import upsert_conversation_state
+
+                await upsert_conversation_state(
+                    _ar_session,
+                    _ar_owner,
+                    sender.id,
+                    status="active",
+                    last_outgoing_at=datetime.utcnow(),
+                    last_auto_reply_at=datetime.utcnow(),
+                )
+
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_telegram_id)
                 await add_auto_reply_log(
@@ -285,6 +299,29 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             logger.exception("auto-reply handler failed")
 
     return handler
+
+
+async def generate_smart_reply(
+    client: TelegramClient,
+    owner_telegram_id: int,
+    peer_id: int,
+    sender_name: str,
+    incoming_text: str,
+) -> str | None:
+    """Публичная обёртка для генерации умного авто-ответа.
+
+    Вызывается из InboxManager или напрямую из других модулей.
+    Возвращает сгенерированный текст или None."""
+    try:
+        return await _build_reply_text(
+            owner_telegram_id=owner_telegram_id,
+            peer_id=peer_id,
+            sender_name=sender_name,
+            incoming_text=incoming_text,
+        )
+    except Exception:
+        logger.exception("generate_smart_reply failed")
+        return None
 
 
 def attach_auto_reply(client: TelegramClient, owner_telegram_id: int) -> None:

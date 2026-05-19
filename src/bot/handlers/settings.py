@@ -74,6 +74,9 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="🔄 Авто-ответ", callback_data="set:sec:auto_reply"),
     )
     kb.row(
+        InlineKeyboardButton(text="🤖 Авто-режим", callback_data="set:sec:auto_mode"),
+    )
+    kb.row(
         InlineKeyboardButton(text="🌅 Дайджест", callback_data="set:sec:digest"),
         InlineKeyboardButton(text="⏰ Напоминания", callback_data="set:sec:reminders"),
     )
@@ -151,6 +154,8 @@ BOOL_KEYS = {
     "smart_digest_enabled",
     "urgent_notify_enabled",
     "monitor_only_selected_folders",
+    "auto_reply_close_contacts",
+    "notify_on_auto_reply",
 }
 
 CHOICE_KEYS = {
@@ -158,6 +163,7 @@ CHOICE_KEYS = {
     "transcription_mode": {"local", "api", "hybrid"},
     "transcription_api_provider": {"openai", "gemini", "mistral"},
     "auto_reply_mode": {"static", "smart"},
+    "auto_mode": {"offline_only", "always", "smart"},
 }
 
 NUMERIC_KEYS = {
@@ -230,6 +236,9 @@ def _section_for_key(key: str) -> str:
         "draft_suggestions_enabled": "drafts",
         "draft_only_important": "drafts",
         "draft_max_per_hour": "drafts",
+        "auto_mode": "auto_mode",
+        "auto_reply_close_contacts": "auto_mode",
+        "notify_on_auto_reply": "auto_mode",
     }.get(key, "menu")
 
 
@@ -690,6 +699,55 @@ async def _render_section(
         )
         kb.row(*_back_row())
 
+    elif section == "auto_mode":
+        mode_labels = {
+            "offline_only": "🌙 Только когда оффлайн",
+            "always": "🔄 Всегда отвечать",
+            "smart": "🧠 Умный режим (по срочности)",
+        }
+        qh_start = s.quiet_hours_start or "не задано"
+        qh_end = s.quiet_hours_end or "не задано"
+        close_contacts = _check(s.auto_reply_close_contacts)
+        notify = _check(s.notify_on_auto_reply)
+
+        text = (
+            "🤖 <b>Авто-режим</b>\n\n"
+            "Определяет, когда и как бот отвечает на сообщения.\n\n"
+            f"Режим: <b>{mode_labels.get(s.auto_mode, s.auto_mode)}</b>\n"
+            f"🔕 Тихие часы: <b>{qh_start} – {qh_end}</b>\n"
+            f"{close_contacts} Авто-ответ близким контактам\n"
+            f"{notify} Уведомлять об авто-ответах"
+        )
+
+        for mode in ("offline_only", "always", "smart"):
+            prefix = "• " if s.auto_mode == mode else ""
+            kb.button(
+                text=f"{prefix}{mode_labels[mode]}",
+                callback_data=f"set:choose:auto_mode:{mode}",
+            )
+        kb.adjust(1)
+
+        kb.row(
+            InlineKeyboardButton(
+                text="🔕 Начало тихих часов",
+                callback_data="set:input:quiet_hours_start",
+            ),
+            InlineKeyboardButton(
+                text="🔕 Конец тихих часов", callback_data="set:input:quiet_hours_end"
+            ),
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.auto_reply_close_contacts)} Авто-ответ близким",
+                callback_data="set:tog:auto_reply_close_contacts",
+            ),
+            InlineKeyboardButton(
+                text=f"{_check(s.notify_on_auto_reply)} Уведомлять об авто-ответах",
+                callback_data="set:tog:notify_on_auto_reply",
+            ),
+        )
+        kb.row(*_back_row())
+
     elif section == "folders":
         async with get_session() as session:
             folders_data = await list_folders(session, owner)
@@ -1011,3 +1069,54 @@ async def step_sync_interval(message: Message, state: FSMContext) -> None:
         owner.settings.auto_sync_interval_sec = secs
     await state.clear()
     await message.answer(f"✅ Интервал авто-синка: <b>{secs} сек</b>")
+
+
+# ---------- FSM: тихие часы ----------
+
+
+@router.callback_query(F.data == "set:input:quiet_hours_start")
+async def cb_input_quiet_hours_start(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    await callback.message.answer(
+        "Введи время начала тихих часов (HH:MM, например 23:00):"
+    )
+    await state.set_state(SettingsStates.waiting_quiet_hours_start)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:quiet_hours_end")
+async def cb_input_quiet_hours_end(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.answer(
+        "Введи время конца тихих часов (HH:MM, например 07:00):"
+    )
+    await state.set_state(SettingsStates.waiting_quiet_hours_end)
+    await callback.answer()
+
+
+@router.message(SettingsStates.waiting_quiet_hours_start)
+async def step_quiet_hours_start(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not HM_RE.match(text):
+        await message.answer("❌ Неверный формат. Введи HH:MM (например 23:00):")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        owner.settings.quiet_hours_start = text
+        await session.flush()
+    await state.clear()
+    await message.answer(f"✅ Тихие часы начало: <b>{text}</b>")
+
+
+@router.message(SettingsStates.waiting_quiet_hours_end)
+async def step_quiet_hours_end(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not HM_RE.match(text):
+        await message.answer("❌ Неверный формат. Введи HH:MM (например 07:00):")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        owner.settings.quiet_hours_end = text
+        await session.flush()
+    await state.clear()
+    await message.answer(f"✅ Тихие часы конец: <b>{text}</b>")

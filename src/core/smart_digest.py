@@ -63,11 +63,19 @@ async def collect_recent_messages(
 
             text_content = m.transcript or m.text or m.extracted_text or ""
             urgency = classify_message(text_content) if text_content else "normal"
+
+            # Загрузить состояние диалога (unread_count)
+            from src.db.repo import get_conversation_state
+
+            _state = await get_conversation_state(session, user, m.peer_id)
+            _unread = _state.unread_count if _state else 0
+
             by_peer[m.peer_id] = {
                 "sender_name": m.sender_name or str(m.peer_id),
                 "last_text": text_content,
                 "count": 0,
                 "urgency": urgency,
+                "unread_count": _unread,
             }
         by_peer[m.peer_id]["count"] += 1
         # сохраняем самое свежее (первое в порядке desc)
@@ -105,7 +113,12 @@ def build_smart_digest(messages_by_peer: dict[int, dict], interval: int) -> str:
         lines = []
         for e in urgent:
             snippet = (e["last_text"][:80] or "").replace("\n", " ")
-            lines.append(f"• {e['sender_name']}: «{snippet}»")
+            unread = (
+                f" ({e.get('unread_count', 0)} новых)"
+                if e.get("unread_count", 0) > 1
+                else ""
+            )
+            lines.append(f"• {e['sender_name']}: «{snippet}»{unread}")
         parts.append("🔴 <b>Срочное:</b>\n" + "\n".join(lines))
 
     if important:
@@ -113,14 +126,25 @@ def build_smart_digest(messages_by_peer: dict[int, dict], interval: int) -> str:
         for e in important:
             snippet = (e["last_text"][:80] or "").replace("\n", " ")
             count = f" ({e['count']} сообщений)" if e["count"] > 1 else ""
-            lines.append(f"• {e['sender_name']}: «{snippet}»{count}")
+            unread = (
+                f" ({e.get('unread_count', 0)} новых)"
+                if e.get("unread_count", 0) > 1
+                else ""
+            )
+            suffix = f"{count}{unread}" if count and unread else (count or unread)
+            lines.append(f"• {e['sender_name']}: «{snippet}»{suffix}")
         parts.append("🟡 <b>Важное:</b>\n" + "\n".join(lines))
 
     if normal:
         lines = []
         for e in normal:
             snippet = (e["last_text"][:80] or "").replace("\n", " ")
-            lines.append(f"• {e['sender_name']}: «{snippet}»")
+            unread = (
+                f" ({e.get('unread_count', 0)} новых)"
+                if e.get("unread_count", 0) > 1
+                else ""
+            )
+            lines.append(f"• {e['sender_name']}: «{snippet}»{unread}")
         parts.append("🟢 <b>Обычное:</b>\n" + "\n".join(lines))
 
     return "\n\n".join(parts)

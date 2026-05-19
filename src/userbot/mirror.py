@@ -11,7 +11,13 @@ from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import User as TgUser
 
 from src.core.notifier import notifier
-from src.db.repo import get_or_create_user, upsert_message, upsert_contact
+from src.db.repo import (
+    get_contact,
+    get_or_create_user,
+    upsert_contact,
+    upsert_conversation_state,
+    upsert_message,
+)
 from src.db.session import get_session
 
 
@@ -161,129 +167,51 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                         owner.absence_status = status
                         owner.absence_message = message_text or msg.text[:100]
 
-            # ===== SESSION CLOSED — медленные LLM-вызовы вне сессии =====
-
-            # Folder filter: если monitor_only_selected_folders и контакт не в выбранных папках — пропустить обработку
-            if not msg.out:
-                async with get_session() as _ff_session:
-                    _ff_owner = await get_or_create_user(_ff_session, owner_telegram_id)
-                    _ff_s = _ff_owner.settings
-                    if _ff_s.monitor_only_selected_folders and _ff_s.monitored_folders:
-                        import json as _json
-
-                        monitored = _json.loads(_ff_s.monitored_folders)
-                        if monitored:
-                            from src.db.repo import get_contact as _get_contact
-
-                            _ff_contact = await _get_contact(
-                                _ff_session, _ff_owner, peer_id
-                            )
-                            contact_folders = (
-                                (_ff_contact.folder_names or "").split(",")
-                                if _ff_contact
-                                else []
-                            )
-                            contact_folders = [
-                                f.strip() for f in contact_folders if f.strip()
-                            ]
-                            if not any(f in monitored for f in contact_folders):
-                                return  # прервать обработку для этого сообщения
-
-            # Urgent notification (LLM)
+            # ===== InboxManager: решение по входящему =====
             if not msg.out and msg.text:
-                _urgent_enabled = False
-                _urgency_provider = None
-                async with get_session() as _qs:
-                    _o = await get_or_create_user(_qs, owner_telegram_id)
-                    if _o.settings.urgent_notify_enabled:
-                        from src.llm.router import build_provider
+                from src.core.inbox_manager import process_incoming, InboxAction
+                from src.llm.router import build_provider as _build_provider
 
-                        _urgency_provider = await build_provider(_qs, _o)
-                        _urgent_enabled = True
-                if _urgent_enabled and _urgency_provider:
-                    from src.core.urgency_classifier import classify_urgency
-
-                    urgency = await classify_urgency(
-                        msg.text, provider=_urgency_provider, sender_name=sender_name
+                async with get_session() as _im_session:
+                    _im_owner = await get_or_create_user(_im_session, owner_telegram_id)
+                    _im_contact = await get_contact(_im_session, _im_owner, peer_id)
+                    _im_provider = await _build_provider(_im_session, _im_owner)
+                    decision = await process_incoming(
+                        message_text=msg.text,
+                        sender_name=sender_name or str(peer_id),
+                        peer_id=peer_id,
+                        owner=_im_owner,
+                        contact=_im_contact,
+                        provider=_im_provider,
                     )
-                    if urgency == "urgent":
-                        sender_name_local = sender_name or str(peer_id)
-                        await notifier.notify(
-                            f"🔴 <b>СРОЧНОЕ от {sender_name_local}!</b>\n\n"
-                            f"<i>{msg.text[:300]}</i>"
-                        )
-                    else:
-                        # для отладки: логируем что LLM сказал про сообщение
-                        logger.debug(
-                            "Message from %s classified as %s: %s",
-                            sender_name,
-                            urgency,
-                            msg.text[:80],
-                        )
 
-            # Draft suggestion (LLM)
-            if not msg.out and msg.text:
-                try:
-                    _draft_sender = await event.get_sender()
-                    _sender_is_bot = bool(getattr(_draft_sender, "bot", False))
-                except Exception:
-                    _sender_is_bot = False
-                if not _sender_is_bot:
-                    async with get_session() as _ds:
-                        _ds_owner = await get_or_create_user(_ds, owner_telegram_id)
-                        from src.core.draft_suggester import (
-                            should_suggest,
-                            suggest_draft,
-                        )
-                        from src.bot.handlers.draft_actions import (
-                            draft_keyboard,
-                            store_draft,
-                        )
-                        from src.core.text_sanitizer import sanitize_html
-                        from src.llm.router import build_provider as _build_provider
+                    # Обновить ConversationState
+                    status = "active"
+                    if decision.action == InboxAction.QUEUE_FOR_DIGEST:
+                        status = "waiting_reply"
+                    await upsert_conversation_state(
+                        _im_session,
+                        _im_owner,
+                        peer_id,
+                        status=status,
+                        increment_unread=True,
+                        last_incoming_at=datetime.utcnow(),
+                    )
 
-                        _provider = await _build_provider(_ds, _ds_owner)
-
-                        if await should_suggest(
-                            _ds_owner.settings,
-                            _ds_owner.id,
-                            msg.text,
-                            provider=_provider,
-                        ):
-                            if _provider:
-                                from src.db.repo import (
-                                    fetch_chat_messages,
-                                    get_contact,
-                                )
-
-                                contact = await get_contact(_ds, _ds_owner, peer_id)
-                                if contact:
-                                    recent = await fetch_chat_messages(
-                                        _ds,
-                                        _ds_owner,
-                                        peer_id,
-                                        limit=10,
-                                    )
-                                    draft = await suggest_draft(
-                                        _provider,
-                                        _ds_owner.id,
-                                        peer_id,
-                                        contact,
-                                        msg.text,
-                                        sender_name or str(peer_id),
-                                        recent,
-                                    )
-                                    if draft:
-                                        draft_hash = store_draft(draft)
-                                        safe_draft = sanitize_html(draft)[:400]
-                                        await notifier.notify(
-                                            f"💬 <b>{sender_name or peer_id}:</b>"
-                                            f" <i>{msg.text[:200]}</i>\n\n"
-                                            f"→ <b>Черновик:</b> {safe_draft}",
-                                            reply_markup=draft_keyboard(
-                                                peer_id, draft_hash
-                                            ),
-                                        )
+                # Применить решение (вне сессии)
+                if decision.action == InboxAction.NOTIFY_URGENT:
+                    await notifier.notify(
+                        f"🔴 <b>СРОЧНОЕ от {sender_name or peer_id}!</b>\n\n"
+                        f"<i>{msg.text[:300]}</i>"
+                    )
+                elif decision.action == InboxAction.DRAFT_SUGGEST:
+                    await notifier.notify(
+                        f"💬 <b>{sender_name or peer_id}:</b>"
+                        f" <i>{msg.text[:200]}</i>\n\n"
+                        f"→ Напиши ответ? /chat {sender_name or peer_id}"
+                    )
+                elif decision.action in (InboxAction.SILENT_LOG, InboxAction.IGNORE):
+                    pass  # только сохранили в БД
         except Exception:
             logger.exception("mirror handler failed")
 

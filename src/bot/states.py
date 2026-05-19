@@ -19,6 +19,8 @@ class SettingsStates(StatesGroup):
     waiting_timezone = State()
     waiting_auto_reply_text = State()
     waiting_sync_interval = State()
+    waiting_quiet_hours_start = State()
+    waiting_quiet_hours_end = State()
 
 
 class NewsTopicStates(StatesGroup):

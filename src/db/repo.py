@@ -12,6 +12,7 @@ from src.db.models import (
     AutoReplyLog,
     Commitment,
     Contact,
+    ConversationState,
     Folder,
     Memory,
     Message,
@@ -198,6 +199,18 @@ async def get_contact(
         select(Contact).where(Contact.user_id == user.id, Contact.peer_id == peer_id)
     )
     return result.scalar_one_or_none()
+
+
+async def list_active_conversations(
+    session: AsyncSession, user: User, status: str = "active", limit: int = 50
+) -> list[ConversationState]:
+    result = await session.execute(
+        select(ConversationState)
+        .where(ConversationState.user_id == user.id, ConversationState.status == status)
+        .order_by(ConversationState.last_incoming_at.desc().nullslast())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
 
 
 async def upsert_message(
@@ -714,3 +727,63 @@ async def list_folders(session: AsyncSession, user: User) -> list[Folder]:
         select(Folder).where(Folder.user_id == user.id).order_by(Folder.title)
     )
     return list(result.scalars().all())
+
+
+async def upsert_conversation_state(
+    session: AsyncSession,
+    user: User,
+    peer_id: int,
+    *,
+    status: str | None = None,
+    increment_unread: bool = False,
+    last_incoming_at: datetime | None = None,
+    last_outgoing_at: datetime | None = None,
+    last_auto_reply_at: datetime | None = None,
+) -> ConversationState:
+    """Создаёт или обновляет состояние диалога с контактом."""
+    result = await session.execute(
+        select(ConversationState).where(
+            ConversationState.user_id == user.id,
+            ConversationState.peer_id == peer_id,
+        )
+    )
+    state = result.scalar_one_or_none()
+    if state is None:
+        state = ConversationState(
+            user_id=user.id,
+            peer_id=peer_id,
+            status=status or "active",
+            unread_count=1 if increment_unread else 0,
+            last_incoming_at=last_incoming_at,
+            last_outgoing_at=last_outgoing_at,
+            last_auto_reply_at=last_auto_reply_at,
+        )
+        session.add(state)
+    else:
+        if status is not None:
+            state.status = status
+        if increment_unread:
+            state.unread_count = (state.unread_count or 0) + 1
+        if last_incoming_at is not None:
+            state.last_incoming_at = last_incoming_at
+        if last_outgoing_at is not None:
+            state.last_outgoing_at = last_outgoing_at
+        if last_auto_reply_at is not None:
+            state.last_auto_reply_at = last_auto_reply_at
+    await session.flush()
+    return state
+
+
+async def get_conversation_state(
+    session: AsyncSession,
+    user: User,
+    peer_id: int,
+) -> ConversationState | None:
+    """Возвращает состояние диалога с контактом."""
+    result = await session.execute(
+        select(ConversationState).where(
+            ConversationState.user_id == user.id,
+            ConversationState.peer_id == peer_id,
+        )
+    )
+    return result.scalar_one_or_none()
