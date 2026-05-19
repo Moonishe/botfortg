@@ -104,9 +104,21 @@ CONTACT_DISAMBIGUATION_PROMPT = """Ты — система разрешения 
 - Если запрос «батя» а есть контакт «Батя» или «Отец» или «Папа» — выбери его
 - Если запрос «Настя» а есть контакт «Настя Иванова» и контакт «батя» — выбери «Настя Иванова»
 
+## ВАЖНО: похожие имена — нужен выбор пользователя
+Если несколько кандидатов имеют ОЧЕНЬ ПОХОЖИЕ имена (одно и то же имя у разных людей, например две «Анастасии», или «Настя» и «Анастасия» — это могут быть РАЗНЫЕ люди), НЕ выбирай одного. Укажи:
+- confidence = "ambiguous"
+- reason = объясни что имена слишком похожи и нужен выбор пользователя
+
+"Ambiguous" используй ТОЛЬКО когда имена явно одного корня:
+- «Настя» vs «Анастасия» → ambiguous
+- «Настя Петрова» vs «Настя Иванова» → ambiguous
+- «Саша» vs «Александр» → ambiguous
+- «Ксюша» vs «Ксения» → ambiguous
+- «Настя» vs «батя» → НЕ ambiguous, выбери Настю
+
 ## Формат ответа
 Верни ТОЛЬКО JSON:
-{"selected_index": 0, "confidence": "high|medium|low", "reason": "почему выбран именно этот"}
+{"selected_index": 0, "confidence": "high|medium|low|ambiguous", "reason": "почему выбран именно этот"}
 
 Если НИ ОДИН кандидат не подходит — верни:
 {"selected_index": -1, "confidence": "none", "reason": "почему"}"""
@@ -187,6 +199,11 @@ async def resolve_with_llm(
             idx = parsed.get("selected_index", -1)
             if isinstance(idx, int) and 0 <= idx < len(candidates):
                 confidence = parsed.get("confidence", "medium")
+            if confidence == "ambiguous":
+                # Несколько кандидатов с похожими именами — не выбираем,
+                # возвращаем всех, пусть пользователь выберет
+                logger.info("LLM ambiguous for %r: %s", query, parsed.get("reason", ""))
+            else:
                 logger.info(
                     "LLM selected %r for query %r (confidence=%s)",
                     candidates[idx].display_name,
