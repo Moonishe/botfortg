@@ -1,4 +1,5 @@
 """Live-апдейт is_archived через Telethon UpdateFolderPeers (folder_id=1 — архив)."""
+
 from __future__ import annotations
 
 import logging
@@ -14,7 +15,9 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 
 
-def attach_dialog_event_handlers(client: TelegramClient, owner_telegram_id: int) -> None:
+def attach_dialog_event_handlers(
+    client: TelegramClient, owner_telegram_id: int
+) -> None:
     async def on_folder_peers(update: UpdateFolderPeers) -> None:
         try:
             async with get_session() as session:
@@ -24,8 +27,9 @@ def attach_dialog_event_handlers(client: TelegramClient, owner_telegram_id: int)
                     try:
                         peer_id = get_peer_id(fp.peer)
                     except Exception:
+                        logger.debug("dialog_events: entry skipped", exc_info=True)
                         continue
-                    is_archived = (fp.folder_id == 1)
+                    is_archived = fp.folder_id == 1
                     contact = await get_contact(session, owner, peer_id)
                     if contact is None:
                         continue
@@ -33,7 +37,10 @@ def attach_dialog_event_handlers(client: TelegramClient, owner_telegram_id: int)
                         contact.is_archived = is_archived
                         touched += 1
                 if touched:
-                    logger.info("UpdateFolderPeers: updated archive flag for %d contacts", touched)
+                    logger.info(
+                        "UpdateFolderPeers: updated archive flag for %d contacts",
+                        touched,
+                    )
         except Exception:
             logger.exception("on_folder_peers handler failed")
 

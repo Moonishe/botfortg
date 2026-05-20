@@ -118,6 +118,7 @@ async def collect_reply_radar(owner_id: int, limit: int = 5) -> list[RadarItem]:
                     score += 10
                     reasons.append("высокая чувствительность")
             except Exception:
+                logger.debug("reply_radar: contact_profile load failed", exc_info=True)
                 pass
 
             # Risk level
@@ -159,6 +160,7 @@ async def collect_reply_radar(owner_id: int, limit: int = 5) -> list[RadarItem]:
                         reply_window = f"{h['days']}"
                         break
             except Exception:
+                logger.debug("reply_radar: contact_profile load failed", exc_info=True)
                 pass
 
             items.append(

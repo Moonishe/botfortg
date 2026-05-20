@@ -73,6 +73,9 @@ async def sync_dialogs(
                                     (existing + "," + f.title) if existing else f.title
                                 )
                         except Exception:
+                            logger.debug(
+                                "dialogs: folder sync entry skipped", exc_info=True
+                            )
                             pass
         # Сохранить папки в БД
         async with get_session() as session:

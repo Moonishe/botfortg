@@ -100,6 +100,7 @@ async def build_send_guard(
                         "Высокая чувствительность контакта — будь аккуратнее."
                     )
         except Exception:
+            logger.debug("send_guard: profile check skipped", exc_info=True)
             pass
 
         if contact and contact.archetype == "toxic":

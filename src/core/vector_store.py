@@ -300,7 +300,7 @@ class VectorStore:
             if self._client:
                 self._client.close()
         except Exception:
-            pass
+            logger.exception("vector_store shutdown failed")
 
 
 vector_store = VectorStore()

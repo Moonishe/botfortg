@@ -35,7 +35,9 @@ CANCEL_HINT = "В любой момент можно отменить коман
 
 
 @router.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext, userbot_manager: UserbotManager) -> None:
+async def cmd_cancel(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
     current = await state.get_state()
     if current is None:
         await message.answer("Нечего отменять.")
@@ -56,7 +58,9 @@ async def cmd_logout(message: Message, userbot_manager: UserbotManager) -> None:
 
 
 @router.message(Command("login"))
-async def cmd_login(message: Message, state: FSMContext, userbot_manager: UserbotManager) -> None:
+async def cmd_login(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
     tg_id = message.from_user.id
 
     async with get_session() as session:
@@ -93,18 +97,26 @@ async def step_api_id(message: Message, state: FSMContext) -> None:
 async def step_api_hash(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if len(text) != 32 or not all(c in "0123456789abcdefABCDEF" for c in text):
-        await message.answer("api_hash должен быть строкой из 32 hex-символов. Попробуй ещё раз или /cancel.")
+        await message.answer(
+            "api_hash должен быть строкой из 32 hex-символов. Попробуй ещё раз или /cancel."
+        )
         return
     await state.update_data(api_hash=text)
     await state.set_state(LoginStates.phone)
-    await message.answer("Введи номер телефона в международном формате, например <code>+79991234567</code>.")
+    await message.answer(
+        "Введи номер телефона в международном формате, например <code>+79991234567</code>."
+    )
 
 
 @router.message(LoginStates.phone)
-async def step_phone(message: Message, state: FSMContext, userbot_manager: UserbotManager) -> None:
+async def step_phone(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
     phone = (message.text or "").strip().replace(" ", "")
     if not phone.startswith("+") or not phone[1:].isdigit() or len(phone) < 8:
-        await message.answer("Не похоже на телефон. Должно быть как <code>+79991234567</code>. /cancel — выйти.")
+        await message.answer(
+            "Не похоже на телефон. Должно быть как <code>+79991234567</code>. /cancel — выйти."
+        )
         return
 
     data = await state.get_data()
@@ -121,7 +133,9 @@ async def step_phone(message: Message, state: FSMContext, userbot_manager: Userb
     except PhoneNumberInvalidError:
         await userbot_manager.cancel_pending(message.from_user.id)
         await state.clear()
-        await message.answer("❌ Telegram сказал: неверный номер. Запусти /login заново.")
+        await message.answer(
+            "❌ Telegram сказал: неверный номер. Запусти /login заново."
+        )
         return
     except ApiIdInvalidError:
         await userbot_manager.cancel_pending(message.from_user.id)
@@ -131,7 +145,9 @@ async def step_phone(message: Message, state: FSMContext, userbot_manager: Userb
     except FloodWaitError as e:
         await userbot_manager.cancel_pending(message.from_user.id)
         await state.clear()
-        await message.answer(f"❌ FloodWait: подожди {e.seconds} секунд и попробуй /login снова.")
+        await message.answer(
+            f"❌ FloodWait: подожди {e.seconds} секунд и попробуй /login снова."
+        )
         return
     except Exception:
         logger.exception("send_code_request failed")
@@ -149,7 +165,9 @@ async def step_phone(message: Message, state: FSMContext, userbot_manager: Userb
 
 
 @router.message(LoginStates.code)
-async def step_code(message: Message, state: FSMContext, userbot_manager: UserbotManager) -> None:
+async def step_code(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
     raw = (message.text or "").strip()
     code = "".join(ch for ch in raw if ch.isdigit())
     if not code:
@@ -194,7 +212,9 @@ async def step_code(message: Message, state: FSMContext, userbot_manager: Userbo
 
 
 @router.message(LoginStates.password_2fa)
-async def step_2fa(message: Message, state: FSMContext, userbot_manager: UserbotManager) -> None:
+async def step_2fa(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
     password = (message.text or "").strip()
     if not password:
         await message.answer("Пустой пароль. Введи 2FA-пароль или /cancel.")
@@ -222,12 +242,15 @@ async def step_2fa(message: Message, state: FSMContext, userbot_manager: Userbot
     try:
         await message.delete()
     except Exception:
+        logger.debug("login: could not delete password message", exc_info=True)
         pass
 
     await _finalize_login(message, state, userbot_manager)
 
 
-async def _finalize_login(message: Message, state: FSMContext, userbot_manager: UserbotManager) -> None:
+async def _finalize_login(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
     tg_id = message.from_user.id
     pending = userbot_manager.clear_pending(tg_id)
     if pending is None:
@@ -236,7 +259,11 @@ async def _finalize_login(message: Message, state: FSMContext, userbot_manager: 
         return
 
     me = await pending.client.get_me()
-    label_parts = [p for p in [getattr(me, "first_name", None), getattr(me, "last_name", None)] if p]
+    label_parts = [
+        p
+        for p in [getattr(me, "first_name", None), getattr(me, "last_name", None)]
+        if p
+    ]
     label = " ".join(label_parts) or (me.username or str(me.id))
     session_string = pending.client.session.save()
 

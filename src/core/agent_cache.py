@@ -101,6 +101,12 @@ async def cache_get_or_set(
         try:
             await cache_set_db(agent_type, params_hash, val, ttl_seconds)
         except Exception:
+            logger.debug(
+                "agent_cache persist failed: %s:%s",
+                agent_type,
+                params_hash,
+                exc_info=True,
+            )
             # In-memory кэша достаточно для не-JSON-сериализуемых типов
             pass
     return val

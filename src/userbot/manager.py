@@ -104,7 +104,7 @@ class UserbotManager:
             try:
                 await client.disconnect()
             except Exception:
-                pass
+                logger.exception("userbot disconnect failed")
 
     def start_pending(
         self, telegram_id: int, api_id: int, api_hash: str
@@ -128,7 +128,7 @@ class UserbotManager:
             try:
                 await pending.client.disconnect()
             except Exception:
-                pass
+                logger.exception("userbot disconnect failed")
 
     def clear_pending(self, telegram_id: int) -> PendingLogin | None:
         return self._pending.pop(telegram_id, None)

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.config import settings
 from src.db.models import Base
 
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(settings.database_url, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -107,7 +109,7 @@ async def init_db() -> None:
                     text(f"ALTER TABLE users ADD COLUMN {col} {col_def}")
                 )
             except Exception:
-                pass
+                logger.warning("Migration for %s skipped", col, exc_info=True)
 
         # Миграция: добавляем колонки adaptive scoring если их нет
         for col, col_def in [
@@ -122,7 +124,7 @@ async def init_db() -> None:
                     text(f"ALTER TABLE memories ADD COLUMN {col} {col_def}")
                 )
             except Exception:
-                pass  # колонка уже существует
+                logger.warning("Migration for %s skipped", col, exc_info=True)
 
         # Миграция: source_memory_id в commitments
         try:
@@ -130,7 +132,7 @@ async def init_db() -> None:
                 text("ALTER TABLE commitments ADD COLUMN source_memory_id BIGINT")
             )
         except Exception:
-            pass
+            logger.warning("Migration for source_memory_id skipped", exc_info=True)
         try:
             await conn.execute(
                 text(
@@ -139,7 +141,9 @@ async def init_db() -> None:
                 )
             )
         except Exception:
-            pass
+            logger.warning(
+                "Migration for ix_commitments_source_memory_id skipped", exc_info=True
+            )
 
         # Миграция старых связей памяти (related_memory_id → memory_links)
         try:
@@ -167,7 +171,9 @@ async def init_db() -> None:
                     )
             await conn.commit()
         except Exception:
-            pass  # таблица ещё не существует — ок
+            logger.warning(
+                "Migration for related_memory_id → memory_links skipped", exc_info=True
+            )
 
         # Миграция: radar_snoozed_until для ConversationState
         try:
@@ -177,7 +183,7 @@ async def init_db() -> None:
                 )
             )
         except Exception:
-            pass
+            logger.warning("Migration for radar_snoozed_until skipped", exc_info=True)
 
 
 @asynccontextmanager

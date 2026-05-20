@@ -541,6 +541,7 @@ async def run_pipeline(
                 "agent_errors": agent_errors,
             }
         except Exception:
+            logger.exception("maestro fallback_request failed")
             return {
                 "final_response": "Извини, что-то пошло не так. Попробуй ещё раз.",
                 "plan": [],
@@ -582,6 +583,7 @@ async def run_pipeline(
                 "agent_errors": agent_errors,
             }
         except Exception:
+            logger.exception("maestro agent synthesis failed")
             # Если LLM не может сформулировать — возвращаем сырые данные агентов
             summary = "\n\n".join(agent_texts)
             return {

@@ -245,6 +245,7 @@ async def make_plan(
             meta["recall_hit"] = len(recall_result.facts)
             meta["recall_facts"] = [rf.fact[:80] for rf in recall_result.facts[:3]]
     except Exception:
+        logger.debug("smart_autorouter: recall skipped", exc_info=True)
         pass
     plan.metrics["recall_ms"] = int((time.monotonic() - t1) * 1000)
 
@@ -266,6 +267,7 @@ async def make_plan(
                     parts.append(f"Цели: {sp.goals}")
                 plan.self_profile = "; ".join(parts)
     except Exception:
+        logger.debug("smart_autorouter: self-profile skipped", exc_info=True)
         pass
 
     # ---------- Слой 3: Context chain (last_purpose) ----------
@@ -335,6 +337,7 @@ async def make_plan(
                         plan.elapsed_ms = plan.metrics["router_ms"]
                         return plan
     except Exception:
+        logger.debug("smart_autorouter: contact routing skipped", exc_info=True)
         pass
 
     # Отправка сообщения
@@ -428,6 +431,7 @@ async def make_plan(
                     meta["escalated_from"] = "medium"
                 meta["conflict_risk"] = [t["contact_name"] for t in triggers[:2]]
     except Exception:
+        logger.debug("smart_autorouter: intent classification skipped", exc_info=True)
         pass
 
     # Всё остальное → MAIN + light

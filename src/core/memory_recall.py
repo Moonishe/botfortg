@@ -88,10 +88,14 @@ async def recall(
             Memory.is_active == True,
             or_(Memory.expires_at.is_(None), Memory.expires_at > now),
         ]
-        q_all = select(Memory).where(*base_conditions).order_by(
-            Memory.pinned.desc(),
-            Memory.created_at.desc(),
-            Memory.confidence.desc(),
+        q_all = (
+            select(Memory)
+            .where(*base_conditions)
+            .order_by(
+                Memory.pinned.desc(),
+                Memory.created_at.desc(),
+                Memory.confidence.desc(),
+            )
         )
         if mode == "light":
             q_all = q_all.limit(max(limit * 8, 40))
@@ -363,6 +367,9 @@ def format_recall_for_prompt(recall_result: RecallResult, max_facts: int = 8) ->
                     end = end_marker + len("</memory_links>")
                     lines.append(graph_context[start:end])
         except Exception:
+            logger.debug(
+                "memory_recall: graph_context extraction failed", exc_info=True
+            )
             pass
 
     return "\n".join(lines)

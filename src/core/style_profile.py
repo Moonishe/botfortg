@@ -151,6 +151,7 @@ def style_profile_as_prompt_hint(
         try:
             g = json.loads(global_profile_json)
         except Exception:
+            logger.debug("global_style_profile JSON parse failed", exc_info=True)
             pass
         else:
             lines: list[str] = ["Твой общий стиль общения:"]

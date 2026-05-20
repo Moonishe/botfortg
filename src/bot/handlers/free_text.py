@@ -768,6 +768,7 @@ async def _process_text(
 
                 persona_block = await format_persona_for_prompt(owner_telegram_id) or ""
             except Exception:
+                logger.debug("fast_route persona load skipped", exc_info=True)
                 pass
 
             fast_ctx = AssemblyContext(
@@ -795,6 +796,7 @@ async def _process_text(
                 if persona_hint:
                     fast_context_parts.append(persona_hint)
             except Exception:
+                logger.debug("fast_route persona load skipped", exc_info=True)
                 pass
             fast_system = (
                 "Ты ассистент. Ответь коротко.\n\n" + "\n\n".join(fast_context_parts)
