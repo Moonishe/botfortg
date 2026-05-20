@@ -125,8 +125,22 @@ async def make_plan(
         plan.elapsed_ms = int((time.monotonic() - start) * 1000)
         return plan
 
-    # Поиск / анализ
-    if any(w in t for w in ("найди", "поищи", "анализ", "сводка", "проанализируй")):
+    # Поиск
+    if any(w in t for w in ("найди", "поищи")):
+        task = RouterTask(
+            user_text,
+            purpose=RoutePurpose.SEARCH,
+            risk=RiskLevel.MEDIUM,
+            need_agents=["search"],
+            heavy=heavy_available,
+            cache_ttl=300,
+        )
+        plan.tasks.append(task)
+        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        return plan
+
+    # Анализ / сводка
+    if any(w in t for w in ("анализ", "сводка", "проанализируй")):
         task = RouterTask(
             user_text,
             purpose=RoutePurpose.ANALYSIS,
@@ -134,6 +148,20 @@ async def make_plan(
             need_agents=["search"],
             heavy=heavy_available,
             cache_ttl=300,
+        )
+        plan.tasks.append(task)
+        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        return plan
+
+    # Черновик ответа
+    if any(w in t for w in ("напиши ответ", "черновик", "draft", "набросай ответ")):
+        task = RouterTask(
+            user_text,
+            purpose=RoutePurpose.DRAFT,
+            risk=RiskLevel.MEDIUM,
+            need_agents=["draft"],
+            heavy=False,
+            cache_ttl=0,
         )
         plan.tasks.append(task)
         plan.elapsed_ms = int((time.monotonic() - start) * 1000)

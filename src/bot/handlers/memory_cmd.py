@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -17,9 +18,10 @@ from src.core.memory_fuel import (
     get_fuel_stats,
 )
 from src.core.memory_neighbors import format_neighbors, get_neighbors
-from src.db.models import Commitment, Memory, MemoryCandidate
+from src.db.models import Commitment, LlmKeySlot, Memory, MemoryCandidate
 from src.db.repo import (
     add_commitment,
+    add_key_slot,
     add_memory,
     add_memory_candidate,
     delete_memory,
@@ -28,6 +30,7 @@ from src.db.repo import (
     get_linked_memories,
     get_memory_stats,
     get_or_create_user,
+    list_key_slots,
     list_memories,
     list_memory_candidates,
     search_memories,
@@ -39,6 +42,73 @@ from src.userbot.manager import UserbotManager
 logger = logging.getLogger(__name__)
 router = Router(name="memory_cmd")
 router.message.filter(OwnerOnly())
+
+
+@router.message(Command("keys"))
+async def cmd_keys(message: Message) -> None:
+    """Управление ключами LLM."""
+    args = (message.text or "").split()
+    if len(args) >= 4 and args[1] == "add":
+        provider = args[2].lower()
+        purpose = args[3].lower()
+        api_key = " ".join(args[4:])
+        if provider not in ("openai", "gemini", "mistral"):
+            await message.answer("❌ Провайдер: openai, gemini или mistral")
+            return
+        # Удаляем сообщение с ключом из чата
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            slot = await add_key_slot(
+                session,
+                owner,
+                provider,
+                api_key,
+                purpose=purpose,
+                label=f"{provider}/{purpose}",
+            )
+        await message.answer(
+            f"✅ Ключ добавлен: {provider}/{purpose} (слот #{slot.id})"
+        )
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        slots = await list_key_slots(session, owner)
+        if not slots:
+            await message.answer(
+                "🔑 <b>Нет ключевых слотов.</b>\n\n"
+                "Добавь ключ через /keys add openai main sk-...\n"
+                "Где:\n"
+                "• провайдер: openai/gemini/mistral\n"
+                "• purpose: main/draft/memory/background/search/analysis/urgent/fallback\n"
+                "• ключ: сам API ключ"
+            )
+            return
+        lines = ["<b>🔑 Ключевые слоты:</b>", ""]
+        for s in slots[:10]:
+            status = "✅" if s.enabled else "🚫"
+            cool = (
+                " 🔒"
+                if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
+                else ""
+            )
+            lines.append(
+                f"{status} <b>{s.provider}</b> / {s.purpose} "
+                f"(приоритет {s.priority}, исп. {s.usage_count}×{cool})"
+            )
+            if s.last_error:
+                lines.append(f"   ⚠️ {s.last_error[:80]}")
+            if s.label:
+                lines.append(f"   🏷 {s.label}")
+        lines.append("")
+        lines.append(
+            "<i>/keys add &lt;provider&gt; &lt;purpose&gt; &lt;key&gt; — добавить</i>"
+        )
+        await message.answer("\n".join(lines))
 
 
 @router.message(Command("memory"))

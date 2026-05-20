@@ -589,14 +589,7 @@ async def _process_text(
 ) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
         tz_name = owner.settings.timezone
-
-    if provider is None:
-        await message.answer(
-            "Чтобы я мог понимать свободный текст — добавь LLM-ключ в /settings → 🔑 API-ключи."
-        )
-        return
 
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = ctx_store.render_history_block(message.from_user.id)
@@ -660,7 +653,6 @@ async def _process_text(
     router_plan = await make_plan(
         raw,
         owner.telegram_id,
-        provider_available=provider is not None,
         heavy_available=owner.settings.use_heavy_model if owner.settings else True,
     )
     if router_plan.tasks:
@@ -673,6 +665,21 @@ async def _process_text(
             t0.cache_ttl,
             t0.need_agents or "—",
         )
+
+    # Строим провайдер с учётом purpose из auto-router'а
+    purpose = router_plan.tasks[0].purpose.value if router_plan.tasks else "main"
+    async with get_session() as session:
+        owner_db = await get_or_create_user(session, owner.telegram_id)
+        provider = await build_provider(session, owner_db, purpose=purpose)
+        if provider is None and purpose != "main":
+            logger.debug("No key for purpose '%s', falling back to main", purpose)
+            provider = await build_provider(session, owner_db, purpose="main")
+
+    if provider is None:
+        await message.answer(
+            "Чтобы я мог понимать свободный текст — добавь LLM-ключ в /settings → 🔑 API-ключи."
+        )
+        return
 
     # Сначала пробуем Maestro + агенты — полный пайплайн
     try:
