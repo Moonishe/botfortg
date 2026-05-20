@@ -150,6 +150,21 @@ AGENT_SYSTEM = """\
 "full_analysis"    — полный анализ переписок.
   folders: [str]|null
 
+"add_api_key"      — добавить API-ключ.
+  provider: str    — openai/gemini/mistral
+  purpose: str     — main/fallback/embeddings/stt (по умолчанию "main")
+  key: str         — сам ключ, несколько через запятую для bulk-добавления
+
+"remove_api_key"   — удалить слот ключа.
+  slot_id: int     — номер слота
+  all: str|null    — "все"/"all" чтобы удалить все ключи
+
+"toggle_api_key"   — включить/выключить слот.
+  slot_id: int     — номер слота
+  action: str      — "enable"/"disable"/"toggle" (по умолчанию "toggle")
+
+"list_keys"        — показать все ключи. Без параметров.
+
 ## Форматы
 - multi: {"intent": "multi", "actions": [{...}, {...}]}
 - Не выдумывай поля, которых нет в списке.

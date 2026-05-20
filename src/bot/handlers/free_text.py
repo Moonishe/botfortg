@@ -33,13 +33,16 @@ from src.core.infra.timeutil import (
     now_in_tz,
 )
 from src.core.infra.transcription import transcription_service
+from src.db.models import LlmKeySlot
 from src.db.repo import (
     add_commitment,
+    add_key_slot,
     get_api_key,
     get_contact,
     get_contact_profile,
     get_or_create_user,
     get_self_profile,
+    list_key_slots,
     list_open_commitments,
     update_commitment_status,
     upsert_contact,
@@ -927,6 +930,18 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
     if kind == "full_analysis":
         await _exec_full_analysis(intent, message)
         return
+    if kind == "add_api_key":
+        await _exec_add_api_key(intent, message)
+        return
+    if kind == "remove_api_key":
+        await _exec_remove_api_key(intent, message)
+        return
+    if kind == "toggle_api_key":
+        await _exec_toggle_api_key(intent, message)
+        return
+    if kind == "list_keys":
+        await _exec_list_keys(intent, message)
+        return
     if kind == "clarify":
         question = (intent.get("question") or "").strip()
         if question:
@@ -1197,3 +1212,206 @@ async def _exec_full_analysis(intent, message) -> None:
     import asyncio
 
     asyncio.create_task(_run())
+
+
+# ─── Key management handlers (natural language) ─────────────────────
+
+
+async def _exec_add_api_key(intent: dict, message: Message) -> None:
+    """Добавить API-ключ(и) через естественный язык."""
+    provider = (intent.get("provider") or "").strip().lower()
+    purpose = (intent.get("purpose") or "main").strip().lower()
+    keys_raw = (intent.get("key") or "").strip()
+
+    if not provider or not keys_raw:
+        await message.answer(
+            "🤷 Не хватает данных: укажи провайдера (openai/gemini/mistral) и ключ."
+        )
+        return
+
+    if provider not in ("openai", "gemini", "mistral"):
+        await message.answer("❌ Провайдер: openai, gemini или mistral")
+        return
+
+    # Split by comma for bulk
+    keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
+    if not keys:
+        await message.answer("❌ Пустой список ключей.")
+        return
+
+    # Delete message with keys from chat (security)
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with key")
+
+    from src.crypto import decrypt
+    from src.llm.router import _provider_class_for
+
+    success = 0
+    failed = 0
+    results = []
+    last_slot_id = None
+
+    for i, api_key in enumerate(keys):
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            slot = await add_key_slot(
+                session,
+                owner,
+                provider,
+                api_key,
+                purpose=purpose,
+                label=f"{provider}/{purpose}",
+                priority=i,
+            )
+            last_slot_id = slot.id
+        # Validate key
+        try:
+            raw_key = decrypt(slot.key_enc)
+            prov_class = _provider_class_for(provider)
+            prov = prov_class(raw_key)
+            valid = await prov.validate_key()
+            if not valid:
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, message.from_user.id)
+                    bad_slot = await session.get(LlmKeySlot, slot.id)
+                    if bad_slot:
+                        await session.delete(bad_slot)
+                        await session.flush()
+                results.append(f"  #{slot.id} {api_key[:12]}… ❌")
+                failed += 1
+            else:
+                results.append(f"  #{slot.id} {api_key[:12]}… ✅")
+                success += 1
+        except Exception:
+            results.append(f"  #{slot.id} {api_key[:12]}… ✅ (ошибка проверки)")
+            success += 1
+
+    if len(keys) == 1 and success == 1:
+        await message.answer(
+            f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{last_slot_id})"
+        )
+    elif len(keys) == 1 and failed == 1:
+        await message.answer(
+            f"❌ Ключ {provider}/{purpose} не прошёл валидацию. Проверь ключ."
+        )
+    else:
+        lines = [f"<b>Добавлено {len(keys)} ключей {provider}/{purpose}:</b>", ""]
+        lines.extend(results)
+        await message.answer("\n".join(lines))
+
+
+async def _exec_remove_api_key(intent: dict, message: Message) -> None:
+    """Удалить слот ключа через естественный язык."""
+    slot_id = intent.get("slot_id")
+    remove_all = intent.get("all")
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+
+        # Remove all
+        if remove_all and str(remove_all).strip().lower() in ("все", "all"):
+            slots = await list_key_slots(session, owner)
+            if not slots:
+                await message.answer("❌ Нет ключей для удаления.")
+                return
+            count = 0
+            for s in slots:
+                await session.delete(s)
+                count += 1
+            await session.commit()
+            await message.answer(f"✅ Удалено {count} ключей.")
+            return
+
+        if slot_id is None:
+            await message.answer("🤷 Не указан номер слота. Напиши: удали ключ 5")
+            return
+
+        try:
+            slot_id = int(slot_id)
+        except (TypeError, ValueError):
+            await message.answer("❌ Номер слота должен быть числом.")
+            return
+
+        slot = await session.get(LlmKeySlot, slot_id)
+        if slot and slot.user_id == owner.id:
+            prov = slot.provider
+            purp = slot.purpose
+            await session.delete(slot)
+            await session.commit()
+            await message.answer(f"✅ Слот #{slot_id} ({prov}/{purp}) удалён.")
+        else:
+            await message.answer("❌ Слот не найден или не твой.")
+
+
+async def _exec_toggle_api_key(intent: dict, message: Message) -> None:
+    """Включить/выключить слот ключа через естественный язык."""
+    slot_id = intent.get("slot_id")
+    action = (intent.get("action") or "toggle").strip().lower()
+
+    if slot_id is None:
+        await message.answer("🤷 Не указан номер слота. Напиши: отключи ключ 3")
+        return
+
+    try:
+        slot_id = int(slot_id)
+    except (TypeError, ValueError):
+        await message.answer("❌ Номер слота должен быть числом.")
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        slot = await session.get(LlmKeySlot, slot_id)
+        if slot and slot.user_id == owner.id:
+            if action == "enable":
+                slot.enabled = True
+            elif action == "disable":
+                slot.enabled = False
+            else:  # toggle
+                slot.enabled = not slot.enabled
+            await session.commit()
+            status = "включён" if slot.enabled else "выключен"
+            await message.answer(
+                f"✅ Слот #{slot_id} ({slot.provider}/{slot.purpose}) {status}."
+            )
+        else:
+            await message.answer("❌ Слот не найден или не твой.")
+
+
+async def _exec_list_keys(intent: dict, message: Message) -> None:
+    """Показать все ключи через естественный язык."""
+    from datetime import datetime, timezone
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        slots = await list_key_slots(session, owner)
+
+    if not slots:
+        await message.answer(
+            "🔑 <b>Нет ключевых слотов.</b>\n\n"
+            "Добавь ключ через /keys add openai main sk-...\n"
+            "Где:\n"
+            "• провайдер: openai/gemini/mistral\n"
+            "• purpose: main/draft/memory/background/search/analysis/urgent/fallback\n"
+            "• ключ: сам API ключ"
+        )
+        return
+
+    lines = ["<b>🔑 Ключевые слоты:</b>", ""]
+    for s in slots[:10]:
+        status = "✅" if s.enabled else "🚫"
+        cool = (
+            " 🔒"
+            if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
+            else ""
+        )
+        lines.append(
+            f"{status} <b>{s.provider}</b> / {s.purpose} "
+            f"(приоритет {s.priority}, исп. {s.usage_count}×{cool})"
+        )
+        if s.last_error:
+            lines.append(f"   ⚠️ {s.last_error[:80]}")
+        if s.label:
+            lines.append(f"   🏷 {s.label}")
+    await message.answer("\n".join(lines))
