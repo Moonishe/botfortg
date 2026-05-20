@@ -8,6 +8,7 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,6 @@ def cache_set(agent_type: str, params_hash: str, value: Any, ttl_seconds: int) -
 async def cache_get_db(agent_type: str, params_hash: str) -> Any | None:
     """Достать из SQLite кэша."""
     from src.db.repo import get_agent_cache
-    from src.db.session import get_session
 
     async with get_session() as session:
         row = await get_agent_cache(session, f"{agent_type}:{params_hash}")
@@ -62,7 +62,6 @@ async def cache_set_db(
 ) -> None:
     """Сохранить в SQLite кэш."""
     from src.db.repo import upsert_agent_cache
-    from src.db.session import get_session
 
     async with get_session() as session:
         await upsert_agent_cache(

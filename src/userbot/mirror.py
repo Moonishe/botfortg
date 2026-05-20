@@ -11,6 +11,7 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import User as TgUser
 
+from src.core.notification_queue import notification_queue
 from src.core.notifier import notifier
 from src.db.repo import (
     get_contact,
@@ -20,6 +21,7 @@ from src.db.repo import (
     upsert_message,
 )
 from src.db.session import get_session
+from src.llm.router import build_provider
 
 
 logger = logging.getLogger(__name__)
@@ -93,8 +95,6 @@ async def _process_incoming_bg(
     Открывает собственную сессию БД, не роняет обработчик при ошибках.
     """
     from src.core.inbox_manager import InboxAction, process_incoming
-    from src.db.repo import get_contact, get_or_create_user, upsert_conversation_state
-    from src.llm.router import build_provider
 
     try:
         async with get_session() as _im_session:
@@ -129,8 +129,6 @@ async def _process_incoming_bg(
                 f"🔴 <b>СРОЧНОЕ от {sender_name}!</b>\n\n<i>{text[:300]}</i>"
             )
         elif decision.action == InboxAction.DRAFT_SUGGEST:
-            from src.core.notification_queue import notification_queue
-
             await notification_queue.enqueue(
                 topic="inbox",
                 text=f"💬 <b>{sender_name}:</b> <i>{text[:200]}</i>\n\n→ Напиши ответ? /chat {sender_name}",

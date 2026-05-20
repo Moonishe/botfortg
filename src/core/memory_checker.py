@@ -6,6 +6,7 @@ import math
 
 from sqlalchemy import select
 
+from src.core.notification_queue import notification_queue
 from src.core.temporal_layers import (
     classify_layer,
     get_layer_config,
@@ -138,7 +139,6 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
 
         if closed_count > 0:
             # Уведомление о ночной очистке
-            from src.core.notification_queue import notification_queue
             from src.db.models import Notification
 
             await notification_queue.enqueue(

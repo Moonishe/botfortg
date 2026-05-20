@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from src.llm.base import LLMProvider
     from src.db.models import Message
 
+from src.db.session import get_session
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +64,6 @@ async def run_full_analysis(
     """
     result = AnalysisResult()
 
-    from src.db.session import get_session
     from src.db.repo import (
         get_or_create_user,
         list_contacts,

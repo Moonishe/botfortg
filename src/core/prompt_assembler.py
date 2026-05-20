@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from src.core.soul_blocks import _load_blocks
+from src.db.repo import get_or_create_user, get_self_profile
+from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -268,9 +270,6 @@ async def assemble_self_profile_prompt(owner_id: int, session=None) -> str:
     Returns:
         отформатированный блок профиля или "" если профиля нет / ошибка.
     """
-    from src.db.repo import get_or_create_user, get_self_profile
-    from src.db.session import get_session
-
     if session is not None:
         owner = await get_or_create_user(session, owner_id)
         profile = await get_self_profile(session, owner)

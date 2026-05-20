@@ -6,6 +6,7 @@ import logging
 from src.db.repo import get_or_create_user, list_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage
+from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,6 @@ async def tag_fact(
 
 async def tag_all_untagged(owner_id: int) -> int:
     """Проставляет теги для всех нетэгированных фактов."""
-    from src.llm.router import build_provider
-
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         provider = await build_provider(session, owner)

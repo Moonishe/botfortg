@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from src.db.models import Contact, User
     from src.llm.base import LLMProvider
 
+from src.db.session import get_session
+from src.llm.router import build_provider
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,10 +81,7 @@ async def process_incoming(
 
     # Построить провайдера, если не передан
     if provider is None and owner.settings.llm_provider:
-        from src.llm.router import build_provider
-
         # Провайдер требует сессию — создаём временную
-        from src.db.session import get_session
 
         async with get_session() as _session:
             provider = await build_provider(_session, owner)

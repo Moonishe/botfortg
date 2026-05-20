@@ -3,6 +3,7 @@
 import logging
 from datetime import datetime, timezone
 from collections import defaultdict
+from src.core.notification_queue import notification_queue
 from src.db.session import get_session
 from src.config import settings
 from src.db.repo import get_or_create_user, list_memories, get_contact
@@ -173,7 +174,6 @@ def format_conflicts(conflicts: list[dict]) -> str:
 async def conflict_check_loop(owner_id: int):
     """Фоновый цикл: раз в 12 часов проверяет конфликты."""
     import asyncio
-    from src.core.notification_queue import notification_queue
     from src.core.timeutil import now_in_tz
     from src.db.models import Notification
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton

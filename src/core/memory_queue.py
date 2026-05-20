@@ -8,6 +8,10 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
+from src.db.repo import get_or_create_user
+from src.db.session import get_session
+from src.llm.router import build_provider
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,9 +57,6 @@ async def _worker() -> None:
 
 async def _process_job(job: MemoryJob) -> None:
     """Выполнить одно задание."""
-    from src.db.session import get_session
-    from src.db.repo import get_or_create_user
-
     async with get_session() as session:
         owner = await get_or_create_user(session, job.telegram_id)
 
@@ -118,7 +119,6 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
 
 async def _handle_extract(session, owner, job: MemoryJob) -> None:
     """Извлечь и сохранить факты из текста переписки (job_type='extract')."""
-    from src.llm.router import build_provider
     from src.core.memory_extractor import extract_and_save_memories
 
     provider = await build_provider(session, owner)
@@ -159,7 +159,6 @@ async def _handle_extract(session, owner, job: MemoryJob) -> None:
 
 async def _handle_tag(session, owner, job: MemoryJob) -> None:
     """Протегировать нетэгированные факты (job_type='tag')."""
-    from src.llm.router import build_provider
     from src.core.memory_tagger import tag_new_fact
     from src.db.repo import list_memories
 

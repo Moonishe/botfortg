@@ -6,6 +6,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from src.core.notification_queue import notification_queue
 from src.core.timeutil import now_in_tz
 from src.db.repo import get_or_create_user
 from src.config import settings
@@ -16,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 async def sleep_tracker_loop(owner_id: int) -> None:
     """Фоновый цикл: каждые 15 минут проверяет паттерны сна."""
-    from src.core.notification_queue import notification_queue
     from src.db.models import Notification
 
     _notified_for_date: str | None = (

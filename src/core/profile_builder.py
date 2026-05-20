@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from src.db.repo import (
     get_contact_profile,
+    get_or_create_user,
     list_memories,
     upsert_contact_profile,
 )
@@ -43,8 +44,6 @@ async def build_profile(
     Возвращает dict с полями профиля (тот же JSON, что от LLM).
     """
     async with get_session() as session:
-        from src.db.repo import get_or_create_user
-
         owner = await get_or_create_user(session, owner_id)
         if owner is None:
             logger.warning("build_profile: owner %s not found", owner_id)

@@ -18,8 +18,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import InstructionProfile, InstructionCandidate, InstructionEvent
+from src.db.repo import get_or_create_user
 from src.db.session import SessionLocal
 from src.core.notification_queue import notification_queue
+from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +94,6 @@ class InstructionOptimizer:
 
         if user_obj:
             try:
-                from src.llm.router import build_provider
-
                 provider = await build_provider(
                     session, user_obj, purpose="instructions"
                 )
@@ -211,8 +211,6 @@ class InstructionOptimizer:
 
         # LLM анализ диалога
         try:
-            from src.llm.router import build_provider
-
             provider = await build_provider(session, user_obj, purpose="instructions")
             if provider:
                 prompt = (
@@ -268,9 +266,6 @@ class InstructionOptimizer:
         Запускать раз в день (например, в 02:00 по крону).
         """
         async with SessionLocal() as session:
-            # Получаем user для build_provider
-            from src.db.repo import get_or_create_user
-
             # user_id здесь — это telegram_id (по конвенции репозитория)
             owner = await get_or_create_user(session, user_id)
             await self.consolidate_rules(

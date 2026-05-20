@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from src.db.repo import add_memory, get_or_create_user, list_memories
 from src.db.session import get_session
 from src.config import settings
+from src.core.notification_queue import notification_queue
 from src.llm.base import ChatMessage
+from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +101,6 @@ async def run_distillation(owner_id: int, contact_id: int | None = None) -> dict
     Запускает дистилляцию для контакта (или общих фактов).
     Возвращает {success: bool, fact: str | None, deactivated: int}
     """
-    from src.llm.router import build_provider
-
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         provider = await build_provider(session, owner)
@@ -141,7 +141,6 @@ async def distillation_loop(owner_id: int) -> None:
     """Фоновый цикл: раз в день (14:00) запускает дистилляцию общих фактов."""
     import asyncio
 
-    from src.core.notification_queue import notification_queue
     from src.core.timeutil import now_in_tz
     from src.db.models import Notification
 

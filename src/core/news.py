@@ -18,6 +18,7 @@ from src.db.models import Contact, User
 from src.db.repo import get_or_create_user, list_contacts, list_news_topics
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
+from src.llm.router import build_provider
 
 
 logger = logging.getLogger(__name__)
@@ -110,8 +111,6 @@ async def build_news_digest(
 
         provider = provider_override
         if provider is None:
-            from src.llm.router import build_provider
-
             provider = await build_provider(session, owner)
         heavy = owner.settings.use_heavy_model
 

@@ -20,6 +20,7 @@ from telethon.tl.types import (
 
 from src.config import settings as app_settings
 from src.core.chat_service import load_chat, message_to_text
+from src.core.notification_queue import notification_queue
 from src.core.notifier import notifier
 from src.core.style_profile import style_profile_as_prompt_hint
 from src.core.timeutil import now_in_tz
@@ -407,8 +408,6 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     incoming_text=incoming_text[:500],
                     reply_text=reply,
                 )
-
-            from src.core.notification_queue import notification_queue
 
             await notification_queue.enqueue(
                 topic="auto_reply",

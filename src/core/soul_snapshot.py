@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 from src.core.prompt_assembler import prompt_assembler
-
-if TYPE_CHECKING:
-    from src.db.models import SoulSnapshot
+from src.db.models import SoulSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +92,6 @@ class SoulSnapshotManager:
         Returns:
             Сохранённый SoulSnapshot.
         """
-        from src.db.models import SoulSnapshot
-
         context_blocks = prompt_assembler.get_context_blocks()
 
         # Определяем версию
@@ -141,7 +137,6 @@ class SoulSnapshotManager:
             True если откат успешен, False если версия не найдена.
         """
         from sqlalchemy import select
-        from src.db.models import SoulSnapshot
 
         result = await session.execute(
             select(SoulSnapshot).where(SoulSnapshot.version == version)
@@ -230,7 +225,6 @@ class SoulSnapshotManager:
     async def _next_version(self, session) -> str:
         """Вычисляет следующую semver-версию."""
         from sqlalchemy import select, func
-        from src.db.models import SoulSnapshot
 
         result = await session.execute(select(func.count(SoulSnapshot.id)))
         count = result.scalar() or 0
@@ -239,7 +233,6 @@ class SoulSnapshotManager:
     async def _get_latest_active(self, session) -> Optional["SoulSnapshot"]:
         """Возвращает последний активный снапшот."""
         from sqlalchemy import select
-        from src.db.models import SoulSnapshot
 
         result = await session.execute(
             select(SoulSnapshot)

@@ -10,8 +10,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from src.db.session import get_session
 from src.db.repo import get_or_create_user, get_contact
+from src.db.session import get_session
+from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +158,6 @@ async def recall(
         if include_semantic:
             try:
                 from src.core.vector_store import vector_store
-                from src.llm.router import build_provider
 
                 provider = await build_provider(session, owner)
                 if provider:

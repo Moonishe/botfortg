@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from src.config import settings
+from src.core.notification_queue import notification_queue
 from src.db.models import Skill, Trajectory
 from src.db.repo import (
     add_skill_usage,
@@ -222,8 +223,6 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
         try:
             created = await suggest_skills_from_trajectories(telegram_id)
             if created:
-                from src.core.notification_queue import notification_queue
-
                 await notification_queue.enqueue(
                     topic="skills",
                     category="self_evolution",

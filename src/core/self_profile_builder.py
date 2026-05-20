@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.llm.base import LLMProvider
 
+from src.db.repo import get_or_create_user, list_memories, upsert_self_profile
+from src.db.session import get_session
+
 logger = logging.getLogger(__name__)
 
 SELF_PROFILE_SYSTEM = """Ты анализируешь факты памяти владельца Telegram-аккаунта. На основе фактов составь профиль в JSON.
@@ -23,12 +26,6 @@ async def build_self_profile(
     telegram_id: int, provider: "LLMProvider"
 ) -> object | None:
     """Строит SelfProfile из персональных фактов через LLM."""
-    from src.db.repo import (
-        get_or_create_user,
-        list_memories,
-        upsert_self_profile,
-    )
-    from src.db.session import get_session
     from src.llm.base import ChatMessage
 
     async with get_session() as session:

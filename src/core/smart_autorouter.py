@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 # Предкомпилированные константы для быстрого роутинга (не создаются заново на каждый запрос)
 import re as _re
 
+from src.db.repo import get_or_create_user, get_conversation_state
+from src.db.session import get_session
+
 _RE_CONTACT_ACTION = _re.compile(
     r"(?:скажи|напиши|отправь|передай|ответь)\s+(\S+)", _re.IGNORECASE
 )
@@ -252,11 +255,8 @@ async def make_plan(
     # ---------- Шаг 2: Self-profile (саморефлексия) ----------
     try:
         from src.db.repo import get_self_profile
-        from src.db.session import get_session
 
         async with get_session() as session:
-            from src.db.repo import get_or_create_user
-
             owner = await get_or_create_user(session, telegram_id)
             sp = await get_self_profile(session, owner)
             if sp:
@@ -307,8 +307,6 @@ async def make_plan(
     # ---------- Слой 4: Contact-aware routing ----------
     try:
         from src.core.contact_resolver import resolve
-        from src.db.session import get_session
-        from src.db.repo import get_or_create_user, get_conversation_state
 
         names = _RE_CONTACT_ACTION.findall(user_text)
         if names:

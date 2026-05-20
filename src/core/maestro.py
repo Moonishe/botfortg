@@ -9,6 +9,8 @@ import re
 from typing import Any
 
 from src.core.vector_store import vector_store
+from src.db.repo import get_or_create_user, list_contacts, search_memories
+from src.db.session import get_session
 from src.llm.base import ChatMessage
 
 
@@ -293,8 +295,6 @@ async def _execute_agent(
     owner_id: int,
 ) -> dict:
     """Исполняет одного агента по спецификации из плана maestro."""
-    from src.db.session import get_session
-
     agent_type = agent_spec.get("agent", "")
     query = agent_spec.get("query", "")
     cache = agent_spec.get("cache", True)
@@ -303,7 +303,6 @@ async def _execute_agent(
     try:
         if agent_type == "search":
             from src.agents.search_agent import resolve as search_resolve
-            from src.db.repo import get_or_create_user, list_contacts
 
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
@@ -317,7 +316,6 @@ async def _execute_agent(
 
         elif agent_type == "memory":
             from src.agents.memory_agent import recall as memory_recall
-            from src.db.repo import get_or_create_user, search_memories
 
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
