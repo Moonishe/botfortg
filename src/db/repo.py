@@ -100,11 +100,16 @@ async def delete_telegram_session(session: AsyncSession, user: User) -> None:
 async def upsert_api_key(
     session: AsyncSession, user: User, provider: str, key: str
 ) -> None:
+    # Нормализация: поддерживается несколько ключей через запятую
+    parts = [k.strip() for k in key.split(",") if k.strip()]
+    if not parts:
+        return
+    normalized = ",".join(parts)
     result = await session.execute(
         select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == provider)
     )
     existing = result.scalar_one_or_none()
-    enc = encrypt(key)
+    enc = encrypt(normalized)
     if existing is None:
         session.add(ApiKey(user_id=user.id, provider=provider, key_enc=enc))
     else:
@@ -112,11 +117,20 @@ async def upsert_api_key(
 
 
 async def get_api_key(session: AsyncSession, user: User, provider: str) -> str | None:
+    """Возвращает сохранённый ключ(и). Если ключей несколько — через запятую."""
     result = await session.execute(
         select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == provider)
     )
     row = result.scalar_one_or_none()
     return decrypt(row.key_enc) if row is not None else None
+
+
+async def get_api_keys(session: AsyncSession, user: User, provider: str) -> list[str]:
+    """Возвращает список ключей для провайдера."""
+    raw = await get_api_key(session, user, provider)
+    if not raw:
+        return []
+    return [k.strip() for k in raw.split(",") if k.strip()]
 
 
 async def upsert_contact(

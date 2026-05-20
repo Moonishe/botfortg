@@ -7,7 +7,10 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from src.core.notifier import notifier
+from src.db.models import Message
 from src.db.repo import (
     get_contact,
     get_or_create_user,
@@ -20,12 +23,25 @@ logger = logging.getLogger(__name__)
 
 
 def _naive_utc(dt: datetime | None) -> datetime | None:
-    """Приводит datetime к naive UTC (снимает tzinfo если был)."""
+    """Приводит datetime к naive UTC для безопасных сравнений с SQLite."""
     if dt is None:
         return None
     if dt.tzinfo is not None:
-        return dt.replace(tzinfo=None)
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def _last_before(dates: list[datetime], target: datetime) -> datetime | None:
+    """Возвращает последний datetime из отсортированного списка перед target."""
+    latest = None
+    for dt in dates:
+        nd = _naive_utc(dt)
+        if nd is None:
+            continue
+        if nd >= target:
+            break
+        latest = nd
+    return latest
 
 
 async def detect_silence_triggers(owner_id: int) -> list[dict]:
@@ -40,7 +56,8 @@ async def detect_silence_triggers(owner_id: int) -> list[dict]:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         memories = await list_memories(session, owner)
-        active_convos = await list_active_conversations(session, owner, limit=30)
+        active_convos = await list_active_conversations(session, owner, limit=100)
+        conv_by_peer = {c.peer_id: c for c in active_convos}
 
         # Группируем негативные факты по контактам
         contact_neg: dict[int, list[datetime]] = defaultdict(list)
@@ -55,8 +72,8 @@ async def detect_silence_triggers(owner_id: int) -> list[dict]:
                 continue
             neg_dates.sort()
 
-            # Находим ConversationState для этого контакта
-            conv = next((c for c in active_convos if c.peer_id == contact_id), None)
+            # Находим ConversationState для текущего молчания.
+            conv = conv_by_peer.get(contact_id)
             if not conv or not conv.last_outgoing_at:
                 continue
 
@@ -64,13 +81,31 @@ async def detect_silence_triggers(owner_id: int) -> list[dict]:
             if last_out is None:
                 continue
 
-            # Вычисляем среднее молчание перед негативом (последние 5 случаев)
+            outgoing_result = await session.execute(
+                select(Message.date)
+                .where(
+                    Message.user_id == owner.id,
+                    Message.peer_id == contact_id,
+                    Message.is_outgoing.is_(True),
+                    Message.date < neg_dates[-1],
+                )
+                .order_by(Message.date.asc())
+            )
+            outgoing_dates = [
+                d for d in outgoing_result.scalars().all() if _naive_utc(d) is not None
+            ]
+            if not outgoing_dates:
+                continue
+
+            # Вычисляем молчание перед каждым старым негативом: последнее исходящее до негатива → негатив.
             silence_before_neg: list[float] = []
             for nd in neg_dates[-5:]:
-                if last_out < nd:
-                    silence = (nd - last_out).total_seconds() / 3600
-                    if silence > 0:
-                        silence_before_neg.append(silence)
+                prior_out = _last_before(outgoing_dates, nd)
+                if prior_out is None:
+                    continue
+                silence = (nd - prior_out).total_seconds() / 3600
+                if silence > 0:
+                    silence_before_neg.append(silence)
 
             if not silence_before_neg:
                 continue

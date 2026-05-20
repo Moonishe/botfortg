@@ -26,7 +26,10 @@ from src.db.repo import (
     add_commitment,
     update_commitment_status,
     list_memories,
+    upsert_conversation_state,
+    upsert_message,
 )
+from src.core.conflict_predictor import detect_silence_triggers
 from src.core.temporal_layers import get_prompt_facts
 from src.core.memory_checker import _run_decay_and_validation
 
@@ -249,3 +252,64 @@ async def test_decay_processes_all_expired_without_offset_skip():
         owner = await get_or_create_user(session, OWNER_TG_ID)
         mems = await list_memories(session, owner)
         assert all(not m.is_active for m in mems)
+
+
+@pytest.mark.asyncio
+async def test_conflict_predictor_uses_historical_outgoing_before_negative():
+    """Conflict predictor считает молчание перед каждым негативом, а не от текущего last_outgoing_at."""
+    contact_id = 4242
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    async with get_session() as session:
+        owner = await get_or_create_user(session, OWNER_TG_ID)
+        await upsert_message(
+            session,
+            user_id=owner.id,
+            peer_id=contact_id,
+            message_id=1,
+            sender_id=OWNER_TG_ID,
+            sender_name="me",
+            is_outgoing=True,
+            date=now - timedelta(hours=40),
+            kind="text",
+            text="пишу первый раз",
+        )
+        await upsert_message(
+            session,
+            user_id=owner.id,
+            peer_id=contact_id,
+            message_id=2,
+            sender_id=OWNER_TG_ID,
+            sender_name="me",
+            is_outgoing=True,
+            date=now - timedelta(hours=20),
+            kind="text",
+            text="пишу второй раз",
+        )
+        first_neg = await add_memory(
+            session,
+            owner,
+            fact="контакт раздражён из-за молчания",
+            contact_id=contact_id,
+            sentiment="negative",
+        )
+        second_neg = await add_memory(
+            session,
+            owner,
+            fact="контакт снова недоволен долгим ответом",
+            contact_id=contact_id,
+            sentiment="negative",
+        )
+        first_neg.created_at = now - timedelta(hours=30)
+        second_neg.created_at = now - timedelta(hours=10)
+        await upsert_conversation_state(
+            session,
+            owner,
+            contact_id,
+            last_outgoing_at=now - timedelta(hours=8),
+        )
+
+    triggers = await detect_silence_triggers(OWNER_TG_ID)
+    trigger = next((t for t in triggers if t["contact_id"] == contact_id), None)
+    assert trigger is not None
+    assert trigger["silence_hours"] == 10
+    assert trigger["current_hours"] == 8

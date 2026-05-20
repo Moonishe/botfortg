@@ -104,6 +104,28 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     kb.row(InlineKeyboardButton(text="📬 Треды", callback_data="thread:refresh"))
     kb.row(InlineKeyboardButton(text="🧠 Полный анализ", callback_data="set:analyze"))
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="set:close"))
+    # Быстрые тогглы (авто-память, избранное, дайджест, авто-ответ)
+    text += "\n⚡ <b>Быстрые тогглы:</b>"
+    kb.row(
+        InlineKeyboardButton(
+            text=f"🧠 Авто-память {_check(getattr(s, 'auto_extract_memories', False))}",
+            callback_data="set:tog:auto_extract_memories",
+        ),
+        InlineKeyboardButton(
+            text=f"⭐ Избранное {_check(getattr(s, 'include_saved_messages', False))}",
+            callback_data="set:tog:include_saved_messages",
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text=f"☀ Дайджест {_check(s.digest_enabled)}",
+            callback_data="set:tog:digest_enabled",
+        ),
+        InlineKeyboardButton(
+            text=f"🔄 Авто-ответ {_check(s.auto_reply_enabled)}",
+            callback_data="set:tog:auto_reply_enabled",
+        ),
+    )
     return text, kb.as_markup()
 
 
@@ -819,7 +841,9 @@ async def _render_section(
 async def cb_input_openai(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_openai_key)
     await callback.message.answer(
-        "Пришли OpenAI API key (начинается с <code>sk-</code>). Проверю и сохраню. /cancel — отмена."
+        "Пришли OpenAI API key (начинается с <code>sk-</code>). Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
     )
     await callback.answer()
 
@@ -828,7 +852,9 @@ async def cb_input_openai(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_gemini(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_gemini_key)
     await callback.message.answer(
-        "Пришли Gemini API key с <code>aistudio.google.com</code>. Проверю и сохраню. /cancel — отмена."
+        "Пришли Gemini API key с <code>aistudio.google.com</code>. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
     )
     await callback.answer()
 
@@ -837,7 +863,9 @@ async def cb_input_gemini(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_mistral(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_mistral_key)
     await callback.message.answer(
-        "Пришли Mistral API key с <code>console.mistral.ai</code>. Проверю и сохраню. /cancel — отмена."
+        "Пришли Mistral API key с <code>console.mistral.ai</code>. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
     )
     await callback.answer()
 
@@ -948,62 +976,80 @@ async def cb_input_tz(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(SettingsStates.waiting_openai_key)
 async def step_openai_key(message: Message, state: FSMContext) -> None:
-    key = (message.text or "").strip()
-    if not key:
+    raw = (message.text or "").strip()
+    if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
         return
     try:
         await message.delete()
     except Exception:
         pass
-    if not await OpenAIProvider(key).validate_key():
+    # Валидируем первый ключ как индикатор; остальные считаем рабочими
+    if not await OpenAIProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "openai", key)
+        await upsert_api_key(session, owner, "openai", ",".join(parts))
     await state.clear()
-    await message.answer("✅ OpenAI key сохранён.")
+    count = len(parts)
+    await message.answer(f"✅ Сохранено OpenAI ключей: {count}.")
 
 
 @router.message(SettingsStates.waiting_gemini_key)
 async def step_gemini_key(message: Message, state: FSMContext) -> None:
-    key = (message.text or "").strip()
-    if not key:
+    raw = (message.text or "").strip()
+    if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
         return
     try:
         await message.delete()
     except Exception:
         pass
-    if not await GeminiProvider(key).validate_key():
+    # Валидируем первый ключ как индикатор; остальные считаем рабочими
+    if not await GeminiProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "gemini", key)
+        await upsert_api_key(session, owner, "gemini", ",".join(parts))
     await state.clear()
-    await message.answer("✅ Gemini key сохранён.")
+    count = len(parts)
+    await message.answer(f"✅ Сохранено Gemini ключей: {count}.")
 
 
 @router.message(SettingsStates.waiting_mistral_key)
 async def step_mistral_key(message: Message, state: FSMContext) -> None:
-    key = (message.text or "").strip()
-    if not key:
+    raw = (message.text or "").strip()
+    if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
         return
     try:
         await message.delete()
     except Exception:
         pass
-    if not await MistralProvider(key).validate_key():
+    # Валидируем первый ключ как индикатор; остальные считаем рабочими
+    if not await MistralProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "mistral", key)
+        await upsert_api_key(session, owner, "mistral", ",".join(parts))
     await state.clear()
-    await message.answer("✅ Mistral key сохранён.")
+    count = len(parts)
+    await message.answer(f"✅ Сохранено Mistral ключей: {count}.")
 
 
 @router.message(SettingsStates.waiting_digest_time)

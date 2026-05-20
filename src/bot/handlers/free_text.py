@@ -310,8 +310,9 @@ async def _execute_intent(
 
                     # Негативные факты о контакте — предупреждение
                     try:
-                        from datetime import datetime, timezone
+                        from src.core.temporal_layers import utc_naive, utcnow_naive
 
+                        now = utcnow_naive()
                         neg_mems = await list_memories(
                             session, owner, contact_id=target.peer_id
                         )
@@ -320,7 +321,7 @@ async def _execute_intent(
                             for m in neg_mems
                             if m.sentiment == "negative"
                             and m.created_at
-                            and (datetime.now(timezone.utc) - m.created_at).days < 7
+                            and (now - utc_naive(m.created_at)).days < 7
                         ]
                         if recent_neg:
                             neg_warning = (
@@ -328,7 +329,7 @@ async def _execute_intent(
                                 + "; ".join(m.fact[:50] for m in recent_neg[:2])
                             )
                     except Exception:
-                        pass
+                        logger.warning("negative memory warning failed", exc_info=True)
 
             await message.answer(
                 f"🤔 <b>Готов отправить</b>\n\n"

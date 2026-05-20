@@ -98,6 +98,10 @@ async def main() -> None:
             conflict_predictor_loop(settings.owner_telegram_id),
             name="conflict-predictor",
         ),
+        asyncio.create_task(
+            habit_tracker_loop(settings.owner_telegram_id),
+            name="habit-tracker",
+        ),
     ]
 
     try:

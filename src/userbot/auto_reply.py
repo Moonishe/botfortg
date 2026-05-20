@@ -136,6 +136,14 @@ async def _build_reply_text(
     incoming_text: str,
 ) -> str | None:
     memory_context = ""
+    profile_prompt = ""
+    provider = None
+    heavy = False
+    global_profile = None
+    contact_style_profile = None
+    contact_archetype = None
+    owner_absence_status = None
+    owner_absence_message = None
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
         provider = await build_provider(session, owner)
@@ -170,6 +178,40 @@ async def _build_reply_text(
 
         heavy = owner.settings.use_heavy_model
         global_profile = owner.global_style_profile
+        owner_absence_status = owner.absence_status
+        owner_absence_message = owner.absence_message
+        contact_style_profile = contact.style_profile if contact else None
+        contact_archetype = contact.archetype if contact else None
+
+        # ContactProfile — подсказки о стиле и ограничениях. Собираем их внутри DB-сессии.
+        try:
+            profile = await get_contact_profile(session, owner, peer_id)
+            if profile:
+                profile_hints = []
+                if profile.communication_style:
+                    profile_hints.append(f"Стиль общения: {profile.communication_style}")
+                if profile.communication_dos:
+                    dos_list = (
+                        json.loads(profile.communication_dos)
+                        if isinstance(profile.communication_dos, str)
+                        and profile.communication_dos.startswith("[")
+                        else [profile.communication_dos]
+                    )
+                    profile_hints.append(f"МОЖНО: {', '.join(dos_list[:4])}")
+                if profile.communication_donts:
+                    donts_list = (
+                        json.loads(profile.communication_donts)
+                        if isinstance(profile.communication_donts, str)
+                        and profile.communication_donts.startswith("[")
+                        else [profile.communication_donts]
+                    )
+                    profile_hints.append(f"НЕЛЬЗЯ: {', '.join(donts_list[:4])}")
+                if profile_hints:
+                    profile_prompt = "\n\nПРОФИЛЬ КОНТАКТА:\n" + "\n".join(
+                        profile_hints
+                    )
+        except Exception:
+            logger.debug("get_contact_profile failed, skipping profile hints")
 
     if provider is None:
         logger.warning("auto-reply: no LLM provider configured")
@@ -194,19 +236,19 @@ async def _build_reply_text(
             logger.exception("auto-reply: load_chat failed")
 
     style_hint = style_profile_as_prompt_hint(
-        contact.style_profile if contact else None,
+        contact_style_profile,
         global_profile,
     )
     system = AUTO_REPLY_SYSTEM_BASE
     if memory_context:
         system = system + "\n\n" + memory_context
-    if owner.absence_status == "away":
-        system += f"\n\nВАЖНО: Владелец сказал перед уходом: «{owner.absence_message}». Учти это в ответе. Он отсутствует."
-    elif owner.absence_status == "soon_back":
-        system += f"\n\nВладелец скоро вернётся: «{owner.absence_message}». Ответь обнадёживающе, он скоро будет."
-    elif owner.absence_status == "sleeping":
+    if owner_absence_status == "away":
+        system += f"\n\nВАЖНО: Владелец сказал перед уходом: «{owner_absence_message}». Учти это в ответе. Он отсутствует."
+    elif owner_absence_status == "soon_back":
+        system += f"\n\nВладелец скоро вернётся: «{owner_absence_message}». Ответь обнадёживающе, он скоро будет."
+    elif owner_absence_status == "sleeping":
         system += (
-            f"\n\n🌙💤 Владелец СПИТ ({owner.absence_message}). "
+            f"\n\n🌙💤 Владелец СПИТ ({owner_absence_message}). "
             "Никаких «занят» или «не у телефона» — честно скажи что он спит. "
             "Используй эмодзи: 😴🛏️🌙💤🌌. Тон: заботливый, сонный. "
             "Пример: «Владелец сейчас спит сладким сном 😴💤 "
@@ -216,40 +258,15 @@ async def _build_reply_text(
         system = system + "\n" + style_hint
 
     # Архетип контакта (подсказка для тона)
-    if contact and contact.archetype:
+    if contact_archetype:
         from src.core.contact_archetypes import archetype_reply_hint
 
-        hint = archetype_reply_hint(contact.archetype)
+        hint = archetype_reply_hint(contact_archetype)
         if hint:
             system += hint
 
-    # ContactProfile — подсказки о стиле и ограничениях
-    try:
-        profile = await get_contact_profile(session, owner, peer_id)
-        if profile:
-            profile_hints = []
-            if profile.communication_style:
-                profile_hints.append(f"Стиль общения: {profile.communication_style}")
-            if profile.communication_dos:
-                dos_list = (
-                    json.loads(profile.communication_dos)
-                    if isinstance(profile.communication_dos, str)
-                    and profile.communication_dos.startswith("[")
-                    else [profile.communication_dos]
-                )
-                profile_hints.append(f"МОЖНО: {', '.join(dos_list[:4])}")
-            if profile.communication_donts:
-                donts_list = (
-                    json.loads(profile.communication_donts)
-                    if isinstance(profile.communication_donts, str)
-                    and profile.communication_donts.startswith("[")
-                    else [profile.communication_donts]
-                )
-                profile_hints.append(f"НЕЛЬЗЯ: {', '.join(donts_list[:4])}")
-            if profile_hints:
-                system += "\n\nПРОФИЛЬ КОНТАКТА:\n" + "\n".join(profile_hints)
-    except Exception:
-        logger.debug("get_contact_profile failed, skipping profile hints")
+    if profile_prompt:
+        system += profile_prompt
 
     user_prompt = (
         f"Собеседник: {sender_name}.\n"
