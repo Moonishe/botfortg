@@ -14,6 +14,8 @@ from src.bot.handlers import (
     draft_actions,
     explain_cmd,
     free_text,
+    free_text_memory,
+    free_text_settings,
     login,
     memory_cmd,
     news_cmd,
@@ -76,6 +78,8 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(today_cmd.router)
     dp.include_router(skills_cmd.router)
     dp.include_router(trajectory_cmd.router)
+    dp.include_router(free_text_memory.router)
+    dp.include_router(free_text_settings.router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text.router)
 

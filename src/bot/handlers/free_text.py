@@ -10,9 +10,7 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
-    CallbackQuery,
     InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -32,31 +30,17 @@ from src.core import conversation_context as ctx_store
 from src.core.text_sanitizer import sanitize_html
 from src.core.timeutil import (
     fmt_local,
-    get_user_tz,
-    HM_RE,
-    is_valid_tz,
     now_in_tz,
-    tz_short,
 )
 from src.core.transcription import transcription_service
 from src.db.repo import (
     add_commitment,
-    add_memory,
-    add_memory_candidate,
-    add_news_topic,
-    create_pending_action,
-    delete_memory,
-    delete_news_topic,
     get_api_key,
     get_contact,
     get_contact_profile,
-    get_memory_stats,
     get_or_create_user,
     get_self_profile,
-    list_memories,
-    list_news_topics,
     list_open_commitments,
-    search_memories,
     update_commitment_status,
     upsert_contact,
 )
@@ -67,58 +51,31 @@ from src.core.skills import build_skill_index, record_skill_usages
 from src.userbot import get_active_telethon_client, get_userbot_manager
 from src.userbot.manager import UserbotManager
 
-
-# ---------------------------------------------------------------------------
-# Settings cache — однотенантный, TTL 30 сек, инвалидируется при /settings
-# ---------------------------------------------------------------------------
-_settings_cache: dict[str, object] | None = None  # type: ignore[assignment]
-_settings_cache_ts: float = 0.0
-_SETTINGS_CACHE_TTL: float = 30.0
-_settings_lock = asyncio.Lock()
-
-
-async def _get_owner_context(telegram_id: int) -> dict[str, object]:
-    """Возвращает {owner_telegram_id, tz_name, use_heavy, global_style_profile} с TTL-кэшем."""
-    global _settings_cache, _settings_cache_ts
-    now = time.monotonic()
-    if _settings_cache is not None and (now - _settings_cache_ts) < _SETTINGS_CACHE_TTL:
-        return _settings_cache  # type: ignore[return-value]
-    async with _settings_lock:
-        # Double-check after acquiring lock (TOCTOU guard)
-        now = time.monotonic()
-        if (
-            _settings_cache is not None
-            and (now - _settings_cache_ts) < _SETTINGS_CACHE_TTL
-        ):
-            return _settings_cache  # type: ignore[return-value]
-        async with get_session() as session:
-            owner = await get_or_create_user(session, telegram_id)
-            _settings_cache = {
-                "owner_telegram_id": owner.telegram_id,
-                "tz_name": get_user_tz(owner),
-                "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
-                "global_style_profile": owner.global_style_profile,
-            }
-            _settings_cache_ts = now
-        return _settings_cache  # type: ignore[return-value]
-
-
-def invalidate_settings_cache() -> None:
-    """Сбросить кэш настроек (вызывается при изменении /settings)."""
-    global _settings_cache
-    _settings_cache = None
-
-
-def _fire_record_trajectory(*args: object, **kwargs: object) -> None:
-    """Fire-and-forget запись траектории (не блокирует ответ пользователю)."""
-
-    async def _safe() -> None:
-        try:
-            await record_trajectory(*args, **kwargs)  # type: ignore[arg-type]
-        except Exception:
-            logger.exception("fire-and-forget trajectory failed")
-
-    asyncio.create_task(_safe())
+from .free_text_common import (
+    _candidates_keyboard_chat,
+    _candidates_keyboard_send,
+    _confirm_keyboard,
+    _fire_record_trajectory,
+    _get_owner_context,
+    _parse_iso_to_utc_naive,
+    _post_turn_optimize,
+    _summarize_intent_for_memory,
+    memory_quick_keyboard,
+)
+from .free_text_memory import (
+    _exec_check_memories,
+    _exec_extract_memories,
+    _exec_forget_memory,
+    _exec_list_memories,
+    _exec_store_memory,
+)
+from .free_text_settings import (
+    _exec_add_news_topic,
+    _exec_change_auto_mode,
+    _exec_remove_news_topic,
+    _exec_set_quiet_hours,
+    _exec_set_setting,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -127,113 +84,6 @@ router.message.filter(OwnerOnly())
 
 
 CHAT_LOAD_LIMIT = 50
-
-
-# Поля UserSettings, которые агент может менять через set_setting (имя → тип значения)
-SETTING_FIELDS: dict[str, str] = {
-    "auto_reply_enabled": "bool",
-    "auto_reply_mode": "choice:static,smart",
-    "auto_reply_text": "str",
-    "auto_reply_cooldown_min": "int",
-    "digest_enabled": "bool",
-    "digest_time": "hm",
-    "news_enabled": "bool",
-    "news_digest_time": "hm",
-    "news_window_hours": "int",
-    "reminders_enabled": "bool",
-    "reminder_lead_hours": "int",
-    "reminder_overdue_enabled": "bool",
-    "ignore_archived": "bool",
-    "use_heavy_model": "bool",
-    "llm_provider": "choice:openai,gemini,mistral",
-    "transcription_mode": "choice:local,api,hybrid",
-    "transcription_api_provider": "choice:openai,gemini,mistral",
-    "auto_sync_enabled": "bool",
-    "auto_sync_interval_sec": "int",
-    "auto_extract_memories": "bool",
-    "include_saved_messages": "bool",
-    "smart_digest_enabled": "bool",
-    "smart_digest_interval_min": "int",
-    "urgent_notify_enabled": "bool",
-    "monitor_only_selected_folders": "bool",
-    "monitored_folders": "str",
-    "timezone": "tz",
-}
-
-
-def _coerce_setting_value(spec: str, raw):
-    if spec == "bool":
-        if isinstance(raw, bool):
-            return raw, None
-        if isinstance(raw, str) and raw.lower() in {"true", "yes", "on", "вкл", "1"}:
-            return True, None
-        if isinstance(raw, str) and raw.lower() in {"false", "no", "off", "выкл", "0"}:
-            return False, None
-        return None, "ожидаю true/false"
-    if spec == "int":
-        try:
-            return int(raw), None
-        except (TypeError, ValueError):
-            return None, "ожидаю целое число"
-    if spec == "str":
-        if not isinstance(raw, str) or not raw.strip():
-            return None, "ожидаю строку"
-        return raw.strip(), None
-    if spec == "hm":
-        if isinstance(raw, str) and HM_RE.match(raw.strip()):
-            return raw.strip(), None
-        return None, "ожидаю время в формате HH:MM"
-    if spec == "tz":
-        if isinstance(raw, str) and is_valid_tz(raw.strip()):
-            return raw.strip(), None
-        return None, "не нашёл такой IANA timezone"
-    if spec.startswith("choice:"):
-        opts = set(spec[len("choice:") :].split(","))
-        if isinstance(raw, str) and raw.strip() in opts:
-            return raw.strip(), None
-        return None, f"допустимые значения: {', '.join(sorted(opts))}"
-    return None, "неизвестный тип"
-
-
-def _confirm_keyboard(action_id: int):
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(
-            text="✅ Отправить", callback_data=f"send:confirm:{action_id}"
-        ),
-        InlineKeyboardButton(text="✏ Изменить", callback_data=f"send:edit:{action_id}"),
-    )
-    kb.row(
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"send:cancel:{action_id}")
-    )
-    return kb.as_markup()
-
-
-def _candidates_keyboard_send(candidates):
-    kb = InlineKeyboardBuilder()
-    for c in candidates:
-        kb.row(
-            InlineKeyboardButton(
-                text=f"{c.label()} · {c.score}",
-                callback_data=f"send:pick:{c.peer_id}",
-            )
-        )
-    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="send:cancel:0"))
-    return kb.as_markup()
-
-
-def _candidates_keyboard_chat(action: str, candidates):
-    # action ∈ {summary, tasks, draft, catchup} — re-use chat:* callback'ов из chat_cmd
-    kb = InlineKeyboardBuilder()
-    for c in candidates:
-        kb.row(
-            InlineKeyboardButton(
-                text=f"{c.label()} · {c.score}",
-                callback_data=f"chat:{action}:{c.peer_id}",
-            )
-        )
-    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="chat:cancel:0"))
-    return kb.as_markup()
 
 
 async def _execute_intent(
@@ -308,6 +158,8 @@ async def _execute_intent(
             )
             async with get_session() as session:
                 owner = await get_or_create_user(session, message.from_user.id)
+                from src.db.repo import create_pending_action
+
                 action = await create_pending_action(
                     session, user_id=owner.id, kind="send_message", payload=payload
                 )
@@ -489,6 +341,8 @@ async def _execute_intent(
         )
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
+            from src.db.repo import create_pending_action
+
             action = await create_pending_action(
                 session, user_id=owner.id, kind="send_message", payload=payload
             )
@@ -581,87 +435,6 @@ async def _find_chats_and_offer(message, client, query: str, action: str) -> Non
     await message.answer(
         f"Нашёл подходящие чаты. Выбери — соберу {pretty_action}:",
         reply_markup=kb.as_markup(),
-    )
-
-
-async def _exec_set_setting(intent, message) -> None:
-    key = (intent.get("key") or "").strip()
-    value = intent.get("value")
-    spec = SETTING_FIELDS.get(key)
-    if spec is None:
-        await message.answer(sanitize_html(f"Не умею менять «{key}»."))
-        return
-    validated, err = _coerce_setting_value(spec, value)
-    if err:
-        await message.answer(
-            sanitize_html(f"Не понял значение для <b>{key}</b>: {err}.")
-        )
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        setattr(owner.settings, key, validated)
-        await session.flush()
-        invalidate_settings_cache()
-        new_tz = owner.settings.timezone
-    if key == "timezone":
-        await message.answer(f"✅ Часовой пояс: <b>{tz_short(new_tz)}</b>")
-    elif isinstance(validated, bool):
-        await message.answer(f"✅ <b>{key}</b>: {'ВКЛ' if validated else 'ВЫКЛ'}")
-    else:
-        shown = str(validated)
-        if len(shown) > 100:
-            shown = shown[:97] + "…"
-        await message.answer(sanitize_html(f"✅ <b>{key}</b> = <code>{shown}</code>"))
-
-
-async def _exec_add_news_topic(intent, message) -> None:
-    topic = (intent.get("topic") or "").strip()
-    if not topic:
-        await message.answer("Не понял какую тему добавить.")
-        return
-    try:
-        hours = int(intent.get("hours") or 24)
-    except (TypeError, ValueError):
-        hours = 24
-    hours = max(1, min(168, hours))
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await add_news_topic(session, owner, topic, hours=hours)
-    await message.answer(
-        sanitize_html(f"✅ Добавил тему: <b>{topic}</b> (окно {hours}ч)")
-    )
-
-
-async def _exec_remove_news_topic(intent, message) -> None:
-    needle = (intent.get("topic") or "").strip().lower()
-    if not needle:
-        await message.answer("Какую тему удалить?")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        topics = await list_news_topics(session, owner)
-        matched = [t for t in topics if needle in t.topic.lower()]
-        if not matched:
-            await message.answer(sanitize_html(f"Тем по «{needle}» не нашёл."))
-            return
-        for t in matched:
-            await delete_news_topic(session, owner, t.id)
-    names = ", ".join(f"«{t.topic}»" for t in matched)
-    await message.answer(f"🗑 Удалил: {names}")
-
-
-def memory_quick_keyboard(contact_name: str = "") -> InlineKeyboardMarkup:
-    """Inline-кнопки быстрых действий с памятью."""
-    explain_cb = f"memq:explain:{contact_name}" if contact_name else "memq:explain:"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🧠 Что помню", callback_data="memq:list"),
-                InlineKeyboardButton(text="➕ Запомни", callback_data="memq:add"),
-                InlineKeyboardButton(text="❌ Забудь", callback_data="memq:forget"),
-                InlineKeyboardButton(text="🤔 Почему?", callback_data=explain_cb),
-            ]
-        ]
     )
 
 
@@ -990,60 +763,6 @@ async def _process_text(
         logger.exception("failed to set last purpose")
 
 
-def _summarize_intent_for_memory(intent: dict) -> str:
-    # компактная запись «что я только что сделал» для памяти диалога
-    kind = intent.get("intent")
-    if kind == "multi":
-        return "несколько действий: " + ", ".join(
-            (a or {}).get("intent", "?") for a in intent.get("actions", [])[:5]
-        )
-    if kind == "send_message":
-        return f"подготовил отправку «{(intent.get('text') or '')[:60]}» для {intent.get('recipient')}"
-    if kind in {"summarize_chat", "tasks_for_chat", "draft_reply", "catchup"}:
-        return f"{kind} с контактом {intent.get('contact')}"
-    if kind == "find_in_chats":
-        return f"искал в чатах: {intent.get('query')}"
-    if kind == "news_digest":
-        return f"новости: {intent.get('topic')}"
-    if kind == "set_setting":
-        return f"настройка {intent.get('key')} → {intent.get('value')}"
-    if kind == "add_news_topic":
-        return f"добавил тему: {intent.get('topic')}"
-    if kind == "remove_news_topic":
-        return f"убрал тему: {intent.get('topic')}"
-    if kind == "add_reminder":
-        return f"напоминание: {intent.get('text')}"
-    if kind == "remove_reminder":
-        return f"убрал напоминание: {intent.get('query')}"
-    if kind == "add_reminders_from_chat":
-        return f"вытащил обещания из чата с {intent.get('contact')}"
-    if kind == "list_todos":
-        return "показал список обещаний"
-    if kind == "chat":
-        return (intent.get("reply") or "")[:160]
-    if kind == "store_memory":
-        return "запомнил факт"
-    if kind == "forget_memory":
-        return "удалил из памяти"
-    if kind == "list_memories":
-        return "посмотрел память"
-    if kind == "extract_memories_from_chat":
-        return "извлёк факты из переписки"
-    if kind == "check_memories":
-        return "проверил актуальность памяти"
-    if kind == "change_auto_mode":
-        return "изменил авто-режим"
-    if kind == "set_quiet_hours":
-        return "настроил тихие часы"
-    if kind == "show_inbox":
-        return "посмотрел входящие"
-    if kind == "full_analysis":
-        return "запустил полный анализ"
-    if kind == "clarify":
-        return f"переспросил: {intent.get('question', '')[:100]}"
-    return kind or ""
-
-
 @router.message(F.text & ~F.text.startswith("/"))
 async def free_text(
     message: Message,
@@ -1202,26 +921,6 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
 
 
-def _parse_iso_to_utc_naive(value, tz_name: str | None = None):
-    if not value:
-        return None
-    try:
-        from datetime import datetime, timezone
-        from src.core.timeutil import parse_tz
-
-        s = str(value).replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is not None:
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        if tz_name:
-            tz = parse_tz(tz_name)
-            local_dt = dt.replace(tzinfo=tz)
-            return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
-    except Exception:
-        return None
-
-
 async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
     text = (intent.get("text") or "").strip()
     if not text:
@@ -1356,206 +1055,6 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
     )
 
 
-async def _exec_store_memory(intent, message) -> None:
-    fact = (intent.get("fact") or "").strip()
-    if not fact:
-        await message.answer("🤷 Не понял, что запомнить. Уточни.")
-        return
-    contact_name = (intent.get("contact") or "").strip()
-    sentiment = (intent.get("sentiment") or "").strip()
-    if sentiment not in ("positive", "negative", "neutral"):
-        sentiment = None
-
-    # Confidence из интента; если нет — считаем низкой (→ кандидат)
-    confidence = float(intent.get("confidence") or 0.0)
-
-    contact_id = None
-    if contact_name:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-        client = get_active_telethon_client(message.from_user.id)
-        if client is not None:
-            candidates = await resolve(client, owner, contact_name)
-            if candidates:
-                contact_id = candidates[0].peer_id
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-
-        if confidence >= 0.85:
-            # Высокая уверенность — сразу в память
-            mem = await add_memory(
-                session,
-                owner,
-                fact=fact,
-                contact_id=contact_id,
-                sentiment=sentiment,
-                source="user",
-            )
-            await message.answer(sanitize_html(f"🧠 Запомнил: <i>{fact}</i>"))
-        else:
-            # Низкая уверенность — в черновик (MemoryCandidate)
-            await add_memory_candidate(
-                session,
-                owner,
-                fact=fact,
-                contact_id=contact_id,
-                sentiment=sentiment,
-                source="user",
-            )
-            await message.answer(
-                sanitize_html(
-                    f"📬 Сохранил как черновик: <i>{fact}</i>\n"
-                    f"Подтверди через <code>/memory --inbox</code>"
-                )
-            )
-
-
-async def _exec_forget_memory(intent, message) -> None:
-    query = (intent.get("query") or "").strip()
-    if not query:
-        await message.answer("Что удалить? Уточни.")
-        return
-    contact_name = (intent.get("contact") or "").strip()
-
-    contact_id = None
-    if contact_name:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-        client = get_active_telethon_client(message.from_user.id)
-        if client is not None:
-            candidates = await resolve(client, owner, contact_name)
-            if candidates:
-                contact_id = candidates[0].peer_id
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        found = await search_memories(session, owner, query, contact_id=contact_id)
-
-    if not found:
-        await message.answer("Ничего не нашёл по этому запросу.")
-        return
-
-    async with get_session() as session:
-        for m in found:
-            # переоткрываем owner в текущей сессии (detach-safe)
-            owner2 = await get_or_create_user(session, message.from_user.id)
-            await delete_memory(session, owner2, m.id)
-
-    names = ", ".join(
-        f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
-    )
-    await message.answer(f"🗑 Забыл: {names}")
-
-
-async def _exec_list_memories(intent, message) -> None:
-    contact_name = (intent.get("contact") or "").strip()
-
-    contact_id = None
-    label = ""
-    if contact_name:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-        client = get_active_telethon_client(message.from_user.id)
-        if client is not None:
-            candidates = await resolve(client, owner, contact_name)
-            if candidates:
-                contact_id = candidates[0].peer_id
-                label = f" — {candidates[0].label()}"
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        items = await list_memories(session, owner, contact_id=contact_id)
-        items = [m for m in items if m.is_active]
-
-    if not items:
-        await message.answer("Память пуста.")
-        return
-
-    lines = []
-    for m in items:
-        sent = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
-            m.sentiment or "", ""
-        )
-        lines.append(f"• {sent} {m.fact}")
-    body = "\n".join(lines)
-    await message.answer(f"🧠 <b>Память{label}</b>\n\n{body}")
-
-
-async def _exec_extract_memories(intent, message, userbot_manager) -> None:
-    contact_name = (intent.get("contact") or "").strip()
-    if not contact_name:
-        await message.answer("Про какой контакт извлечь память?")
-        return
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-
-    client = (
-        userbot_manager.get_client(message.from_user.id) if userbot_manager else None
-    )
-    if client is None:
-        await message.answer("Сначала /login.")
-        return
-
-    candidates = await resolve(client, owner, contact_name)
-    if not candidates:
-        await message.answer("Не нашёл такого контакта.")
-        return
-
-    peer_id = candidates[0].peer_id
-
-    from src.core.chat_service import load_chat, message_to_text
-    from src.core.memory_queue import enqueue, MemoryJob
-
-    # Загружаем сообщения и строим транскрипт
-    messages = await load_chat(client, message.from_user.id, peer_id, limit=100)
-    transcript = "\n".join(message_to_text(m) for m in messages)
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        contact = await get_contact(session, owner, peer_id)
-
-    # Ставим задачу в очередь на фоновое извлечение
-    await enqueue(
-        MemoryJob(
-            telegram_id=message.from_user.id,
-            contact_id=contact.peer_id if contact else None,
-            messages_text=transcript,
-            job_type="extract",
-        )
-    )
-    await message.answer("🧠 Извлекаю факты в фоне…")
-
-
-async def _exec_change_auto_mode(intent, message) -> None:
-    mode = (intent.get("mode") or "").strip()
-    if mode not in ("offline_only", "always", "smart"):
-        await message.answer("❌ Укажи режим: offline_only, always или smart")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        owner.settings.auto_mode = mode
-        await session.flush()
-    invalidate_settings_cache()
-    labels = {"offline_only": "только оффлайн", "always": "всегда", "smart": "умный"}
-    await message.answer(f"✅ Режим авто-ответа: <b>{labels[mode]}</b>")
-
-
-async def _exec_set_quiet_hours(intent, message) -> None:
-    start = (intent.get("start") or "").strip()
-    end = (intent.get("end") or "").strip()
-    if not HM_RE.match(start) or not HM_RE.match(end):
-        await message.answer("❌ Укажи время в формате HH:MM (например 23:00 и 07:00)")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        owner.settings.quiet_hours_start = start
-        owner.settings.quiet_hours_end = end
-        await session.flush()
-    await message.answer(f"✅ Тихие часы: <b>{start} – {end}</b>")
-
-
 async def _exec_show_inbox(intent, message, userbot_manager) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -1679,233 +1178,3 @@ async def _exec_full_analysis(intent, message) -> None:
     import asyncio
 
     asyncio.create_task(_run())
-
-
-async def _exec_check_memories(intent, message) -> None:
-    """Бот сам задаёт вопросы про устаревшие факты из памяти."""
-    questions = intent.get("questions") or []
-    if not isinstance(questions, list) or not questions:
-        return
-
-    for q in questions[:2]:  # не больше 2 вопросов за раз
-        mid = q.get("memory_id")
-        question = q.get("question", "")
-        if not question:
-            continue
-        kb = InlineKeyboardBuilder()
-        kb.row(
-            InlineKeyboardButton(text="✅ Да, всё ок", callback_data=f"mem:ok:{mid}"),
-            InlineKeyboardButton(
-                text="❌ Уже неактуально", callback_data=f"mem:del:{mid}"
-            ),
-        )
-        await message.answer(
-            sanitize_html(f"🤔 {question}"), reply_markup=kb.as_markup()
-        )
-
-
-@router.callback_query(F.data.startswith("mem:ok:"))
-async def cb_mem_ok(callback: CallbackQuery) -> None:
-    from src.db.repo import get_or_create_user, list_memories
-
-    mid = int(callback.data.split(":")[2])
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        memories = await list_memories(session, owner)
-        for m in memories:
-            if m.id == mid:
-                m.sentiment = "neutral"
-    if callback.message:
-        await callback.message.edit_text(
-            f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>"
-        )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("mem:del:"))
-async def cb_mem_del(callback: CallbackQuery) -> None:
-    from src.db.repo import delete_memory, get_or_create_user
-
-    mid = int(callback.data.split(":")[2])
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        await delete_memory(session, owner, mid)
-    if callback.message:
-        await callback.message.edit_text(
-            f"🗑 {callback.message.text}\n\n<i>Удалил из памяти.</i>"
-        )
-    await callback.answer()
-
-
-# ── Memory Quick Actions (inline-кнопки) ──────────────────────────────
-
-
-@router.callback_query(F.data == "memq:list")
-async def cb_memq_list(callback: CallbackQuery) -> None:
-    """Показать последние 10 фактов памяти."""
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        memories = await list_memories(session, owner)
-        active = [m for m in memories if m.is_active]
-        if not active:
-            await callback.answer("Память пуста 📭", show_alert=True)
-            return
-        lines = ["<b>🧠 Последние факты:</b>", ""]
-        for m in active[:10]:
-            emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
-                m.sentiment, "⚪"
-            )
-            lines.append(f"{emoji} {m.fact[:100]}")
-        lines.append(f"\n<i>Всего: {len(memories)} фактов. /memory — подробнее</i>")
-        await callback.message.answer("\n".join(lines))
-        await callback.answer()
-
-
-@router.callback_query(F.data == "memq:add")
-async def cb_memq_add(callback: CallbackQuery) -> None:
-    """Предложить добавить факт в память."""
-    await callback.message.answer(
-        "📝 <b>Что запомнить?</b>\n"
-        "Напиши факт в формате:\n"
-        "<code>запомни: [факт]</code>\n\n"
-        "Например: <code>запомни: у Насти ДР 15 июня</code>"
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "memq:forget")
-async def cb_memq_forget(callback: CallbackQuery) -> None:
-    """Показать последние факты для удаления."""
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        memories = await list_memories(session, owner)
-        active = [m for m in memories if m.is_active]
-        if not active:
-            await callback.answer("Нечего забывать 📭", show_alert=True)
-            return
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"❌ {m.fact[:40]}", callback_data=f"memq:del:{m.id}"
-                    )
-                ]
-                for m in active[:8]
-            ]
-        )
-        await callback.message.answer(
-            "<b>❌ Что забыть?</b>\nВыбери факт для удаления:",
-            reply_markup=kb,
-        )
-        await callback.answer()
-
-
-@router.callback_query(F.data.startswith("memq:del:"))
-async def cb_memq_delete(callback: CallbackQuery) -> None:
-    """Удалить конкретный факт памяти по ID."""
-    mem_id = int(callback.data.split(":")[2])
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        success = await delete_memory(session, owner, mem_id)
-        if success:
-            await callback.message.edit_text("✅ Забыто!")
-        else:
-            await callback.answer("Не удалось удалить", show_alert=True)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("memq:explain:"))
-async def cb_memq_explain(callback: CallbackQuery) -> None:
-    """Показать объяснение (почему бот так думает)."""
-    contact_name = callback.data.split(":", 2)[2] if ":" in callback.data else ""
-
-    contact_id = None
-    contact_label = ""
-    if contact_name:
-        # Пытаемся найти контакт
-        client = get_active_telethon_client(callback.from_user.id)
-        if client is not None:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, callback.from_user.id)
-            from src.core.contact_resolver import resolve
-
-            candidates = await resolve(client, owner, contact_name)
-            if candidates:
-                contact_id = candidates[0].peer_id
-                contact_label = candidates[0].label()
-
-    from src.bot.handlers.explain_cmd import build_explain_text
-
-    text = await build_explain_text(
-        callback.from_user.id,
-        contact_id=contact_id,
-        contact_label=contact_label,
-    )
-    if callback.message:
-        await callback.message.answer(text)
-    await callback.answer()
-
-
-# ---------------------------------------------------------------------------
-# InstructionOptimizer integration — post-turn LLM review
-# ---------------------------------------------------------------------------
-
-
-# Rate-limit для post_turn_optimize: не чаще 1 раза в 5 минут на пользователя
-_post_turn_last_call: dict[int, float] = {}
-_post_turn_lock: "asyncio.Lock | None" = None
-_post_turn_task: "asyncio.Task | None" = None
-
-
-def _get_post_turn_lock() -> asyncio.Lock:
-    global _post_turn_lock
-    if _post_turn_lock is None:
-        _post_turn_lock = asyncio.Lock()
-    return _post_turn_lock
-
-
-async def _post_turn_optimize(
-    telegram_id: int,
-    user_message: str,
-    assistant_response: str,
-) -> None:
-    """
-    Запускает LLM-ревью диалога через InstructionOptimizer.
-    FIRE-AND-FORGET: не ждёт результат, rate-limited (1 раз в 5 мин).
-    """
-    if not user_message or not assistant_response:
-        return
-
-    now = time.monotonic()
-    async with _get_post_turn_lock():
-        # Cleanup: удаляем записи старше 1 часа
-        stale = [uid for uid, ts in _post_turn_last_call.items() if now - ts > 3600]
-        for uid in stale:
-            del _post_turn_last_call[uid]
-        if telegram_id in _post_turn_last_call:
-            if now - _post_turn_last_call[telegram_id] < 300:
-                return  # rate-limited
-        _post_turn_last_call[telegram_id] = now
-
-    async def _do_optimize():
-        try:
-            from src.db.session import get_session
-            from src.db.repo import get_or_create_user
-            from src.core.instruction_optimizer import instruction_optimizer
-
-            async with get_session() as session:
-                owner = await get_or_create_user(session, telegram_id)
-                await instruction_optimizer.post_turn_review(
-                    session=session,
-                    user_id=owner.id,
-                    user_obj=owner,
-                    user_message=user_message,
-                    assistant_response=assistant_response,
-                )
-        except Exception:
-            logger.debug("post_turn_optimize skipped", exc_info=True)
-
-    global _post_turn_task
-    if _post_turn_task and not _post_turn_task.done():
-        _post_turn_task.cancel()
-    _post_turn_task = asyncio.create_task(_do_optimize())
