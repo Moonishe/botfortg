@@ -16,7 +16,7 @@ def parse_telethon_proxy(proxy_url: str) -> tuple | None:
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (1080 if scheme == "socks5" else 8080)
     if parsed.username and parsed.password:
-        return (scheme, host, port, parsed.username, parsed.password)
+        return (scheme, host, port, True, parsed.username, parsed.password)
     return (scheme, host, port)
 
 
@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     )
     mistral_stt_model: str = Field(
         "voxtral-mini-transcribe-latest", description="Mistral STT модель"
+    )
+
+    memory_warmup_idle_timeout_sec: int = Field(
+        86400, description="Таймаут простоя для сброса warmup-счётчика (24 часа)"
+    )
+    memory_warmup_max_contacts: int = Field(
+        10,
+        description="Макс контактов при штатной экстракции (в warmup — все контакты)",
     )
 
     disk_critical_mb: int = Field(

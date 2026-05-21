@@ -522,9 +522,15 @@ async def cb_extract_memories(
 
 
 async def _auto_extract_memories(message: Message, client, owner) -> None:
-    """Авто-извлечение памяти без вопроса (fire-and-forget)."""
+    """Авто-извлечение памяти без вопроса (fire-and-forget).
+
+    При холодном старте (warmup) извлекает из ВСЕХ контактов.
+    В штатном режиме — только из top-N (memory_warmup_max_contacts).
+    """
     from src.db.repo import list_contacts
     from src.llm.router import build_provider
+    from src.core.memory.memory_warmup import should_full_extract
+    from src.config import settings
     import asyncio
 
     async with get_session() as session:
@@ -535,24 +541,37 @@ async def _auto_extract_memories(message: Message, client, owner) -> None:
     if provider is None:
         return
 
-    targets = [c for c in contacts[:10] if not c.is_bot]
+    # --- Warmup: все контакты при холодном старте ---
+    telegram_id = message.from_user.id
+    in_warmup = should_full_extract(
+        telegram_id,
+        idle_timeout_sec=settings.memory_warmup_idle_timeout_sec,
+    )
+
+    max_contacts = len(contacts) if in_warmup else settings.memory_warmup_max_contacts
+    targets = [c for c in contacts[:max_contacts] if not c.is_bot]
     if not targets:
         return
+
+    logger.info(
+        "auto_extract: %s mode, %d contacts",
+        "warmup" if in_warmup else "normal",
+        len(targets),
+    )
 
     total = 0
     for ct in targets:
         try:
             msgs = await load_chat(client, message.from_user.id, ct.peer_id, limit=60)
-            count = await extract_and_save_memories(
-                provider, message.from_user.id, ct, msgs
-            )
+            count = await extract_and_save_memories(provider, telegram_id, ct, msgs)
             total += count
         except Exception:
             logger.exception("auto extract memories failed")
 
     if total:
+        mode_label = "🔥 Warmup" if in_warmup else "🧠"
         await message.answer(
-            f"🧠 Авто-память: +{total} фактов из {len(targets)} контактов."
+            f"{mode_label} Авто-память: +{total} фактов из {len(targets)} контактов."
         )
 
 
