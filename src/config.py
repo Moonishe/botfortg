@@ -171,6 +171,12 @@ class Settings(BaseSettings):
         description="Макс контактов при штатной экстракции (в warmup — все контакты)",
     )
 
+    # Авто-пересборка профиля каждые N новых личных фактов (0 = только вручную)
+    persona_trigger_every_n_facts: int = Field(
+        default=15,
+        description="Trigger persona rebuild every N new personal facts",
+    )
+
     disk_critical_mb: int = Field(
         100, description="Критический порог свободного места (MB)"
     )

@@ -111,6 +111,21 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
                     weight=0.9,
                 )
 
+    # --- Persona auto-rebuild: check if enough new personal facts ---
+    try:
+        from src.core.memory.persona_pipeline import maybe_rebuild_persona
+
+        # Only trigger if we saved personal/self-facts (contact_id is None)
+        has_personal_facts = any(
+            fact_data.get("memory_type") in {"personal", "preference"}
+            or fact_data.get("contact_id") is None
+            for fact_data in (job.facts or [])
+        )
+        if has_personal_facts:
+            await maybe_rebuild_persona(session, owner)
+    except Exception:
+        logger.debug("Persona auto-rebuild skipped (non-critical)", exc_info=True)
+
     await session.commit()
     logger.debug(
         "Background saved %d facts for user %d", len(job.facts or []), job.telegram_id
@@ -149,6 +164,15 @@ async def _handle_extract(session, owner, job: MemoryJob) -> None:
         messages=[],
         transcript=job.messages_text,
     )
+
+    # --- Persona auto-rebuild ---
+    try:
+        from src.core.memory.persona_pipeline import maybe_rebuild_persona
+
+        await maybe_rebuild_persona(session, owner)
+    except Exception:
+        logger.debug("Persona auto-rebuild skipped (non-critical)", exc_info=True)
+
     logger.debug(
         "Background extracted %d facts for user %d (contact %s)",
         count,

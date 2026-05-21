@@ -1723,6 +1723,34 @@ async def get_self_profile(session: AsyncSession, user: User) -> SelfProfile | N
     return result.scalar_one_or_none()
 
 
+async def count_new_personal_facts_since(
+    session: AsyncSession,
+    owner: User,
+    since: datetime | None,
+) -> int:
+    """Count personal Memory facts created after `since`.
+
+    Personal facts are those with contact_id IS NULL and is_active=True.
+    If since is None, counts ALL active personal facts.
+    """
+    from sqlalchemy import func
+
+    q = (
+        select(func.count())
+        .select_from(Memory)
+        .where(
+            Memory.user_id == owner.id,
+            Memory.contact_id.is_(None),
+            Memory.is_active == True,
+        )
+    )
+    if since is not None:
+        q = q.where(Memory.created_at > since)
+
+    result = await session.execute(q)
+    return result.scalar_one()
+
+
 async def upsert_self_profile(
     session: AsyncSession, user: User, **kwargs: object
 ) -> SelfProfile:
