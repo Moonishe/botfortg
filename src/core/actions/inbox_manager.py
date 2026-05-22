@@ -136,7 +136,11 @@ def _is_filtered_by_folder(owner: User, contact: Contact | None) -> bool:
     settings = owner.settings
     if not settings.monitor_only_selected_folders or not settings.monitored_folders:
         return False
-    monitored = json.loads(settings.monitored_folders)
+    try:
+        monitored = json.loads(settings.monitored_folders)
+    except json.JSONDecodeError:
+        logger.warning("Invalid monitored_folders JSON: %r", settings.monitored_folders)
+        monitored = []
     if not monitored:
         return False
     if contact is None:

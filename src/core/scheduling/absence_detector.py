@@ -1,7 +1,6 @@
 """Детектор фраз отсутствия в исходящих сообщениях."""
 
 import re
-from typing import Optional
 
 _AWAY_PATTERNS = [
     r"я уш[ёе]л",

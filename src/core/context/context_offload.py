@@ -18,7 +18,6 @@ from typing import Any
 from src.core.context.token_tracker import (
     count_prompt_tokens,
     get_budget_stage,
-    estimate_tokens,
     DEFAULT_MAX_TOKENS,
 )
 
@@ -126,6 +125,8 @@ async def _stage2_summarise(
                 ),
             ]
             summary = await provider.chat(chat_messages)
+            if summary is None:
+                summary = ""
             summary_msg = {
                 "role": "system",
                 "content": f"📋 [Саммари]: {summary.strip()}",
@@ -217,9 +218,6 @@ async def compress_context(
         "Context offload: %d tokens (%.0f%%), stage=%s", total, ratio * 100, stage
     )
 
-    # Identify critical messages
-    critical_indices: set[int] = {i for i, m in enumerate(messages) if _is_critical(m)}
-
     result = CompressedContext(
         messages=list(messages),  # copy
         tokens_before=total,
@@ -229,6 +227,11 @@ async def compress_context(
     # Stage 1: Format (always applies if needed)
     if stage in ("format", "summary", "mermaid"):
         result.messages = _stage1_format(result.messages)
+
+    # Identify critical messages AFTER Stage 1, so indices are not stale
+    critical_indices: set[int] = {
+        i for i, m in enumerate(result.messages) if _is_critical(m)
+    }
 
     # Stage 2: LLM Summary
     if stage in ("summary", "mermaid"):

@@ -11,7 +11,7 @@ from src.core.scheduling.notification_queue import notification_queue
 from src.db.models import Notification
 from src.core.infra.timeutil import fmt_local
 from src.db.models import Commitment
-from src.db.repo import get_or_create_user, update_commitment_status
+from src.db.repo import get_or_create_user
 from src.db.session import get_session
 
 
@@ -38,6 +38,7 @@ async def _check_once(owner_telegram_id: int) -> None:
                 Commitment.user_id == owner.id,
                 Commitment.status == "open",
                 Commitment.deadline_at.is_not(None),
+                Commitment.last_reminded_at.is_(None),
             )
         )
         open_items = list(result.scalars().all())
@@ -74,12 +75,18 @@ async def _check_once(owner_telegram_id: int) -> None:
             category=reason,  # "overdue" или "lead"
         )
 
-    # помечаем reminded чтобы не дублировать
+    # помечаем когда отправили напоминание (не меняем status!)
     async with get_session() as session:
         for c, _ in to_remind:
-            await update_commitment_status(session, c.id, "reminded")
+            c = await session.merge(c)
+            c.last_reminded_at = datetime.now(timezone.utc)
+        await session.commit()
 
 
+from src.core.infra.task_manager import task_manager
+
+
+@task_manager.task("reminders-loop")
 async def reminders_loop() -> None:
     while True:
         try:

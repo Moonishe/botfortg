@@ -2,10 +2,8 @@
 
 import json
 import logging
-from datetime import datetime, timezone
 
 from src.db.repo import (
-    get_contact_profile,
     get_or_create_user,
     list_memories,
     upsert_contact_profile,

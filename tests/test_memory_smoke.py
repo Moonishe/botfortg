@@ -16,12 +16,10 @@ os.environ["BOT_TOKEN"] = "test:token"
 os.environ["OWNER_TELEGRAM_ID"] = "123456789"
 
 from src.db.session import init_db, get_session
-from src.db.models import Memory, MemoryCandidate, Commitment
+from src.db.models import MemoryCandidate
 from src.db.repo import (
     add_memory,
     add_memory_candidate,
-    delete_memory_candidate,
-    list_memory_candidates,
     get_or_create_user,
     add_commitment,
     update_commitment_status,
@@ -111,7 +109,7 @@ async def test_memory_candidate_confirm():
 @pytest.mark.asyncio
 async def test_memory_candidate_temporary():
     """temporary → memory_type='temporary', decay_rate=0.3."""
-    owner = await _get_owner()
+    _owner = await _get_owner()
     async with get_session() as session:
         owner2 = await get_or_create_user(session, OWNER_TG_ID)
         await add_memory(
@@ -135,7 +133,7 @@ async def test_memory_candidate_temporary():
 @pytest.mark.asyncio
 async def test_permanent_decay_rate():
     """permanent → decay_rate=0.01."""
-    owner = await _get_owner()
+    _owner = await _get_owner()
     async with get_session() as session:
         owner2 = await get_or_create_user(session, OWNER_TG_ID)
         await add_memory(
@@ -178,7 +176,7 @@ async def test_commitment_to_task_memory():
         await add_memory(
             session,
             owner3,
-            fact=f"Выполнено: Позвонить маме",
+            fact="Выполнено: Позвонить маме",
             source="commitment",
             memory_type="task",
         )
@@ -195,7 +193,7 @@ async def test_commitment_to_task_memory():
 @pytest.mark.asyncio
 async def test_get_prompt_facts_is_active():
     """get_prompt_facts() возвращает только active факты."""
-    owner = await _get_owner()
+    _owner = await _get_owner()
     async with get_session() as session:
         owner2 = await get_or_create_user(session, OWNER_TG_ID)
         await add_memory(

@@ -103,7 +103,7 @@ class WeeklyDigestBuilder:
         result = await session.execute(
             select(func.count())
             .select_from(Memory)
-            .where(Memory.is_active == True, Memory.user_id == db_user_id)
+            .where(Memory.is_active, Memory.user_id == db_user_id)
         )
         stats.total_active_facts = result.scalar() or 0
 
@@ -112,7 +112,7 @@ class WeeklyDigestBuilder:
             select(func.count())
             .select_from(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == db_user_id,
                 Memory.memory_tier == 1,
             )
@@ -123,7 +123,7 @@ class WeeklyDigestBuilder:
             select(func.count())
             .select_from(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == db_user_id,
                 Memory.memory_tier == 2,
             )
@@ -134,7 +134,7 @@ class WeeklyDigestBuilder:
             select(func.count())
             .select_from(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == db_user_id,
                 Memory.memory_tier == 3,
             )
@@ -146,7 +146,7 @@ class WeeklyDigestBuilder:
             select(func.count())
             .select_from(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == db_user_id,
                 Memory.created_at >= week_ago,
             )
@@ -158,7 +158,7 @@ class WeeklyDigestBuilder:
             select(func.count())
             .select_from(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == db_user_id,
                 Memory.tags.ilike("%consolidated%"),
             )
@@ -170,7 +170,7 @@ class WeeklyDigestBuilder:
             select(func.count())
             .select_from(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == db_user_id,
                 Memory.tags.ilike("%💡%"),
             )
@@ -263,7 +263,7 @@ class WeeklyDigestBuilder:
             .where(
                 Contact.user_id == db_user_id,
                 Contact.peer_kind == "user",
-                Contact.is_bot == False,
+                Contact.is_bot.is_(False),
             )
             .group_by(Contact.id)
             .having(func.max(Message.date) < silent_cutoff)
@@ -304,7 +304,7 @@ class WeeklyDigestBuilder:
         distilled_result = await session.execute(
             select(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == db_user_id,
                 Memory.tags.ilike("%💡%"),
             )
@@ -325,14 +325,14 @@ class WeeklyDigestBuilder:
         )
 
         lines = [
-            f"📊 **Что было на неделе** ({period_str})",
+            f"📊 <b>Что было на неделе</b> ({period_str})",
             "━" * 28,
             "",
         ]
 
         # Memory
         lines.append(
-            f"🧠 **Память**: +{stats.new_facts} фактов, "
+            f"🧠 <b>Память</b>: +{stats.new_facts} фактов, "
             f"{stats.consolidated_count} сжато в tier-2, "
             f"{stats.distilled_count} 💡 дистиллировано"
         )
@@ -348,32 +348,32 @@ class WeeklyDigestBuilder:
             or stats.commitments_overdue
         ):
             lines.append(
-                f"📝 **Обещания**: +{stats.commitments_created} создано, "
+                f"📝 <b>Обещания</b>: +{stats.commitments_created} создано, "
                 f"{stats.commitments_fulfilled} выполнено, "
                 f"{stats.commitments_overdue} просрочено"
             )
 
         # Contacts
         if stats.messages_total:
-            lines.append(f"💬 **Сообщений**: {stats.messages_total}")
+            lines.append(f"💬 <b>Сообщений</b>: {stats.messages_total}")
 
         if stats.top_contacts_by_messages:
             top = ", ".join(
                 f"{name} ({cnt})" for name, cnt in stats.top_contacts_by_messages[:3]
             )
-            lines.append(f"👥 **Топ контактов**: {top}")
+            lines.append(f"👥 <b>Топ контактов</b>: {top}")
 
         if stats.new_contacts:
-            lines.append(f"🆕 **Новых контактов**: {stats.new_contacts}")
+            lines.append(f"🆕 <b>Новых контактов</b>: {stats.new_contacts}")
 
         # Silent contacts
         if stats.silent_contacts:
             silent = ", ".join(stats.silent_contacts[:5])
-            lines.append(f"⚠️  **Тишина**: {silent} — >5 дней без ответа")
+            lines.append(f"⚠️  <b>Тишина</b>: {silent} — >5 дней без ответа")
 
         # Patterns
         if stats.patterns_detected:
-            lines.append(f"📈 **Паттерны**: обнаружено {stats.patterns_detected}")
+            lines.append(f"📈 <b>Паттерны</b>: обнаружено {stats.patterns_detected}")
 
         # Habits
         if stats.habits_improved or stats.habits_declined:
@@ -383,7 +383,7 @@ class WeeklyDigestBuilder:
             for h in stats.habits_declined:
                 habit_lines.append(f"   ❌ {h}")
             if habit_lines:
-                lines.append("🏋️ **Привычки**:")
+                lines.append("🏋️ <b>Привычки</b>:")
                 lines.extend(habit_lines)
 
         # Memory health
@@ -395,14 +395,14 @@ class WeeklyDigestBuilder:
             else "высокая"
         )
         lines.append(
-            f"❤️  **Здоровье памяти**: fuel {stats.fuel_level:.0%}, "
+            f"❤️  <b>Здоровье памяти</b>: fuel {stats.fuel_level:.0%}, "
             f"фрагментация {frag_label}"
         )
 
         # Distilled knowledge
         if stats.top_distilled:
             lines.append("")
-            lines.append("💡 **Знания недели**:")
+            lines.append("💡 <b>Знания недели</b>:")
             for fact in stats.top_distilled[:5]:
                 lines.append(f"• {fact[:120]}")
 
@@ -455,6 +455,14 @@ async def weekly_digest_loop(owner_id: int) -> None:
         except Exception:
             logger.exception("Weekly digest error")
             await asyncio.sleep(settings.weekly_digest_check_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "weekly-digest", partial(weekly_digest_loop, settings.owner_telegram_id)
+)
 
 
 # Синглтон

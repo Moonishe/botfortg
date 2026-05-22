@@ -3,6 +3,9 @@
 import logging
 from datetime import datetime
 
+from sqlalchemy import select
+
+from src.db.models import MemoryLink
 from src.db.repo import (
     get_contact,
     get_linked_memories,
@@ -86,8 +89,19 @@ async def build_chain_narrative(contact_id: int, owner_id: int) -> str | None:
         seen: set[int] = set()
         chains: list[list[dict]] = []
 
-        # Начинаем с фактов у которых есть relation_type (корни цепочек)
-        roots = [m for m in memories if m.relation_type and not m.related_memory_id]
+        # Начинаем с фактов у которых есть связи через MemoryLink (корни цепочек)
+        linked_ids: set[int] = set()
+        if memories:
+            result = await session.execute(
+                select(MemoryLink.source_id)
+                .where(
+                    MemoryLink.source_id.in_([m.id for m in memories]),
+                    MemoryLink.user_id == owner.id,
+                )
+                .distinct()
+            )
+            linked_ids = {row[0] for row in result.all()}
+        roots = [m for m in memories if m.id in linked_ids]
         if not roots:
             roots = memories[:1]
 

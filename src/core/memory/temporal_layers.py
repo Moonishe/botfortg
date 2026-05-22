@@ -138,7 +138,7 @@ async def get_prompt_facts(
     now = utcnow_naive()
     conditions = [
         Memory.user_id == owner.id,
-        Memory.is_active == True,
+        Memory.is_active,
         or_(Memory.expires_at.is_(None), Memory.expires_at > now),
     ]
     if contact_id:
@@ -179,6 +179,14 @@ async def temporal_migration_loop(owner_id: int) -> None:
     while True:
         try:
             await update_temporal_layers(owner_id)
-        except (ValueError, AttributeError, LookupError, OSError):
+        except Exception:
             logger.exception("Temporal migration error")
         await asyncio.sleep(settings.temporal_migration_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "temporal-migration", partial(temporal_migration_loop, settings.owner_telegram_id)
+)

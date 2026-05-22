@@ -8,14 +8,14 @@ import os
 # ---------------------------------------------------------------------------
 # Environment: MUST be set BEFORE any src imports
 # ---------------------------------------------------------------------------
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ.setdefault("ENCRYPTION_KEY", "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=")
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
 import pytest
 
-from src.core.intelligence.smart_autorouter import make_plan, ResponseMode
+from src.core.intelligence.smart_autorouter import make_plan
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.intelligence.agent import route_intent
 from src.llm.base import ChatMessage

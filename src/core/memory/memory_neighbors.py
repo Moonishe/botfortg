@@ -27,6 +27,8 @@ async def get_neighbors(owner_id: int, memory_id: int, limit: int = 3) -> list[d
     Возвращает:
         Список словарей: {memory_id, fact, contact_name, similarity}.
     """
+    from src.core.actions.vector_store import get_vector_store
+
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         provider = await build_provider(session, owner)
@@ -42,18 +44,15 @@ async def get_neighbors(owner_id: int, memory_id: int, limit: int = 3) -> list[d
             logger.debug("Failed to embed for neighbors (memory_id=%d)", memory_id)
             return []
 
-    from src.core.actions.vector_store import get_vector_store
+        # Ищем похожие факты в Qdrant (+1 чтобы потом исключить сам факт)
+        neighbors = await get_vector_store().search_similar_memories(
+            user_id=owner.id,
+            embedding=embedding,
+            threshold=0.65,
+            limit=limit + 1,
+        )
 
-    # Ищем похожие факты в Qdrant (+1 чтобы потом исключить сам факт)
-    neighbors = await get_vector_store().search_similar_memories(
-        user_id=owner.id,
-        embedding=embedding,
-        threshold=0.65,
-        limit=limit + 1,
-    )
-
-    result: list[dict] = []
-    async with get_session() as session2:
+        result: list[dict] = []
         for n in neighbors:
             nid = n.get("memory_id", 0)
             if nid == memory_id or nid == mem.id:
@@ -61,7 +60,7 @@ async def get_neighbors(owner_id: int, memory_id: int, limit: int = 3) -> list[d
             contact_name = ""
             cid = n.get("contact_id")
             if cid:
-                contact = await get_contact(session2, owner, cid)
+                contact = await get_contact(session, owner, cid)
                 contact_name = contact.display_name if contact else ""
             result.append(
                 {
@@ -102,6 +101,8 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
     Возвращает:
         Список словарей: {contact1, contact2, fact1, fact2, similarity}.
     """
+    from src.core.actions.vector_store import get_vector_store
+
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         memories = await list_memories(session, owner)
@@ -113,35 +114,32 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
         if not provider:
             return []
 
-    from src.core.actions.vector_store import get_vector_store
+        bridges: list[dict] = []
+        seen_pairs: set[tuple[int, int]] = set()
 
-    bridges: list[dict] = []
-    seen_pairs: set[tuple[int, int]] = set()
-
-    for m1 in active[:50]:  # макс 50 для производительности
-        try:
-            emb = await provider.embed(m1.fact)
-        except Exception:
-            continue
-
-        neighbors = await get_vector_store().search_similar_memories(
-            user_id=owner.id,
-            embedding=emb,
-            threshold=0.75,
-            limit=5,
-        )
-        for n in neighbors:
-            nid = n.get("memory_id", 0)
-            n_cid = n.get("contact_id", 0)
-            if nid == m1.id or not n_cid:
+        for m1 in active[:50]:  # макс 50 для производительности
+            try:
+                emb = await provider.embed(m1.fact)
+            except Exception:
                 continue
-            if m1.contact_id != n_cid:  # РАЗНЫЕ контакты! (both non-None: line 122+136)
-                pair = (m1.contact_id, n_cid)  # type: ignore[arg-type]
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)  # type: ignore[arg-type]
-                    async with get_session() as s:
-                        c1 = await get_contact(s, owner, m1.contact_id)  # type: ignore[arg-type]
-                        c2 = await get_contact(s, owner, n_cid)  # type: ignore[arg-type]
+
+            neighbors = await get_vector_store().search_similar_memories(
+                user_id=owner.id,
+                embedding=emb,
+                threshold=0.75,
+                limit=5,
+            )
+            for n in neighbors:
+                nid = n.get("memory_id", 0)
+                n_cid = n.get("contact_id", 0)
+                if nid == m1.id or not n_cid:
+                    continue
+                if m1.contact_id != n_cid:  # РАЗНЫЕ КОНТАКТЫ
+                    pair = (int(m1.contact_id), int(n_cid))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        c1 = await get_contact(session, owner, int(m1.contact_id))
+                        c2 = await get_contact(session, owner, int(n_cid))
                         bridges.append(
                             {
                                 "contact1": c1.display_name
@@ -153,10 +151,10 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
                                 "similarity": round(n.get("score", 0), 2),
                             }
                         )
-                    if len(bridges) >= 5:
-                        break
-        if len(bridges) >= 5:
-            break
+                        if len(bridges) >= 5:
+                            break
+            if len(bridges) >= 5:
+                break
 
     return bridges
 
@@ -186,62 +184,57 @@ async def cross_contact_insights(owner_id: int) -> list[str]:
     - "и Настя, и Артём упоминали дедлайны"
     - "у Насти и Лены общая тема: ремонт"
     """
-    from collections import Counter
+
+    from collections import defaultdict
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         memories = await list_memories(session, owner)
         active_with_contact = [m for m in memories if m.is_active and m.contact_id]
 
-    if len(active_with_contact) < 5:
-        return []
+        if len(active_with_contact) < 5:
+            return []
 
-    # Группируем факты по контактам
-    from collections import defaultdict
+        # Группируем факты по контактам
+        by_contact: dict[int, list] = defaultdict(list)
+        for m in active_with_contact:
+            by_contact[m.contact_id].append(m)
 
-    by_contact: dict[int, list] = defaultdict(list)
-    for m in active_with_contact:
-        by_contact[m.contact_id].append(m)
+        # Собираем ключевые слова для каждого контакта
+        contact_keywords: dict[int, set[str]] = {}
+        for cid, facts in by_contact.items():
+            words: set[str] = set()
+            for m in facts:
+                tokens = [
+                    w.lower().strip(",.!?…():;-«»\"'")
+                    for w in m.fact.split()
+                    if len(w.strip(",.!?…():;-«»\"'")) > 3
+                ]
+                words.update(tokens)
+            contact_keywords[cid] = words
 
-    # Собираем ключевые слова для каждого контакта
-    contact_keywords: dict[int, set[str]] = {}
-    for cid, facts in by_contact.items():
-        words: set[str] = set()
-        for m in facts:
-            # Извлекаем слова длиннее 3 букв
-            tokens = [
-                w.lower().strip(",.!?…():;-«»\"'")
-                for w in m.fact.split()
-                if len(w.strip(",.!?…():;-«»\"'")) > 3
-            ]
-            words.update(tokens)
-        contact_keywords[cid] = words
+        # Ищем пересечения
+        insights: list[str] = []
+        contact_ids = list(contact_keywords.keys())
 
-    # Ищем пересечения
-    insights: list[str] = []
-    contact_ids = list(contact_keywords.keys())
-
-    for i in range(len(contact_ids)):
-        for j in range(i + 1, len(contact_ids)):
-            cid1 = contact_ids[i]
-            cid2 = contact_ids[j]
-            common = contact_keywords[cid1] & contact_keywords[cid2]
-            if len(common) >= 2:
-                # Получаем имена контактов
-                async with get_session() as s:
-                    owner = await get_or_create_user(s, owner_id)
-                    c1 = await get_contact(s, owner, cid1)
-                    c2 = await get_contact(s, owner, cid2)
-                name1 = c1.display_name if c1 else str(cid1)
-                name2 = c2.display_name if c2 else str(cid2)
-                common_words = ", ".join(sorted(common)[:4])
-                insights.append(
-                    f"🔗 И <b>{name1}</b>, и <b>{name2}</b> упоминали: {common_words}"
-                )
-                if len(insights) >= 5:
-                    break
-        if len(insights) >= 5:
-            break
+        for i in range(len(contact_ids)):
+            for j in range(i + 1, len(contact_ids)):
+                cid1 = contact_ids[i]
+                cid2 = contact_ids[j]
+                common = contact_keywords[cid1] & contact_keywords[cid2]
+                if len(common) >= 2:
+                    c1 = await get_contact(session, owner, cid1)
+                    c2 = await get_contact(session, owner, cid2)
+                    name1 = c1.display_name if c1 else str(cid1)
+                    name2 = c2.display_name if c2 else str(cid2)
+                    common_words = ", ".join(sorted(common)[:4])
+                    insights.append(
+                        f"🔗 И <b>{name1}</b>, и <b>{name2}</b> упоминали: {common_words}"
+                    )
+                    if len(insights) >= 5:
+                        break
+            if len(insights) >= 5:
+                break
 
     return insights
 

@@ -12,20 +12,39 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import InstructionProfile, InstructionCandidate, InstructionEvent
+from src.db.models import InstructionProfile, InstructionCandidate
 from src.db.repo import get_or_create_user
 from src.db.session import SessionLocal
 from src.core.scheduling.notification_queue import notification_queue
+from src.llm.base import ChatMessage
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
 
-UTC_NOW = lambda: datetime.now(timezone.utc)
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+
+
+def _extract_json_from_llm_response(response: str) -> str:
+    """Извлекает JSON из LLM-ответа, даже если он обёрнут в ```json...```."""
+    m = _JSON_FENCE_RE.search(response)
+    if m:
+        return m.group(1).strip()
+    # Fallback: попробовать найти {...} напрямую
+    brace_m = re.search(r"\{[\s\S]*\}", response)
+    if brace_m:
+        return brace_m.group(0)
+    return response.strip()
 
 
 class InstructionOptimizer:
@@ -114,14 +133,10 @@ class InstructionOptimizer:
                         ' "consolidated": [str]}'
                     )
                     response = await provider.chat(
-                        [{"role": "user", "content": prompt}]
+                        [ChatMessage(role="user", content=prompt)]
                     )
                     # Извлекаем JSON из ответа (может быть обёрнут в ```json)
-                    json_str = response.strip()
-                    if json_str.startswith("```"):
-                        json_str = json_str.split("\n", 1)[1]
-                        if json_str.endswith("```"):
-                            json_str = json_str[:-3]
+                    json_str = _extract_json_from_llm_response(response)
                     llm_result = json.loads(json_str)
             except Exception:
                 logger.debug("LLM consolidation failed", exc_info=True)
@@ -223,12 +238,10 @@ class InstructionOptimizer:
                     "Верни ТОЛЬКО JSON (без markdown-разметки):\n"
                     '{"conflicts": [str], "suggestions": [str], "tone_changes": [str]}'
                 )
-                response = await provider.chat([{"role": "user", "content": prompt}])
-                json_str = response.strip()
-                if json_str.startswith("```"):
-                    json_str = json_str.split("\n", 1)[1]
-                    if json_str.endswith("```"):
-                        json_str = json_str[:-3]
+                response = await provider.chat(
+                    [ChatMessage(role="user", content=prompt)]
+                )
+                json_str = _extract_json_from_llm_response(response)
                 llm_result = json.loads(json_str)
             else:
                 llm_result = {"conflicts": [], "suggestions": [], "tone_changes": []}

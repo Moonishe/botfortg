@@ -49,21 +49,6 @@ async def collect_recent_messages(
     by_peer: dict[int, dict] = {}
     for m in rows:
         if m.peer_id not in by_peer:
-            # Folder filter: если monitor_only_selected_folders и контакт не в выбранных папках — пропустить
-            if (
-                user.settings.monitor_only_selected_folders
-                and user.settings.monitored_folders
-            ):
-                monitored = json.loads(user.settings.monitored_folders)
-                if monitored:
-                    contact = await get_contact(session, user, m.peer_id)
-                    contact_folders = (
-                        (contact.folder_names or "").split(",") if contact else []
-                    )
-                    contact_folders = [f.strip() for f in contact_folders if f.strip()]
-                    if not any(f in monitored for f in contact_folders):
-                        continue
-
             text_content = m.transcript or m.text or m.extracted_text or ""
             urgency = classify_message(text_content) if text_content else "normal"
 
@@ -80,6 +65,22 @@ async def collect_recent_messages(
                 "urgency": urgency,
                 "unread_count": _unread,
             }
+
+            # Folder filter: если monitor_only_selected_folders и контакт не в выбранных папках — пропустить
+            if (
+                user.settings.monitor_only_selected_folders
+                and user.settings.monitored_folders
+            ):
+                monitored = json.loads(user.settings.monitored_folders)
+                if monitored:
+                    contact = await get_contact(session, user, m.peer_id)
+                    contact_folders = (
+                        (contact.folder_names or "").split(",") if contact else []
+                    )
+                    contact_folders = [f.strip() for f in contact_folders if f.strip()]
+                    if not any(f in monitored for f in contact_folders):
+                        continue
+
         by_peer[m.peer_id]["count"] += 1
         # сохраняем самое свежее (первое в порядке desc)
         if by_peer[m.peer_id]["count"] == 1:
@@ -187,6 +188,15 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                 )
 
                 settings.smart_digest_last_sent = now
+                await session.commit()
         except Exception:
             logger.exception("smart_digest_loop tick failed")
         await asyncio.sleep(60)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "smart-digest", partial(smart_digest_loop, settings.owner_telegram_id)
+)

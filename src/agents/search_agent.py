@@ -49,13 +49,17 @@ async def resolve(provider, query: str, contacts: list[dict]) -> dict[str, Any]:
 
     user_msg = f"Запрос: {query}\n\nСписок контактов:\n{contacts_json}"
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=SEARCH_SYSTEM),
-            ChatMessage(role="user", content=user_msg),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=SEARCH_SYSTEM),
+                ChatMessage(role="user", content=user_msg),
+            ],
+            heavy=False,
+        )
+    except Exception as e:
+        logger.error("Search agent LLM error: %s", e)
+        return {"found": False}
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)

@@ -3,7 +3,6 @@
 import logging
 
 from aiogram import Router
-from aiogram.types import Message
 
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import HM_RE, tz_short
@@ -37,7 +36,7 @@ SETTING_FIELDS: dict[str, str] = {
     "reminder_overdue_enabled": "bool",
     "ignore_archived": "bool",
     "use_heavy_model": "bool",
-    "llm_provider": "choice:openai,gemini,mistral",
+    "llm_provider": "choice:openrouter,openai,gemini,mistral,cloudflare",
     "transcription_mode": "choice:local,api,hybrid",
     "transcription_api_provider": "choice:openai,gemini,mistral",
     "auto_sync_enabled": "bool",
@@ -48,6 +47,7 @@ SETTING_FIELDS: dict[str, str] = {
     "smart_digest_interval_min": "int",
     "urgent_notify_enabled": "bool",
     "monitor_only_selected_folders": "bool",
+    "pattern_caching_enabled": "bool",
     "monitored_folders": "str",
     "timezone": "tz",
 }
@@ -69,8 +69,8 @@ async def _exec_set_setting(intent, message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         setattr(owner.settings, key, validated)
-        await session.flush()
-        invalidate_settings_cache()
+        await session.commit()
+        await invalidate_settings_cache(message.from_user.id)
         new_tz = owner.settings.timezone
     if key == "timezone":
         await message.answer(f"✅ Часовой пояс: <b>{tz_short(new_tz)}</b>")
@@ -116,7 +116,7 @@ async def _exec_remove_news_topic(intent, message) -> None:
         for t in matched:
             await delete_news_topic(session, owner, t.id)
     names = ", ".join(f"«{t.topic}»" for t in matched)
-    await message.answer(f"🗑 Удалил: {names}")
+    await message.answer(sanitize_html(f"🗑 Удалил: {names}"))
 
 
 async def _exec_change_auto_mode(intent, message) -> None:
@@ -127,8 +127,8 @@ async def _exec_change_auto_mode(intent, message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.auto_mode = mode
-        await session.flush()
-    invalidate_settings_cache()
+        await session.commit()
+        await invalidate_settings_cache()
     labels = {"offline_only": "только оффлайн", "always": "всегда", "smart": "умный"}
     await message.answer(f"✅ Режим авто-ответа: <b>{labels[mode]}</b>")
 
@@ -143,5 +143,5 @@ async def _exec_set_quiet_hours(intent, message) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.quiet_hours_start = start
         owner.settings.quiet_hours_end = end
-        await session.flush()
+        await session.commit()
     await message.answer(f"✅ Тихие часы: <b>{start} – {end}</b>")

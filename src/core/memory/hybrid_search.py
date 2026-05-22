@@ -29,7 +29,8 @@ def reciprocal_rank_fusion(
     """Combine two ranked result lists via Reciprocal Rank Fusion.
 
     Each input is a list of (id, score) tuples, sorted by relevance
-    (best first). The score is ignored for ranking — only position matters.
+    (best first). The score is used as a weight multiplier in RRF so that
+    higher-relevance results contribute more, even at the same position.
 
     Args:
         vector_results: Ranked list of (memory_id, cosine_score) from Qdrant.
@@ -44,8 +45,9 @@ def reciprocal_rank_fusion(
     for ranking in (vector_results, keyword_results):
         if not ranking:
             continue
-        for rank_i, (mem_id, _score) in enumerate(ranking, start=1):
-            rrf_contrib = 1.0 / (k + rank_i)
+        for rank_i, (mem_id, score) in enumerate(ranking, start=1):
+            weight = score if score else 1.0
+            rrf_contrib = weight / (k + rank_i)
             scores[mem_id] = scores.get(mem_id, 0.0) + rrf_contrib
 
     # Sort by fused score descending

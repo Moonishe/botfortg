@@ -1,5 +1,5 @@
 import asyncio
-import importlib.util
+import importlib
 import sys
 from logging.config import fileConfig
 from pathlib import Path
@@ -18,21 +18,13 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # --- Load models directly to avoid circular imports ---
-# models.py has no project-internal imports (only stdlib + SQLAlchemy).
-# Loading it via importlib bypasses src/db/__init__.py and the entire
-# circular import chain (db → core → bot → db → ...).
-_THIS_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _THIS_DIR.parent
-_MODELS_PATH = _PROJECT_ROOT / "src" / "db" / "models.py"
-
-_spec = importlib.util.spec_from_file_location("src.db.models", str(_MODELS_PATH))
-if _spec is None or _spec.loader is None:
-    raise ImportError(f"Cannot load models module from {_MODELS_PATH}")
-_models_module = importlib.util.module_from_spec(_spec)
-sys.modules["src.db.models"] = _models_module
-_spec.loader.exec_module(_models_module)
-
-Base = _models_module.Base
+# The models package uses string-based forward references so there are no
+# cross-module import cycles.  Importing via importlib still bypasses the
+# src/db/__init__.py entry point and the circular import chain.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+_models = importlib.import_module("db.models")
+Base = _models.Base
 
 target_metadata = Base.metadata
 
@@ -81,6 +73,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_object=include_object,
+        render_as_batch=True,
     )
 
     with context.begin_transaction():
@@ -93,6 +86,7 @@ def do_run_migrations(connection):
         connection=connection,
         target_metadata=target_metadata,
         include_object=include_object,
+        render_as_batch=True,
     )
     with context.begin_transaction():
         context.run_migrations()

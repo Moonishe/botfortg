@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from src.core.contacts.chat_service import message_to_text
@@ -40,7 +41,7 @@ STYLE_SYSTEM = (
 def _parse_json_safe(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
-        text = text.strip("`")
+        text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
@@ -107,6 +108,7 @@ async def update_style_profile_for_contact(
         if contact is not None:
             contact.style_profile = json.dumps(profile, ensure_ascii=False)
             contact.style_updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            await session.flush()
 
     return profile
 

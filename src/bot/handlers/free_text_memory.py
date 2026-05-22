@@ -7,7 +7,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -24,11 +23,6 @@ from src.db.repo import (
 from src.db.session import get_session
 from src.userbot import get_active_telethon_client
 
-from .free_text_common import (
-    _fire_record_trajectory,
-    _summarize_intent_for_memory,
-    memory_quick_keyboard,
-)
 
 logger = logging.getLogger(__name__)
 router = Router(name="free_text_memory")
@@ -67,7 +61,7 @@ async def _exec_store_memory(intent, message) -> None:
 
         if confidence >= 0.85:
             # Высокая уверенность — сразу в память
-            mem = await add_memory(
+            await add_memory(
                 session,
                 owner,
                 fact=fact,
@@ -130,7 +124,7 @@ async def _exec_forget_memory(intent, message) -> None:
     names = ", ".join(
         f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
     )
-    await message.answer(f"🗑 Забыл: {names}")
+    await message.answer(sanitize_html(f"🗑 Забыл: {names}"))
 
 
 async def _exec_list_memories(intent, message) -> None:
@@ -166,7 +160,7 @@ async def _exec_list_memories(intent, message) -> None:
         )
         lines.append(f"• {sent} {m.fact}")
     body = "\n".join(lines)
-    await message.answer(f"🧠 <b>Память{label}</b>\n\n{body}")
+    await message.answer(sanitize_html(f"🧠 <b>Память{label}</b>\n\n{body}"))
 
 
 async def _exec_extract_memories(intent, message, userbot_manager) -> None:
@@ -294,9 +288,9 @@ async def cb_memq_list(callback: CallbackQuery) -> None:
             emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
                 m.sentiment, "⚪"
             )
-            lines.append(f"{emoji} {m.fact[:100]}")
+            lines.append(f"{emoji} {sanitize_html(m.fact[:100])}")
         lines.append(f"\n<i>Всего: {len(memories)} фактов. /memory — подробнее</i>")
-        await callback.message.answer("\n".join(lines))
+        await callback.message.answer(sanitize_html("\n".join(lines)))
         await callback.answer()
 
 

@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timezone
 from typing import Any
 
 from src.core.scheduling.notification_queue import notification_queue
@@ -156,7 +155,6 @@ def format_habits(habits: list[dict[str, Any]]) -> str:
     if not habits:
         return "🔍 Привычек пока не обнаружено. Нужно больше данных."
 
-    now = datetime.now(timezone.utc)
     lines = ["<b>🧠 Обнаруженные привычки:</b>", ""]
     for h in habits:
         topic = h["topic"]
@@ -189,7 +187,6 @@ def format_habits(habits: list[dict[str, Any]]) -> str:
 
 async def habit_tracker_loop(owner_id: int) -> None:
     """Фоновый цикл: поиск привычек раз в неделю (ВС 18:00)."""
-    last_run: date | None = None
     while True:
         try:
             async with get_session() as session:
@@ -198,20 +195,36 @@ async def habit_tracker_loop(owner_id: int) -> None:
 
             now = now_in_tz(tz_name)
             # Воскресенье 18:00, не чаще раза в день
-            if now.weekday() == 6 and now.hour == 18 and last_run != now.date():
-                last_run = now.date()
+            if now.weekday() == 6 and now.hour == 18:
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_id)
-                    memories = await list_memories(session, owner)
-                    active = [m for m in memories if m.is_active and m.created_at]
-                    habits = find_habit_candidates(active)
+                    if (
+                        owner.settings.habit_last_run_date is None
+                        or owner.settings.habit_last_run_date < now.date()
+                    ):
+                        owner.settings.habit_last_run_date = now.date()
+                        await session.commit()
+
+                        memories = await list_memories(session, owner)
+                        active = [m for m in memories if m.is_active and m.created_at]
+                        habits = find_habit_candidates(active)
                 if habits:
                     text = format_habits(habits)
-                    await notification_queue.enqueue(
-                        topic="habits",
-                        text=text,
-                        priority=Notification.PRIORITY_LOW,
-                    )
+                else:
+                    text = "🔍 Привычек пока не обнаружено. Нужно больше данных."
+                await notification_queue.enqueue(
+                    topic="habits",
+                    text=text,
+                    priority=Notification.PRIORITY_LOW,
+                )
         except Exception as e:
             logger.exception("Habit tracker error: %s", e)
         await asyncio.sleep(settings.habit_tracker_interval_sec)  # проверять каждый час
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "habit-tracker", partial(habit_tracker_loop, settings.owner_telegram_id)
+)

@@ -6,7 +6,7 @@
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -36,6 +36,7 @@ class MemoryJob:
 # Очередь заданий (maxsize=100 — защита от переполнения памяти)
 _queue: asyncio.Queue[MemoryJob] = asyncio.Queue(maxsize=100)
 _worker_task: asyncio.Task | None = None
+_worker_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def _worker() -> None:
@@ -48,11 +49,12 @@ async def _worker() -> None:
         try:
             job: MemoryJob = await _queue.get()
             await _process_job(job)
-            _queue.task_done()
         except asyncio.CancelledError:
             break
-        except (ValueError, AttributeError, KeyError, ImportError, OSError):
+        except Exception:
             logger.exception("Memory queue worker error")
+        finally:
+            _queue.task_done()
 
 
 async def _process_job(job: MemoryJob) -> None:
@@ -77,21 +79,30 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
 
     saved_memories: list = []
     for fact_data in job.facts or []:
-        mem = await add_memory(
-            session,
-            owner,
-            fact=fact_data.get("fact", ""),
-            contact_id=job.contact_id,
-            sentiment=fact_data.get("sentiment"),
-            source=fact_data.get("source", "chat"),
-            importance=fact_data.get("importance", 0.5),
-            decay_rate=fact_data.get("decay_rate", 0.07),
-            memory_type=fact_data.get("memory_type"),
-            embedding=fact_data.get("embedding"),
-            vector_store_obj=get_vector_store() if fact_data.get("embedding") else None,
-        )
-        if mem:
-            saved_memories.append(mem)
+        try:
+            mem = await add_memory(
+                session,
+                owner,
+                fact=fact_data.get("fact", ""),
+                contact_id=job.contact_id,
+                sentiment=fact_data.get("sentiment"),
+                source=fact_data.get("source", "chat"),
+                importance=fact_data.get("importance", 0.5),
+                decay_rate=fact_data.get("decay_rate", 0.07),
+                memory_type=fact_data.get("memory_type"),
+                embedding=fact_data.get("embedding"),
+                vector_store_obj=get_vector_store()
+                if fact_data.get("embedding")
+                else None,
+            )
+            if mem:
+                saved_memories.append(mem)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "Failed to save fact for user %d, skipping", job.telegram_id
+            )
 
     # Сохраняем связи между фактами, указанные LLM (relation_type / relation_to_index)
     for i, fact_data in enumerate(job.facts or []):
@@ -115,10 +126,9 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
     try:
         from src.core.memory.persona_pipeline import maybe_rebuild_persona
 
-        # Only trigger if we saved personal/self-facts (contact_id is None)
+        # Only trigger if we saved personal/self-facts
         has_personal_facts = any(
             fact_data.get("memory_type") in {"personal", "preference"}
-            or fact_data.get("contact_id") is None
             for fact_data in (job.facts or [])
         )
         if has_personal_facts:
@@ -192,25 +202,35 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
         return
 
     memories = await list_memories(session, owner)
+    tagged = 0
+    MAX_TAG_PER_CYCLE = 30
     for mem in memories:
+        if tagged >= MAX_TAG_PER_CYCLE:
+            logger.debug("_handle_tag: hit limit %d, stopping", MAX_TAG_PER_CYCLE)
+            break
         if not mem.tags:
             try:
                 await tag_new_fact(provider, session, mem.id)
+                await session.commit()
+                tagged += 1
             except (ValueError, AttributeError, ConnectionError, OSError):
+                await session.rollback()
                 logger.exception("Tagging failed for memory %d", mem.id)
-    await session.commit()
-    logger.debug("Background tagging done for user %d", job.telegram_id)
+    logger.debug(
+        "Background tagging done for user %d (%d tagged)", job.telegram_id, tagged
+    )
 
 
-def start_worker() -> asyncio.Task:
+async def start_worker() -> asyncio.Task:
     """Запустить фонового worker'а (если ещё не запущен).
 
     Вызывается при старте приложения (main.py).
     """
     global _worker_task
-    if _worker_task is None or _worker_task.done():
-        _worker_task = asyncio.create_task(_worker(), name="memory-queue-worker")
-    return _worker_task
+    async with _worker_lock:
+        if _worker_task is None or _worker_task.done():
+            _worker_task = asyncio.create_task(_worker(), name="memory-queue-worker")
+        return _worker_task
 
 
 async def enqueue(job: MemoryJob) -> None:
@@ -228,11 +248,12 @@ async def enqueue(job: MemoryJob) -> None:
 async def stop_worker() -> None:
     """Остановить фонового worker'а (graceful shutdown)."""
     global _worker_task
-    if _worker_task and not _worker_task.done():
-        _worker_task.cancel()
-        try:
-            await _worker_task
-        except asyncio.CancelledError:
-            pass
-        _worker_task = None
-        logger.info("Memory queue worker stopped")
+    async with _worker_lock:
+        if _worker_task and not _worker_task.done():
+            _worker_task.cancel()
+            try:
+                await _worker_task
+            except asyncio.CancelledError:
+                pass
+            _worker_task = None
+            logger.info("Memory queue worker stopped")

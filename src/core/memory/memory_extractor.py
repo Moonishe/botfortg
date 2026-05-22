@@ -6,6 +6,7 @@
 
 import json
 import logging
+import re
 
 from src.core.contacts.chat_service import message_to_text
 from src.db.models import Contact, Message
@@ -54,10 +55,12 @@ MEMORIES_SYSTEM = (
 )
 
 
-def _parse_json_array(text: str) -> list[dict]:
+def _parse_json_array(text: str | None) -> list[dict]:
+    if text is None:
+        return []
     text = text.strip()
     if text.startswith("```"):
-        text = text.strip("`")
+        text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
@@ -87,20 +90,24 @@ async def extract_and_save_memories(
 
     Возвращает количество найденных фактов.
     """
-    if contact is None:
-        return 0
-
     # Строим транскрипт из сообщений, если не передан готовый
     if transcript is None and messages:
         transcript = "\n".join(message_to_text(m) for m in messages)
     if not transcript:
         return 0
 
-    user_prompt = (
-        f"Собеседник: {contact.display_name}.\n"
-        "Извлеки важные факты о собеседнике из этой переписки:\n\n"
-        f"{transcript}"
-    )
+    if contact is not None:
+        user_prompt = (
+            f"Собеседник: {contact.display_name}.\n"
+            "Извлеки важные факты о собеседнике из этой переписки:\n\n"
+            f"{transcript}"
+        )
+    else:
+        user_prompt = (
+            "Извлеки важные факты о пользователе (его предпочтения, личные данные, задачи) "
+            "из этой переписки:\n\n"
+            f"{transcript}"
+        )
 
     try:
         raw = await provider.chat(
@@ -202,6 +209,6 @@ async def extract_and_save_memories(
         "Extracted %d facts for user %d, contact %s (enqueued for save)",
         len(valid_facts),
         telegram_id,
-        contact.display_name,
+        contact.display_name if contact else "self",
     )
     return len(valid_facts)

@@ -4,7 +4,6 @@
 """
 
 import logging
-from datetime import datetime, timezone
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
@@ -13,7 +12,7 @@ from aiogram.types import Message
 from src.bot.filters import OwnerOnly
 from src.core.contacts.contact_resolver import resolve
 from src.core.actions.conflict_resolver import find_conflicts
-from src.db.repo import get_contact, get_or_create_user, list_memories, get_memory_graph
+from src.db.repo import get_or_create_user, list_memories, get_memory_graph
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
 

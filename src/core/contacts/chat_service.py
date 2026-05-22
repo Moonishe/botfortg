@@ -109,7 +109,9 @@ async def _process_one(
             logger.exception("transcription failed for msg %s", msg.id)
 
     elif kind == "document" and parse_docs:
-        filename = getattr(msg.file, "name", None) or f"{msg.id}.bin"
+        raw_name = getattr(msg.file, "name", None) or f"{msg.id}.bin"
+        # Sanitize: strip directory components, dangerous chars, limit length
+        filename = Path(raw_name).name[:128].replace("\\", "_").replace("\0", "_")
         if is_supported(filename):
             try:
                 target = media_root / f"{peer_id}_{msg.id}_{filename}"
@@ -333,7 +335,6 @@ async def sweep_orphaned_media() -> int:
     """Удаляет осиротевшие .ogg/.pdf/.docx в data/media/.
     Файл считается осиротевшим, если в БД у этого сообщения уже есть транскрипт.
     Возвращает количество удалённых файлов."""
-    from sqlalchemy import or_
 
     from src.db.models import Message
     from src.db.session import get_session

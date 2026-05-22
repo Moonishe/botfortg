@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from src.core.intelligence.soul_blocks import _load_blocks
+from src.core.intelligence.soul_blocks import ANTI_AI_BLOCK, _load_blocks
 from src.db.repo import get_or_create_user, get_self_profile
 from src.db.session import get_session
 
@@ -60,10 +60,13 @@ class AssemblyContext:
     memory_context: str = ""
     deep_memory: str = ""
     persona_block: str = ""
+    style_match_block: str = ""
     confirmed_rules: list = field(default_factory=list)
     preview_candidates: list = field(default_factory=list)
     rag_context: str = ""
     skill_index: str = ""
+    # Anti-AI humanizer
+    anti_ai: bool = True
     # Дополнительные поля для agent target
     now_local: str = ""
     tz_name: str = ""
@@ -89,7 +92,9 @@ class PromptAssembler:
         if target == "maestro":
             return (
                 self._blocks["stable_maestro_core"]
-                + "\n"
+                + "\n\n"
+                + self._blocks["stable_maestro_convictions"]
+                + "\n\n"
                 + self._blocks["stable_maestro_safety"]
             )
         elif target == "agent":
@@ -109,9 +114,17 @@ class PromptAssembler:
             parts.append(self._blocks["context_agent_intents"])
             parts.append(self._blocks["context_agent_format"])
 
+        # Anti-AI block (controlled by per-user setting)
+        if ctx.anti_ai:
+            parts.append(ANTI_AI_BLOCK)
+
         # Persona block (из adaptive_persona)
         if ctx.persona_block:
             parts.append(ctx.persona_block)
+
+        # Style‑match block (динамический анализ стиля пользователя)
+        if ctx.style_match_block:
+            parts.append(ctx.style_match_block)
 
         # Confirmed rules (из adaptive_instructions)
         if ctx.confirmed_rules:

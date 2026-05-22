@@ -2,10 +2,11 @@
 
 import json
 import logging
+import re
 from datetime import datetime
 
 from src.core.contacts.chat_service import message_to_text
-from src.db.models import Contact, Message
+from src.db.models import Message
 from src.db.repo import add_commitment, add_memory, get_or_create_user, search_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
@@ -32,7 +33,7 @@ COMMITMENTS_SYSTEM = (
 def _parse_json_array(text: str) -> list[dict]:
     text = text.strip()
     if text.startswith("```"):
-        text = text.strip("`")
+        text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
@@ -110,7 +111,7 @@ async def extract_and_save_commitments(
             similar = await search_memories(session, owner, text)
             source_memory_id = similar[0].id if similar else None
 
-            c = await add_commitment(
+            await add_commitment(
                 session,
                 user_id=owner.id,
                 peer_id=contact_peer_id,

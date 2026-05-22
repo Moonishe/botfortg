@@ -166,6 +166,10 @@ async def send_digest(owner_telegram_id: int) -> None:
     )
 
 
+from src.core.infra.task_manager import task_manager
+
+
+@task_manager.task("digest-scheduler")
 async def digest_scheduler_loop() -> None:
     """Каждую минуту проверяет, пора ли отправлять дайджест.
     Сравнение времени — в TZ владельца (UserSettings.timezone)."""
@@ -183,9 +187,15 @@ async def digest_scheduler_loop() -> None:
             local_now = now_in_tz(tz_name)
             current_hm = local_now.strftime("%H:%M")
             current_day = local_now.strftime("%Y-%m-%d")
+            # Normalize target_hm to HH:MM (handle "9:00" vs "09:00")
+            try:
+                th, tm = target_hm.split(":")
+                target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
+            except (ValueError, AttributeError):
+                target_hm_normalized = target_hm
             if (
                 enabled
-                and target_hm == current_hm
+                and target_hm_normalized == current_hm
                 and last_sent.get(owner_id) != current_day
             ):
                 await send_digest(owner_id)

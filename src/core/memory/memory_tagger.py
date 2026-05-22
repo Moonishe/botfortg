@@ -3,6 +3,7 @@
 import json
 import logging
 
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import get_or_create_user, list_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage
@@ -23,6 +24,8 @@ DEFAULT_TAGS = [
     "планы",
 ]
 
+BATCH_SIZE = 10
+
 TAGGING_PROMPT = """Проставь теги для факта памяти. 
 Доступные теги: {available_tags}
 Можно выбрать 1-3 тега, только если они точно подходят.
@@ -30,6 +33,15 @@ TAGGING_PROMPT = """Проставь теги для факта памяти.
 Факт: {fact}
 
 Верни ТОЛЬКО JSON: {{"tags": ["тег1", "тег2"]}}"""
+
+TAGGING_BATCH_PROMPT = """Проставь теги для каждого факта. 
+Доступные теги: {available_tags}
+Можно выбрать 1-3 тега на факт.
+
+Факты:
+{numbered_facts}
+
+Верни ТОЛЬКО JSON: {{"results": [["тег1", "тег2"], ["тег3"], ...]}}"""
 
 
 async def tag_fact(
@@ -49,7 +61,8 @@ async def tag_fact(
                 ChatMessage(
                     role="user",
                     content=TAGGING_PROMPT.format(
-                        available_tags=", ".join(tags_list), fact=fact[:200]
+                        available_tags=", ".join(tags_list),
+                        fact=fact[:200].replace("{", "{{").replace("}", "}}"),
                     ),
                 ),
             ],
@@ -80,6 +93,70 @@ async def tag_fact(
     return []
 
 
+async def tag_facts_batch(
+    provider, facts: list[str], available_tags: list[str] | None = None
+) -> list[list[str]]:
+    """LLM проставляет теги для нескольких фактов за один вызов."""
+    if not provider or not facts:
+        return []
+    tags_list = available_tags or DEFAULT_TAGS
+    numbered = "\n".join(f"{i + 1}. {f[:200]}" for i, f in enumerate(facts))
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(
+                    role="system",
+                    content="Ты — классификатор. Отвечай ТОЛЬКО JSON.",
+                ),
+                ChatMessage(
+                    role="user",
+                    content=TAGGING_BATCH_PROMPT.format(
+                        available_tags=", ".join(tags_list),
+                        numbered_facts=numbered.replace("{", "{{").replace("}", "}}"),
+                    ),
+                ),
+            ],
+            heavy=False,
+        )
+    except Exception:
+        logger.exception("Batch tagging LLM call failed for %d facts", len(facts))
+        return []
+    import re
+
+    raw = raw.strip()
+    raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
+    raw = re.sub(r"\n?\s*```\s*$", "", raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if not m:
+            return []
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return []
+    results = data.get("results", [])
+    valid_set = set(tags_list or DEFAULT_TAGS)
+    if not isinstance(results, list):
+        return []
+    out = []
+    for r in results[: len(facts)]:
+        if isinstance(r, list):
+            out.append(
+                [
+                    t.strip().lower()
+                    for t in r
+                    if isinstance(t, str) and t.strip().lower() in valid_set
+                ]
+            )
+        else:
+            out.append([])
+    while len(out) < len(facts):
+        out.append([])
+    return out
+
+
 async def tag_all_untagged(owner_id: int) -> int:
     """Проставляет теги для всех нетэгированных фактов."""
     async with get_session() as session:
@@ -94,11 +171,25 @@ async def tag_all_untagged(owner_id: int) -> int:
             if m.is_active and m.fact and not m.tags and len(m.fact) >= 10
         ]
         tagged = 0
-        for m in untagged:
-            tags = await tag_fact(provider, m.fact)
-            if tags:
-                m.tags = ",".join(tags)
-                tagged += 1
+        MAX_TAG_PER_CYCLE = 30
+        to_process = untagged[:MAX_TAG_PER_CYCLE]
+
+        for i in range(0, len(to_process), BATCH_SIZE):
+            batch = to_process[i : i + BATCH_SIZE]
+            facts = [m.fact for m in batch]
+            batch_tags = await tag_facts_batch(provider, facts)
+            if batch_tags:
+                for m, tags in zip(batch, batch_tags):
+                    if tags:
+                        m.tags = "|".join(tags)
+                        tagged += 1
+            else:
+                for m in batch:
+                    tags = await tag_fact(provider, m.fact)
+                    if tags:
+                        m.tags = "|".join(tags)
+                        tagged += 1
+
         if tagged > 0:
             await session.commit()
         return tagged
@@ -112,7 +203,7 @@ async def tag_new_fact(provider, session, memory_id: int) -> None:
     if mem and mem.fact and not mem.tags and len(mem.fact) >= 10:
         tags = await tag_fact(provider, mem.fact)
         if tags:
-            mem.tags = ",".join(tags)
+            mem.tags = "|".join(tags)
             await session.flush()
 
 
@@ -126,8 +217,8 @@ async def search_by_tag(session, owner, tag: str) -> list:
         select(Memory)
         .where(
             Memory.user_id == owner.id,
-            Memory.is_active == True,
-            Memory.tags.ilike(f"%{tag}%"),
+            Memory.is_active,
+            Memory.tags.icontains(tag),
         )
         .order_by(Memory.created_at.desc())
     )
@@ -137,11 +228,11 @@ async def search_by_tag(session, owner, tag: str) -> list:
 def format_tagged(memories: list, tag: str) -> str:
     """Форматирует факты по тегу."""
     if not memories:
-        return f"🏷 Нет фактов с тегом «{tag}»."
-    lines = [f"<b>🏷 Тег: {tag}</b> ({len(memories)} фактов)", ""]
+        return f"🏷 Нет фактов с тегом «{sanitize_html(tag)}»."
+    lines = [f"<b>🏷 Тег: {sanitize_html(tag)}</b> ({len(memories)} фактов)", ""]
     for m in memories[:15]:
-        tags_str = f" [{m.tags}]" if m.tags else ""
-        lines.append(f"• {m.fact[:100]}{tags_str}")
+        tags_str = f" [{sanitize_html(m.tags)}]" if m.tags else ""
+        lines.append(f"• {sanitize_html(m.fact[:100])}{tags_str}")
     return "\n".join(lines)
 
 
@@ -153,7 +244,7 @@ async def get_tag_stats(owner_id: int) -> dict:
         tag_counts: dict[str, int] = {}
         for m in memories:
             if m.is_active and m.tags:
-                for t in m.tags.split(","):
+                for t in (m.tags or "").replace(",", "|").split("|"):
                     t = t.strip().lower()
                     if t:
                         tag_counts[t] = tag_counts.get(t, 0) + 1

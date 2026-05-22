@@ -205,7 +205,7 @@ async def classify_message_llm(
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("\n", 1)[0]
         if raw.startswith("```"):
-            raw = raw.strip("`")
+            raw = re.sub(r"^```[a-z]*\s*|\s*```$", "", raw).strip()
         data = json.loads(raw)
         urgency = data.get("urgency", "normal")
         if urgency in ("urgent", "important", "normal"):

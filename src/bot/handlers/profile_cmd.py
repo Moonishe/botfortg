@@ -203,7 +203,7 @@ def _format_contact_profile(
         questions = _load_profile_json(profile.open_questions)
         if questions:
             items = questions if isinstance(questions, list) else [questions]
-            lines.append(f"<b>❓ Открытые вопросы:</b>")
+            lines.append("<b>❓ Открытые вопросы:</b>")
             for q in items[:3]:
                 lines.append(f"  • {q}")
 
@@ -248,7 +248,7 @@ async def cmd_profile(
 
         contact = await get_contact(session, owner, peer_id)
         if contact is None:
-            await message.answer(f"🙅 Контакт не найден в БД. Попробуй /sync.")
+            await message.answer("🙅 Контакт не найден в БД. Попробуй /sync.")
             return
 
         profile = await get_contact_profile(session, owner, peer_id)
@@ -359,7 +359,7 @@ async def cb_profile_rebuild(
     questions = profile_data.get("open_questions")
     if questions:
         items = questions if isinstance(questions, list) else [questions]
-        lines.append(f"<b>❓ Открытые вопросы:</b>")
+        lines.append("<b>❓ Открытые вопросы:</b>")
         for q in items[:3]:
             lines.append(f"  • {q}")
 

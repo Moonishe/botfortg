@@ -1,7 +1,7 @@
 """Memory Fuel Gauge — отслеживает «истощение» памяти по контактам."""
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from src.db.repo import get_or_create_user, list_contacts, list_memories
 from src.db.session import get_session
@@ -54,7 +54,7 @@ async def get_fuel_stats(owner_id: int) -> dict:
             # Последняя дата среди фактов
             dates = [f.created_at for f in facts if f.created_at]
             last_fact = max(dates) if dates else now
-            avg_conf = sum(f.confidence for f in facts) / len(facts)
+            avg_conf = sum(f.confidence or 0 for f in facts) / len(facts)
             days_since = (now - last_fact).days
 
             # Истощён: >14 дней без новых фактов ИЛИ средний confidence < 0.3

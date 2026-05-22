@@ -28,50 +28,11 @@ class PendingLogin:
 _MANAGER_SINGLETON: "UserbotManager | None" = None
 
 
-async def _retry_after_floodwait(
-    telegram_id: int,
-    session_string: str,
-    api_id: int,
-    api_hash: str,
-    delay: float,
-) -> None:
-    """Ждёт FloodWait и переподключает клиента."""
-    await asyncio.sleep(delay)
-    logger.info("Retrying after FloodWait for %s", telegram_id)
-    mgr = _MANAGER_SINGLETON
-    if mgr is None:
-        return
-    client = TelegramClient(
-        StringSession(session_string),
-        api_id,
-        api_hash,
-        proxy=parse_telethon_proxy(settings.proxy_url),
-    )
-    try:
-        await client.connect()
-        if await client.is_user_authorized():
-            mgr._clients[telegram_id] = client
-            from src.userbot.auto_reply import attach_auto_reply
-            from src.userbot.dialog_events import attach_dialog_event_handlers
-            from src.userbot.mirror import attach_mirror
-
-            attach_auto_reply(client, telegram_id)
-            attach_dialog_event_handlers(client, telegram_id)
-            attach_mirror(client, telegram_id)
-            logger.info("FloodWait retry succeeded for %s", telegram_id)
-        else:
-            await client.disconnect()
-            logger.warning("FloodWait retry: session expired for %s", telegram_id)
-    except Exception:
-        logger.exception("FloodWait retry failed for %s", telegram_id)
-        if client.is_connected():
-            await client.disconnect()
-
-
 @dataclass
 class UserbotManager:
     _clients: dict[int, TelegramClient] = field(default_factory=dict)
     _pending: dict[int, PendingLogin] = field(default_factory=dict)
+    _retry_tasks: set[asyncio.Task] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         global _MANAGER_SINGLETON
@@ -116,7 +77,9 @@ class UserbotManager:
                             "Saved session for %s is not authorized anymore",
                             user.telegram_id,
                         )
-                        from src.core.scheduling.notification_queue import notification_queue
+                        from src.core.scheduling.notification_queue import (
+                            notification_queue,
+                        )
 
                         await notification_queue.enqueue(
                             topic=f"userbot:{user.telegram_id}",
@@ -125,21 +88,33 @@ class UserbotManager:
                         )
                 except FloodWaitError as e:
                     logger.warning(
-                        "FloodWait %ds for user %s, scheduling retry",
+                        "FloodWait %ds for user %s, sleeping...",
                         e.seconds,
                         user.telegram_id,
                     )
-                    if client.is_connected():
-                        await client.disconnect()
-                    asyncio.create_task(
-                        _retry_after_floodwait(
-                            telegram_id=user.telegram_id,
-                            session_string=session_string,
-                            api_id=api_id,
-                            api_hash=api_hash,
-                            delay=e.seconds,
+                    await asyncio.sleep(e.seconds)
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        self._clients[user.telegram_id] = client
+                        from src.userbot.auto_reply import attach_auto_reply
+                        from src.userbot.dialog_events import (
+                            attach_dialog_event_handlers,
                         )
-                    )
+                        from src.userbot.mirror import attach_mirror
+
+                        attach_auto_reply(client, user.telegram_id)
+                        attach_dialog_event_handlers(client, user.telegram_id)
+                        attach_mirror(client, user.telegram_id)
+                        logger.info(
+                            "FloodWait retry succeeded for user %s",
+                            user.telegram_id,
+                        )
+                    else:
+                        await client.disconnect()
+                        logger.warning(
+                            "FloodWait retry: session expired for %s",
+                            user.telegram_id,
+                        )
                 except Exception:
                     logger.exception(
                         "Failed to restore client for user %s", user.telegram_id
@@ -161,7 +136,7 @@ class UserbotManager:
         attach_mirror(client, telegram_id)
 
     async def remove_client(self, telegram_id: int) -> None:
-        client = self._clients.pop(telegram_id, None)
+        client = self._clients.get(telegram_id)
         if client is not None:
             try:
                 await client.log_out()
@@ -171,6 +146,8 @@ class UserbotManager:
                 await client.disconnect()
             except Exception:
                 logger.exception("userbot disconnect failed")
+            finally:
+                self._clients.pop(telegram_id, None)
 
     def start_pending(
         self, telegram_id: int, api_id: int, api_hash: str
@@ -198,3 +175,32 @@ class UserbotManager:
 
     def clear_pending(self, telegram_id: int) -> PendingLogin | None:
         return self._pending.pop(telegram_id, None)
+
+    async def shutdown(self) -> None:
+        """Shutdown the manager — cancel retry tasks, disconnect all clients and pending logins."""
+        logger.info("Shutting down UserbotManager")
+
+        # 1. Cancel all pending FloodWait retry tasks
+        for task in self._retry_tasks:
+            task.cancel()
+        if self._retry_tasks:
+            await asyncio.gather(*self._retry_tasks, return_exceptions=True)
+        self._retry_tasks.clear()
+
+        # 2. Disconnect all active clients
+        for tg_id, client in list(self._clients.items()):
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.exception("Error disconnecting client %s", tg_id)
+        self._clients.clear()
+
+        # 3. Cancel all pending logins
+        for tg_id, pending in list(self._pending.items()):
+            try:
+                await pending.client.disconnect()
+            except Exception:
+                logger.exception("Error disconnecting pending client %s", tg_id)
+        self._pending.clear()
+
+        logger.info("UserbotManager shutdown complete")

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ.setdefault("ENCRYPTION_KEY", "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=")
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
@@ -16,7 +16,7 @@ os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from src.core.actions.vector_store import VectorStore, get_vector_store
-from src.config import Settings, settings
+from src.config import Settings
 
 
 # ---------------------------------------------------------------------------

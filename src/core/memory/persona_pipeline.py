@@ -7,7 +7,7 @@ adapted for TelegramHelper's simpler architecture.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from src.config import settings
 from src.db.repo import count_new_personal_facts_since, get_self_profile

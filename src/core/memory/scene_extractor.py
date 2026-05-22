@@ -13,10 +13,10 @@ import logging
 import re
 from typing import Any
 
+from src.llm.base import ChatMessage
 from src.llm.router import build_provider
 from src.db.session import get_session
-from src.db.repo import get_or_create_user, upsert_memory_cluster, add_member
-from src.config import settings
+from src.db.repo import get_or_create_user
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +113,10 @@ async def generate_scene_narrative(
 
     try:
         response = await provider.chat(
-            system=SCENE_SYSTEM_PROMPT,
-            user=user_prompt,
-            temperature=0.5,
-            purpose="background",
+            [
+                ChatMessage(role="system", content=SCENE_SYSTEM_PROMPT),
+                ChatMessage(role="user", content=user_prompt),
+            ],
         )
     except Exception:
         logger.exception("LLM call failed for scene extraction")
@@ -154,50 +154,65 @@ async def extract_scenes_for_user(telegram_id: int) -> int:
     Returns:
         Number of scenes generated.
     """
-    from src.db.repo import list_clusters_for_contact as _list_clusters
-    from src.db.repo import get_cluster_members as _get_members
+    from collections import defaultdict
     from sqlalchemy import select
-    from src.db.models import MemoryCluster, MemoryClusterMember
+    from src.db.models import Memory, MemoryCluster, MemoryClusterMember
 
     generated = 0
 
     try:
         async with get_session() as session:
+            # Resolve telegram_id → DB user_id (MemoryCluster.user_id is FK to users.id)
+            owner = await get_or_create_user(session, telegram_id)
             # Get all clusters for user
             result = await session.execute(
                 select(MemoryCluster).where(
-                    MemoryCluster.user_id == telegram_id,
+                    MemoryCluster.user_id == owner.id,
                     MemoryCluster.fact_count >= 3,
                 )
             )
             clusters = result.scalars().all()
 
-            for cluster in clusters:
-                # Get facts in this cluster
-                member_result = await session.execute(
-                    select(MemoryClusterMember).where(
-                        MemoryClusterMember.cluster_id == cluster.id,
-                    )
+            if not clusters:
+                return 0
+
+            # Batch 1: load all cluster members in one query
+            cluster_ids = [c.id for c in clusters]
+            members_result = await session.execute(
+                select(MemoryClusterMember).where(
+                    MemoryClusterMember.cluster_id.in_(cluster_ids),
                 )
-                members = member_result.scalars().all()
+            )
+            all_members = members_result.scalars().all()
+
+            # Group members by cluster_id and collect all memory_ids
+            members_by_cluster: dict[int, list[MemoryClusterMember]] = defaultdict(list)
+            memory_ids: set[int] = set()
+            for mbr in all_members:
+                members_by_cluster[mbr.cluster_id].append(mbr)
+                memory_ids.add(mbr.memory_id)
+
+            # Batch 2: load all memories in one query
+            if memory_ids:
+                memories_result = await session.execute(
+                    select(Memory).where(Memory.id.in_(list(memory_ids)))
+                )
+                all_memories = memories_result.scalars().all()
+                memories_by_id = {m.id: m for m in all_memories}
+            else:
+                memories_by_id = {}
+
+            for cluster in clusters:
+                members = members_by_cluster.get(cluster.id, [])
 
                 fact_texts: list[str] = []
                 contact_id: int | None = None
                 for mbr in members:
-                    # Get Memory.fact via relationship or direct query
-                    from src.db.models import Memory
-
-                    mem_result = await session.execute(
-                        select(Memory.fact).where(Memory.id == mbr.memory_id)
-                    )
-                    row = mem_result.first()
-                    if row:
-                        fact_texts.append(row[0])
-                    if contact_id is None:
-                        # Infer contact_id from first member's memory
-                        mem_full = await session.get(Memory, mbr.memory_id)
-                        if mem_full:
-                            contact_id = mem_full.contact_id
+                    mem = memories_by_id.get(mbr.memory_id)
+                    if mem:
+                        fact_texts.append(mem.fact)
+                        if contact_id is None:
+                            contact_id = mem.contact_id
 
                 if len(fact_texts) < 3:
                     continue
@@ -212,7 +227,6 @@ async def extract_scenes_for_user(telegram_id: int) -> int:
                 if scene:
                     cluster.summary = scene["narrative"]
                     cluster.fact_count = len(fact_texts)
-                    await session.commit()
                     generated += 1
                     logger.info(
                         "Scene generated: cluster=%d topic=%s title=%s",

@@ -1,6 +1,8 @@
 import asyncio
 
+import httpx
 from google import genai
+from google.genai import errors as genai_errors
 
 from src.config import LLMDefaults
 from src.llm.base import ChatMessage
@@ -32,8 +34,14 @@ class GeminiProvider:
                 # пагинированный итератор; первый элемент достаточен
                 next(iter(self._client.models.list()))
                 return True
+            except genai_errors.ClientError as e:
+                if e.code in (401, 403):
+                    return False  # invalid/revoked key or permission denied
+                raise  # other client errors (429, etc.) — let caller retry
+            except (httpx.TimeoutException, httpx.ConnectError):
+                raise  # network issue — let caller retry
             except Exception:
-                return False
+                return False  # unknown error — assume invalid
 
         return await asyncio.to_thread(_check)
 
@@ -71,6 +79,9 @@ class GeminiProvider:
         result = await asyncio.to_thread(_call)
         cache_set(text, result, LLMDefaults.GEMINI_EMBED)
         return result
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._client.close)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         from src.core.actions.embedding_cache import get as cache_get, set as cache_set

@@ -192,3 +192,11 @@ async def conflict_predictor_loop(owner_id: int) -> None:
         except Exception as e:
             logger.exception("Conflict predictor error: %s", e)
         await asyncio.sleep(settings.conflict_predictor_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "conflict-predictor", partial(conflict_predictor_loop, settings.owner_telegram_id)
+)

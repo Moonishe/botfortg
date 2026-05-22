@@ -178,7 +178,7 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
                 lines.append("")
                 lines.append("<b>🔗 Связанные факты:</b>")
                 for lm in linked[:3]:
-                    rel_label = {
+                    _rel_label = {
                         "cause": "причина",
                         "effect": "следствие",
                         "contradicts": "противоречие",

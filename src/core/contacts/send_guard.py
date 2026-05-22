@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.temporal_layers import utc_naive, utcnow_naive
 from src.db.session import get_session
 from src.db.repo import (
@@ -18,6 +20,7 @@ from src.db.repo import (
 logger = logging.getLogger(__name__)
 
 _undo_buffer: dict[int, list] = {}
+_undo_lock = asyncio.Lock()
 
 
 @dataclass
@@ -64,7 +67,7 @@ async def build_send_guard(
             result.risk_level = "high"
             neg_texts = "; ".join(m.fact[:50] for m in neg[:3])
             result.warnings.append(
-                f"За последние 2 недели негативные факты о {name}: {neg_texts}"
+                f"За последние 2 недели негативные факты о {sanitize_html(name)}: {sanitize_html(neg_texts)}"
             )
 
         try:
@@ -72,7 +75,7 @@ async def build_send_guard(
             if prof:
                 if prof.communication_style:
                     result.profile_hints.append(
-                        f"Стиль: {prof.communication_style[:60]}"
+                        f"Стиль: {sanitize_html(prof.communication_style[:60])}"
                     )
                 if prof.communication_dos:
                     import json as _j
@@ -83,7 +86,9 @@ async def build_send_guard(
                         else [prof.communication_dos]
                     )
                     if dos:
-                        result.profile_hints.append(f"✅ {', '.join(dos[:3])}")
+                        result.profile_hints.append(
+                            f"✅ {sanitize_html(', '.join(dos[:3]))}"
+                        )
                 if prof.communication_donts:
                     import json as _j
 
@@ -93,7 +98,9 @@ async def build_send_guard(
                         else [prof.communication_donts]
                     )
                     if donts:
-                        result.profile_hints.append(f"❌ {', '.join(donts[:3])}")
+                        result.profile_hints.append(
+                            f"❌ {sanitize_html(', '.join(donts[:3]))}"
+                        )
                 if prof.sensitivity and prof.sensitivity > 0.7:
                     result.risk_level = "high"
                     result.warnings.append(
@@ -111,24 +118,28 @@ async def build_send_guard(
     return result
 
 
-def store_undo(telegram_id: int, peer_id: int, message_id: int, text: str) -> None:
-    if telegram_id not in _undo_buffer:
-        _undo_buffer[telegram_id] = []
-    _undo_buffer[telegram_id].append(
-        (peer_id, message_id, text, datetime.now(timezone.utc))
-    )
-    _undo_buffer[telegram_id] = [
-        (p, m, t, ts)
-        for p, m, t, ts in _undo_buffer[telegram_id]
-        if (datetime.now(timezone.utc) - ts).total_seconds() < 300
-    ]
+async def store_undo(
+    telegram_id: int, peer_id: int, message_id: int, text: str
+) -> None:
+    async with _undo_lock:
+        if telegram_id not in _undo_buffer:
+            _undo_buffer[telegram_id] = []
+        _undo_buffer[telegram_id].append(
+            (peer_id, message_id, text, datetime.now(timezone.utc))
+        )
+        _undo_buffer[telegram_id] = [
+            (p, m, t, ts)
+            for p, m, t, ts in _undo_buffer[telegram_id]
+            if (datetime.now(timezone.utc) - ts).total_seconds() < 300
+        ]
 
 
-def get_undo(telegram_id: int) -> tuple | None:
-    if telegram_id not in _undo_buffer or not _undo_buffer[telegram_id]:
-        return None
-    last = _undo_buffer[telegram_id][-1]
-    age = (datetime.now(timezone.utc) - last[3]).total_seconds()
-    if age > 60:
-        return None
-    return last
+async def get_undo(telegram_id: int) -> tuple | None:
+    async with _undo_lock:
+        if telegram_id not in _undo_buffer or not _undo_buffer[telegram_id]:
+            return None
+        last = _undo_buffer[telegram_id][-1]
+        age = (datetime.now(timezone.utc) - last[3]).total_seconds()
+        if age > 60:
+            return None
+        return last

@@ -14,19 +14,16 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.session import get_session
 from src.db.repo import (
     get_or_create_user,
     get_contact,
-    get_self_profile,
     list_open_commitments,
-    list_memories,
-    get_memory_stats,
     list_memory_candidates,
 )
 from src.core.contacts.reply_radar import collect_reply_radar, format_radar, RadarItem
 from src.core.memory.memory_health import calculate_health_score, format_health_compact
-from src.core.memory.memory_fuel import get_fuel_stats, format_fuel_line
 from src.core.memory.temporal_layers import utc_naive, utcnow_naive
 
 logger = logging.getLogger(__name__)
@@ -77,8 +74,7 @@ async def cmd_today(message: Message):
             for c in commits
             if c.deadline_at
             and utc_naive(c.deadline_at) >= now
-            and utc_naive(c.deadline_at)
-            <= now.replace(hour=23, minute=59, second=59)
+            and utc_naive(c.deadline_at) <= now.replace(hour=23, minute=59, second=59)
         ][:3]
 
         # Memory inbox
@@ -101,11 +97,11 @@ async def cmd_today(message: Message):
             )
             window = f" 🕐 {item.reply_window}" if item.reply_window else ""
             lines.append(
-                f"{risk} <b>{item.contact_name}</b> — {item.waiting_hours:.0f}ч [{item.score}]{window}"
+                f"{risk} <b>{sanitize_html(item.contact_name)}</b> — {item.waiting_hours:.0f}ч [{item.score}]{window}"
             )
             if item.latest_snippet:
-                lines.append(f"   «{item.latest_snippet[:80]}»")
-            lines.append(f"   <i>{item.reason}</i>")
+                lines.append(f"   «{sanitize_html(item.latest_snippet[:80])}»")
+            lines.append(f"   <i>{sanitize_html(item.reason)}</i>")
         lines.append("")
     else:
         lines.append("✅ <b>Нет срочных ответов.</b>")
@@ -146,7 +142,7 @@ async def cmd_today(message: Message):
         for item in radar[:3]:
             await message.answer(
                 f"{'🔴' if item.risk_level == 'high' else '🟡' if item.risk_level == 'medium' else '🟢'} "
-                f"<b>{item.contact_name}</b> — {item.waiting_hours:.0f}ч ({item.unread_count} непроч.)",
+                f"<b>{sanitize_html(item.contact_name)}</b> — {item.waiting_hours:.0f}ч ({item.unread_count} непроч.)",
                 reply_markup=_radar_keyboard(item),
             )
 
@@ -158,11 +154,11 @@ async def cmd_radar(message: Message):
     """Только Reply Radar — быстрый срез."""
     radar = await collect_reply_radar(message.from_user.id, limit=5)
     text = format_radar(radar)
-    await message.answer(text)
+    await message.answer(sanitize_html(text))
     if radar:
         for item in radar[:3]:
             await message.answer(
-                f"<b>{item.contact_name}</b> — {item.score} баллов",
+                f"<b>{sanitize_html(item.contact_name)}</b> — {item.score} баллов",
                 reply_markup=_radar_keyboard(item),
             )
 
@@ -184,19 +180,19 @@ async def cb_radar_why(callback: CallbackQuery):
         return
 
     lines = [
-        f"<b>🤔 Почему {name} в радаре?</b>",
+        f"<b>🤔 Почему {sanitize_html(name)} в радаре?</b>",
         f"Баллы: <b>{item.score}</b>",
         f"Риск: <b>{item.risk_level}</b>",
         f"Ждёт: {item.waiting_hours:.0f}ч",
         f"Непрочитано: {item.unread_count}",
-        f"Причина: {item.reason}",
+        f"Причина: {sanitize_html(item.reason)}",
     ]
     if item.latest_snippet:
-        lines.append(f"Последнее: «{item.latest_snippet}»")
+        lines.append(f"Последнее: «{sanitize_html(item.latest_snippet)}»")
     if item.memory_hints:
         lines.append("Факты памяти:")
         for h in item.memory_hints:
-            lines.append(f"• {h}")
+            lines.append(f"• {sanitize_html(h)}")
     if item.reply_window:
         lines.append(f"Лучшее время ответа: {item.reply_window}")
     await callback.message.answer("\n".join(lines))
@@ -232,7 +228,7 @@ async def cb_radar_snooze(callback: CallbackQuery):
 async def _daily_reply_streak(telegram_id: int) -> str:
     """Считает сколько дней подряд владелец отвечал в течение суток."""
     from src.db.models import ConversationState
-    from sqlalchemy import select, func
+    from sqlalchemy import select
 
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)

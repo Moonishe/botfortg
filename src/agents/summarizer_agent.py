@@ -30,13 +30,17 @@ async def summarize(provider, messages_text: str) -> dict[str, Any]:
 
     user_msg = f"Переписка:\n{messages_text[:4000]}"
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=SUMMARY_SYSTEM),
-            ChatMessage(role="user", content=user_msg),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=SUMMARY_SYSTEM),
+                ChatMessage(role="user", content=user_msg),
+            ],
+            heavy=False,
+        )
+    except Exception as e:
+        logger.error("Summarizer agent LLM error: %s", e)
+        return {"summary": "Не удалось сделать саммари."}
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)

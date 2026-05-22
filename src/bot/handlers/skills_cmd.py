@@ -10,6 +10,7 @@ from src.db.repo import (
     list_skills,
     set_skill_enabled,
     get_skill_by_name,
+    upsert_skill,
 )
 from src.db.session import get_session
 
@@ -25,15 +26,90 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
 
+        # Feature 3: /skills yaml add <name> ---\nkey: value\n---
+        if parts and parts[0] == "yaml" and len(parts) > 1:
+            yaml_args = parts[1].split(maxsplit=1)
+            if len(yaml_args) >= 2 and yaml_args[0] == "add":
+                # name — первый токен после "add", всё остальное — description с YAML
+                name_and_yaml = yaml_args[1].split(maxsplit=1)
+                skill_name = name_and_yaml[0].strip()
+                yaml_description = (
+                    name_and_yaml[1].strip() if len(name_and_yaml) > 1 else ""
+                )
+
+                if not yaml_description:
+                    await message.answer(
+                        "⚠️ Использование: /skills yaml add &lt;name&gt; ---\\n"
+                        "tags: [tag1, tag2]\\ncategory: search\\n---\\n"
+                        "Описание навыка..."
+                    )
+                    return
+
+                # Парсим YAML frontmatter для валидации
+                try:
+                    from src.core.intelligence.skill_yaml import (
+                        extract_frontmatter_metadata,
+                    )
+
+                    yaml_meta, clean_desc = extract_frontmatter_metadata(
+                        yaml_description
+                    )
+                except Exception as e:
+                    await message.answer(f"⚠️ Ошибка парсинга YAML: {e}")
+                    return
+
+                if not yaml_meta:
+                    await message.answer(
+                        "⚠️ Не найден YAML frontmatter (---...---).\n"
+                        "Добавьте в начале описания:\n"
+                        "<code>---\ntags: [tag1]\ncategory: mycat\n---</code>"
+                    )
+                    return
+
+                try:
+                    skill = await upsert_skill(
+                        session,
+                        owner,
+                        name=skill_name[:128],
+                        description=yaml_description,
+                        trigger_patterns_json=None,
+                        body=clean_desc or yaml_description,
+                        enabled=False,
+                        review_status="proposed",
+                    )
+                    meta_str = ", ".join(f"{k}={v}" for k, v in yaml_meta.items())
+                    await message.answer(
+                        f"✅ Skill <b>{skill.name}</b> создан с YAML метаданными.\n"
+                        f"Метаданные: {meta_str}\n"
+                        f"Статус: proposed (включите через /skills enable {skill.name})"
+                    )
+                except Exception as e:
+                    await message.answer(f"⚠️ Ошибка создания навыка: {e}")
+                return
+
         if parts and parts[0] == "show" and len(parts) > 1:
             skill = await get_skill_by_name(session, owner, parts[1])
             if not skill:
                 await message.answer("Skill не найден.")
                 return
+            # Показываем YAML метаданные если есть
+            yaml_info = ""
+            import json
+
+            patterns = skill.trigger_patterns_json or []
+            for p in patterns:
+                if isinstance(p, dict) and "__yaml__" in p:
+                    yaml_info = (
+                        "\n\n<b>YAML метаданные:</b>\n<pre>"
+                        + json.dumps(p["__yaml__"], ensure_ascii=False, indent=2)
+                        + "</pre>"
+                    )
+                    break
             await message.answer(
                 f"<b>{skill.name}</b>\n"
                 f"enabled={skill.enabled} · status={skill.review_status}\n\n"
-                f"{skill.description or ''}\n\n"
+                f"{skill.description or ''}"
+                f"{yaml_info}\n\n"
                 f"<pre>{skill.body[:3000]}</pre>"
             )
             return
@@ -63,6 +139,10 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
             f"• <b>{skill.name}</b> · {state} · {skill.review_status} · "
             f"ok:{skill.success_count} err:{skill.failure_count}"
         )
-    lines.append("\n<code>/skills show name</code> · <code>/skills enable name</code> · <code>/skills disable name</code>")
+    lines.append(
+        "\n<code>/skills show name</code> · "
+        "<code>/skills enable name</code> · "
+        "<code>/skills disable name</code>\n"
+        "<code>/skills yaml add name ---\\nkey: value\\n---</code>"
+    )
     await message.answer("\n".join(lines))
-

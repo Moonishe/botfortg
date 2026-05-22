@@ -135,13 +135,16 @@ async def build_news_digest(
         topic_vec = None
 
     if topic_vec is not None:
+        texts_to_embed = [p["text"][:1500] for p in posts]
+        try:
+            vecs = await provider.embed_batch(texts_to_embed)
+        except Exception:
+            logger.exception("embed_batch failed")
+            vecs = None
         scored: list[tuple[float, dict]] = []
-        for p in posts:
-            try:
-                v = await provider.embed(p["text"][:1500])
+        if vecs is not None:
+            for p, v in zip(posts, vecs):
                 scored.append((_cosine(topic_vec, v), p))
-            except Exception:
-                continue
         scored.sort(key=lambda x: x[0], reverse=True)
         # отсекаем шум: оставляем хотя бы топ-N с положительным сходством
         relevant = [p for s, p in scored if s > 0.15][:top_k]
@@ -182,6 +185,10 @@ async def build_news_digest(
     return sanitize_html(raw)
 
 
+from src.core.infra.task_manager import task_manager
+
+
+@task_manager.task("news-scheduler")
 async def news_scheduler_loop() -> None:
     last_sent: dict[int, str] = {}
     while True:
@@ -197,8 +204,14 @@ async def news_scheduler_loop() -> None:
                     local_now = now_in_tz(tz_name)
                     current_hm = local_now.strftime("%H:%M")
                     current_day = local_now.strftime("%Y-%m-%d")
+                    # Normalize target_hm to HH:MM (handle "9:00" vs "09:00")
+                    try:
+                        th, tm = target_hm.split(":")
+                        target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
+                    except (ValueError, AttributeError):
+                        target_hm_normalized = target_hm
                     if (
-                        target_hm == current_hm
+                        target_hm_normalized == current_hm
                         and last_sent.get(owner_id) != current_day
                     ):
                         topics = await list_news_topics(

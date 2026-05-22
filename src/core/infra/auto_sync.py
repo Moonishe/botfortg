@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_SYNC_INTERVAL_SEC = 7200
 
 
+from src.core.infra.task_manager import task_manager
+
+
+@task_manager.task("auto-sync")
 async def auto_sync_loop() -> None:
     from src.userbot import get_active_telethon_client
 

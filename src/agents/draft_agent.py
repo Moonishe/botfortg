@@ -74,13 +74,21 @@ async def draft(
     parts.append("Напиши черновик ответа.")
     user_msg = "\n\n".join(parts)
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=DRAFT_SYSTEM),
-            ChatMessage(role="user", content=user_msg),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=DRAFT_SYSTEM),
+                ChatMessage(role="user", content=user_msg),
+            ],
+            heavy=False,
+        )
+    except Exception as e:
+        logger.error("Draft agent LLM error: %s", e)
+        return {
+            "draft": "Извини, не могу сейчас ответить.",
+            "tone": "neutral",
+            "reasoning": "fallback",
+        }
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)

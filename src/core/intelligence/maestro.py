@@ -1,8 +1,9 @@
 """Maestro — главный ИИ-координатор. Тяжёлая модель. Планирует и делегирует сабагентам."""
 
 from __future__ import annotations
-
 import asyncio
+import importlib
+
 import json
 import logging
 import re
@@ -10,6 +11,10 @@ from typing import Any
 
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.actions.vector_store import get_vector_store
+from src.core.intelligence.agent_orchestrator import (
+    AgentOrchestrator,
+    AGENT_SPECS,
+)
 from src.db.repo import get_or_create_user, list_contacts, search_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage
@@ -17,6 +22,10 @@ from src.llm.router import ExhaustedError
 
 
 logger = logging.getLogger(__name__)
+
+# ── Глобальный оркестратор агентов ──
+# Один экземпляр на всё приложение: кеш, health-трекинг, таймауты.
+orchestrator = AgentOrchestrator(AGENT_SPECS)
 
 MAESTRO_SYSTEM = """Ты — главный AI-ассистент владельца Telegram. Ты общаешься с ним как живой собеседник.
 
@@ -129,6 +138,7 @@ async def process(
     # --- RAG: релевантный контекст из истории переписок ---
     rag_context = ""
     if rag_enabled and owner_id is not None:
+        _owner_db_id = None
         try:
             async with get_session() as session:
                 owner_db = await get_or_create_user(session, owner_id)
@@ -188,6 +198,18 @@ async def process(
             except Exception:
                 pass
 
+        # Собираем style‑match блок (динамический анализ стиля пользователя)
+        style_match_block = ""
+        if owner_id is not None:
+            try:
+                from src.core.intelligence.style_matcher import (
+                    get_or_update_style_profile,
+                )
+
+                style_match_block = await get_or_update_style_profile(owner_id) or ""
+            except Exception:
+                logger.debug("Style matcher skipped", exc_info=True)
+
         # Собираем confirmed rules
         confirmed_rules = []
         if owner_id is not None:
@@ -198,13 +220,25 @@ async def process(
             except Exception:
                 pass
 
+        # Load anti-AI setting from user settings
+        anti_ai = False
+        if owner_id is not None:
+            try:
+                async with get_session() as _s:
+                    _owner = await get_or_create_user(_s, owner_id)
+                    anti_ai = _owner.settings.anti_ai_enabled
+            except Exception:
+                pass
+
         ctx = AssemblyContext(
             target="maestro",
             user_id=owner_id or 0,
             memory_context=memory_recall_context,
             rag_context=rag_context,
             persona_block=persona_block,
+            style_match_block=style_match_block,
             confirmed_rules=confirmed_rules,
+            anti_ai=anti_ai,
         )
         if owner_id is not None:
             try:
@@ -252,12 +286,15 @@ async def process(
                 pass
 
     try:
-        raw = await provider.chat(
-            [
-                ChatMessage(role="system", content=system),
-                ChatMessage(role="user", content=user_msg),
-            ],
-            heavy=True,
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user_msg),
+                ],
+                heavy=True,
+            ),
+            timeout=60.0,
         )
         raw = raw.strip()
         if raw.startswith("```"):
@@ -316,6 +353,98 @@ async def process(
 
 # ---- Agent dispatch table ----
 
+AGENT_REGISTRY: dict[str, tuple[str, str]] = {
+    "search": ("src.agents.search_agent", "resolve"),
+    "memory": ("src.agents.memory_agent", "recall"),
+    "urgency": ("src.core.contacts.urgency_classifier", "classify_message"),
+    "commitment": ("src.agents.commitment_agent", "extract"),
+    "summarizer": ("src.agents.summarizer_agent", "summarize"),
+    "draft": ("src.agents.draft_agent", "draft"),
+    "digest": ("src.agents.digest_agent", "build_digest"),
+    "skill_creator": ("src.agents.skill_creator_agent", "propose"),
+}
+
+
+async def _invoke_search(func, provider, query, owner_id, **kwargs):
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        contacts = await list_contacts(session, owner)
+        contact_dicts = [
+            {"id": c.peer_id, "name": c.display_name, "username": c.username}
+            for c in contacts[:50]
+        ]
+    data = await func(provider, query, contact_dicts)
+    return {"data": data, "success": True}
+
+
+async def _invoke_memory(func, provider, query, owner_id, **kwargs):
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        facts_obj = await search_memories(session, owner, query)
+        facts_list = [m.fact for m in facts_obj] if facts_obj else []
+    data = await func(provider, query, facts_list)
+    return {"data": data, "success": True}
+
+
+async def _invoke_urgency(func, _provider, query, _owner_id, **kwargs):
+    urgency = func(query)
+    return {"data": {"urgency": urgency}, "success": True}
+
+
+async def _invoke_commitment(func, provider, query, _owner_id, **kwargs):
+    data = await func(provider, query)
+    return {"data": data, "success": True}
+
+
+async def _invoke_summarizer(func, provider, query, _owner_id, **kwargs):
+    data = await func(provider, query)
+    return {"data": data, "success": True}
+
+
+async def _invoke_draft(func, provider, query, _owner_id, **kwargs):
+    agent_spec = kwargs.get("agent_spec", {})
+    contact_name = (
+        agent_spec.get("contact_name") or agent_spec.get("sender_name") or "собеседник"
+    )
+    data = await func(provider, contact_name, query)
+    return {"data": data, "success": True}
+
+
+async def _invoke_digest(func, provider, query, _owner_id, **kwargs):
+    data = await func(provider, [{"text": query}])
+    return {"data": data, "success": True}
+
+
+async def _invoke_skill_creator(func, provider, query, owner_id, **kwargs):
+    """Вызывает skill_creator агент: собирает последние сообщения и анализирует."""
+    async with get_session() as session:
+        from src.db.repo import fetch_my_messages_global
+
+        owner = await get_or_create_user(session, owner_id)
+        messages_raw = await fetch_my_messages_global(session, owner, limit=50)
+        recent_messages = [
+            {
+                "text": msg.text or "",
+                "is_outgoing": msg.is_outgoing if hasattr(msg, "is_outgoing") else True,
+                "timestamp": str(msg.date) if hasattr(msg, "date") else "",
+            }
+            for msg in messages_raw
+        ]
+    data = await func(provider, recent_messages)
+    return {"data": data, "success": True}
+
+
+_AGENT_INVOKERS: dict[str, Any] = {
+    "search": _invoke_search,
+    "memory": _invoke_memory,
+    "urgency": _invoke_urgency,
+    "commitment": _invoke_commitment,
+    "summarizer": _invoke_summarizer,
+    "draft": _invoke_draft,
+    "digest": _invoke_digest,
+    "skill_creator": _invoke_skill_creator,
+}
+
 
 def _agent_result_as_text(agent_type: str, result: dict) -> str:
     """Форматирует результат агента для вставки в промпт."""
@@ -346,73 +475,39 @@ async def _execute_agent(
     """Исполняет одного агента по спецификации из плана maestro."""
     agent_type = agent_spec.get("agent", "")
     query = agent_spec.get("query", "")
-    cache = agent_spec.get("cache", True)
-    cache_ttl = 300 if cache else 0
 
+    agent_info = AGENT_REGISTRY.get(agent_type)
+    if agent_info is None:
+        logger.warning("Unknown agent type: %s", agent_type)
+        return {
+            "agent": agent_type,
+            "data": {},
+            "success": False,
+            "error": "Неизвестный агент: " + agent_type,
+        }
+
+    invoker = _AGENT_INVOKERS.get(agent_type)
+    if invoker is None:
+        logger.error("No invoker registered for agent: %s", agent_type)
+        return {
+            "agent": agent_type,
+            "data": {},
+            "success": False,
+            "error": "Нет обработчика для агента: " + agent_type,
+        }
+
+    module_path, func_name = agent_info
     try:
-        if agent_type == "search":
-            from src.agents.search_agent import resolve as search_resolve
-
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                contacts = await list_contacts(session, owner)
-                contact_dicts = [
-                    {"id": c.peer_id, "name": c.display_name, "username": c.username}
-                    for c in contacts[:50]
-                ]
-            data = await search_resolve(provider, query, contact_dicts)
-            return {"data": data, "success": True}
-
-        elif agent_type == "memory":
-            from src.agents.memory_agent import recall as memory_recall
-
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                facts_obj = await search_memories(session, owner, query)
-                facts_list = [m.fact for m in facts_obj] if facts_obj else []
-            data = await memory_recall(provider, query, facts_list)
-            return {"data": data, "success": True}
-
-        elif agent_type == "urgency":
-            from src.core.contacts.urgency_classifier import classify_message
-
-            urgency = classify_message(query)
-            return {"data": {"urgency": urgency}, "success": True}
-
-        elif agent_type == "commitment":
-            from src.agents.commitment_agent import extract as comm_extract
-
-            data = await comm_extract(provider, query)
-            return {"data": data, "success": True}
-
-        elif agent_type == "summarizer":
-            from src.agents.summarizer_agent import summarize as summ_summarize
-
-            data = await summ_summarize(provider, query)
-            return {"data": data, "success": True}
-
-        elif agent_type == "draft":
-            from src.agents.draft_agent import draft as draft_agent
-
-            data = await draft_agent(provider, "собеседник", query)
-            return {"data": data, "success": True}
-
-        elif agent_type == "digest":
-            from src.agents.digest_agent import build_digest as digest_build
-
-            data = await digest_build(provider, [{"text": query}])
-            return {"data": data, "success": True}
-
-        else:
-            return {
-                "data": {},
-                "success": False,
-                "error": f"Неизвестный агент: {agent_type}",
-            }
-
+        module = importlib.import_module(module_path)
+        agent_func = getattr(module, func_name)
+        result = await invoker(
+            agent_func, provider, query, owner_id, agent_spec=agent_spec
+        )
+        result["agent"] = agent_type
+        return result
     except Exception as e:
         logger.exception("Agent %s failed", agent_type)
-        return {"data": {}, "success": False, "error": str(e)}
+        return {"agent": agent_type, "data": {}, "success": False, "error": str(e)}
 
 
 async def _execute_agents_parallel(
@@ -425,7 +520,23 @@ async def _execute_agents_parallel(
     tasks = [
         _execute_agent(provider, spec, owner_id=owner_id) for spec in agents_to_call
     ]
-    return await asyncio.gather(*tasks, return_exceptions=False)
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    results: list[dict] = []
+    for i, r in enumerate(raw_results):
+        if isinstance(r, Exception):
+            agent_name = agents_to_call[i].get("agent", "?")
+            logger.error("Agent %s failed with exception: %s", agent_name, r)
+            results.append(
+                {
+                    "agent": agent_name,
+                    "data": {},
+                    "success": False,
+                    "error": str(r),
+                }
+            )
+        else:
+            results.append(r)
+    return results
 
 
 async def run_pipeline(
@@ -536,14 +647,17 @@ async def run_pipeline(
             "agent_errors": [],
         }
 
-    results = await _execute_agents_parallel(
-        provider, agents_to_call, owner_id=owner_id
+    # --- Шаг 2: Запустить агентов через оркестратор ---
+    # Оркестратор обеспечивает: per-agent timeout, кеш, health-check,
+    # cooldown для repeat-фейлов, partial results (один упал — остальные живы).
+    results, orch_errors = await orchestrator.execute(
+        agents_to_call, provider, owner_id
     )
 
     # Собираем результаты
     agent_texts = []
-    for i, r in enumerate(results):
-        agent_type = agents_to_call[i].get("agent", "?")
+    for r in results:
+        agent_type = r.get("agent", "?")
         if r.get("success"):
             used_agents.append(agent_type)
             agent_texts.append(_agent_result_as_text(agent_type, r))
@@ -554,21 +668,27 @@ async def run_pipeline(
                 "Agent %s failed: %s — retrying via fallback", agent_type, err
             )
 
+    # Ошибки оркестрации (cooldown, timeout) — тоже в agent_errors
+    agent_errors.extend(orch_errors)
+
     # --- Шаг 3: Fallback — перезапросить у Maestro с учётом ошибок ---
     if agent_errors and not agent_texts:
         # Ни один агент не сработал — Maestro должен ответить сам
         fallback_prompt = (
-            f"Все агенты не справились:\n"
+            "Все агенты не справились:\n"
             + "\n".join(agent_errors)
             + f"\n\nОтветь пользователю сам: {user_text}"
         )
         try:
-            raw = await provider.chat(
-                [
-                    ChatMessage(role="system", content=MAESTRO_SYSTEM),
-                    ChatMessage(role="user", content=fallback_prompt),
-                ],
-                heavy=True,
+            raw = await asyncio.wait_for(
+                provider.chat(
+                    [
+                        ChatMessage(role="system", content=MAESTRO_SYSTEM),
+                        ChatMessage(role="user", content=fallback_prompt),
+                    ],
+                    heavy=True,
+                ),
+                timeout=60.0,
             )
             return {
                 "final_response": sanitize_html(raw.strip()),
@@ -633,14 +753,17 @@ async def run_pipeline(
         combined = "\n\n".join(agent_texts)
         promo = MAESTRO_AFTER_AGENTS.format(agent_results=combined)
         try:
-            raw = await provider.chat(
-                [
-                    ChatMessage(role="system", content=promo),
-                    ChatMessage(
-                        role="user", content=f"Пользователь сказал: {user_text}"
-                    ),
-                ],
-                heavy=True,
+            raw = await asyncio.wait_for(
+                provider.chat(
+                    [
+                        ChatMessage(role="system", content=promo),
+                        ChatMessage(
+                            role="user", content=f"Пользователь сказал: {user_text}"
+                        ),
+                    ],
+                    heavy=True,
+                ),
+                timeout=60.0,
             )
             raw = raw.strip()
             if raw.startswith("```"):

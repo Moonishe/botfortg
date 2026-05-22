@@ -34,9 +34,7 @@ async def detect_patterns(owner_id: int) -> list[dict]:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         memories = await list_memories(session, owner)
-        contacts = await list_contacts(
-            session, owner, kinds=("user",), include_bots=False
-        )
+        await list_contacts(session, owner, kinds=("user",), include_bots=False)
 
         # ---- Инсайт 1: периодические контакты ----
         contact_activity: dict[int, list[datetime]] = defaultdict(list)
@@ -249,7 +247,15 @@ async def patterns_loop(owner_id: int) -> None:
                 await asyncio.sleep(600)  # не повторять в этот час
             await asyncio.sleep(
                 settings.memory_patterns_interval_sec
-            )  # �������� ������ 10 �����
+            )  # каждые 10 минут проверка
         except Exception:
             logger.exception("Patterns loop error")
             await asyncio.sleep(settings.memory_patterns_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "memory-patterns", partial(patterns_loop, settings.owner_telegram_id)
+)

@@ -13,6 +13,7 @@ class SettingsStates(StatesGroup):
     waiting_openai_key = State()
     waiting_gemini_key = State()
     waiting_mistral_key = State()
+    waiting_cloudflare_key = State()
     waiting_digest_time = State()
     waiting_news_time = State()
     waiting_lead_hours = State()
@@ -21,6 +22,9 @@ class SettingsStates(StatesGroup):
     waiting_sync_interval = State()
     waiting_quiet_hours_start = State()
     waiting_quiet_hours_end = State()
+    waiting_import_keys = State()
+    waiting_custom_instructions = State()
+    waiting_alias = State()
 
 
 class NewsTopicStates(StatesGroup):

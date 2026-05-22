@@ -37,13 +37,17 @@ async def recall(provider, query: str, facts: list[str]) -> dict[str, Any]:
     facts_str = "\n".join(f"- {f}" for f in facts[:20])
     user_msg = f"Факты о контакте:\n{facts_str}\n\nВопрос: {query}"
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=RECALL_SYSTEM),
-            ChatMessage(role="user", content=user_msg),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=RECALL_SYSTEM),
+                ChatMessage(role="user", content=user_msg),
+            ],
+            heavy=False,
+        )
+    except Exception as e:
+        logger.error("Memory agent LLM error: %s", e)
+        return {"answer": "Не удалось проанализировать.", "relevant_facts": []}
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)

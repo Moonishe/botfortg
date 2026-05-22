@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone
 
 from sqlalchemy import select as _sel
 
@@ -11,7 +10,6 @@ from src.db.models import Memory, MemoryCluster, MemoryClusterMember
 from src.db.repo import (
     add_member,
     get_or_create_user,
-    list_contacts,
     list_memories,
     upsert_memory_cluster,
 )
@@ -19,8 +17,6 @@ from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
-
-UTC = lambda: datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def rebuild_clusters(telegram_id: int) -> int:
@@ -73,7 +69,7 @@ async def cluster_first_retrieval(
             _sel(MemoryCluster)
             .where(
                 MemoryCluster.user_id == owner.id,
-                MemoryCluster.topic.ilike(f"%{query}%"),
+                MemoryCluster.topic.icontains(query),
             )
             .limit(3)
         )
@@ -93,7 +89,7 @@ async def cluster_first_retrieval(
             )
             .where(
                 MemoryClusterMember.cluster_id.in_(cluster_ids),
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == owner.id,
             )
             .order_by(
@@ -119,19 +115,35 @@ async def cluster_loop(telegram_id: int) -> None:
             now = now_in_tz(tz)
             if now.hour == 3 and last_run != now.date():
                 last_run = now.date()
-                n = await rebuild_clusters(telegram_id)
-                logger.info("Clusters rebuilt: %d created", n)
-        except Exception:
-            logger.exception("Cluster loop error")
+                try:
+                    n = await rebuild_clusters(telegram_id)
+                    logger.info("Clusters rebuilt: %d created", n)
+                except Exception:
+                    logger.exception("Cluster loop error")
+                else:
+                    # --- L2 Scene extraction after successful cluster rebuild ---
+                    try:
+                        from src.core.memory.scene_extractor import (
+                            extract_scenes_for_user,
+                        )
 
-        # --- L2 Scene extraction after cluster rebuild ---
-        try:
-            from src.core.memory.scene_extractor import extract_scenes_for_user
+                        scenes = await extract_scenes_for_user(telegram_id)
+                        if scenes:
+                            logger.info("L2 scenes generated: %d", scenes)
+                    except Exception:
+                        logger.debug(
+                            "Scene extraction skipped (non-critical)", exc_info=True
+                        )
 
-            scenes = await extract_scenes_for_user(telegram_id)
-            if scenes:
-                logger.info("L2 scenes generated: %d", scenes)
         except Exception:
-            logger.debug("Scene extraction skipped (non-critical)", exc_info=True)
+            logger.exception("Cluster loop error (outer)")
 
         await asyncio.sleep(settings.memory_clusterer_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "memory-cluster", partial(cluster_loop, settings.owner_telegram_id)
+)

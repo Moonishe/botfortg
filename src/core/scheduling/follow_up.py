@@ -17,7 +17,9 @@ async def follow_up_loop(owner_id: int) -> None:
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
-                cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+                cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                    hours=24
+                )
                 convos = await list_active_conversations(
                     session, owner, status="waiting_reply", limit=30
                 )
@@ -47,3 +49,9 @@ async def follow_up_loop(owner_id: int) -> None:
         except Exception:
             logger.exception("FollowUp loop error")
             await asyncio.sleep(settings.follow_up_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register("follow-up", partial(follow_up_loop, settings.owner_telegram_id))

@@ -52,6 +52,12 @@ class LLMDefaults:
     MISTRAL_EMBED = _LazyModel("mistral_embed_model")
     MISTRAL_STT = _LazyModel("mistral_stt_model")
 
+    CLOUDFLARE_CHAT_LIGHT = _LazyModel("cloudflare_chat_light_model")
+    CLOUDFLARE_CHAT_HEAVY = _LazyModel("cloudflare_chat_heavy_model")
+    CLOUDFLARE_EMBED = _LazyModel("cloudflare_embed_model")
+
+    OPENAI_BASE_URL = _LazyModel("openai_base_url")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -154,13 +160,41 @@ class Settings(BaseSettings):
         "mistral-small-latest", description="Mistral лёгкая чат-модель"
     )
     mistral_chat_heavy_model: str = Field(
-        "magistral-medium-latest", description="Mistral тяжёлая чат-модель"
+        "mistral-medium-latest", description="Mistral тяжёлая чат-модель"
     )
     mistral_embed_model: str = Field(
         "mistral-embed", description="Mistral модель эмбеддингов"
     )
     mistral_stt_model: str = Field(
         "voxtral-mini-transcribe-latest", description="Mistral STT модель"
+    )
+
+    # --- Cloudflare Workers AI ---
+    openai_base_url: str = Field(
+        "",
+        description="Кастомный base_url для OpenAI-совместимых API (например, https://macky1.icu/v1). Оставь пустым для стандартного OpenAI.",
+    )
+
+    cloudflare_account_id: str = Field(
+        "", description="Cloudflare Account ID (из URL дашборда)"
+    )
+
+    cloudflare_chat_light_model: str = Field(
+        "@cf/qwen/qwen3-30b-a3b-fp8",
+        description="Cloudflare лёгкая чат-модель (Qwen3 30B — $0.05/$0.34 per M)",
+    )
+    cloudflare_chat_heavy_model: str = Field(
+        "@cf/moonshotai/kimi-k2.6",
+        description="Cloudflare тяжёлая чат-модель (Kimi K2.6 1T — $0.95/$4 per M)",
+    )
+    cloudflare_embed_model: str = Field(
+        "@cf/baai/bge-m3",
+        description="Cloudflare модель эмбеддингов (BGE-M3 multilingual — $0.012/M)",
+    )
+
+    embedding_dim: int = Field(
+        1536,
+        description="Размерность эмбеддингов (OpenAI text-embedding-3-small: 1536, BGE-M3: 1024, Gemini text-embedding-004: 768)",
     )
 
     memory_warmup_idle_timeout_sec: int = Field(

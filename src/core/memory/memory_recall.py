@@ -8,17 +8,96 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import time
 
-from src.db.repo import get_or_create_user, get_contact
+from src.db.repo import get_or_create_user
 from src.db.session import get_session
-from src.llm.router import build_provider
+from src.llm.router import _ensure_utc, build_provider
 from src.core.memory.hybrid_search import reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
 
-UTC_NAIVE = lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+_recall_cache: dict[str, tuple[float, RecallResult]] = {}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _jaccard_similarity(text_a: str, text_b: str) -> float:
+    """Jaccard similarity on word sets — fallback when embeddings unavailable."""
+    set_a = set(text_a.lower().split())
+    set_b = set(text_b.lower().split())
+    if not set_a or not set_b:
+        return 0.0
+    intersection = set_a & set_b
+    union = set_a | set_b
+    return len(intersection) / len(union)
+
+
+def _mmr_rerank(
+    facts: list[dict],
+    query_embedding: list[float] | None = None,
+    lambda_param: float = 0.7,
+    top_k: int | None = None,
+) -> list[dict]:
+    """
+    Maximal Marginal Relevance re-ranking.
+
+    Balances **relevance** (score) vs **diversity** (dissimilarity between
+    selected items) so the bot doesn't present nearly-identical facts.
+
+    Each dict in *facts* must have:
+        - "score" (float): original relevance score
+        - "fact"  (str):  fact text
+
+    Algorithm
+    ---------
+    1. Start with the highest-scoring fact.
+    2. For each remaining candidate compute:
+       MMR = λ · relevance − (1 − λ) · max_similarity_to_already_selected
+    3. Greedily pick the best candidate.
+    """
+    if not facts:
+        return facts
+
+    if top_k is None:
+        top_k = len(facts)
+
+    sorted_facts = sorted(facts, key=lambda x: x.get("score", 0), reverse=True)
+    selected = [sorted_facts[0]]
+    candidates = sorted_facts[1:]
+
+    while candidates and len(selected) < top_k:
+        best_idx = -1
+        best_score = -float("inf")
+
+        for i, cand in enumerate(candidates):
+            # Relevance: use pre-computed score (e.g. RRF fused score)
+            relevance = cand.get("score", 0)
+
+            # Diversity: max Jaccard similarity to any already-selected fact
+            max_sim = 0.0
+            for sel in selected:
+                sim = _jaccard_similarity(cand["fact"], sel["fact"])
+                if sim > max_sim:
+                    max_sim = sim
+
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = i
+
+        if best_idx >= 0:
+            selected.append(candidates.pop(best_idx))
+        else:
+            break
+
+    return selected
 
 
 @dataclass
@@ -68,16 +147,24 @@ async def recall(
 
     Возвращает список RecalledFact с причинами.
     """
+    _cache_key = f"{telegram_id}:{query}:{contact_id}:{mode}"
+    _cache_now = time.monotonic()
+    _state_modified = False
+    if _cache_key in _recall_cache:
+        _ts, _cached = _recall_cache[_cache_key]
+        if _cache_now - _ts < 60:
+            return _cached
+
     result = RecallResult()
     mode = (mode or "deep").lower()
     if mode not in {"light", "normal", "deep"}:
         mode = "deep"
     include_deep = include_deep and mode == "deep"
     include_semantic = bool(query) and mode in {"normal", "deep"}
-    include_frequent = mode in {"normal", "deep"}
+    _include_frequent = mode in {"normal", "deep"}
     include_self_facts = include_self and mode in {"normal", "deep"}
     include_contact_facts = mode in {"normal", "deep"}
-    now = UTC_NAIVE()
+    now = _utc_now()
     seen_ids: set[int] = set()
     ranked: list[RecalledFact] = []
 
@@ -94,7 +181,7 @@ async def recall(
         # Все активные факты пользователя
         base_conditions = [
             Memory.user_id == owner.id,
-            Memory.is_active == True,
+            Memory.is_active,
             or_(Memory.expires_at.is_(None), Memory.expires_at > now),
         ]
         q_all = (
@@ -110,12 +197,22 @@ async def recall(
             q_all = q_all.limit(max(limit * 8, 40))
         elif mode == "normal":
             q_all = q_all.limit(max(limit * 20, 160))
+        else:  # deep
+            q_all = q_all.limit(max(limit * 40, 500))
         all_facts_result = await session.execute(q_all)
         all_facts: list[Memory] = list(all_facts_result.scalars().all())
 
         # --- 1. Pinned ---
         if include_pinned:
-            pinned = [m for m in all_facts if m.pinned and m.id not in seen_ids]
+            pinned = [
+                m
+                for m in all_facts
+                if m.pinned
+                and m.id not in seen_ids
+                and (
+                    not contact_id or m.contact_id is None or m.contact_id == contact_id
+                )
+            ]
             for m in pinned:
                 ranked.append(
                     RecalledFact(
@@ -207,11 +304,12 @@ async def recall(
                         keyword_results=keyword_hits,
                     )
 
+                    hybrid_ranked: list[RecalledFact] = []
                     for mem_id, fused_score in fused:
                         if mem_id not in seen_ids:
                             m = next((f for f in all_facts if f.id == mem_id), None)
                             if m:
-                                ranked.append(
+                                hybrid_ranked.append(
                                     RecalledFact(
                                         fact=m.fact,
                                         reason="🔍 гибридный поиск",
@@ -222,11 +320,29 @@ async def recall(
                                     )
                                 )
                                 seen_ids.add(m.id)
+
+                    # MMR rerank: balance relevance vs diversity
+                    if len(hybrid_ranked) > 2:
+                        mmr_input = [
+                            {"score": rf.confidence, "fact": rf.fact}
+                            for rf in hybrid_ranked
+                        ]
+                        mmr_output = _mmr_rerank(
+                            mmr_input,
+                            query_embedding=embedding,
+                        )
+                        # Reorder hybrid_ranked to match MMR ranking
+                        mmr_rank = {d["fact"]: idx for idx, d in enumerate(mmr_output)}
+                        hybrid_ranked.sort(
+                            key=lambda rf: mmr_rank.get(rf.fact, float("inf"))
+                        )
+
+                    ranked.extend(hybrid_ranked)
             except (ImportError, ValueError, ConnectionError, OSError):
                 logger.debug("Hybrid recall failed, skipping", exc_info=True)
 
         # --- 4. Fresh (7 days, high confidence) ---
-        cutoff_7d = UTC_NAIVE()
+        cutoff_7d = _utc_now()
         from datetime import timedelta
 
         cutoff_7d = cutoff_7d - timedelta(days=7)
@@ -234,9 +350,10 @@ async def recall(
             m
             for m in all_facts
             if m.id not in seen_ids
-            and m.created_at
-            and m.created_at >= cutoff_7d
+            and (ca := _ensure_utc(m.created_at))
+            and ca >= cutoff_7d
             and (m.confidence or 0) >= 0.5
+            and (m.contact_id == contact_id if contact_id else True)
         ]
         fresh.sort(key=lambda m: m.confidence or 0, reverse=True)
         for m in fresh[:3]:
@@ -254,7 +371,11 @@ async def recall(
 
         # --- 5. Frequently used ---
         freq = [
-            m for m in all_facts if m.id not in seen_ids and (m.use_count or 0) >= 3
+            m
+            for m in all_facts
+            if m.id not in seen_ids
+            and (m.use_count or 0) >= 3
+            and (m.contact_id == contact_id if contact_id else True)
         ]
         freq.sort(key=lambda m: m.use_count or 0, reverse=True)
         for m in freq[:2]:
@@ -360,11 +481,16 @@ async def recall(
                 if m:
                     m.use_count = (m.use_count or 0) + 1
                     m.last_used_at = now
+                    _state_modified = True
         await session.flush()
     finally:
         if _close_session and _session_cm is not None:
-            await _session_cm.__aexit__(None, None, None)
+            await _session_cm.__aexit__(*sys.exc_info())
 
+    # Only cache if no state was modified (use_count incrementation).
+    # If use_count was updated, caching would serve stale counts on next call.
+    if not _state_modified:
+        _recall_cache[_cache_key] = (_cache_now, result)
     return result
 
 

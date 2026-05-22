@@ -8,6 +8,89 @@ import time
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# ── Telegram message length safety ─────────────────────────────────────
+TELEGRAM_SAFE_MAX = 4000  # Telegram hard limit is 4096 chars
+
+
+def _smart_split(text: str, max_len: int = TELEGRAM_SAFE_MAX) -> list[str]:
+    """Split text into chunks respecting paragraph then sentence boundaries.
+
+    Never splits mid-word. Sent as multiple messages if too long.
+    """
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    # First pass: split on paragraph boundaries
+    paragraphs = text.split("\n\n")
+    buf = ""
+
+    for para in paragraphs:
+        if not buf:
+            buf = para
+            continue
+        candidate = buf + "\n\n" + para
+        if len(candidate) <= max_len:
+            buf = candidate
+        else:
+            chunks.append(buf)
+            buf = para
+
+    if buf:
+        chunks.append(buf)
+
+    # Second pass: hard-split any chunks still over the limit
+    result: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= max_len:
+            result.append(chunk)
+        else:
+            result.extend(_hard_split(chunk, max_len))
+    return result
+
+
+def _hard_split(text: str, max_len: int) -> list[str]:
+    """Hard-split a single chunk at sentence boundaries, never mid-word."""
+    parts: list[str] = []
+    while text:
+        if len(text) <= max_len:
+            parts.append(text)
+            break
+        # Try to find a sentence boundary within the limit
+        chunk = text[:max_len]
+        last_period = chunk.rfind(". ")
+        last_newline = chunk.rfind("\n")
+        split_at = max(last_period, last_newline)
+        if split_at > max_len // 2:
+            parts.append(text[: split_at + 1].strip())
+            text = text[split_at + 1 :].strip()
+        else:
+            # No good boundary found — hard cut at the last space
+            last_space = chunk.rfind(" ")
+            if last_space > max_len // 2:
+                parts.append(text[:last_space].strip())
+                text = text[last_space:].strip()
+            else:
+                parts.append(chunk.strip())
+                text = text[max_len:].strip()
+    return parts
+
+
+async def safe_answer(
+    message, text: str, max_len: int = TELEGRAM_SAFE_MAX, **kwargs
+) -> None:
+    """Send ``text`` via ``message.answer()``, splitting into multiple messages if too long.
+    ``reply_markup`` (if any) is attached only to the last message.
+    """
+    parts = _smart_split(text, max_len)
+    for i, part in enumerate(parts):
+        final_kwargs = {}
+        if i == len(parts) - 1:
+            final_kwargs = kwargs  # reply_markup only on the last chunk
+        await message.answer(part, **final_kwargs)
+
+
+from src.core.infra.task_manager import track_ff
 from src.core.infra.timeutil import HM_RE, is_valid_tz, get_user_tz
 from src.core.actions.trajectory import record_trajectory
 from src.db.repo import get_or_create_user
@@ -17,44 +100,49 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Settings cache — однотенантный, TTL 30 сек, инвалидируется при /settings
+# Settings cache — per-user, TTL 30 сек, инвалидируется при /settings
 # ---------------------------------------------------------------------------
-_settings_cache: dict[str, object] | None = None  # type: ignore[assignment]
-_settings_cache_ts: float = 0.0
+_settings_cache: dict[int, dict] = {}  # telegram_id → cached context
+_settings_cache_ts: dict[int, float] = {}  # telegram_id → last cache time
 _SETTINGS_CACHE_TTL: float = 30.0
 _settings_lock = asyncio.Lock()
 
 
 async def _get_owner_context(telegram_id: int) -> dict[str, object]:
-    """Возвращает {owner_telegram_id, tz_name, use_heavy, global_style_profile} с TTL-кэшем."""
-    global _settings_cache, _settings_cache_ts
+    """Возвращает {owner_telegram_id, tz_name, use_heavy, global_style_profile} с TTL-кэшем (per-user)."""
     now = time.monotonic()
-    if _settings_cache is not None and (now - _settings_cache_ts) < _SETTINGS_CACHE_TTL:
-        return _settings_cache  # type: ignore[return-value]
+    cached_ts = _settings_cache_ts.get(telegram_id, 0.0)
+    if telegram_id in _settings_cache and (now - cached_ts) < _SETTINGS_CACHE_TTL:
+        return _settings_cache[telegram_id]  # type: ignore[return-value]
     async with _settings_lock:
         # Double-check after acquiring lock (TOCTOU guard)
         now = time.monotonic()
-        if (
-            _settings_cache is not None
-            and (now - _settings_cache_ts) < _SETTINGS_CACHE_TTL
-        ):
-            return _settings_cache  # type: ignore[return-value]
+        cached_ts = _settings_cache_ts.get(telegram_id, 0.0)
+        if telegram_id in _settings_cache and (now - cached_ts) < _SETTINGS_CACHE_TTL:
+            return _settings_cache[telegram_id]  # type: ignore[return-value]
         async with get_session() as session:
             owner = await get_or_create_user(session, telegram_id)
-            _settings_cache = {
+            ctx = {
                 "owner_telegram_id": owner.telegram_id,
                 "tz_name": get_user_tz(owner),
                 "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
                 "global_style_profile": owner.global_style_profile,
             }
-            _settings_cache_ts = now
-        return _settings_cache  # type: ignore[return-value]
+            _settings_cache[telegram_id] = ctx
+            _settings_cache_ts[telegram_id] = now
+        return ctx  # type: ignore[return-value]
 
 
-def invalidate_settings_cache() -> None:
-    """Сбросить кэш настроек (вызывается при изменении /settings)."""
-    global _settings_cache
-    _settings_cache = None
+async def invalidate_settings_cache(telegram_id: int | None = None) -> None:
+    """Сбросить кэш настроек (вызывается при изменении /settings).
+    Если telegram_id=None — сбрасывает весь кэш."""
+    async with _settings_lock:
+        if telegram_id is not None:
+            _settings_cache.pop(telegram_id, None)
+            _settings_cache_ts.pop(telegram_id, None)
+        else:
+            _settings_cache.clear()
+            _settings_cache_ts.clear()
 
 
 def _fire_record_trajectory(*args: object, **kwargs: object) -> None:
@@ -66,7 +154,7 @@ def _fire_record_trajectory(*args: object, **kwargs: object) -> None:
         except Exception:
             logger.exception("fire-and-forget trajectory failed")
 
-    asyncio.create_task(_safe())
+    track_ff(asyncio.create_task(_safe()))
 
 
 def _coerce_setting_value(spec: str, raw):
@@ -117,13 +205,41 @@ def _confirm_keyboard(action_id: int):
     return kb.as_markup()
 
 
+KIND_EMOJI = {"user": "👤", "group": "👥", "channel": "📢", "bot": "🤖"}
+
+
+def _group_candidates(candidates: list, max_display: int = 8):
+    """Group candidates by peer_kind, return (displayed_list, hidden_count)."""
+    if len(candidates) <= max_display:
+        return candidates, 0
+
+    # Sort by score descending, show top max_display
+    sorted_candidates = sorted(candidates, key=lambda c: c.score, reverse=True)
+    return sorted_candidates[:max_display], len(sorted_candidates) - max_display
+
+
 def _candidates_keyboard_send(candidates):
     kb = InlineKeyboardBuilder()
-    for c in candidates:
+    displayed, hidden = _group_candidates(candidates, max_display=8)
+
+    # Group by kind with visual separator
+    shown_kinds: set[str] = set()
+    for c in displayed:
+        emoji = KIND_EMOJI.get(c.peer_kind, "•")
+        if c.peer_kind not in shown_kinds:
+            shown_kinds.add(c.peer_kind)
         kb.row(
             InlineKeyboardButton(
-                text=f"{c.label()} · {c.score}",
+                text=f"{emoji} {c.label()} · {c.score}",
                 callback_data=f"send:pick:{c.peer_id}",
+            )
+        )
+
+    if hidden:
+        kb.row(
+            InlineKeyboardButton(
+                text=f"🔍 Ещё {hidden} контактов — уточните имя",
+                callback_data="send:cancel:0",  # cancel just dismisses
             )
         )
     kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="send:cancel:0"))
@@ -133,11 +249,25 @@ def _candidates_keyboard_send(candidates):
 def _candidates_keyboard_chat(action: str, candidates):
     # action ∈ {summary, tasks, draft, catchup} — re-use chat:* callback'ов из chat_cmd
     kb = InlineKeyboardBuilder()
-    for c in candidates:
+    displayed, hidden = _group_candidates(candidates, max_display=8)
+
+    shown_kinds: set[str] = set()
+    for c in displayed:
+        emoji = KIND_EMOJI.get(c.peer_kind, "•")
+        if c.peer_kind not in shown_kinds:
+            shown_kinds.add(c.peer_kind)
         kb.row(
             InlineKeyboardButton(
-                text=f"{c.label()} · {c.score}",
+                text=f"{emoji} {c.label()} · {c.score}",
                 callback_data=f"chat:{action}:{c.peer_id}",
+            )
+        )
+
+    if hidden:
+        kb.row(
+            InlineKeyboardButton(
+                text=f"🔍 Ещё {hidden} контактов — уточните имя",
+                callback_data="chat:cancel:0",
             )
         )
     kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="chat:cancel:0"))
@@ -234,13 +364,45 @@ def _parse_iso_to_utc_naive(value, tz_name: str | None = None):
 
 
 # ---------------------------------------------------------------------------
+# Dispatch adapters — приводят хендлеры к единой сигнатуре
+# ---------------------------------------------------------------------------
+
+
+def h_adapter(fn):
+    """Адаптер: fn(intent, message) → унифицированная dispatch-сигнатура."""
+
+    async def _w(intent, message, state, userbot_manager, *, tz_name):
+        return await fn(intent, message)
+
+    return _w
+
+
+def hu_adapter(fn):
+    """Адаптер: fn(intent, message, userbot_manager) → унифицированная."""
+
+    async def _w(intent, message, state, userbot_manager, *, tz_name):
+        return await fn(intent, message, userbot_manager)
+
+    return _w
+
+
+def ht_adapter(fn):
+    """Адаптер: fn(intent, message, *, tz_name) → унифицированная."""
+
+    async def _w(intent, message, state, userbot_manager, *, tz_name):
+        return await fn(intent, message, tz_name=tz_name)
+
+    return _w
+
+
+# ---------------------------------------------------------------------------
 # InstructionOptimizer integration — post-turn LLM review
 # ---------------------------------------------------------------------------
 
 # Rate-limit для post_turn_optimize: не чаще 1 раза в 5 минут на пользователя
 _post_turn_last_call: dict[int, float] = {}
 _post_turn_lock: "asyncio.Lock | None" = None
-_post_turn_task: "asyncio.Task | None" = None
+_post_turn_tasks: "dict[int, asyncio.Task]" = {}
 
 
 def _get_post_turn_lock() -> asyncio.Lock:
@@ -277,7 +439,9 @@ async def _post_turn_optimize(
         try:
             from src.db.session import get_session
             from src.db.repo import get_or_create_user
-            from src.core.intelligence.instruction_optimizer import instruction_optimizer
+            from src.core.intelligence.instruction_optimizer import (
+                instruction_optimizer,
+            )
 
             async with get_session() as session:
                 owner = await get_or_create_user(session, telegram_id)
@@ -291,7 +455,7 @@ async def _post_turn_optimize(
         except Exception:
             logger.debug("post_turn_optimize skipped", exc_info=True)
 
-    global _post_turn_task
-    if _post_turn_task and not _post_turn_task.done():
-        _post_turn_task.cancel()
-    _post_turn_task = asyncio.create_task(_do_optimize())
+    existing = _post_turn_tasks.get(telegram_id)
+    if existing and not existing.done():
+        existing.cancel()
+    _post_turn_tasks[telegram_id] = asyncio.create_task(_do_optimize())

@@ -44,7 +44,9 @@ async def summarize_contact_week(
             return []
 
         # Фильтр по дате (since)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            days=since_days
+        )
         recent = [m for m in messages if m.date and m.date >= cutoff]
         if len(recent) < 5:
             return []
@@ -160,6 +162,14 @@ async def weekly_summary_loop(owner_id: int) -> None:
             await asyncio.sleep(settings.weekly_summary_check_sec)
 
 
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "weekly-summary", partial(weekly_summary_loop, settings.owner_telegram_id)
+)
+
+
 CONSOLIDATION_PROMPT = (
     "Ты сжимаешь список фактов-воспоминаний в краткое саммари (3-5 предложений). "
     "Сохрани ВСЕ важные детали, но убери повторения и слей похожие факты в один. "
@@ -184,7 +194,8 @@ async def consolidate_tier(
             return 0  # недостаточно для консолидации
 
         # Группируем по cluster_topic если есть, иначе все вместе
-        import json as _json, re as _re
+        import json as _json
+        import re as _re
 
         groups = {}
         for m in targets:
@@ -215,7 +226,7 @@ async def consolidate_tier(
                 raw = _re.sub(r"\n?\s*```\s*$", "", raw)
                 result = _json.loads(raw)
                 summary = result.get("summary", "")
-                key_facts = result.get("key_facts", [])
+                _key_facts = result.get("key_facts", [])
 
                 if summary:
                     # Сохраняем консолидированный факт как tier=to_tier
@@ -243,14 +254,16 @@ async def consolidate_tier(
                     # НЕ деактивируем факты — повышаем tier и помечаем как сконсолидированные
                     for m in group:
                         m.memory_tier = to_tier
-                        m.updated_at = datetime.now(timezone.utc)
+                        m.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                         # Добавляем 'consolidated' в comma-separated tags
                         current_tags = [
-                            t.strip() for t in (m.tags or "").split(",") if t.strip()
+                            t.strip()
+                            for t in (m.tags or "").replace(",", "|").split("|")
+                            if t.strip()
                         ]
                         if "consolidated" not in current_tags:
                             current_tags.append("consolidated")
-                        m.tags = ",".join(current_tags)
+                        m.tags = "|".join(current_tags)
 
                     consolidated += len(group)
             except Exception:

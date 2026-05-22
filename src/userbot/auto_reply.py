@@ -18,13 +18,10 @@ from telethon.tl.types import (
     UserStatusOnline,
 )
 
-from src.config import settings
 from src.core.contacts.chat_service import load_chat, message_to_text
 from src.core.scheduling.notification_queue import notification_queue
-from src.core.infra.notifier import notifier
 from src.core.contacts.style_profile import style_profile_as_prompt_hint
 from src.core.infra.timeutil import get_user_tz, now_in_tz
-from src.core.actions.vector_store import get_vector_store
 from src.db.models import AutoReplyLog, User
 from src.core.memory.memory_recall import recall, format_recall_for_prompt
 from src.db.repo import (
@@ -116,6 +113,8 @@ async def _check_and_track_offline(
 async def _recently_replied(owner_telegram_id: int, peer_id: int) -> bool:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
+        if owner.settings is None:
+            return True
         cooldown = getattr(owner.settings, "auto_reply_cooldown_min", None) or 30
         threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
             minutes=cooldown
@@ -306,7 +305,7 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
             async with get_session() as session:
                 owner: User = await get_or_create_user(session, owner_telegram_id)
-                if not owner.settings.auto_reply_enabled:
+                if owner.settings is None or not owner.settings.auto_reply_enabled:
                     return
                 # игнорируем архив, если опция включена
                 existing = await get_contact(session, owner, sender.id)

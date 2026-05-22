@@ -76,7 +76,7 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
             result.unread_total += conv.unread_count
 
         # Просроченные и сегодняшние обязательства
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
         open_commits = await list_open_commitments(session, owner)
         for c in open_commits:
@@ -165,8 +165,8 @@ def format_briefing(data: BriefingData, title: str) -> str:
     if data.memory_stats:
         total = data.memory_stats.get("total", 0)
         by_sentiment = data.memory_stats.get("by_sentiment", {})
-        positive = by_sentiment.get("positive", 0)
-        negative = by_sentiment.get("negative", 0)
+        _positive = by_sentiment.get("positive", 0)
+        _negative = by_sentiment.get("negative", 0)
         by_source = data.memory_stats.get("by_source", {})
         by_tier = data.memory_stats.get("by_tier", {})
         weekly_facts = by_source.get("weekly", 0)
@@ -191,7 +191,10 @@ def format_briefing(data: BriefingData, title: str) -> str:
 
     # Индикатор топлива памяти
     if data.fuel_stats:
-        from src.core.memory.memory_fuel import format_depleted_contacts, format_fuel_line
+        from src.core.memory.memory_fuel import (
+            format_depleted_contacts,
+            format_fuel_line,
+        )
 
         lines.append("")
         lines.append(format_fuel_line(data.fuel_stats))
@@ -258,26 +261,37 @@ async def proactive_briefing_loop(owner_id: int) -> None:
             now = now_in_tz(tz_name)
             hour = now.hour
 
-            if hour == 9:
+            if hour in (9, 21):
+                # Вычислить начало часового слота в tz пользователя, затем в UTC
+                slot_start_tz = now.replace(minute=0, second=0, microsecond=0)
+                slot_start_utc = slot_start_tz.astimezone(timezone.utc).replace(
+                    tzinfo=None
+                )
+
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    if owner.settings.proactive_last_sent != slot_start_utc:
+                        owner.settings.proactive_last_sent = slot_start_utc
+                        await session.commit()
+                    else:
+                        await asyncio.sleep(settings.proactive_briefing_check_sec)
+                        continue
+
                 data = await collect_briefing_data(owner_id)
-                text = format_briefing(data, "☀️ Утренний брифинг")
+                if hour == 9:
+                    title = "☀️ Утренний брифинг"
+                    category = "morning"
+                else:
+                    title = "🌙 Вечерний брифинг"
+                    category = "evening"
+                text = format_briefing(data, title)
                 await notification_queue.enqueue(
                     topic="briefing",
                     text=text,
                     priority=Notification.PRIORITY_MEDIUM,
-                    category="morning",
+                    category=category,
                 )
                 await asyncio.sleep(3600)  # не повторять в этот час
-            elif hour == 21:
-                data = await collect_briefing_data(owner_id)
-                text = format_briefing(data, "🌙 Вечерний брифинг")
-                await notification_queue.enqueue(
-                    topic="briefing",
-                    text=text,
-                    priority=Notification.PRIORITY_MEDIUM,
-                    category="evening",
-                )
-                await asyncio.sleep(3600)
 
             await asyncio.sleep(
                 settings.proactive_briefing_check_sec
@@ -285,3 +299,11 @@ async def proactive_briefing_loop(owner_id: int) -> None:
         except Exception:
             logger.exception("Briefing loop error")
             await asyncio.sleep(settings.proactive_briefing_check_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "proactive-briefing", partial(proactive_briefing_loop, settings.owner_telegram_id)
+)

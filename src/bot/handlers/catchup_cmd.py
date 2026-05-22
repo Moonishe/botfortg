@@ -1,4 +1,5 @@
 """Killer #4: /catchup <контакт> — где мы остановились + черновик ответа."""
+
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -16,7 +17,9 @@ router.message.filter(OwnerOnly())
 
 
 @router.message(Command("catchup"))
-async def cmd_catchup(message: Message, command: CommandObject, userbot_manager: UserbotManager) -> None:
+async def cmd_catchup(
+    message: Message, command: CommandObject, userbot_manager: UserbotManager
+) -> None:
     client = userbot_manager.get_client(message.from_user.id)
     if client is None:
         await message.answer("Сначала /login.")
@@ -27,7 +30,7 @@ async def cmd_catchup(message: Message, command: CommandObject, userbot_manager:
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-    candidates = await resolve(client, owner, query)
+        candidates = await resolve(client, owner, query)
     if not candidates:
         await message.answer("Контакт не найден. Попробуй /sync.")
         return

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from time import time
@@ -11,6 +12,8 @@ from time import time
 
 MAX_TURNS = 8
 LAST_PEER_TTL_SECONDS = 30 * 60  # 30 минут
+
+_STALE_CTX_TTL = 3600  # 1 час — контексты с last_peer_at == 0 или старше удаляются
 
 
 @dataclass
@@ -23,27 +26,29 @@ class _Ctx:
 
 
 _STORE: dict[int, _Ctx] = {}
+_ctx_lock = threading.Lock()
 
 
 def _cleanup_stale_contexts() -> None:
-    """Удаляет контексты, где last_peer_at старше 24 часов."""
+    """Удаляет контексты, где last_peer_at == 0 или last_peer_at старше 1 часа."""
     now = time()
     stale = [
         uid
-        for uid, ctx in _STORE.items()
-        if ctx.last_peer_at > 0 and (now - ctx.last_peer_at) > 86400
+        for uid, ctx in list(_STORE.items())
+        if ctx.last_peer_at == 0 or (now - ctx.last_peer_at) > _STALE_CTX_TTL
     ]
     for uid in stale:
         del _STORE[uid]
 
 
 def _get(user_id: int) -> _Ctx:
-    _cleanup_stale_contexts()
-    ctx = _STORE.get(user_id)
-    if ctx is None:
-        ctx = _Ctx()
-        _STORE[user_id] = ctx
-    return ctx
+    with _ctx_lock:
+        _cleanup_stale_contexts()
+        ctx = _STORE.get(user_id)
+        if ctx is None:
+            ctx = _Ctx()
+            _STORE[user_id] = ctx
+        return ctx
 
 
 def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None:
@@ -52,14 +57,16 @@ def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None:
     assistant_summary = (assistant_summary or "").strip()
     if not user_text and not assistant_summary:
         return
-    ctx.turns.append((time(), user_text[:400], assistant_summary[:400]))
+    with _ctx_lock:
+        ctx.turns.append((time(), user_text[:400], assistant_summary[:400]))
 
 
 def set_last_peer(user_id: int, peer_id: int, peer_name: str | None) -> None:
     ctx = _get(user_id)
-    ctx.last_peer_id = peer_id
-    ctx.last_peer_name = peer_name
-    ctx.last_peer_at = time()
+    with _ctx_lock:
+        ctx.last_peer_id = peer_id
+        ctx.last_peer_name = peer_name
+        ctx.last_peer_at = time()
 
 
 def get_last_peer(user_id: int) -> tuple[int, str | None] | None:
@@ -72,8 +79,9 @@ def get_last_peer(user_id: int) -> tuple[int, str | None] | None:
 
 
 def get_recent_turns(user_id: int) -> list[tuple[str, str]]:
+    ctx = _get(user_id)
     rows = []
-    for item in _get(user_id).turns:
+    for item in ctx.turns:
         if len(item) == 3:
             _, user_text, assistant_summary = item
             rows.append((user_text, assistant_summary))
@@ -98,7 +106,8 @@ def get_recent_turn_count(user_id: int, max_age_seconds: int = 3600) -> int:
 def set_last_purpose(user_id: int, purpose: str) -> None:
     """Запоминает последний purpose для context chaining."""
     ctx = _get(user_id)
-    ctx.last_purpose = purpose
+    with _ctx_lock:
+        ctx.last_purpose = purpose
 
 
 def get_last_purpose(user_id: int) -> str | None:

@@ -34,6 +34,7 @@ router.message.filter(OwnerOnly())
 CANCEL_HINT = "В любой момент можно отменить командой /cancel."
 
 
+# Global /cancel handler — сбрасывает ЛЮБОЕ FSM-состояние, не только login.
 @router.message(Command("cancel"))
 async def cmd_cancel(
     message: Message, state: FSMContext, userbot_manager: UserbotManager
@@ -229,7 +230,7 @@ async def step_2fa(
     try:
         await pending.client.sign_in(password=password)
     except PasswordHashInvalidError:
-        await message.answer("❌ Неверный 2FA-пароль. Попробуй ещё раз или /cancel.")
+        await message.answer("❌ Неверный пароль 2FA. Попробуй ещё раз.")
         return
     except Exception:
         logger.exception("2FA sign_in failed")
@@ -237,15 +238,18 @@ async def step_2fa(
         await state.clear()
         await message.answer("❌ Не удалось войти. Запусти /login заново.")
         return
+    else:
+        # Удалим сообщение с паролем — гигиена.
+        try:
+            await message.delete()
+        except Exception:
+            logger.debug("login: could not delete password message", exc_info=True)
 
-    # Удалим сообщение с паролем — гигиена.
-    try:
-        await message.delete()
-    except Exception:
-        logger.debug("login: could not delete password message", exc_info=True)
-        pass
-
-    await _finalize_login(message, state, userbot_manager)
+        await _finalize_login(message, state, userbot_manager)
+    finally:
+        # Очищаем пароль из памяти — гарантированно выполняется всегда
+        password = None  # allow GC
+        del password  # remove reference
 
 
 async def _finalize_login(

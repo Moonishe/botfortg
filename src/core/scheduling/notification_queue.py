@@ -95,6 +95,7 @@ class NotificationQueue:
                 .order_by(
                     Notification.topic, Notification.priority, Notification.created_at
                 )
+                .with_for_update()
             )
             pending = list(result.scalars().all())
 
@@ -102,7 +103,7 @@ class NotificationQueue:
             return 0
 
         # Разделяем: свежие (в окне) — группируем, старые — отправляем по одному
-        window_start = datetime.now(timezone.utc) - timedelta(
+        window_start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
             seconds=self._window_seconds
         )
         fresh = [n for n in pending if n.created_at >= window_start]
@@ -147,7 +148,7 @@ class NotificationQueue:
                     update(Notification)
                     .where(Notification.id.in_(ids))
                     .values(
-                        flushed_at=datetime.now(timezone.utc),
+                        flushed_at=datetime.now(timezone.utc).replace(tzinfo=None),
                         batch_id=batch_id,
                     )
                 )
@@ -173,7 +174,7 @@ class NotificationQueue:
             Notification.PRIORITY_MEDIUM: "🟡",
             Notification.PRIORITY_LOW: "🟢",
         }
-        priority_label = {
+        _priority_label = {
             Notification.PRIORITY_CRITICAL: "Критическое",
             Notification.PRIORITY_HIGH: "Важное",
             Notification.PRIORITY_MEDIUM: "Обычное",
@@ -181,7 +182,7 @@ class NotificationQueue:
         }
 
         # Определяем доминирующий приоритет для заголовка
-        dominant = min(by_priority.keys())
+        _dominant = min(by_priority.keys())
 
         # Собираем разные темы внутри группы
         topic_set: set[str] = {n.category or n.topic for n in notifications}
@@ -249,13 +250,14 @@ class NotificationQueue:
             self._loop_task = None
 
     async def cleanup_expired(self) -> int:
-        """Удаляет уведомления старше TTL. Возвращает количество удалённых."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=self._ttl_hours)
+        """Удаляет уведомления старше TTL (включая отправленные). Возвращает количество удалённых."""
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            hours=self._ttl_hours
+        )
         async with SessionLocal() as session:
             result = await session.execute(
                 select(Notification).where(
                     Notification.created_at < cutoff,
-                    Notification.flushed_at.is_(None),
                 )
             )
             expired = list(result.scalars().all())

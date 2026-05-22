@@ -7,7 +7,6 @@ injected into prompts when their triggers match the current request.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from collections import Counter
@@ -104,7 +103,7 @@ async def build_skill_index(
 ) -> tuple[str, list[dict]]:
     from src.core.context_cache import get as cache_get
 
-    cached = cache_get(f"skills:{telegram_id}:{route_mode}")
+    cached = await cache_get(f"skills:{telegram_id}:{route_mode}")
     if cached is not None:
         return cached
 
@@ -116,7 +115,7 @@ async def build_skill_index(
 
     from src.core.context_cache import put as cache_put
 
-    cache_put(f"skills:{telegram_id}:{route_mode}", result, ttl=30)
+    await cache_put(f"skills:{telegram_id}:{route_mode}", result, ttl=30)
     return result
 
 
@@ -173,7 +172,7 @@ async def suggest_skills_from_trajectories(telegram_id: int) -> int:
                     select(Trajectory)
                     .where(
                         Trajectory.user_id == owner.id,
-                        Trajectory.success == True,
+                        Trajectory.success,
                         Trajectory.created_at >= since,
                     )
                     .order_by(Trajectory.created_at.desc())
@@ -230,7 +229,104 @@ async def suggest_skills_from_trajectories(telegram_id: int) -> int:
         return created
 
 
+async def propose_skills_from_analysis(owner_id: int) -> list[dict]:
+    """Вызывает skill_creator агента через LLM и создаёт предложенные навыки.
+
+    Фильтрует предложения по confidence > 0.7 и авто-создаёт их
+    сразу активными (enabled=True, review_status="approved").
+    """
+    from src.agents.skill_creator_agent import propose as agent_propose
+    from src.db.repo import fetch_my_messages_global
+    from src.llm.router import build_provider
+
+    proposals: list[dict] = []
+    created_skills: list[dict] = []
+
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_id)
+            messages_raw = await fetch_my_messages_global(session, owner, limit=50)
+            recent_messages = [
+                {
+                    "text": msg.text or "",
+                    "is_outgoing": msg.is_outgoing
+                    if hasattr(msg, "is_outgoing")
+                    else True,
+                    "timestamp": str(msg.date) if hasattr(msg, "date") else "",
+                }
+                for msg in messages_raw
+            ]
+
+            if not recent_messages:
+                logger.debug("propose_skills_from_analysis: no messages to analyze")
+                return []
+
+            provider = await build_provider(session, owner)
+            proposals = await agent_propose(provider, recent_messages)
+    except Exception:
+        logger.exception("propose_skills_from_analysis: agent call failed")
+        return []
+
+    # Фильтруем по confidence и создаём навыки
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        for proposal in proposals:
+            if not isinstance(proposal, dict):
+                continue
+            confidence = proposal.get("confidence", 0)
+            if not isinstance(confidence, (int, float)) or confidence <= 0.7:
+                continue
+
+            name = str(proposal.get("name", "")).strip()
+            if not name:
+                continue
+
+            # Проверяем, нет ли уже навыка с таким именем
+            existing = [
+                s
+                for s in await list_skills(session, owner, limit=200)
+                if s.name.lower() == name.lower()
+            ]
+            if existing:
+                logger.debug(
+                    "propose_skills_from_analysis: skill %r already exists", name
+                )
+                continue
+
+            try:
+                skill = await upsert_skill(
+                    session,
+                    owner,
+                    name=name[:128],
+                    description=str(proposal.get("description", "")),
+                    trigger_patterns_json=proposal.get("trigger_patterns") or [],
+                    body=str(proposal.get("body", "")),
+                    enabled=True,
+                    review_status="approved",
+                )
+                created_skills.append(
+                    {
+                        "name": name,
+                        "id": skill.id,
+                        "confidence": confidence,
+                    }
+                )
+                logger.info(
+                    "propose_skills_from_analysis: created skill %r (confidence=%.2f)",
+                    name,
+                    confidence,
+                )
+            except Exception:
+                logger.exception(
+                    "propose_skills_from_analysis: failed to upsert skill %r", name
+                )
+
+    return created_skills
+
+
 async def skill_optimizer_loop(telegram_id: int) -> None:
+    _last_skill_creation_run: float = 0
+
     while True:
         try:
             created = await suggest_skills_from_trajectories(telegram_id)
@@ -242,5 +338,35 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
                     text=f"Found {created} new skill suggestions. Open /evolve.",
                 )
         except Exception:
-            logger.exception("skill_optimizer_loop failed")
+            logger.exception("skill_optimizer_loop trajectory analysis failed")
+
+        # Feature 1: Skill Creator agent — автономный, каждый час
+        try:
+            now = asyncio.get_event_loop().time()
+            if now - _last_skill_creation_run >= 3600:
+                _last_skill_creation_run = now
+                proposed = await propose_skills_from_analysis(telegram_id)
+                if proposed:
+                    names = [s["name"] for s in proposed]
+                    await notification_queue.enqueue(
+                        topic="skills",
+                        category="self_evolution",
+                        priority=3,
+                        text=(
+                            f"Skill Creator создал {len(proposed)} навыков: "
+                            f"{', '.join(names[:5])}. "
+                            f"Уже активны в /skills."
+                        ),
+                    )
+        except Exception:
+            logger.exception("skill_optimizer_loop skill creator analysis failed")
+
         await asyncio.sleep(settings.skill_optimizer_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "skill-optimizer", partial(skill_optimizer_loop, settings.owner_telegram_id)
+)

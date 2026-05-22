@@ -170,7 +170,7 @@ def format_health(health: dict) -> str:
         f"<b>{emoji} Здоровье памяти: {score}/100 — {label} {emoji}</b>",
         f"[{bar}]",
         "",
-        f"📊 <b>Компоненты:</b>",
+        "📊 <b>Компоненты:</b>",
         f"  🎯 Confidence: {health['confidence_score']}/100",
         f"  🌐 Покрытие: {health['coverage_score']}/100 ({health['contacts_with_facts']}/{health['total_contacts']} контактов)",
         f"  ⏳ Свежесть: {health['freshness_score']}/100",

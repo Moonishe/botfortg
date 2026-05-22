@@ -16,12 +16,26 @@ logger = logging.getLogger(__name__)
 # In-memory LRU (макс 200 записей)
 _memory_cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 _MAX_MEMORY = 200
+_memory_lock: asyncio.Lock = asyncio.Lock()
 
 # Per-key locks to prevent cache stampede on cold misses
 _key_locks: dict[str, asyncio.Lock] = {}
+_get_lock_calls = 0
 
 
 async def _get_lock(key: str) -> asyncio.Lock:
+    global _get_lock_calls
+    _get_lock_calls += 1
+
+    # Periodic cleanup to prevent unbounded memory growth (#1):
+    # Remove locks that are not currently held (no waiters).
+    # Amortized cost: O(#keys) every 100 calls, i.e. O(1) avg.
+    if _get_lock_calls % 100 == 0:
+        for k in list(_key_locks.keys()):
+            lock = _key_locks[k]
+            if not lock.locked():
+                del _key_locks[k]
+
     if key not in _key_locks:
         _key_locks[key] = asyncio.Lock()
     return _key_locks[key]
@@ -31,26 +45,30 @@ def _cache_key(agent_type: str, params_hash: str) -> str:
     return f"{agent_type}:{params_hash}"
 
 
-def cache_get(agent_type: str, params_hash: str) -> Any | None:
+async def cache_get(agent_type: str, params_hash: str) -> Any | None:
     """Достать из in-memory кэша. Возвращает None если нет или протух."""
-    key = _cache_key(agent_type, params_hash)
-    if key in _memory_cache:
-        expires_at, value = _memory_cache[key]
-        if time.time() < expires_at:
-            _memory_cache.move_to_end(key)  # LRU: обновить позицию
-            return value
-        del _memory_cache[key]
-    return None
+    async with _memory_lock:
+        key = _cache_key(agent_type, params_hash)
+        if key in _memory_cache:
+            expires_at, value = _memory_cache[key]
+            if time.time() < expires_at:
+                _memory_cache.move_to_end(key)  # LRU: обновить позицию
+                return value
+            del _memory_cache[key]
+        return None
 
 
-def cache_set(agent_type: str, params_hash: str, value: Any, ttl_seconds: int) -> None:
-    """Сохранить в in-memory кэш."""
-    key = _cache_key(agent_type, params_hash)
-    _memory_cache[key] = (time.time() + ttl_seconds, value)
-    _memory_cache.move_to_end(key)
-    # Вытеснить старые если превышен лимит
-    while len(_memory_cache) > _MAX_MEMORY:
-        _memory_cache.popitem(last=False)
+async def cache_set(
+    agent_type: str, params_hash: str, value: Any, ttl_seconds: int
+) -> None:
+    """Сохранить in-memory кэш."""
+    async with _memory_lock:
+        key = _cache_key(agent_type, params_hash)
+        _memory_cache[key] = (time.time() + ttl_seconds, value)
+        _memory_cache.move_to_end(key)
+        # Вытеснить старые если превышен лимит
+        while len(_memory_cache) > _MAX_MEMORY:
+            _memory_cache.popitem(last=False)
 
 
 async def cache_get_db(agent_type: str, params_hash: str) -> Any | None:
@@ -94,27 +112,27 @@ async def cache_get_or_set(
 
     key = _cache_key(agent_type, params_hash)
 
-    # 1. In-memory (fast path — no lock needed for reads)
-    val = cache_get(agent_type, params_hash)
+    # 1. In-memory (fast path)
+    val = await cache_get(agent_type, params_hash)
     if val is not None:
         return val
 
     async with await _get_lock(key):
         # Double-check after acquiring per-key lock (stampede guard)
-        val = cache_get(agent_type, params_hash)
+        val = await cache_get(agent_type, params_hash)
         if val is not None:
             return val
 
         # 2. SQLite
         val = await cache_get_db(agent_type, params_hash)
         if val is not None:
-            cache_set(agent_type, params_hash, val, ttl_seconds)
+            await cache_set(agent_type, params_hash, val, ttl_seconds)
             return val
 
         # 3. Вычислить
         val = await factory()
         if val is not None:
-            cache_set(agent_type, params_hash, val, ttl_seconds)
+            await cache_set(agent_type, params_hash, val, ttl_seconds)
             try:
                 await cache_set_db(agent_type, params_hash, val, ttl_seconds)
             except Exception:

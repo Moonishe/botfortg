@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.timeutil import get_user_tz, now_in_tz
@@ -36,7 +36,7 @@ async def sleep_tracker_loop(owner_id: int) -> None:
                 if is_night:
                     last_seen = owner.last_seen_online
                     if last_seen is not None:
-                        dt_now_utc = datetime.now(timezone.utc)
+                        dt_now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
                         offline_minutes = (dt_now_utc - last_seen).total_seconds() / 60
                         # Уже спит >60 минут подряд
                         if offline_minutes > 60 and owner.absence_status != "sleeping":
@@ -76,3 +76,11 @@ async def sleep_tracker_loop(owner_id: int) -> None:
         except Exception:
             logger.exception("Sleep tracker error")
             await asyncio.sleep(settings.sleep_tracker_fallback_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "sleep-tracker", partial(sleep_tracker_loop, settings.owner_telegram_id)
+)

@@ -3,8 +3,8 @@
 from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.session import get_session
 from src.db.repo import (
     get_or_create_user,
@@ -14,7 +14,6 @@ from src.db.repo import (
     list_open_commitments,
     list_memories,
 )
-from src.db.models import ConversationState
 from src.core.memory.temporal_layers import utc_naive, utcnow_naive
 
 logger = logging.getLogger(__name__)
@@ -196,14 +195,14 @@ def format_radar(items: list[RadarItem]) -> str:
         emoji = risk_emoji.get(item.risk_level, "⚪")
         window = f" 🕐 {item.reply_window}" if item.reply_window else ""
         lines.append(
-            f"{emoji} <b>{item.contact_name}</b> — ждёт {item.waiting_hours:.0f}ч "
+            f"{emoji} <b>{sanitize_html(item.contact_name)}</b> — ждёт {item.waiting_hours:.0f}ч "
             f"({item.unread_count} непроч.) [{item.score}]{window}"
         )
         if item.latest_snippet:
-            lines.append(f"   «{item.latest_snippet}»")
+            lines.append(f"   «{sanitize_html(item.latest_snippet)}»")
         if item.memory_hints:
-            lines.append(f"   🧠 {item.memory_hints[0][:70]}")
-        lines.append(f"   <i>{item.reason}</i>")
+            lines.append(f"   🧠 {sanitize_html(item.memory_hints[0][:70])}")
+        lines.append(f"   <i>{sanitize_html(item.reason)}</i>")
         lines.append("")
     lines.append("<i>/today — полный пульт | /radar — только ответы</i>")
     return "\n".join(lines)

@@ -7,7 +7,6 @@ from ``src.core.context.context_offload``.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +72,7 @@ async def compress_maestro_context(
         logger.debug("Context offload failed, using raw history", exc_info=True)
         # Fallback: return raw history as text
         raw = "\n".join(
-            f"[{m.get('role', '?')}]: {m.get('content', '')[:200]}"
+            f"[{m.get('role', '?')}]: {(m.get('content') or '')[:200]}"
             for m in history[-20:]  # safety: at most 20 messages in fallback
         )
         return raw, None

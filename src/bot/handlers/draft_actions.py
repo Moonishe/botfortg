@@ -16,8 +16,10 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
+from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
 from src.bot.states import DraftStates
-from src.userbot import get_active_telethon_client, get_userbot_manager
+from src.core.contacts.send_guard import store_undo
+from src.userbot import get_active_telethon_client
 
 
 logger = logging.getLogger(__name__)
@@ -96,9 +98,12 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
         return
 
     try:
-        await client.send_message(entity=int(peer_id), message=draft_text)
+        entity = await client.get_entity(peer_id)
+        sent_msg = await client.send_message(entity=entity, message=draft_text)
         if callback.message:
-            await callback.message.edit_text("✅ Отправлено! 🚀")
+            await store_undo(callback.from_user.id, peer_id, sent_msg.id, draft_text)
+            after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
+            await callback.message.edit_text("✅ Отправлено! 🚀", reply_markup=after_kb)
     except ValueError as e:
         if callback.message:
             await callback.message.edit_text(f"❌ Ошибка 😞: {e}")
@@ -163,8 +168,12 @@ async def step_draft_edit(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        await client.send_message(entity=int(peer_id), message=new_text)
-        await message.answer("✅ Отправлено! 🚀")
+        entity = await client.get_entity(peer_id)
+        sent_msg = await client.send_message(entity=entity, message=new_text)
+        await store_undo(message.from_user.id, peer_id, sent_msg.id, new_text)
+        after_kb = smart_post_action_keyboard("edit", {"peer_id": str(peer_id)})
+        await message.answer("✅ Отправлено! 🚀", reply_markup=after_kb)
     except Exception as e:
+        await state.clear()
         await message.answer(f"❌ Ошибка отправки 😞: {e}")
     await state.clear()

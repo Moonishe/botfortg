@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 
 from aiogram import F, Router
@@ -13,16 +12,29 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
+from src.core.infra.text_sanitizer import sanitize_html
+from src.core.services.chat_actions import (
+    catchup_action,
+    draft_reply_action,
+    extract_tasks_action,
+    get_chat_message_count,
+    summarize_chat_action,
+)
 from src.core.contacts.chat_service import load_chat
-from src.core.actions.commitment_extractor import extract_and_save_commitments
 from src.core.memory.memory_extractor import extract_and_save_memories
 from src.core.contacts.contact_resolver import ContactCandidate, resolve
-from src.core.intelligence.summarizer import catchup, draft_reply, summarize_chat
-from src.db.repo import get_contact, get_or_create_user, list_memories
+from src.db.repo import (
+    add_watched_peer,
+    get_contact,
+    get_or_create_user,
+    get_watched_peers,
+    is_peer_watched,
+    list_memories,
+    remove_watched_peer,
+)
 from src.db.session import get_session
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
-from src.bot.handlers.analyze_cmd import cmd_analyze
 
 
 logger = logging.getLogger(__name__)
@@ -51,18 +63,18 @@ def _actions_keyboard(peer_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
-            text="📝 Саммари", callback_data=f"chat:summary:{peer_id}"
+            text="📝 Саммари", callback_data=f"chat:summary:{peer_id}:50"
         ),
         InlineKeyboardButton(
-            text="✅ Задачи/обещания", callback_data=f"chat:tasks:{peer_id}"
+            text="✅ Задачи/обещания", callback_data=f"chat:tasks:{peer_id}:50"
         ),
     )
     kb.row(
         InlineKeyboardButton(
-            text="💬 Черновик ответа", callback_data=f"chat:draft:{peer_id}"
+            text="💬 Черновик ответа", callback_data=f"chat:draft:{peer_id}:50"
         ),
         InlineKeyboardButton(
-            text="⏪ Где мы остановились", callback_data=f"chat:catchup:{peer_id}"
+            text="⏪ Где мы остановились", callback_data=f"chat:catchup:{peer_id}:50"
         ),
     )
     kb.row(
@@ -72,7 +84,18 @@ def _actions_keyboard(peer_id: int) -> InlineKeyboardMarkup:
         ),
     )
     kb.row(
+        InlineKeyboardButton(text="👁 Следить", callback_data=f"chat:watch:{peer_id}"),
+        InlineKeyboardButton(
+            text="👁 Не следить", callback_data=f"chat:unwatch:{peer_id}"
+        ),
+    )
+    kb.row(
         InlineKeyboardButton(text="🧠 Полный анализ", callback_data="chat:analyze:all"),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="🔢 Выбрать лимит", callback_data=f"chat:limit:{peer_id}"
+        ),
     )
     return kb.as_markup()
 
@@ -197,167 +220,155 @@ async def cb_pick(callback: CallbackQuery, userbot_manager: UserbotManager) -> N
     await callback.answer()
 
 
-async def _action_load(
-    callback: CallbackQuery, userbot_manager: UserbotManager, peer_id: int
-):
-    """Готовит данные для действий: client, owner, contact, messages, provider."""
-    client = userbot_manager.get_client(callback.from_user.id)
-    if client is None:
-        await callback.answer("Подключи аккаунт через /login", show_alert=True)
-        return None
-
-    await callback.answer("Подгружаю чат…")
-    if callback.message:
-        await callback.message.edit_text("⏳ Подгружаю последние сообщения…")
-
-    messages = await load_chat(
-        client, callback.from_user.id, peer_id, limit=50, transcribe=True
-    )
+@router.callback_query(F.data.startswith("chat:watch:"))
+async def cb_watch(callback: CallbackQuery) -> None:
+    peer_id = int(callback.data.split(":")[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
-        provider = await build_provider(session, owner)
-        heavy = owner.settings.use_heavy_model
+        if await is_peer_watched(session, owner, peer_id):
+            await callback.answer("Уже слежу за этим чатом 👁", show_alert=True)
+            return
+        await add_watched_peer(session, owner, peer_id)
+        name = contact.display_name if contact else str(peer_id)
 
-        # авто-извлечение памяти о контакте (fire-and-forget, не блокируем UI)
-        import asyncio
+    await callback.answer(f"Теперь слежу за чатом «{name}» 👁", show_alert=True)
 
-        asyncio.create_task(
-            extract_and_save_memories(
-                provider, callback.from_user.id, contact, messages
-            )
-        )
 
-    if contact is None:
-        if callback.message:
-            await callback.message.edit_text(
-                "Контакт не найден в локальной БД. Попробуй /sync."
-            )
-        return None
-    if provider is None:
-        if callback.message:
-            await callback.message.edit_text(
-                "Не задан API-ключ выбранного LLM. Добавь в /settings."
-            )
-        return None
-    return client, owner, contact, messages, provider, heavy
+@router.callback_query(F.data.startswith("chat:unwatch:"))
+async def cb_unwatch(callback: CallbackQuery) -> None:
+    peer_id = int(callback.data.split(":")[2])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        contact = await get_contact(session, owner, peer_id)
+        if not await is_peer_watched(session, owner, peer_id):
+            await callback.answer("Я и так не слежу за этим чатом", show_alert=True)
+            return
+        await remove_watched_peer(session, owner, peer_id)
+        name = contact.display_name if contact else str(peer_id)
+
+    await callback.answer(f"Больше не слежу за чатом «{name}»", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("chat:summary:"))
 async def cb_summary(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
-    peer_id = int(callback.data.split(":")[2])
-    bundle = await _action_load(callback, userbot_manager, peer_id)
-    if bundle is None:
-        return
-    _client, _owner, contact, messages, provider, heavy = bundle
-
-    text = await summarize_chat(
-        provider, contact, messages, heavy=heavy, owner_id=_owner.id
-    )
+    parts = callback.data.split(":")
+    peer_id = int(parts[2])
+    limit = int(parts[3]) if len(parts) >= 4 else 50
+    await callback.answer("Подгружаю чат…")
     if callback.message:
-        await callback.message.edit_text(
-            f"📝 <b>Саммари — {contact.display_name}</b>\n\n{text}",
-            reply_markup=_actions_keyboard(peer_id),
-        )
+        await callback.message.edit_text("⏳ Подгружаю последние сообщения…")
+
+    result = await summarize_chat_action(
+        callback.from_user.id, peer_id, userbot_manager, limit=limit
+    )
+    if result is None or callback.message is None:
+        return
+    await callback.message.edit_text(result.html, reply_markup=result.markup)
 
 
 @router.callback_query(F.data.startswith("chat:tasks:"))
 async def cb_tasks(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
-    peer_id = int(callback.data.split(":")[2])
-    bundle = await _action_load(callback, userbot_manager, peer_id)
-    if bundle is None:
-        return
-    _client, owner, contact, messages, provider, _heavy = bundle
-
-    items = await extract_and_save_commitments(
-        provider,
-        telegram_id=owner.telegram_id,
-        contact=contact,
-        messages=messages,
-    )
-
-    if not items:
-        body = "Явных обязательств не нашёл."
-    else:
-        lines = []
-        for it in items:
-            who = "Я" if it.get("direction") == "mine" else "Они"
-            deadline = it.get("deadline")
-            tail = f" · до {deadline}" if deadline else ""
-            lines.append(f"• <b>{who}</b>: {it.get('text', '')}{tail}")
-        body = "\n".join(lines)
-
+    parts = callback.data.split(":")
+    peer_id = int(parts[2])
+    limit = int(parts[3]) if len(parts) >= 4 else 50
+    await callback.answer("Извлекаю задачи…")
     if callback.message:
-        await callback.message.edit_text(
-            f"✅ <b>Обязательства — {contact.display_name}</b>\n\n{body}",
-            reply_markup=_actions_keyboard(peer_id),
-        )
+        await callback.message.edit_text("⏳ Анализирую переписку…")
+
+    result = await extract_tasks_action(
+        callback.from_user.id, peer_id, userbot_manager, limit=limit
+    )
+    if result is None or callback.message is None:
+        return
+    await callback.message.edit_text(result.html, reply_markup=result.markup)
 
 
 @router.callback_query(F.data.startswith("chat:draft:"))
 async def cb_draft(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
-    peer_id = int(callback.data.split(":")[2])
-    bundle = await _action_load(callback, userbot_manager, peer_id)
-    if bundle is None:
-        return
-    _client, _owner, contact, messages, provider, heavy = bundle
-
-    draft = await draft_reply(
-        provider,
-        contact,
-        messages,
-        heavy=heavy,
-        global_style=_owner.global_style_profile,
-        owner_id=_owner.id,
-    )
-    payload = json.dumps({"peer_id": peer_id, "text": draft}, ensure_ascii=False)
-
-    from src.db.repo import create_pending_action
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        action = await create_pending_action(
-            session, user_id=owner.id, kind="send_message", payload=payload
-        )
-
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(
-            text="✅ Отправить", callback_data=f"send:confirm:{action.id}"
-        ),
-        InlineKeyboardButton(
-            text="❌ Отмена", callback_data=f"send:cancel:{action.id}"
-        ),
-    )
+    parts = callback.data.split(":")
+    peer_id = int(parts[2])
+    limit = int(parts[3]) if len(parts) >= 4 else 50
+    await callback.answer("Готовлю черновик…")
     if callback.message:
-        await callback.message.edit_text(
-            f"💬 <b>Черновик ответа — {contact.display_name}</b>\n\n{draft}\n\n"
-            f"Отправить?",
-            reply_markup=kb.as_markup(),
-        )
+        await callback.message.edit_text("⏳ Пишу черновик ответа…")
+
+    result = await draft_reply_action(
+        callback.from_user.id, peer_id, userbot_manager, limit=limit
+    )
+    if result is None or callback.message is None:
+        return
+    await callback.message.edit_text(result.html, reply_markup=result.markup)
 
 
 @router.callback_query(F.data.startswith("chat:catchup:"))
 async def cb_catchup(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
-    peer_id = int(callback.data.split(":")[2])
-    bundle = await _action_load(callback, userbot_manager, peer_id)
-    if bundle is None:
-        return
-    _client, _owner, contact, messages, provider, heavy = bundle
+    parts = callback.data.split(":")
+    peer_id = int(parts[2])
+    limit = int(parts[3]) if len(parts) >= 4 else 50
+    await callback.answer("Подгружаю историю…")
+    if callback.message:
+        await callback.message.edit_text("⏳ Ищу где вы остановились…")
 
-    text = await catchup(
-        provider,
-        contact,
-        messages,
-        heavy=heavy,
-        global_style=_owner.global_style_profile,
-        owner_id=_owner.id,
+    result = await catchup_action(
+        callback.from_user.id, peer_id, userbot_manager, limit=limit
     )
+    if result is None or callback.message is None:
+        return
+    await callback.message.edit_text(result.html, reply_markup=result.markup)
+
+
+@router.callback_query(F.data.startswith("chat:limit:"))
+async def cb_limit(callback: CallbackQuery) -> None:
+    """Показывает меню выбора лимита сообщений."""
+    peer_id = int(callback.data.split(":")[2])
+
+    # Проверяем количество сообщений
+    try:
+        count = await get_chat_message_count(callback.from_user.id, peer_id)
+    except Exception:
+        count = 0
+
+    # Строим клавиатуру выбора лимита
+    kb = InlineKeyboardBuilder()
+
+    if count > 0:
+        status = (
+            f"В чате <b>{count}</b> сообщений."
+            if count <= 100
+            else f"⚠️ Чат большой: <b>{count}</b> сообщений."
+        )
+        if count > 100:
+            status += "\nАнализ может занять время."
+    else:
+        status = "Сообщений пока нет или чат не синхронизирован."
+
+    # Кнопки лимита
+    options = [50, 100, 200, 500]
+    row = []
+    for n in options:
+        if n <= count or count == 0:  # показываем все опции если нет данных
+            row.append(
+                InlineKeyboardButton(
+                    text=str(n), callback_data=f"chat:summary:{peer_id}:{n}"
+                )
+            )
+    kb.row(*row)
+
+    kb.row(
+        InlineKeyboardButton(
+            text="📋 Все сообщения",
+            callback_data=f"chat:summary:{peer_id}:{max(count, 500)}",
+        )
+    )
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"chat:pick:{peer_id}"))
+
     if callback.message:
         await callback.message.edit_text(
-            f"⏪ <b>Где мы остановились — {contact.display_name}</b>\n\n{text}",
-            reply_markup=_actions_keyboard(peer_id),
+            f"{status}\n\nСколько сообщений проанализировать?",
+            reply_markup=kb.as_markup(),
         )
+    await callback.answer()
 
 
 @router.message(Command("sync"))
@@ -475,7 +486,6 @@ async def cb_extract_memories(
         return
 
     from src.db.repo import list_contacts
-    from src.llm.router import build_provider
 
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
@@ -528,10 +538,8 @@ async def _auto_extract_memories(message: Message, client, owner) -> None:
     В штатном режиме — только из top-N (memory_warmup_max_contacts).
     """
     from src.db.repo import list_contacts
-    from src.llm.router import build_provider
     from src.core.memory.memory_warmup import should_full_extract
     from src.config import settings
-    import asyncio
 
     async with get_session() as session:
         contacts = await list_contacts(
@@ -605,7 +613,63 @@ async def cmd_recent(message: Message) -> None:
         lines.append(f"<b>{ct.display_name}</b> {who} {last_date}\n<i>{last_msg}</i>")
 
     body = "\n\n".join(lines)
-    await message.answer(f"📋 <b>Последняя активность</b>\n\n{body}")
+    await message.answer(sanitize_html(f"📋 <b>Последняя активность</b>\n\n{body}"))
+
+
+@router.message(Command("watchlist"))
+async def cmd_watchlist(message: Message) -> None:
+    """Показать список отслеживаемых чатов."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        watched = await get_watched_peers(session, owner)
+
+    if not watched:
+        await message.answer(
+            "👁 <b>Отслеживание чатов</b>\n\n"
+            "Пока список пуст — я сохраняю <b>все</b> чаты.\n\n"
+            "Добавь чаты через /chat → «Следить», "
+            "и я буду сохранять только их.\n\n"
+            "<i>Используй /watchlist снова для просмотра списка.</i>"
+        )
+        return
+
+    # Получаем имена контактов
+    lines = [f"👁 <b>Отслеживаемые чаты ({len(watched)})</b>\n"]
+    kb = InlineKeyboardBuilder()
+
+    async with get_session() as session:
+        for pid in sorted(watched):
+            contact = await get_contact(session, owner, pid)
+            name = contact.display_name if contact else f"ID:{pid}"
+            icon = {"user": "👤", "chat": "👥", "channel": "📢", "bot": "🤖"}.get(
+                contact.peer_kind if contact else "user", "💬"
+            )
+            lines.append(f"{icon} <b>{name}</b>")
+            kb.row(
+                InlineKeyboardButton(
+                    text=f"❌ Перестать следить за «{name}»",
+                    callback_data=f"chat:unwatch:{pid}",
+                )
+            )
+
+    kb.row(InlineKeyboardButton(text="➕ Добавить чат", callback_data="watchlist:add"))
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data == "watchlist:add")
+async def cb_watchlist_add(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "Чтобы добавить чат в отслеживание:\n\n"
+            "1. Используй <code>/chat Имя</code> для поиска контакта\n"
+            "2. Нажми <b>👁 Следить</b> в меню действий\n\n"
+            "Или введи <code>/chat</code> для списка недавних контактов."
+        )
 
 
 @router.callback_query(F.data.startswith("chat:story:"))
@@ -617,12 +681,12 @@ async def cb_story(callback: CallbackQuery) -> None:
     narrative = await build_chain_narrative(peer_id, callback.from_user.id)
     if callback.message:
         if narrative:
-            await callback.message.edit_text(
+            await callback.message.edit_text(  # type: ignore[union-attr]
                 narrative,
                 reply_markup=_actions_keyboard(peer_id),
             )
         else:
-            await callback.message.edit_text(
+            await callback.message.edit_text(  # type: ignore[union-attr]
                 "Недостаточно данных для истории (нужно минимум 3 факта).",
                 reply_markup=_actions_keyboard(peer_id),
             )
@@ -644,7 +708,7 @@ async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -
 
     from src.core.contacts.contact_resolver import ContactCandidate
 
-    candidate = ContactCandidate(
+    _ = ContactCandidate(
         peer_id=peer_id,
         display_name=contact.display_name if contact else str(peer_id),
         username=None,

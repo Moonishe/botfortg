@@ -11,9 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.db.models import User, Contact
-    from src.llm.base import LLMProvider
-    from src.db.models import Message
+    pass
 
 from src.db.session import get_session
 
@@ -67,7 +65,6 @@ async def run_full_analysis(
     from src.db.repo import (
         get_or_create_user,
         list_contacts,
-        add_memory,
         find_similar_memories,
     )
     from src.core.memory.memory_extractor import extract_and_save_memories
@@ -136,9 +133,10 @@ async def run_full_analysis(
             async with get_session() as session:
                 from src.db.repo import fetch_chat_messages
 
+                owner_synced = await session.merge(owner) if session else owner
                 messages = await fetch_chat_messages(
                     session,
-                    owner,
+                    owner_synced,
                     contact.peer_id,
                     limit=message_limit,
                 )
@@ -174,7 +172,8 @@ async def run_full_analysis(
                     saved = await extract_and_save_commitments(
                         provider,
                         telegram_id=owner_obj.telegram_id,
-                        contact=contact,
+                        contact_name=contact_name,
+                        contact_peer_id=contact.peer_id,
                         messages=messages,
                     )
                     commit_count = len(saved)
@@ -215,8 +214,15 @@ async def run_full_analysis(
                             ):
                                 # Если факты об одном и том же, но с разной
                                 # тональностью — отметим противоречие
-                                sm.sentiment = "contradictory"
-                                await session.flush()
+                                logger.warning(
+                                    "Contradiction: mem %d (%s=%s) vs %d (%s=%s): %r",
+                                    mem.id,
+                                    mem.fact[:50],
+                                    mem.sentiment,
+                                    sm.id,
+                                    sm.fact[:50],
+                                    sm.sentiment,
+                                )
                                 contradictions += 1
                     if contradictions > 0:
                         result.contradictions_found += contradictions

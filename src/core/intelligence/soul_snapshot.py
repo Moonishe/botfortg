@@ -236,7 +236,7 @@ class SoulSnapshotManager:
 
         result = await session.execute(
             select(SoulSnapshot)
-            .where(SoulSnapshot.is_active == True)
+            .where(SoulSnapshot.is_active)
             .order_by(SoulSnapshot.created_at.desc())
             .limit(1)
         )

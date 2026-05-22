@@ -1,7 +1,6 @@
 """Memory Conflict Resolution — автоматическое разрешение противоречивых фактов."""
 
 import logging
-from datetime import datetime, timezone
 from collections import defaultdict
 from src.core.scheduling.notification_queue import notification_queue
 from src.db.session import get_session
@@ -29,7 +28,7 @@ async def find_conflicts(owner_id: int) -> list[dict]:
 
         conflicts = []
         for contact_id, facts in by_contact.items():
-            if len(facts) < 3:
+            if len(facts) < 2:
                 continue
             # Ищем пары positive—negative
             positive = [f for f in facts if f.sentiment == "positive" and f.created_at]
@@ -64,8 +63,12 @@ async def find_conflicts(owner_id: int) -> list[dict]:
                                     "date_negative": str(n.created_at.date())
                                     if n.created_at
                                     else "",
-                                    "confidence_positive": p.confidence or 0.5,
-                                    "confidence_negative": n.confidence or 0.5,
+                                    "confidence_positive": p.confidence
+                                    if p.confidence is not None
+                                    else 0.5,
+                                    "confidence_negative": n.confidence
+                                    if n.confidence is not None
+                                    else 0.5,
                                     "days_apart": days_apart,
                                 }
                             )
@@ -163,10 +166,10 @@ def format_conflicts(conflicts: list[dict]) -> str:
         newer = "positive" if c["date_positive"] >= c["date_negative"] else "negative"
         if newer == "positive":
             lines.append(
-                f"   💡 Более новый факт — позитивный. Возможно, конфликт разрешён."
+                "   💡 Более новый факт — позитивный. Возможно, конфликт разрешён."
             )
         else:
-            lines.append(f"   💡 Более новый факт — негативный. Требует внимания.")
+            lines.append("   💡 Более новый факт — негативный. Требует внимания.")
         lines.append("")
     return "\n".join(lines)
 
@@ -223,3 +226,11 @@ async def conflict_check_loop(owner_id: int):
         except Exception:
             logger.exception("Conflict check error")
             await asyncio.sleep(settings.conflict_resolver_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "conflict-check", partial(conflict_check_loop, settings.owner_telegram_id)
+)

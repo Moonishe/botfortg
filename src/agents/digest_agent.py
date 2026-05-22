@@ -53,13 +53,24 @@ async def build_digest(provider, messages_data: list[dict]) -> dict[str, Any]:
     msgs_json = json.dumps(messages_data, ensure_ascii=False)
     user_msg = f"Входящие сообщения:\n{msgs_json}"
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=DIGEST_SYSTEM),
-            ChatMessage(role="user", content=user_msg),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=DIGEST_SYSTEM),
+                ChatMessage(role="user", content=user_msg),
+            ],
+            heavy=False,
+        )
+    except Exception as e:
+        logger.error("Digest agent LLM error: %s", e)
+        return {
+            "urgent_count": 0,
+            "important_count": 0,
+            "normal_count": len(messages_data),
+            "highlights": [],
+            "summary": "Ошибка дайджеста.",
+            "html": "Ошибка.",
+        }
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)

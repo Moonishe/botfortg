@@ -79,11 +79,13 @@ async def sync_dialogs(
                             pass
         # Сохранить папки в БД
         async with get_session() as session:
+            owner = await session.merge(owner)
             await upsert_folders(session, owner, folders_data)
     except Exception as e:
         logger.warning("Failed to fetch folders: %s", e)
         peer_to_folder = {}
     async with get_session() as session:
+        owner = await session.merge(owner)
         # archived=True — это отдельная архивная папка, делаем два прохода
         for archived_pass in (False, True):
             async for dialog in client.iter_dialogs(

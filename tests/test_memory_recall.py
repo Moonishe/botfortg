@@ -99,7 +99,7 @@ async def test_use_count_increments():
         assert m.use_count >= 1
 
     # второй вызов
-    r2 = await recall(123459, limit=5)
+    await recall(123459, limit=5)
     async with get_session() as session:
         from src.db.models import Memory
         from sqlalchemy import select

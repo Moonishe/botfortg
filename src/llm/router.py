@@ -3,6 +3,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import enum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,9 +26,11 @@ from src.db.models import User
 from src.db.repo import get_active_keys, get_api_keys, mark_key_failure, mark_key_used
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
+from src.llm.cloudflare_provider import CloudflareProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
+from src.llm.openrouter_provider import OpenRouterProvider
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,169 @@ class ExhaustedError(Exception):
     pass
 
 
-PROVIDER_ORDER = ("openai", "gemini", "mistral")
+class _CircuitState(enum.Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class _KeyCircuitBreaker:
+    def __init__(self, failure_threshold: int = 3, base_timeout: float = 90.0) -> None:
+        self._failure_count = 0
+        self._tripped_count = 0
+        self._state = _CircuitState.CLOSED
+        self._last_failure_time = 0.0
+        self._base_timeout = base_timeout
+        self._failure_threshold = failure_threshold
+
+    @property
+    def state(self) -> _CircuitState:
+        return self._state
+
+    def ready_at(self, now: float) -> float:
+        """Возвращает монотонное время, когда ключ снова готов."""
+        if self._state != _CircuitState.OPEN:
+            return now
+        timeout = self._base_timeout * (2**self._tripped_count)
+        return self._last_failure_time + min(timeout, 3600.0)
+
+    def is_ready(self, now: float) -> bool:
+        if self._state == _CircuitState.CLOSED:
+            return True
+        if self._state == _CircuitState.HALF_OPEN:
+            return True
+        # OPEN always returns False — only try_half_open() gates recovery probes,
+        # ensuring single-probe + exponential backoff on re-trip.
+        return False
+
+    def record_success(self) -> None:
+        self._failure_count = 0
+        self._tripped_count = 0
+        self._state = _CircuitState.CLOSED
+
+    def record_failure(self, now: float) -> None:
+        self._failure_count += 1
+        self._last_failure_time = now
+        if self._state == _CircuitState.HALF_OPEN:
+            self._state = _CircuitState.OPEN
+            self._tripped_count += 1
+        elif (
+            self._state == _CircuitState.CLOSED
+            and self._failure_count >= self._failure_threshold
+        ):
+            self._state = _CircuitState.OPEN
+            # NOTE: _tripped_count НЕ инкрементится при первом открытии —
+            # он растёт только при re-trip'ах (HALF_OPEN → OPEN),
+            # чтобы экспоненциальный backoff считался с base*2^0 = base.
+
+    def try_half_open(self, now: float) -> bool:
+        """Переводит в HALF_OPEN если пришло время пробовать."""
+        if self._state != _CircuitState.OPEN:
+            return False
+        if now >= self.ready_at(now):
+            self._state = _CircuitState.HALF_OPEN
+            return True
+        return False
+
+
+# ─── Adaptive Provider Selection ─────────────────────────────────────
+
+
+@dataclass
+class _ProviderMetrics:
+    """Per-provider performance metrics for adaptive selection.
+
+    Хранит историю успехов/неудач и среднюю латентность для каждого
+    LLM-провайдера (openai, gemini, mistral, ...). Используется в
+    ProviderFallback.chat() для сортировки провайдеров — наиболее
+    надёжный и быстрый пробуется первым.
+    """
+
+    success_count: int = 0
+    failure_count: int = 0
+    total_latency: float = 0.0
+    call_count: int = 0
+    last_failure_time: float = 0.0
+    last_success_time: float = 0.0
+
+    @property
+    def success_rate(self) -> float:
+        total = self.success_count + self.failure_count
+        if total == 0:
+            return 1.0  # неизвестный = оптимистичный (exploration bias)
+        return self.success_count / total
+
+    @property
+    def avg_latency(self) -> float:
+        if self.call_count == 0:
+            return 0.0
+        return self.total_latency / self.call_count
+
+    def score(self, now: float) -> float:
+        """Composite score 0..1. Higher = provider to try first.
+
+        Формула: 60% успешность + 40% латентность, с штрафом за
+        недавние (последние 60s) ошибки.
+        """
+        sr = self.success_rate
+        lat = self.avg_latency
+        # Normalize latency: 0s → 1.0, >=10s → 0.0
+        lat_score = max(0.0, 1.0 - lat / 10.0) if self.call_count > 0 else 0.5
+        # Recent failure penalty
+        if self.last_failure_time > 0 and now - self.last_failure_time < 60.0:
+            recency_penalty = 0.3
+        else:
+            recency_penalty = 1.0
+        return (sr * 0.6 + lat_score * 0.4) * recency_penalty
+
+
+_PROVIDER_METRICS: dict[str, _ProviderMetrics] = {}
+_PROVIDER_METRICS_LOCK: asyncio.Lock | None = (
+    None  # lazy-init on first use (Python 3.10+ loop safety)
+)
+
+
+async def _record_provider_success(name: str, latency: float) -> None:
+    """Записывает успешный вызов провайдера с замеренной латентностью."""
+    global _PROVIDER_METRICS_LOCK
+    if _PROVIDER_METRICS_LOCK is None:
+        _PROVIDER_METRICS_LOCK = asyncio.Lock()
+    now = asyncio.get_running_loop().time()
+    async with _PROVIDER_METRICS_LOCK:
+        metrics = _PROVIDER_METRICS.get(name)
+        if metrics is None:
+            metrics = _ProviderMetrics()
+            _PROVIDER_METRICS[name] = metrics
+        metrics.success_count += 1
+        metrics.call_count += 1
+        metrics.total_latency += latency
+        metrics.last_success_time = now
+
+
+async def _record_provider_failure(name: str) -> None:
+    """Записывает неудачный вызов провайдера."""
+    global _PROVIDER_METRICS_LOCK
+    if _PROVIDER_METRICS_LOCK is None:
+        _PROVIDER_METRICS_LOCK = asyncio.Lock()
+    now = asyncio.get_running_loop().time()
+    async with _PROVIDER_METRICS_LOCK:
+        metrics = _PROVIDER_METRICS.get(name)
+        if metrics is None:
+            metrics = _ProviderMetrics()
+            _PROVIDER_METRICS[name] = metrics
+        metrics.failure_count += 1
+        metrics.last_failure_time = now
+
+
+def _score_provider(name: str, now: float) -> float:
+    """Public score lookup. 1.0 для провайдеров без истории (exploration)."""
+    metrics = _PROVIDER_METRICS.get(name)
+    if metrics is None:
+        return 1.0
+    return metrics.score(now)
+
+
+PROVIDER_ORDER = ("openrouter", "openai", "gemini", "mistral", "cloudflare")
 RETRYABLE_MARKERS = (
     "429",
     "500",
@@ -54,24 +219,41 @@ RETRYABLE_MARKERS = (
     "temporarily unavailable",
     "raw_status_code': 429",
     'raw_status_code": 429',
+    # Cloudflare Workers AI async-модели (cold start, async queue)
+    "async queue",
+    "queued",
+    "model is busy",
+    "cold start",
+    "workers ai",
+    "cf-ray",
 )
 KEY_COOLDOWN_SECONDS = 90.0
-_FAILED_KEYS: dict[tuple[str, str], float] = {}
+MAX_RETRIES_PER_KEY = 3
+RETRY_BASE_DELAY = 1.0  # seconds
+_CIRCUIT_BREAKERS: dict[tuple[str, str], _KeyCircuitBreaker] = {}
+_CIRCUIT_BREAKERS_LOCK: asyncio.Lock | None = (
+    None  # lazy-init on first use (Python 3.10+ loop safety)
+)
 
 # Per-purpose лимиты параллельных запросов
-_PURPOSE_SEMAPHORES: dict[str, asyncio.Semaphore] = {
-    "main": asyncio.Semaphore(2),
-    "draft": asyncio.Semaphore(1),
-    "memory": asyncio.Semaphore(1),
-    "background": asyncio.Semaphore(3),
-    "analysis": asyncio.Semaphore(1),
-    "urgent": asyncio.Semaphore(2),
-    "fallback": asyncio.Semaphore(2),
-}
+_PURPOSE_SEMAPHORES: dict[str, asyncio.Semaphore] | None = (
+    None  # lazy-init on first use
+)
 
 
 async def acquire_purpose_slot(purpose: str) -> asyncio.Semaphore:
     """Захватывает слот для purpose. Возвращает семафор."""
+    global _PURPOSE_SEMAPHORES
+    if _PURPOSE_SEMAPHORES is None:
+        _PURPOSE_SEMAPHORES = {
+            "main": asyncio.Semaphore(2),
+            "draft": asyncio.Semaphore(1),
+            "memory": asyncio.Semaphore(1),
+            "background": asyncio.Semaphore(3),
+            "analysis": asyncio.Semaphore(1),
+            "urgent": asyncio.Semaphore(2),
+            "fallback": asyncio.Semaphore(2),
+        }
     sem = _PURPOSE_SEMAPHORES.get(purpose)
     if sem is None:
         sem = _PURPOSE_SEMAPHORES.get("fallback", asyncio.Semaphore(1))
@@ -92,8 +274,9 @@ def _is_retryable_llm_error(exc: Exception) -> bool:
     code = str(getattr(exc, "code", "") or "").lower()
     if code in {"429", "500", "503", "3505", "service_tier_capacity_exceeded"}:
         return True
-    body = getattr(exc, "body", None) or getattr(exc, "response", None)
-    text = f"{type(exc).__name__} {exc} {body}".lower()
+    # NOTE: body намеренно не включено — полный ответ LLM может содержать
+    # чувствительные данные пользователя (PII, секреты, содержимое диалога).
+    text = f"{type(exc).__name__} {exc}".lower()
     return any(marker in text for marker in RETRYABLE_MARKERS)
 
 
@@ -103,6 +286,11 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}…{key[-4:]}"
 
 
+async def _restore_cooldowns(slot_ids: list[int]) -> None:
+    """При рестарте все circuit breaker'ы начинают с CLOSED — не восстанавливаем кулдауны."""
+    pass
+
+
 # ─── MultiKey: обёртка для ротации ключей ─────────────────────────────
 
 
@@ -110,6 +298,8 @@ class MultiKeyProvider:
     """Обёртка: ротирует ключи провайдера при ошибке 429/503/500.
 
     Позволяет указать несколько API-ключей для одного LLM-провайдера.
+    Round-robin распределяет параллельные вызовы по ключам,
+    Semaphore(N) ограничивает число одновременных запросов.
     При получении ошибки пропускной способности (rate limit, capacity exceeded)
     автоматически переключается на следующий ключ.
     """
@@ -133,7 +323,7 @@ class MultiKeyProvider:
         self._session_provider = session_provider
         self._kwargs = kwargs
         self._idx = 0
-        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(len(self._keys))
         self._current_purpose = purpose
         self.name = f"{provider_name}(×{len(self._keys)})"
 
@@ -143,68 +333,144 @@ class MultiKeyProvider:
         Пропускает ключи, которые фейлились менее 60 секунд назад.
         При успехе обновляет активный индекс и отмечает слот (DB).
         При временной ошибке помечает слот как упавший (DB cooldown).
+        Записывает метрики для Adaptive Provider Selection.
         """
-        async with self._lock:
-            last_error: Exception | None = None
-            now = asyncio.get_running_loop().time()
-            skipped = 0
-            for attempt in range(len(self._keys)):
-                idx = (self._idx + attempt) % len(self._keys)
-                key = self._keys[idx]
-                failed_at = _FAILED_KEYS.get((self.provider_name, key))
-                if failed_at is not None and now - failed_at < KEY_COOLDOWN_SECONDS:
+        global _CIRCUIT_BREAKERS_LOCK
+        if _CIRCUIT_BREAKERS_LOCK is None:
+            _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
+        start_time = asyncio.get_running_loop().time()
+        last_error: Exception | None = None
+        now = start_time
+
+        # Round-robin: фиксируем стартовый индекс
+        start_idx = self._idx
+
+        skipped = 0
+        for attempt in range(len(self._keys)):
+            idx = (start_idx + attempt) % len(self._keys)
+            key = self._keys[idx]
+            cache_key = (
+                (self.provider_name, str(self._slot_ids[idx]))
+                if self._slot_ids and idx < len(self._slot_ids)
+                else (self.provider_name, key)
+            )
+            async with _CIRCUIT_BREAKERS_LOCK:
+                cb = _CIRCUIT_BREAKERS.get(cache_key)
+            if cb is not None and not cb.is_ready(now):
+                _ = cb.try_half_open(now)  # проверяем, не пора ли попробовать
+                if not cb.is_ready(now):
                     skipped += 1
                     continue
-                try:
-                    provider = self._provider_class(key, **self._kwargs)
-                    result = await operation(provider, *args, **kwargs)
-                    self._idx = idx
-                    _FAILED_KEYS.pop((self.provider_name, key), None)
-                    # DB: отметить успешное использование (fresh session)
-                    if self._slot_ids:
-                        try:
-                            async with get_session() as fresh_s:
-                                await mark_key_used(fresh_s, self._slot_ids[idx])
-                        except Exception:
-                            logger.exception(
-                                "Failed to mark key slot %d as used",
-                                self._slot_ids[idx],
+            # Create provider instance — handle creation failure separately
+            try:
+                provider = self._provider_class(key, **self._kwargs)
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            try:
+                for retry in range(MAX_RETRIES_PER_KEY):
+                    try:
+                        result = await operation(provider, *args, **kwargs)
+                    except Exception as exc:
+                        if not _is_retryable_llm_error(exc):
+                            raise
+                        if retry < MAX_RETRIES_PER_KEY - 1:
+                            delay = RETRY_BASE_DELAY * (2**retry)
+                            logger.warning(
+                                "LLM %s key %s attempt %d/%d failed, retrying in %.1fs: %s",
+                                self.provider_name,
+                                _mask_key(key),
+                                retry + 1,
+                                MAX_RETRIES_PER_KEY,
+                                delay,
+                                str(exc)[:200],
                             )
-                    return result
-                except Exception as exc:
-                    if _is_retryable_llm_error(exc):
-                        _FAILED_KEYS[(self.provider_name, key)] = (
-                            asyncio.get_running_loop().time()
-                        )
-                        last_error = exc
-                        logger.warning(
-                            "LLM %s key %s temporarily failed, rotating: %s",
-                            self.provider_name,
-                            _mask_key(key),
-                            exc,
-                        )
-                        # DB: отметить падение слота (fresh session)
+                            await asyncio.sleep(delay)
+                        else:
+                            raise
+                    else:
+                        async with _CIRCUIT_BREAKERS_LOCK:
+                            cb = _CIRCUIT_BREAKERS.get(cache_key)
+                            if cb:
+                                cb.record_success()
+                                if cb.state == _CircuitState.CLOSED:
+                                    _CIRCUIT_BREAKERS.pop(cache_key, None)
+                        # DB: отметить успешное использование (fresh session)
                         if self._slot_ids:
                             try:
                                 async with get_session() as fresh_s:
-                                    await mark_key_failure(
-                                        fresh_s, self._slot_ids[idx], str(exc)[:256]
-                                    )
+                                    await mark_key_used(fresh_s, self._slot_ids[idx])
                             except Exception:
                                 logger.exception(
-                                    "Failed to mark key slot %d as failed",
+                                    "Failed to mark key slot %d as used",
                                     self._slot_ids[idx],
                                 )
-                        continue
-                    raise
-            if last_error:
-                raise ExhaustedError(
-                    f"Все {len(self._keys)} ключей {self.provider_name} недоступны "
-                    f"(последняя ошибка: {last_error})"
+                        # Adaptive Provider Selection: запись метрик успеха
+                        # (try/except — потеря result при ошибке метрики дороже, чем сама метрика)
+                        latency = asyncio.get_running_loop().time() - start_time
+                        try:
+                            await _record_provider_success(self.provider_name, latency)
+                        except Exception:
+                            logger.exception(
+                                "Failed to record provider success metric for %s",
+                                self.provider_name,
+                            )
+                        return result
+            except Exception as exc:
+                if _is_retryable_llm_error(exc):
+                    async with _CIRCUIT_BREAKERS_LOCK:
+                        if cache_key not in _CIRCUIT_BREAKERS:
+                            _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
+                        _CIRCUIT_BREAKERS[cache_key].record_failure(now)
+                    last_error = exc
+                    logger.warning(
+                        "LLM %s key %s temporarily failed, rotating: %s",
+                        self.provider_name,
+                        _mask_key(key),
+                        str(exc)[:200],
+                    )
+                    # DB: отметить падение слота (fresh session)
+                    if self._slot_ids:
+                        try:
+                            async with get_session() as fresh_s:
+                                error_msg = (
+                                    f"{type(exc).__name__}: {str(exc).split(chr(10))[0]}"
+                                )[:256]
+                                await mark_key_failure(
+                                    fresh_s, self._slot_ids[idx], error_msg
+                                )
+                        except Exception:
+                            logger.exception(
+                                "Failed to mark key slot %d as failed",
+                                self._slot_ids[idx],
+                            )
+                    continue
+                raise
+            finally:
+                await provider.close()
+        if last_error:
+            try:
+                await _record_provider_failure(self.provider_name)
+            except Exception:
+                logger.exception(
+                    "Failed to record provider failure metric for %s",
+                    self.provider_name,
                 )
             raise ExhaustedError(
-                f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне"
+                f"Все {len(self._keys)} ключей {self.provider_name} недоступны "
+                f"(последняя ошибка: {last_error})"
             )
+        try:
+            await _record_provider_failure(self.provider_name)
+        except Exception:
+            logger.exception(
+                "Failed to record provider failure metric for %s",
+                self.provider_name,
+            )
+        raise ExhaustedError(
+            f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне"
+        )
 
     async def chat(self, messages, *, heavy: bool = False) -> str:
         sem = await acquire_purpose_slot(self._current_purpose)
@@ -214,30 +480,21 @@ class MultiKeyProvider:
             release_purpose_slot(sem)
 
     async def _chat_with_retry(self, messages, *, heavy: bool = False) -> str:
-        # Cleanup: удаляем ключи, которые фейлились дольше KEY_COOLDOWN_SECONDS * 5
-        now = asyncio.get_running_loop().time()
-        max_age = KEY_COOLDOWN_SECONDS * 5
-        stale_keys = [k for k, ts in _FAILED_KEYS.items() if now - ts > max_age]
-        for k in stale_keys:
-            del _FAILED_KEYS[k]
-        # Early exit: все ли ключи в кулдауне?
-        all_dead = all(
-            (self.provider_name, key) in _FAILED_KEYS
-            and now - _FAILED_KEYS[(self.provider_name, key)] < KEY_COOLDOWN_SECONDS
-            for key in self._keys
-        )
-        if all_dead:
-            self._idx = 0
-            raise ExhaustedError(
-                f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне. Попробуй позже."
-            )
-        return await self._try_with_retry(lambda p: p.chat(messages, heavy=heavy))
+        await self._semaphore.acquire()
+        try:
+            return await self._try_with_retry(lambda p: p.chat(messages, heavy=heavy))
+        finally:
+            self._semaphore.release()
 
     async def embed(self, text: str) -> list[float]:
         """Embed с защитой backpressure (background семафор)."""
         sem = await acquire_purpose_slot("background")
         try:
-            return await self._try_with_retry(lambda p: p.embed(text))
+            await self._semaphore.acquire()
+            try:
+                return await self._try_with_retry(lambda p: p.embed(text))
+            finally:
+                self._semaphore.release()
         finally:
             release_purpose_slot(sem)
 
@@ -245,7 +502,11 @@ class MultiKeyProvider:
         """Embed_batch с защитой backpressure (background семафор)."""
         sem = await acquire_purpose_slot("background")
         try:
-            return await self._try_with_retry(lambda p: p.embed_batch(texts))
+            await self._semaphore.acquire()
+            try:
+                return await self._try_with_retry(lambda p: p.embed_batch(texts))
+            finally:
+                self._semaphore.release()
         finally:
             release_purpose_slot(sem)
 
@@ -254,6 +515,10 @@ class MultiKeyProvider:
             return await self._try_with_retry(lambda p: p.validate_key())
         except Exception:
             return False
+
+    async def close(self) -> None:
+        """MultiKeyProvider is a factory — instances are closed in _try_with_retry."""
+        pass
 
 
 @dataclass
@@ -265,6 +530,7 @@ class ProviderFallback:
     """
 
     providers: list[MultiKeyProvider]
+    _last_primary_dim: int | None = None
 
     @property
     def name(self) -> str:
@@ -275,8 +541,20 @@ class ProviderFallback:
         return self.providers[0]
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+        """Chat c адаптивным выбором провайдера.
+
+        Сортирует провайдеров по композитному score (успешность + латентность)
+        и пробует наиболее надёжного/быстрого первым. Embeddings не сортируются —
+        остаются на primary для совместимости размерностей векторов.
+        """
         last_error: Exception | None = None
-        for provider in self.providers:
+        now = asyncio.get_running_loop().time()
+        sorted_providers = sorted(
+            self.providers,
+            key=lambda p: _score_provider(p.provider_name, now),
+            reverse=True,
+        )
+        for provider in sorted_providers:
             try:
                 return await provider.chat(messages, heavy=heavy)
             except Exception as exc:
@@ -286,21 +564,95 @@ class ProviderFallback:
                     raise
                 last_error = exc
                 logger.warning(
-                    "LLM provider %s failed, trying fallback: %s", provider.name, exc
+                    "LLM provider %s failed, trying next: %s",
+                    provider.name,
+                    str(exc)[:200],
                 )
         raise last_error or RuntimeError("All LLM providers failed")
 
     async def embed(self, text: str) -> list[float]:
-        return await self.primary.embed(text)
+        """Embed с fallback по цепочке провайдеров.
+
+        При фейле primary — пробует следующих. ВАЖНО: размерности векторов
+        могут отличаться между провайдерами (BGE-M3: 1024, OpenAI: 1536).
+        Fallback с несовпадающей размерностью вызывает ValueError.
+        """
+        last_error: Exception | None = None
+        for i, provider in enumerate(self.providers):
+            try:
+                result = await provider.embed(text)
+                if i == 0:
+                    self._last_primary_dim = len(result)
+                elif (
+                    self._last_primary_dim is not None
+                    and len(result) != self._last_primary_dim
+                ):
+                    raise ValueError(
+                        f"Embedding dimension mismatch: primary={self._last_primary_dim}, "
+                        f"fallback {provider.name}={len(result)}. "
+                        "Vectors would corrupt Qdrant index."
+                    )
+                return result
+            except Exception as exc:
+                if not isinstance(
+                    exc, (ExhaustedError, NotImplementedError, ValueError)
+                ) and not _is_retryable_llm_error(exc):
+                    raise
+                last_error = exc
+                logger.warning(
+                    "Embed provider %s failed, trying fallback: %s",
+                    provider.name,
+                    str(exc)[:200],
+                )
+        raise last_error or RuntimeError("All embed providers failed")
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return await self.primary.embed_batch(texts)
+        """Embed_batch с fallback по цепочке провайдеров.
+
+        Аналогично embed() — при фейле primary пробует backup-провайдеров,
+        с проверкой размерности векторов для предотвращения повреждения Qdrant.
+        """
+        last_error: Exception | None = None
+        for i, provider in enumerate(self.providers):
+            try:
+                result = await provider.embed_batch(texts)
+                if result:
+                    if i == 0:
+                        self._last_primary_dim = len(result[0])
+                    elif (
+                        self._last_primary_dim is not None
+                        and len(result[0]) != self._last_primary_dim
+                    ):
+                        raise ValueError(
+                            f"Embedding dimension mismatch: primary={self._last_primary_dim}, "
+                            f"fallback {provider.name}={len(result[0])}. "
+                            "Vectors would corrupt Qdrant index."
+                        )
+                return result
+            except Exception as exc:
+                if not isinstance(
+                    exc, (ExhaustedError, NotImplementedError, ValueError)
+                ) and not _is_retryable_llm_error(exc):
+                    raise
+                last_error = exc
+                logger.warning(
+                    "Embed_batch provider %s failed, trying fallback: %s",
+                    provider.name,
+                    str(exc)[:200],
+                )
+        raise last_error or RuntimeError("All embed_batch providers failed")
 
     async def validate_key(self) -> bool:
         for provider in self.providers:
             if await provider.validate_key():
                 return True
         return False
+
+    async def close(self) -> None:
+        """Close all child provider instances."""
+        for p in self.providers:
+            if hasattr(p, "close"):
+                await p.close()
 
 
 # ─── Хелперы ──────────────────────────────────────────────────────────
@@ -309,9 +661,11 @@ class ProviderFallback:
 def _provider_class_for(name: str) -> type:
     """Маппинг имени провайдера → класс."""
     return {
+        "openrouter": OpenRouterProvider,
         "openai": OpenAIProvider,
         "gemini": GeminiProvider,
         "mistral": MistralProvider,
+        "cloudflare": CloudflareProvider,
     }[name]
 
 
@@ -335,7 +689,7 @@ async def build_provider(
     from src.core.context_cache import get as cache_get
 
     cache_key = f"provider:{user.telegram_id}:{purpose}"
-    cached = cache_get(cache_key)
+    cached = await cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -362,6 +716,7 @@ async def build_provider(
                     purpose=purpose,
                 )
             )
+            await _restore_cooldowns(slot_ids)
         if providers:
             if len(providers) > 1:
                 logger.info(
@@ -370,7 +725,7 @@ async def build_provider(
                 )
             from src.core.context_cache import put as cache_put
 
-            cache_put(cache_key, ProviderFallback(providers), ttl=300)
+            await cache_put(cache_key, ProviderFallback(providers), ttl=300)
             return ProviderFallback(providers)
     except Exception:
         logger.exception("LlmKeySlot lookup failed, falling back to old ApiKey table")
@@ -418,17 +773,17 @@ async def build_provider(
                     )
                 else:
                     wait_sec = 60
-                return ExhaustedProvider(
-                    f"Все ключи в кулдауне. Попробуй через {wait_sec} сек."
+                logger.warning(
+                    "build_provider: все ключи в кулдауне (wait %d сек).",
+                    wait_sec,
                 )
+                return None
             elif all_slots:
-                return ExhaustedProvider(
-                    "Все ключи отключены (enabled=False). Проверь /keys."
-                )
+                logger.warning("build_provider: все ключи отключены (enabled=False).")
+                return None
             else:
-                return ExhaustedProvider(
-                    "Нет ключей. Добавь через /keys add или /settings."
-                )
+                logger.warning("build_provider: нет ключей для провайдера.")
+                return None
         except Exception:
             pass
         return None
@@ -439,7 +794,7 @@ async def build_provider(
         )
     from src.core.context_cache import put as cache_put
 
-    cache_put(cache_key, ProviderFallback(providers), ttl=300)
+    await cache_put(cache_key, ProviderFallback(providers), ttl=300)
     return ProviderFallback(providers)
 
 
@@ -454,13 +809,14 @@ class ExhaustedProvider:
     async def validate_key(self) -> bool:
         return False
 
-    async def chat(  # type: ignore[return]
-        self, messages: object, *, heavy: bool = False
-    ) -> str:
-        return f"❌ {self._reason}"
+    async def chat(self, messages: object, *, heavy: bool = False) -> str:
+        raise ExhaustedError(self._reason)
 
     async def embed(self, text: str) -> list[float]:
         raise ExhaustedError("Cannot embed: all keys exhausted")
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         raise ExhaustedError("Cannot embed batch: all keys exhausted")
+
+    async def close(self) -> None:
+        pass

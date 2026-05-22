@@ -1,6 +1,8 @@
 # NOTE: Для некритических уведомлений используй notification_queue.enqueue()
 # вместо notifier.notify(). Прямой вызов notifier.notify() — только для CRITICAL.
+import asyncio
 import logging
+from collections import deque
 from typing import TYPE_CHECKING
 
 from src.config import settings
@@ -20,9 +22,26 @@ class Notifier:
 
     def __init__(self) -> None:
         self._bot: "Bot | None" = None
+        self._buffer: deque[dict] = deque()
 
     def attach(self, bot: "Bot") -> None:
         self._bot = bot
+        # Flush buffered notifications
+        if self._buffer:
+            logger.info("Flushing %d buffered notifications", len(self._buffer))
+            asyncio.create_task(self._flush_buffer())
+
+    async def _flush_buffer(self) -> None:
+        while self._buffer:
+            item = self._buffer.popleft()
+            try:
+                await send_with_retry(
+                    self._bot.send_message,
+                    chat_id=settings.owner_telegram_id,
+                    **item,
+                )
+            except Exception:
+                logger.exception("Failed to send buffered notification")
 
     async def notify(
         self,
@@ -32,7 +51,10 @@ class Notifier:
         reply_markup: "InlineKeyboardMarkup | None" = None,
     ) -> None:
         if self._bot is None:
-            logger.warning("Notifier not attached, skipping: %s", text[:80])
+            logger.warning("Notifier not yet attached, buffering: %s", text[:80])
+            self._buffer.append(
+                {"text": text, "parse_mode": parse_mode, "reply_markup": reply_markup}
+            )
             return
         try:
             await send_with_retry(

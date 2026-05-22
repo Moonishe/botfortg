@@ -9,11 +9,11 @@ from typing import Any
 @dataclass
 class CacheEntry:
     data: Any
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = field(default_factory=time.monotonic)
     ttl: float = 300.0  # 5 минут
 
     def is_valid(self) -> bool:
-        return (time.time() - self.timestamp) < self.ttl
+        return (time.monotonic() - self.timestamp) < self.ttl
 
 
 _stats: dict[str, CacheEntry] = {}
@@ -33,7 +33,7 @@ async def get_cached(key: str) -> Any | None:
 
 async def set_cache(key: str, data: Any, ttl: float = 300.0) -> None:
     async with _lock:
-        _stats[key] = CacheEntry(data=data, timestamp=time.time(), ttl=ttl)
+        _stats[key] = CacheEntry(data=data, timestamp=time.monotonic(), ttl=ttl)
 
 
 async def invalidate(prefix: str = "") -> None:

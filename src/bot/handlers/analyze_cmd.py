@@ -1,9 +1,9 @@
 """Команда /analyze — полный анализ переписок."""
 
 import logging
-from aiogram import Router, F
+from aiogram import Router
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
 from src.db.session import get_session

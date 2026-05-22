@@ -84,13 +84,13 @@ async def review_pending_candidates(telegram_id: int) -> int:
     """
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
-        from sqlalchemy import select as _sel, update as _upd
+        from sqlalchemy import select as _sel
         from src.db.models import InstructionCandidate
 
         result = await session.execute(
             _sel(InstructionCandidate).where(
                 InstructionCandidate.user_id == owner.id,
-                InstructionCandidate.llm_reviewed == False,
+                InstructionCandidate.llm_reviewed.is_(False),
             )
         )
         pending = result.scalars().all()
@@ -134,7 +134,7 @@ async def apply_instruction(telegram_id: int, rule: str):
         if profile is None:
             profile = InstructionProfile(user_id=owner.id, rules_json="[]")
             session.add(profile)
-        rules = json.loads(profile.rules_json)
+        rules = json.loads(profile.rules_json) if profile.rules_json else []
         if rule not in rules:
             rules.append(rule)
         profile.rules_json = json.dumps(rules, ensure_ascii=False)
@@ -146,7 +146,7 @@ async def get_active_rules(telegram_id: int) -> list[str]:
     """Возвращает активные правила."""
     from src.core.context_cache import get as cache_get
 
-    cached = cache_get(f"rules:{telegram_id}")
+    cached = await cache_get(f"rules:{telegram_id}")
     if cached is not None:
         return cached
 
@@ -159,11 +159,13 @@ async def get_active_rules(telegram_id: int) -> list[str]:
             select(InstructionProfile).where(InstructionProfile.user_id == owner.id)
         )
         profile = result.scalar_one_or_none()
-        result_val = json.loads(profile.rules_json) if profile else []
+        result_val = (
+            json.loads(profile.rules_json) if profile and profile.rules_json else []
+        )
 
     from src.core.context_cache import put as cache_put
 
-    cache_put(f"rules:{telegram_id}", result_val, ttl=30)
+    await cache_put(f"rules:{telegram_id}", result_val, ttl=5)
     return result_val
 
 

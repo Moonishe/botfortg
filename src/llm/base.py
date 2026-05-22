@@ -24,3 +24,6 @@ class LLMProvider(Protocol):
     async def embed(self, text: str) -> list[float]: ...
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
+
+    async def close(self) -> None:
+        """Close underlying HTTP client and release connections."""

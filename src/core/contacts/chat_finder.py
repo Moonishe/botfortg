@@ -3,11 +3,13 @@ LLM-классификация по именам контактов. Telegram gl
 
 Зачем имена: иногда в тексте чата нужного слова вообще нет (контакт называется
 «Кул Хаус Магазин» — а тема «мебель»). LLM видит это по названию."""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,7 +62,7 @@ _CLASSIFY_SYS = (
 def _strip_fence(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
-        text = text.strip("`")
+        text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
@@ -101,7 +103,9 @@ async def _expand_keywords(provider: LLMProvider, query: str) -> list[str]:
     return cleaned[:12]
 
 
-async def _classify_contacts(provider: LLMProvider, query: str, contacts: list[Contact]) -> dict[int, int]:
+async def _classify_contacts(
+    provider: LLMProvider, query: str, contacts: list[Contact]
+) -> dict[int, int]:
     if not contacts:
         return {}
     # Готовим компактный список для LLM (peer_id, name, kind)
@@ -187,19 +191,32 @@ async def _telegram_keyword_search(
                 except Exception:
                     entity = None
                 if isinstance(entity, TgUser):
-                    parts = [getattr(entity, "first_name", None), getattr(entity, "last_name", None)]
-                    name = " ".join(p for p in parts if p).strip() or (entity.username or str(pid))
+                    parts = [
+                        getattr(entity, "first_name", None),
+                        getattr(entity, "last_name", None),
+                    ]
+                    name = " ".join(p for p in parts if p).strip() or (
+                        entity.username or str(pid)
+                    )
                     is_bot = bool(getattr(entity, "bot", False))
                     kind = "user"
                     username = getattr(entity, "username", None)
                 else:
                     name = getattr(entity, "title", None) or str(pid)
                     is_bot = False
-                    kind = "channel" if entity and getattr(entity, "broadcast", False) else "chat"
+                    kind = (
+                        "channel"
+                        if entity and getattr(entity, "broadcast", False)
+                        else "chat"
+                    )
                     username = getattr(entity, "username", None)
                 found[pid] = {
-                    "count": 1, "sample": sample, "name": name,
-                    "kind": kind, "is_bot": is_bot, "username": username,
+                    "count": 1,
+                    "sample": sample,
+                    "name": name,
+                    "kind": kind,
+                    "is_bot": is_bot,
+                    "username": username,
                 }
             else:
                 entry["count"] += 1
@@ -223,14 +240,19 @@ async def smart_find(
         contacts = await list_contacts(session, owner)
     contact_by_pid = {c.peer_id: c for c in contacts}
 
-    local_task = _local_keyword_search(owner, keywords, contact_by_pid, per_kw_limit=per_kw_limit)
+    local_task = _local_keyword_search(
+        owner, keywords, contact_by_pid, per_kw_limit=per_kw_limit
+    )
     name_task = _classify_contacts(provider, query, contacts)
     local_hits, name_scores = await asyncio.gather(local_task, name_task)
 
     if not local_hits:
-        tg_results = await asyncio.gather(*[
-            _telegram_keyword_search(client, k, per_kw_limit=per_kw_limit) for k in keywords
-        ])
+        tg_results = await asyncio.gather(
+            *[
+                _telegram_keyword_search(client, k, per_kw_limit=per_kw_limit)
+                for k in keywords
+            ]
+        )
         merged: dict[int, dict] = {}
         for batch in tg_results:
             for pid, info in batch.items():
@@ -275,15 +297,17 @@ async def smart_find(
     for pid, agg in aggregated.items():
         if agg.get("is_bot"):
             continue
-        out.append(FoundChat(
-            peer_id=pid,
-            name=agg["name"],
-            sample=agg.get("sample") or "",
-            text_hits=agg.get("text_hits", 0),
-            name_score=agg.get("name_score", 0),
-            kind=agg["kind"],
-            is_bot=agg.get("is_bot", False),
-            username=agg.get("username"),
-        ))
+        out.append(
+            FoundChat(
+                peer_id=pid,
+                name=agg["name"],
+                sample=agg.get("sample") or "",
+                text_hits=agg.get("text_hits", 0),
+                name_score=agg.get("name_score", 0),
+                kind=agg["kind"],
+                is_bot=agg.get("is_bot", False),
+                username=agg.get("username"),
+            )
+        )
     out.sort(key=lambda f: f.total_score, reverse=True)
     return out[:top_n]

@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from sqlalchemy import select, or_, and_
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import Memory, MemoryLink
@@ -92,7 +92,7 @@ class DeepMemoryRetrieval:
 
         # --- Tier 2: medium-term memory (memory_tier=2) ---
         q2 = select(Memory).where(
-            Memory.is_active == True,
+            Memory.is_active,
             Memory.memory_tier == 2,
             Memory.user_id == owner_id,
         )
@@ -101,7 +101,7 @@ class DeepMemoryRetrieval:
         if context_keywords:
             conditions = []
             for kw in context_keywords:
-                conditions.append(Memory.fact.ilike(f"%{kw}%"))
+                conditions.append(Memory.fact.icontains(kw))
             if conditions:
                 q2 = q2.where(or_(*conditions))
         q2 = q2.order_by(Memory.use_count.desc()).limit(self.tier2_limit)
@@ -154,7 +154,7 @@ class DeepMemoryRetrieval:
         if tier3_count < self.tier3_limit:
             remaining = self.tier3_limit - tier3_count
             q3 = select(Memory).where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.memory_tier == 3,
                 Memory.user_id == owner_id,
             )
@@ -180,7 +180,7 @@ class DeepMemoryRetrieval:
         q_distilled = (
             select(Memory)
             .where(
-                Memory.is_active == True,
+                Memory.is_active,
                 Memory.user_id == owner_id,
                 Memory.tags.ilike("%💡%"),
             )
@@ -193,8 +193,8 @@ class DeepMemoryRetrieval:
                 facts.append(
                     DeepFact(
                         memory_id=m.id,
-                        fact=f"💡 {m.fact}",
-                        tier=m.memory_tier or 3,
+                        fact=m.fact,
+                        tier=m.memory_tier if m.memory_tier is not None else 3,
                         confidence=0.9,
                         reason="distilled",
                         contact_id=m.contact_id,
@@ -264,7 +264,7 @@ class DeepMemoryRetrieval:
             nodes[m.id] = MemoryGraphNode(
                 memory_id=m.id,
                 fact=m.fact,
-                tier=m.memory_tier or 1,
+                tier=m.memory_tier if m.memory_tier is not None else 1,
                 neighbors=[],
             )
 
@@ -277,19 +277,22 @@ class DeepMemoryRetrieval:
                 if total_nodes >= self.bfs_max_nodes:
                     break
 
-                # Найти все связи ОТ этого узла (source_id = node_id)
+                # Найти все связи ОТ этого узла (source_id = node_id) И К этому узлу (target_id = node_id)
                 q_links = (
                     select(MemoryLink)
                     .where(
-                        MemoryLink.source_id == node_id,
                         MemoryLink.user_id == owner_id,
+                        (MemoryLink.source_id == node_id)
+                        | (MemoryLink.target_id == node_id),
                     )
                     .limit(self.bfs_max_branch)
                 )
                 links = (await session.execute(q_links)).scalars().all()
 
                 for link in links:
-                    neighbor_id = link.target_id
+                    neighbor_id = (
+                        link.target_id if link.source_id == node_id else link.source_id
+                    )
                     if neighbor_id not in visited and total_nodes < self.bfs_max_nodes:
                         visited.add(neighbor_id)
                         next_frontier.append(neighbor_id)
@@ -320,7 +323,7 @@ class DeepMemoryRetrieval:
                         nodes[m.id] = MemoryGraphNode(
                             memory_id=m.id,
                             fact=m.fact,
-                            tier=m.memory_tier or 1,
+                            tier=m.memory_tier if m.memory_tier is not None else 1,
                             neighbors=[],
                         )
 
@@ -422,10 +425,13 @@ class DeepMemoryRetrieval:
 
 
 def _parse_tags(tags_str: str | None) -> list:
-    """Парсит comma-separated строку тегов в список."""
+    """Парсит строку тегов (разделитель |) в список.
+    Поддерживает обратную совместимость с запятыми.
+    """
     if not tags_str:
         return []
-    return [t.strip() for t in tags_str.split(",") if t.strip()]
+    normalized = tags_str.replace(",", "|")
+    return [t.strip() for t in normalized.split("|") if t.strip()]
 
 
 def _extract_keywords(text: str, max_keywords: int = 5) -> list[str]:

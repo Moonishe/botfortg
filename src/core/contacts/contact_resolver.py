@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
 
 from rapidfuzz import fuzz, process
 from telethon import TelegramClient

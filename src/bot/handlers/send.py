@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -9,7 +10,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
+from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
 from src.core.contacts.contact_resolver import ContactCandidate, resolve
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
     create_pending_action,
     delete_pending_action,
@@ -20,6 +23,7 @@ from src.db.repo import (
 from src.db.session import get_session
 from src.llm.base import ChatMessage
 from src.llm.router import build_provider
+from src.userbot import get_active_telethon_client
 from src.userbot.manager import UserbotManager
 
 
@@ -45,7 +49,7 @@ PARSE_SYSTEM = (
 def _parse_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
-        text = text.strip("`")
+        text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
@@ -142,7 +146,9 @@ async def cmd_send(
     candidates = await resolve(client, owner, recipient_query)
     if not candidates:
         await message.answer(
-            f"Не нашёл контакт «{recipient_query}». Запусти /sync и попробуй снова."
+            sanitize_html(
+                f"Не нашёл контакт «{recipient_query}». Запусти /sync и попробуй снова."
+            )
         )
         return
 
@@ -158,7 +164,7 @@ async def cmd_send(
 
     await state.set_data({"send_text": text})
     await message.answer(
-        f"Кому именно отправить «<i>{text[:80]}</i>»?",
+        sanitize_html(f"Кому именно отправить «<i>{text[:80]}</i>»?"),
         reply_markup=_candidates_keyboard(candidates, text),
     )
 
@@ -188,7 +194,9 @@ async def _create_and_confirm(
         logger.warning("send guard failed", exc_info=True)
 
     await message.answer(
-        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}{guard_hint}\n\n<i>Подтверди отправку 👇</i>",
+        sanitize_html(
+            f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}{guard_hint}\n\n<i>Подтверди отправку 👇</i>"
+        ),
         reply_markup=_confirm_keyboard(action.id),
     )
 
@@ -225,9 +233,11 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     if callback.message:
         await callback.message.edit_text(
-            f"🤔 <b>Готов отправить</b>\n\n"
-            f"→ <b>Кому:</b> {label}\n"
-            f"→ <b>Текст:</b>\n{text}{guard_hint}",
+            sanitize_html(
+                f"🤔 <b>Готов отправить</b>\n\n"
+                f"→ <b>Кому:</b> {label}\n"
+                f"→ <b>Текст:</b>\n{text}{guard_hint}"
+            ),
             reply_markup=_confirm_keyboard(action.id),
         )
     await callback.answer()
@@ -292,7 +302,9 @@ async def step_edit(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await message.answer(
-        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{new_text}{guard_hint}",
+        sanitize_html(
+            f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{new_text}{guard_hint}"
+        ),
         reply_markup=_confirm_keyboard(action_id),
     )
 
@@ -334,13 +346,13 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         await callback.answer("Ошибка при отправке", show_alert=True)
         if callback.message:
             await callback.message.edit_text(
-                f"❌ Не удалось отправить 😞: <code>{e}</code>"
+                sanitize_html(f"❌ Не удалось отправить 😞: <code>{e}</code>")
             )
         return
 
     # Сохраняем для undo
     if sent_msg:
-        store_undo(callback.from_user.id, peer_id, sent_msg.id, text)
+        await store_undo(callback.from_user.id, peer_id, sent_msg.id, text)
 
     # Получаем имя контакта для красивого отчёта
     label = str(peer_id)
@@ -354,43 +366,58 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
     if len(text or "") > 60:
         snippet += "…"
 
-    # Кнопка отмены
-    from aiogram.types import InlineKeyboardMarkup
-
-    undo_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="↩ Отменить", callback_data=f"send:undo:{peer_id}"
-                )
-            ]
-        ]
-    )
+    after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
 
     if callback.message:
         await callback.message.edit_text(
-            f"✅ Отправлено «{label}»: {snippet}", reply_markup=undo_kb
+            sanitize_html(f"✅ Отправлено «{label}»: {snippet}"), reply_markup=after_kb
         )
     await callback.answer("Отправлено")
 
 
 @router.callback_query(F.data.startswith("send:undo:"))
-async def cb_undo(callback: CallbackQuery, userbot_manager=None):
+async def cb_undo(
+    callback: CallbackQuery, userbot_manager: UserbotManager | None = None
+) -> None:
     from src.core.contacts.send_guard import get_undo
 
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    peer_id = int(parts[2])
+    message_id = int(parts[3]) if len(parts) > 3 else None
+
     client = (
         userbot_manager.get_client(callback.from_user.id) if userbot_manager else None
     )
     if not client:
+        client = get_active_telethon_client(callback.from_user.id)
+    if not client:
         await callback.answer("Сначала /login", show_alert=True)
         return
-    undo = get_undo(callback.from_user.id)
-    if undo:
-        try:
-            await client.delete_messages(entity=undo[0], message_ids=[undo[1]])
+
+    if message_id is None:
+        # fallback: use get_undo (old callback format without message_id)
+        undo = await get_undo(callback.from_user.id)
+        if undo:
+            peer_id, message_id = undo[0], undo[1]
+        else:
+            await callback.answer("Слишком поздно для отмены (60с)", show_alert=True)
+            return
+
+    try:
+        entity = await client.get_entity(peer_id)
+        await client.delete_messages(entity=entity, message_ids=[message_id])
+        if callback.message:
             await callback.message.edit_text("↩ Сообщение отменено.")
-        except Exception:
-            await callback.answer("Не удалось отменить", show_alert=True)
-    else:
-        await callback.answer("Слишком поздно для отмены (60с)", show_alert=True)
+        await callback.answer("Отменено")
+    except Exception as e:
+        await callback.answer(f"Не удалось отменить: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("send:again:"))
+async def cb_send_again(callback: CallbackQuery) -> None:
+    await callback.answer("Открой меню отправки")
+    if callback.message:
+        await callback.message.edit_text(
+            "✏️ Используй /chat или отправь сообщение напрямую чтобы написать ещё.",
+            reply_markup=smart_post_action_keyboard("general"),
+        )

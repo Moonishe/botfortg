@@ -19,10 +19,22 @@ from src.bot.filters import OwnerOnly
 from src.bot.states import SettingsStates
 from src.config import LLMDefaults
 from src.core.infra.timeutil import HM_RE, TZ_PRESETS, is_valid_tz, tz_short
-from src.db.repo import get_api_key, get_or_create_user, list_folders, upsert_api_key
+from src.core.intelligence.adaptive_persona import (
+    VALID_LEVELS,
+    VALID_TONES,
+    reset_persona_to_snapshot,
+)
+from src.db.repo import (
+    get_api_key,
+    get_or_create_user,
+    get_persona,
+    list_folders,
+    upsert_api_key,
+)
 from src.db.session import get_session
 from src.userbot.dialogs import sync_dialogs
 from src.userbot import get_active_telethon_client, get_userbot_manager
+from src.llm.cloudflare_provider import CloudflareProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
@@ -48,6 +60,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         openai_key = await get_api_key(session, owner, "openai")
         gemini_key = await get_api_key(session, owner, "gemini")
         mistral_key = await get_api_key(session, owner, "mistral")
+        cloudflare_key = await get_api_key(session, owner, "cloudflare")
 
     text = (
         "⚙ <b>Настройки</b>\n\n"
@@ -63,7 +76,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"📊 Smart дайджест: {_check(getattr(s, 'smart_digest_enabled', False))} (каждые {getattr(s, 'smart_digest_interval_min', 30)}м)\n"
         f"🤖 LLM: <b>{s.llm_provider}</b> · {'тяжёлая' if s.use_heavy_model else 'лёгкая'}\n"
         f"🎤 Транскрипция: <b>{s.transcription_mode}</b> ({getattr(s, 'transcription_api_provider', 'openai')})\n"
-        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))}\n\n"
+        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · Cloudflare {_check(bool(cloudflare_key))}\n\n"
         "<i>Тапни раздел, чтобы открыть его настройки и описание.</i>"
     )
     kb = InlineKeyboardBuilder()
@@ -101,6 +114,9 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     kb.row(InlineKeyboardButton(text="📁 Папки", callback_data="set:sec:folders"))
     kb.row(InlineKeyboardButton(text="📬 Треды", callback_data="thread:refresh"))
     kb.row(InlineKeyboardButton(text="🧠 Полный анализ", callback_data="set:analyze"))
+    kb.row(
+        InlineKeyboardButton(text="🎭 Личность", callback_data="set:sec:personality")
+    )
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="set:close"))
     # Быстрые тогглы (авто-память, избранное, дайджест, авто-ответ)
     text += "\n⚡ <b>Быстрые тогглы:</b>"
@@ -191,14 +207,31 @@ BOOL_KEYS = {
     "monitor_only_selected_folders",
     "auto_reply_close_contacts",
     "notify_on_auto_reply",
+    "adaptive_mode_enabled",
+    "anti_ai_enabled",
 }
 
 CHOICE_KEYS = {
-    "llm_provider": {"openai", "gemini", "mistral"},
+    "llm_provider": {"openrouter", "openai", "gemini", "mistral", "cloudflare"},
     "transcription_mode": {"local", "api", "hybrid"},
     "transcription_api_provider": {"openai", "gemini", "mistral"},
     "auto_reply_mode": {"static", "smart"},
     "auto_mode": {"offline_only", "always", "smart"},
+    # Личность (ChatGPT-style)
+    "base_tone": {
+        "default",
+        "professional",
+        "friendly",
+        "frank",
+        "whimsical",
+        "efficient",
+        "cynical",
+    },
+    "warmth": {"low", "normal", "high"},
+    "enthusiasm": {"low", "normal", "high"},
+    "headings_lists": {"low", "normal", "high"},
+    "emoji_level": {"low", "normal", "high"},
+    "anti_ai_mode": {"off", "log", "fix"},
 }
 
 NUMERIC_KEYS = {
@@ -210,6 +243,18 @@ NUMERIC_KEYS = {
     "smart_digest_interval_min",
 }
 
+# Ключи, которые относятся к AdaptivePersona (не к owner.settings)
+PERSONA_KEYS = frozenset(
+    {
+        "base_tone",
+        "warmth",
+        "enthusiasm",
+        "headings_lists",
+        "emoji_level",
+        "adaptive_mode_enabled",
+    }
+)
+
 
 @router.callback_query(F.data.startswith("set:tog:"))
 async def cb_toggle(callback: CallbackQuery) -> None:
@@ -217,10 +262,32 @@ async def cb_toggle(callback: CallbackQuery) -> None:
     if key not in BOOL_KEYS:
         await callback.answer("Неизвестный переключатель", show_alert=True)
         return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        current = getattr(owner.settings, key)
-        setattr(owner.settings, key, not current)
+
+    # adaptive_mode_enabled — специальный случай (на AdaptivePersona)
+    if key == "adaptive_mode_enabled":
+        async with get_session() as session:
+            owner = await get_or_create_user(session, callback.from_user.id)
+            p = await get_persona(session, owner)
+            p.adaptive_mode_enabled = not p.adaptive_mode_enabled
+            await session.flush()
+        # Инвалидируем кэш ПОСЛЕ коммита
+        from src.core.context_cache import invalidate
+
+        await invalidate(f"persona:{callback.from_user.id}")
+        await callback.answer(
+            f"Адаптивный режим {'✅ ВКЛ' if p.adaptive_mode_enabled else '❌ ВЫКЛ'}"
+        )
+        await _refresh_section(callback, "personality")
+        return
+
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, callback.from_user.id)
+            current = getattr(owner.settings, key)
+            setattr(owner.settings, key, not current)
+    except AttributeError:
+        await callback.answer("Ошибка: настройка не найдена", show_alert=True)
+        return
     await callback.answer("Готово")
     await _refresh_section(callback, _section_for_key(key))
 
@@ -228,13 +295,44 @@ async def cb_toggle(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("set:choose:"))
 async def cb_choose(callback: CallbackQuery) -> None:
     _, _, key, value = callback.data.split(":", 3)
+
+    # Поля личности (на AdaptivePersona, не на UserSettings)
+    PERSONALITY_FIELDS = {
+        "base_tone",
+        "warmth",
+        "enthusiasm",
+        "headings_lists",
+        "emoji_level",
+    }
+    if key in PERSONALITY_FIELDS:
+        valid_values = CHOICE_KEYS.get(key, set())
+        if value not in valid_values:
+            await callback.answer("Невалидное значение", show_alert=True)
+            return
+        async with get_session() as session:
+            owner = await get_or_create_user(session, callback.from_user.id)
+            p = await get_persona(session, owner)
+            setattr(p, key, value)
+            await session.flush()
+        # Инвалидируем кэш ПОСЛЕ коммита
+        from src.core.context_cache import invalidate
+
+        await invalidate(f"persona:{callback.from_user.id}")
+        await callback.answer("Готово")
+        await _refresh_section(callback, "personality")
+        return
+
     if key in CHOICE_KEYS:
         if value not in CHOICE_KEYS[key]:
             await callback.answer("Невалидное значение", show_alert=True)
             return
         async with get_session() as session:
             owner = await get_or_create_user(session, callback.from_user.id)
-            setattr(owner.settings, key, value)
+            if key in PERSONA_KEYS:
+                persona = await get_persona(session, owner)
+                setattr(persona, key, value)
+            else:
+                setattr(owner.settings, key, value)
     elif key in NUMERIC_KEYS:
         try:
             ivalue = max(0, int(value))
@@ -274,6 +372,15 @@ def _section_for_key(key: str) -> str:
         "auto_mode": "auto_mode",
         "auto_reply_close_contacts": "auto_mode",
         "notify_on_auto_reply": "auto_mode",
+        # ChatGPT-style personality
+        "base_tone": "personality",
+        "warmth": "personality",
+        "enthusiasm": "personality",
+        "headings_lists": "personality",
+        "emoji_level": "personality",
+        "adaptive_mode_enabled": "personality",
+        "anti_ai_enabled": "personality",
+        "anti_ai_mode": "personality",
     }.get(key, "menu")
 
 
@@ -309,6 +416,7 @@ async def _render_section(
         openai_key = await get_api_key(session, owner, "openai")
         gemini_key = await get_api_key(session, owner, "gemini")
         mistral_key = await get_api_key(session, owner, "mistral")
+        cloudflare_key = await get_api_key(session, owner, "cloudflare")
 
     kb = InlineKeyboardBuilder()
 
@@ -498,7 +606,9 @@ async def _render_section(
 
     elif section == "llm":
         active = (
-            LLMDefaults.OPENAI_CHAT_HEAVY
+            "DeepSeek V4 Flash (бесплатно)"
+            if s.llm_provider == "openrouter"
+            else LLMDefaults.OPENAI_CHAT_HEAVY
             if s.use_heavy_model and s.llm_provider == "openai"
             else LLMDefaults.OPENAI_CHAT_LIGHT
             if s.llm_provider == "openai"
@@ -507,8 +617,12 @@ async def _render_section(
             else LLMDefaults.GEMINI_CHAT_LIGHT
             if s.llm_provider == "gemini"
             else LLMDefaults.MISTRAL_CHAT_HEAVY
-            if s.use_heavy_model
+            if s.use_heavy_model and s.llm_provider == "mistral"
             else LLMDefaults.MISTRAL_CHAT_LIGHT
+            if s.llm_provider == "mistral"
+            else LLMDefaults.CLOUDFLARE_CHAT_HEAVY
+            if s.use_heavy_model
+            else LLMDefaults.CLOUDFLARE_CHAT_LIGHT
         )
         text = (
             "🤖 <b>LLM-провайдер</b>\n\n"
@@ -530,10 +644,22 @@ async def _render_section(
         )
         kb.row(
             InlineKeyboardButton(
+                text=("• " if s.llm_provider == "openrouter" else "")
+                + "🔥 DeepSeek V4 (бесплатно)",
+                callback_data="set:choose:llm_provider:openrouter",
+            ),
+            InlineKeyboardButton(
                 text=("• " if s.llm_provider == "mistral" else "")
                 + "Mistral (бесплатно)",
                 callback_data="set:choose:llm_provider:mistral",
-            )
+            ),
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=("• " if s.llm_provider == "cloudflare" else "")
+                + "Cloudflare (Kimi/Qwen)",
+                callback_data="set:choose:llm_provider:cloudflare",
+            ),
         )
         kb.row(
             InlineKeyboardButton(
@@ -717,7 +843,8 @@ async def _render_section(
             "Хранятся зашифрованными (Fernet). Можно перезаписать в любой момент.\n\n"
             f"OpenAI: {_check(bool(openai_key))}\n"
             f"Gemini: {_check(bool(gemini_key))}\n"
-            f"Mistral: {_check(bool(mistral_key))}"
+            f"Mistral: {_check(bool(mistral_key))}\n"
+            f"Cloudflare: {_check(bool(cloudflare_key))}"
         )
         kb.row(
             InlineKeyboardButton(
@@ -730,7 +857,10 @@ async def _render_section(
         kb.row(
             InlineKeyboardButton(
                 text="🔑 Mistral key", callback_data="set:input:mistral_key"
-            )
+            ),
+            InlineKeyboardButton(
+                text="🔑 Cloudflare key", callback_data="set:input:cloudflare_key"
+            ),
         )
         kb.row(*_back_row())
 
@@ -825,6 +955,164 @@ async def _render_section(
         )
         kb.row(*_back_row())
 
+    elif section == "personality":
+        from src.db.repo import get_persona
+
+        p = await get_persona(session, owner)
+
+        tone_labels = {
+            "default": "По умолчанию",
+            "professional": "Профессиональный",
+            "friendly": "Дружелюбный",
+            "frank": "Откровенный",
+            "whimsical": "Причудливый",
+            "efficient": "Эффективный",
+            "cynical": "Циничный",
+        }
+        level_labels = {"low": "Менее", "normal": "По умолчанию", "high": "Более"}
+        current_tone = tone_labels.get(p.base_tone, "По умолчанию")
+
+        text = (
+            "🎭 <b>Личность</b>\n\n"
+            "<b>Базовый стиль и тон</b>\n"
+            f"Сейчас: <b>{current_tone}</b>\n\n"
+            "<b>Характеристики</b>\n"
+            f"🔥 Теплый: <b>{level_labels.get(p.warmth, '—')}</b>\n"
+            f"⚡ Восторженный: <b>{level_labels.get(p.enthusiasm, '—')}</b>\n"
+            f"📋 Заголовки и списки: <b>{level_labels.get(p.headings_lists, '—')}</b>\n"
+            f"😊 Эмодзи: <b>{level_labels.get(p.emoji_level, '—')}</b>\n\n"
+            f"📝 Инструкции: {'есть' if p.custom_instructions else 'нет'}\n"
+            f"👤 Псевдоним: {p.alias or 'не задан'}\n"
+            f"🧠 Адаптивный режим: <b>{'ВКЛ' if p.adaptive_mode_enabled else 'ВЫКЛ'}</b>"
+        )
+
+        # -- Базовый тон (выпадающий список) --
+        for tone_key, tone_label in tone_labels.items():
+            prefix = "• " if p.base_tone == tone_key else ""
+            kb.button(
+                text=f"{prefix}{tone_label}",
+                callback_data=f"set:choose:base_tone:{tone_key}",
+            )
+        kb.adjust(2)
+
+        # -- Характеристики: Теплый --
+        kb.row(
+            InlineKeyboardButton(
+                text="🔥 Теплый",
+                callback_data="set:noop:warmth",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if p.warmth == lvl else "") + label,
+                    callback_data=f"set:choose:warmth:{lvl}",
+                )
+                for lvl, label in [
+                    ("low", "Менее"),
+                    ("normal", "По умолч."),
+                    ("high", "Более"),
+                ]
+            ]
+        )
+
+        # -- Характеристики: Восторженный --
+        kb.row(
+            InlineKeyboardButton(
+                text="⚡ Восторженный",
+                callback_data="set:noop:enthusiasm",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if p.enthusiasm == lvl else "") + label,
+                    callback_data=f"set:choose:enthusiasm:{lvl}",
+                )
+                for lvl, label in [
+                    ("low", "Менее"),
+                    ("normal", "По умолч."),
+                    ("high", "Более"),
+                ]
+            ]
+        )
+
+        # -- Характеристики: Заголовки и списки --
+        kb.row(
+            InlineKeyboardButton(
+                text="📋 Заголовки и списки",
+                callback_data="set:noop:headings_lists",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if p.headings_lists == lvl else "") + label,
+                    callback_data=f"set:choose:headings_lists:{lvl}",
+                )
+                for lvl, label in [
+                    ("low", "Менее"),
+                    ("normal", "По умолч."),
+                    ("high", "Более"),
+                ]
+            ]
+        )
+
+        # -- Характеристики: Эмодзи --
+        kb.row(
+            InlineKeyboardButton(
+                text="😊 Эмодзи",
+                callback_data="set:noop:emoji_level",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if p.emoji_level == lvl else "") + label,
+                    callback_data=f"set:choose:emoji_level:{lvl}",
+                )
+                for lvl, label in [
+                    ("low", "Менее"),
+                    ("normal", "По умолч."),
+                    ("high", "Более"),
+                ]
+            ]
+        )
+
+        # -- Пользовательские инструкции --
+        kb.row(
+            InlineKeyboardButton(
+                text="📝 Изменить инструкции",
+                callback_data="set:input:custom_instructions",
+            )
+        )
+
+        # -- Псевдоним --
+        kb.row(
+            InlineKeyboardButton(
+                text="👤 Изменить псевдоним",
+                callback_data="set:input:alias",
+            )
+        )
+
+        # -- Адаптивный режим --
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{'✅' if p.adaptive_mode_enabled else '❌'} Адаптивный режим",
+                callback_data="set:tog:adaptive_mode_enabled",
+            )
+        )
+
+        # -- Сброс --
+        kb.row(
+            InlineKeyboardButton(
+                text="↩ Сбросить к базовым",
+                callback_data="set:persona:reset",
+            )
+        )
+
+        kb.row(*_back_row())
+
     else:
         text = "Раздел не найден."
         kb.row(*_back_row())
@@ -862,6 +1150,20 @@ async def cb_input_mistral(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_mistral_key)
     await callback.message.answer(
         "Пришли Mistral API key с <code>console.mistral.ai</code>. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:cloudflare_key")
+async def cb_input_cloudflare(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_cloudflare_key)
+    await callback.message.answer(
+        "Пришли Cloudflare API Token из <code>dash.cloudflare.com</code> "
+        "(раздел API Tokens, права на Workers AI). "
+        "Проверю и сохраню. /cancel — отмена.\n\n"
+        "⚠️ Перед этим убедись, что <code>CLOUDFLARE_ACCOUNT_ID</code> указан в <code>.env</code>.\n\n"
         "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
         "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
     )
@@ -1051,6 +1353,34 @@ async def step_mistral_key(message: Message, state: FSMContext) -> None:
     await message.answer(f"✅ Сохранено Mistral ключей: {count}.")
 
 
+@router.message(SettingsStates.waiting_cloudflare_key)
+async def step_cloudflare_key(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with cloudflare key")
+    # Валидируем первый ключ как индикатор; остальные считаем рабочими
+    if not await CloudflareProvider(parts[0]).validate_key():
+        await message.answer(
+            "❌ Ключ не работает. Проверь API Token и CLOUDFLARE_ACCOUNT_ID в .env. /cancel."
+        )
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        await upsert_api_key(session, owner, "cloudflare", ",".join(parts))
+    await state.clear()
+    count = len(parts)
+    await message.answer(f"✅ Сохранено Cloudflare ключей: {count}.")
+
+
 @router.message(SettingsStates.waiting_digest_time)
 async def step_digest_time(message: Message, state: FSMContext) -> None:
     hm = (message.text or "").strip()
@@ -1180,3 +1510,97 @@ async def step_quiet_hours_end(message: Message, state: FSMContext) -> None:
         await session.flush()
     await state.clear()
     await message.answer(f"✅ Тихие часы конец: <b>{text}</b>")
+
+
+# ---------- Личность: callback'и ввода ----------
+
+
+@router.callback_query(F.data == "set:input:alias")
+async def cb_input_alias(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_alias)
+    await callback.message.answer(
+        "👤 Как к тебе обращаться?\n\n"
+        "Напиши имя или прозвище (например: <i>Миша, Александр Петрович, шеф</i>). "
+        "Бот будет использовать это обращение в общении.\n"
+        "/cancel — отмена."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:custom_instructions")
+async def cb_input_custom_instructions(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    await state.set_state(SettingsStates.waiting_custom_instructions)
+    await callback.message.answer(
+        "📝 <b>Пользовательские инструкции</b>\n\n"
+        "Напиши свободный текст — как бот должен себя вести, что знать, "
+        "какие темы избегать, и т.д.\n\n"
+        "Например: <i>«Не используй англицизмы. Всегда проверяй факты. "
+        "Перед ответом на сложный вопрос предупреждай что думаешь.»</i>\n\n"
+        "/cancel — отмена."
+    )
+    await callback.answer()
+
+
+# ---------- Личность: FSM-обработчики ----------
+
+
+@router.message(SettingsStates.waiting_alias)
+async def step_alias(message: Message, state: FSMContext) -> None:
+    alias = (message.text or "").strip()
+    if not alias:
+        await message.answer("Пустое обращение. Повтори или /cancel.")
+        return
+    if len(alias) > 64:
+        await message.answer("Слишком длинное (макс. 64 символа). Повтори или /cancel.")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        p = await get_persona(session, owner)
+        p.alias = alias
+        await session.flush()
+    from src.core.context_cache import invalidate as cache_invalidate
+
+    await cache_invalidate(f"persona:{message.from_user.id}")
+    await state.clear()
+    await message.answer(f"✅ Обращение сохранено: <b>{alias}</b>")
+
+
+@router.message(SettingsStates.waiting_custom_instructions)
+async def step_custom_instructions(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустой текст. Повтори или /cancel.")
+        return
+    if len(text) > 2000:
+        await message.answer(
+            "Слишком длинный текст (макс. 2000 символов). Повтори или /cancel."
+        )
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        p = await get_persona(session, owner)
+        p.custom_instructions = text
+        await session.flush()
+    from src.core.context_cache import invalidate as cache_invalidate
+
+    await cache_invalidate(f"persona:{message.from_user.id}")
+    await state.clear()
+    await message.answer(
+        "✅ Инструкции сохранены!\n\n"
+        f"<i>«{text[:300]}{'…' if len(text) > 300 else ''}»</i>"
+    )
+
+
+# ---------- Личность: сброс к базовым ----------
+
+
+@router.callback_query(F.data == "set:persona:reset")
+async def cb_persona_reset(callback: CallbackQuery) -> None:
+    ok = await reset_persona_to_snapshot(callback.from_user.id)
+    if ok:
+        await callback.answer("♻️ Настройки сброшены к базовым", show_alert=True)
+    else:
+        await callback.answer("Нет сохранённого снапшота для сброса", show_alert=True)
+    await _refresh_section(callback, "personality")

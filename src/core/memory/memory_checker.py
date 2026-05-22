@@ -66,7 +66,7 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                 select(Memory)
                 .where(
                     Memory.user_id == owner.id,
-                    Memory.is_active == True,
+                    Memory.is_active,
                     Memory.id > last_id,
                 )
                 .order_by(Memory.id)
@@ -97,7 +97,7 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                         effective_rate = mem.decay_rate * cfg["decay_multiplier"]
 
                         # Базовый decay (экспоненциальный)
-                        base_decay = 2.71828 ** (-effective_rate * days)
+                        base_decay = math.exp(-effective_rate * days)
 
                         # Adaptive multiplier от use_count
                         use_mult = 1.0
@@ -111,15 +111,16 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                             use_mult = 1.3  # неиспользуемый + старый → быстрее
 
                         # Adaptive multiplier от memory_type
+                        # Значения инвертированы: < 1.0 = быстрый decay, > 1.0 = медленный decay
                         type_mult = 1.0
                         if mem.memory_type == "temporary":
-                            type_mult = 3.0  # быстро протухает
+                            type_mult = 0.3  # быстро протухает
                         elif mem.memory_type == "preference":
-                            type_mult = 0.3  # почти не протухает
+                            type_mult = 3.0  # почти не протухает
                         elif mem.memory_type == "personal":
-                            type_mult = 0.5
+                            type_mult = 2.0
                         elif mem.memory_type == "contact_fact":
-                            type_mult = 0.8
+                            type_mult = 1.2
 
                         new_conf = mem.confidence * (base_decay * use_mult * type_mult)
 
@@ -154,3 +155,11 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
 
     await invalidate("mem_")
     return decayed_count, closed_count
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "memory-decay", partial(memory_decay_loop, settings.owner_telegram_id)
+)

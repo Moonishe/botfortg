@@ -1,5 +1,6 @@
 """Промпты для саммари, черновика ответа и «где мы остановились»."""
 
+import asyncio
 import logging
 
 from src.core.contacts.chat_service import message_to_text
@@ -64,8 +65,8 @@ async def summarize_chat(
             if hits:
                 rag_lines = []
                 for h in hits:
-                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
-                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                    prefix = f"[{sanitize_html(h.peer_name)}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {sanitize_html(h.text[:200])}")
                 system = (
                     system
                     + "\n\nРелевантный контекст из истории переписок:\n"
@@ -74,13 +75,23 @@ async def summarize_chat(
         except Exception:
             logger.debug("RAG search non-critical fail", exc_info=True)
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content=user_prompt),
-        ],
-        heavy=heavy,
-    )
+    try:
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user_prompt),
+                ],
+                heavy=heavy,
+            ),
+            timeout=60.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Summarizer LLM timeout")
+        return "⏱️ Таймаут генерации."
+    except Exception as e:
+        logger.error("Summarizer LLM error: %s", e)
+        return "❌ Ошибка генерации."
     return sanitize_html(raw)
 
 
@@ -110,8 +121,8 @@ async def draft_reply(
             if hits:
                 rag_lines = []
                 for h in hits:
-                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
-                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                    prefix = f"[{sanitize_html(h.peer_name)}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {sanitize_html(h.text[:200])}")
                 system = (
                     system
                     + "\n\nРелевантный контекст из истории переписок:\n"
@@ -129,13 +140,23 @@ async def draft_reply(
             else "Напиши уместный ответ на последнее сообщение."
         )
     )
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content=user_prompt),
-        ],
-        heavy=heavy,
-    )
+    try:
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user_prompt),
+                ],
+                heavy=heavy,
+            ),
+            timeout=60.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Summarizer LLM timeout")
+        return "⏱️ Таймаут генерации."
+    except Exception as e:
+        logger.error("Summarizer LLM error: %s", e)
+        return "❌ Ошибка генерации."
     return sanitize_html(raw)
 
 
@@ -164,8 +185,8 @@ async def catchup(
             if hits:
                 rag_lines = []
                 for h in hits:
-                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
-                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                    prefix = f"[{sanitize_html(h.peer_name)}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {sanitize_html(h.text[:200])}")
                 system = (
                     system
                     + "\n\nРелевантный контекст из истории переписок:\n"
@@ -177,11 +198,21 @@ async def catchup(
     user_prompt = (
         f"Собеседник: {contact.display_name}\n\nПоследние сообщения:\n{transcript}"
     )
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content=user_prompt),
-        ],
-        heavy=heavy,
-    )
+    try:
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user_prompt),
+                ],
+                heavy=heavy,
+            ),
+            timeout=60.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Summarizer LLM timeout")
+        return "⏱️ Таймаут генерации."
+    except Exception as e:
+        logger.error("Summarizer LLM error: %s", e)
+        return "❌ Ошибка генерации."
     return sanitize_html(raw)

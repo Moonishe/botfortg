@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -57,9 +58,12 @@ async def get_or_create_user(
     if use_cache:
         from src.core.context_cache import get as cache_get
 
-        cached = cache_get(f"user:{telegram_id}")
+        cached = await cache_get(f"user:{telegram_id}")
         if cached is not None:
-            return cached
+            # cached is user.id (int) — retrieve fresh session-attached object
+            user = await session.get(User, cached)
+            if user is not None:
+                return user
     async with _user_lock:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
@@ -76,7 +80,9 @@ async def get_or_create_user(
     if use_cache:
         from src.core.context_cache import put as cache_put
 
-        cache_put(f"user:{telegram_id}", user, ttl=30)
+        # Cache only the user.id (int) — not the ORM object — to avoid
+        # returning a detached instance after the session closes.
+        await cache_put(f"user:{telegram_id}", user.id, ttl=30)
     return user
 
 
@@ -98,11 +104,7 @@ async def save_telegram_session(
         phone=phone,
         account_label=account_label,
     )
-    existing = await session.get(TelegramSession, user.id)
-    if existing is not None:
-        await session.delete(existing)
-        await session.flush()
-    session.add(payload)
+    await session.merge(payload)
 
 
 async def load_telegram_session(
@@ -228,7 +230,7 @@ async def list_trajectories(
 ) -> list[Trajectory]:
     q = select(Trajectory).where(Trajectory.user_id == user.id)
     if only_errors:
-        q = q.where(Trajectory.success == False)
+        q = q.where(Trajectory.success.is_(False))
     q = q.order_by(Trajectory.created_at.desc()).limit(limit)
     r = await session.execute(q)
     return list(r.scalars().all())
@@ -245,6 +247,36 @@ async def upsert_skill(
     enabled: bool = True,
     review_status: str = "approved",
 ) -> Skill:
+    # Feature 3: YAML frontmatter parsing
+    # Если description содержит YAML frontmatter (---...---),
+    # парсим метаданные и сохраняем в trigger_patterns_json как __yaml__
+    clean_description = description
+    yaml_metadata: dict[str, object] = {}
+    if description and description.strip().startswith("---"):
+        try:
+            from src.core.intelligence.skill_yaml import extract_frontmatter_metadata
+
+            yaml_metadata, clean_description = extract_frontmatter_metadata(description)
+        except Exception:
+            logger.debug("upsert_skill: YAML frontmatter parse skipped", exc_info=True)
+            clean_description = description
+
+    # Собираем trigger_patterns_json: базовые паттерны + YAML метаданные
+    patterns = list(trigger_patterns_json or [])
+    if yaml_metadata:
+        # Добавляем теги из YAML как паттерны
+        tags = yaml_metadata.get("tags", [])
+        if isinstance(tags, list):
+            for tag in tags:
+                if isinstance(tag, str) and tag.strip() not in patterns:
+                    patterns.append(tag.strip())
+        # Сохраняем структурированные метаданные как __yaml__
+        # Убираем дубликат __yaml__ если уже есть
+        patterns = [
+            p for p in patterns if not (isinstance(p, dict) and "__yaml__" in p)
+        ]
+        patterns.append({"__yaml__": yaml_metadata})
+
     result = await session.execute(
         select(Skill).where(
             Skill.user_id == user.id,
@@ -256,16 +288,16 @@ async def upsert_skill(
         skill = Skill(
             user_id=user.id,
             name=name.strip(),
-            description=description,
-            trigger_patterns_json=trigger_patterns_json or [],
+            description=clean_description,
+            trigger_patterns_json=patterns,
             body=body,
             enabled=enabled,
             review_status=review_status,
         )
         session.add(skill)
     else:
-        skill.description = description
-        skill.trigger_patterns_json = trigger_patterns_json or []
+        skill.description = clean_description
+        skill.trigger_patterns_json = patterns
         skill.body = body
         skill.enabled = enabled
         skill.review_status = review_status
@@ -379,7 +411,7 @@ async def get_active_keys(
             LlmKeySlot.user_id == user.id,
             LlmKeySlot.provider == provider,
             LlmKeySlot.purpose == purpose,
-            LlmKeySlot.enabled == True,
+            LlmKeySlot.enabled,
             or_(LlmKeySlot.cooldown_until.is_(None), LlmKeySlot.cooldown_until <= now),
         )
         .order_by(LlmKeySlot.priority.desc())
@@ -586,6 +618,56 @@ async def fetch_chat_messages(
     return list(reversed(result.scalars().all()))
 
 
+async def count_messages(
+    session: AsyncSession,
+    user: User,
+    peer_id: int,
+) -> int:
+    """Возвращает общее количество сообщений в чате с peer_id для данного пользователя."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.user_id == user.id, Message.peer_id == peer_id)
+    )
+    return result.scalar_one()
+
+
+async def get_watched_peers(session: AsyncSession, user: User) -> set[int]:
+    """Возвращает множество peer_id отслеживаемых чатов."""
+    raw = user.settings.watched_peers
+    if not raw:
+        return set()
+    try:
+        parsed = json.loads(raw)
+        return set(int(p) for p in parsed)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return set()
+
+
+async def is_peer_watched(session: AsyncSession, user: User, peer_id: int) -> bool:
+    """Проверяет, отслеживается ли чат peer_id."""
+    watched = await get_watched_peers(session, user)
+    return peer_id in watched
+
+
+async def add_watched_peer(session: AsyncSession, user: User, peer_id: int) -> None:
+    """Добавляет peer_id в список отслеживаемых."""
+    async with _user_lock:
+        watched = await get_watched_peers(session, user)
+        watched.add(peer_id)
+        user.settings.watched_peers = json.dumps(sorted(watched))
+        await session.flush()
+
+
+async def remove_watched_peer(session: AsyncSession, user: User, peer_id: int) -> None:
+    """Удаляет peer_id из списка отслеживаемых."""
+    async with _user_lock:
+        watched = await get_watched_peers(session, user)
+        watched.discard(peer_id)
+        user.settings.watched_peers = json.dumps(sorted(watched)) if watched else None
+        await session.flush()
+
+
 @dataclass
 class FtsHit:
     user_id: int
@@ -599,12 +681,25 @@ class FtsHit:
 
 
 def _fts_query_for(query: str) -> str:
-    # каждое слово → prefix-match, склейка через OR. Это толерантнее MATCH'а целой фразы.
-    parts = []
+    """Build an FTS5-safe MATCH expression from free-text user query.
+
+    Each word becomes a prefix-match joined with OR.
+    FTS5 operator keywords (OR, AND, NOT, NEAR) are double-quoted to
+    prevent them from being interpreted as query operators — this is the
+    standard SQLite FTS5 escaping mechanism for literal keyword search.
+    """
+    _FTS5_KEYWORDS = frozenset({"or", "and", "not", "near"})
+
+    parts: list[str] = []
     for raw in query.split():
         clean = "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
-        if len(clean) >= 2:
-            parts.append(clean.lower() + "*")
+        if len(clean) < 2:
+            continue
+        lower = clean.lower()
+        if lower in _FTS5_KEYWORDS:
+            parts.append(f'"{lower}"')
+        else:
+            parts.append(lower + "*")
     if not parts:
         return ""
     return " OR ".join(parts)
@@ -764,6 +859,7 @@ async def update_commitment_status(
     c = await session.get(Commitment, commitment_id)
     if c is not None:
         c.status = status
+        await session.flush()
 
 
 async def get_commitment(
@@ -978,7 +1074,6 @@ async def add_memory(
         # --- Уровень 2: семантическая дедупликация через Qdrant ---
         if embedding is not None and vector_store_obj is not None:
             # Проверяем кэш эмбеддингов (на случай если embed уже закэширован)
-            from src.core.actions.embedding_cache import get as _cache_get
 
             # Ищем кандидатов с запасом (порог 0.7)
             similar = await vector_store_obj.search_similar_memories(
@@ -1167,7 +1262,13 @@ async def get_agent_cache(session: AsyncSession, cache_key: str) -> str | None:
     row = result.scalar_one_or_none()
     if row:
         now = datetime.now(timezone.utc)
-        age = (now - row.created_at).total_seconds()
+        # Handle both old naive and new aware datetimes
+        try:
+            age = (now - row.created_at).total_seconds()
+        except TypeError:
+            from datetime import timezone as tz
+
+            age = (now - row.created_at.replace(tzinfo=tz.utc)).total_seconds()
         if age < row.ttl_seconds:
             return row.result_json
         await session.delete(row)
@@ -1215,7 +1316,7 @@ async def search_memories(
         select(Memory)
         .where(
             Memory.user_id == user.id,
-            Memory.fact.ilike(f"%{query}%"),
+            Memory.fact.icontains(query),
         )
         .order_by(Memory.created_at.desc())
     )
@@ -1315,7 +1416,7 @@ async def find_similar_memories(
     if not words:
         return []
     # Ищем факты где есть хотя бы 2 общих слова
-    conditions = [Memory.fact.ilike(f"%{w}%") for w in words[:5]]
+    conditions = [Memory.fact.icontains(w) for w in words[:5]]
     result = await session.execute(
         select(Memory).where(Memory.user_id == user.id, or_(*conditions))
     )
@@ -1332,7 +1433,7 @@ async def get_memory_stats(session: AsyncSession, user: User) -> dict:
         return cached
 
     result = await session.execute(
-        select(Memory).where(Memory.user_id == user.id, Memory.is_active == True)
+        select(Memory).where(Memory.user_id == user.id, Memory.is_active)
     )
     memories = list(result.scalars().all())
     by_sentiment = {}
@@ -1428,7 +1529,7 @@ async def get_cluster_members(
         .where(
             MemoryClusterMember.cluster_id == cluster_id,
             MemoryClusterMember.user_id == user.id,
-            Memory.is_active == True,
+            Memory.is_active,
         )
         .order_by(MemoryClusterMember.relevance_score.desc())
         .limit(limit)
@@ -1455,7 +1556,7 @@ async def list_clusters_for_contact(
         .join(Memory, Memory.id == MemoryClusterMember.memory_id)
         .where(
             MemoryCluster.user_id == user.id,
-            Memory.is_active == True,
+            Memory.is_active,
         )
     )
     if contact_id is not None:
@@ -1473,21 +1574,22 @@ async def upsert_folders(
     session: AsyncSession, user: User, folders_data: list[dict]
 ) -> int:
     """Сохраняет/обновляет папки. folders_data: [{'telegram_folder_id': int, 'title': str, 'emoji': str|None}]."""
-    # Удалить старые папки этого пользователя
-    await session.execute(delete(Folder).where(Folder.user_id == user.id))
-    # Вставить новые
-    saved = 0
-    for f in folders_data:
-        session.add(
-            Folder(
-                user_id=user.id,
-                telegram_folder_id=f["telegram_folder_id"],
-                title=f["title"],
-                emoji=f.get("emoji"),
+    async with _user_lock:
+        # Удалить старые папки этого пользователя
+        await session.execute(delete(Folder).where(Folder.user_id == user.id))
+        # Вставить новые
+        saved = 0
+        for f in folders_data:
+            session.add(
+                Folder(
+                    user_id=user.id,
+                    telegram_folder_id=f["telegram_folder_id"],
+                    title=f["title"],
+                    emoji=f.get("emoji"),
+                )
             )
-        )
-        saved += 1
-    await session.flush()
+            saved += 1
+        await session.flush()
     return saved
 
 
@@ -1568,7 +1670,6 @@ async def link_memories(
     relation_type: str | None = None,
 ) -> MemoryLink | None:
     """Создать/обновить связь между фактами памяти (many-to-many)."""
-    from sqlalchemy import and_, or_
 
     # Проверить что оба факта принадлежат пользователю
     result = await session.execute(
@@ -1663,7 +1764,7 @@ async def get_linked_memories(
         .where(
             MemoryLink.source_id == memory_id,
             MemoryLink.user_id == user.id,
-            Memory.is_active == True,
+            Memory.is_active,
         )
         .order_by(MemoryLink.weight.desc())
         .limit(limit)
@@ -1682,7 +1783,33 @@ async def get_memory_graph(
     max_depth: int = 3,
     max_nodes: int = 20,
 ) -> list[dict]:
-    """Строит граф связанных фактов BFS от memory_id."""
+    """Строит граф связанных фактов BFS от memory_id.
+
+    Оптимизация: вместо N запросов (на каждый узел) делаем 2 запроса:
+    1) все MemoryLink пользователя → строим adjacency dict
+    2) все Memory для посещённых ID → batch load
+    """
+    # ── Phase 1: Load ALL MemoryLinks for this user in ONE query ──────
+    rows = (
+        await session.execute(
+            select(
+                MemoryLink.source_id,
+                MemoryLink.target_id,
+                MemoryLink.weight,
+                MemoryLink.relation_type,
+            )
+            .where(MemoryLink.user_id == user.id)
+            .order_by(MemoryLink.weight.desc())
+        )
+    ).all()
+
+    # Build in-memory adjacency dict: source_id -> [(target_id, weight, rel_type), ...]
+    # Already sorted by weight DESC from the DB query
+    adj: dict[int, list[tuple[int, float, str | None]]] = {}
+    for source_id, target_id, weight, relation_type in rows:
+        adj.setdefault(source_id, []).append((target_id, weight, relation_type))
+
+    # ── Phase 2: BFS walk using the in-memory adjacency dict ─────────
     visited: set[int] = set()
     graph: list[dict] = []
     queue: list[tuple[int, int]] = [(memory_id, 0)]
@@ -1692,23 +1819,31 @@ async def get_memory_graph(
             continue
         visited.add(mid)
         if depth > 0:  # не добавляем корневой узел в граф, только соседей
-            mem = await session.get(Memory, mid)
-            if mem:
-                graph.append({"memory": mem, "depth": depth})
+            # Memory будет загружен в Phase 3 (batch)
+            graph.append({"memory_id": mid, "depth": depth})
         if depth < max_depth:
-            result = await session.execute(
-                select(
-                    MemoryLink.target_id,
-                    MemoryLink.weight,
-                    MemoryLink.relation_type,
-                )
-                .where(MemoryLink.source_id == mid, MemoryLink.user_id == user.id)
-                .order_by(MemoryLink.weight.desc())
-                .limit(10)
-            )
-            for target_id, weight, rel_type in result.all():
+            # adj.get(mid, []) уже отсортирован по weight DESC из Phase 1
+            for target_id, weight, rel_type in adj.get(mid, [])[:10]:
                 if target_id not in visited:
                     queue.append((target_id, depth + 1))
+
+    if not graph:
+        return []
+
+    # ── Phase 3: Load ALL needed Memory objects in ONE batch query ───
+    mem_ids = {entry["memory_id"] for entry in graph}
+    result = await session.execute(select(Memory).where(Memory.id.in_(mem_ids)))
+    mem_lookup: dict[int, Memory] = {m.id: m for m in result.scalars().all()}
+
+    # ── Phase 4: Assemble the graph from the lookup dict ──────────────
+    for entry in graph:
+        mid = entry.pop("memory_id")
+        mem = mem_lookup.get(mid)
+        if mem:
+            entry["memory"] = mem
+        # если memory удалена между Phase 2 и Phase 3 — пропускаем
+        # (аналогично оригинальному поведению `if mem:`)
+
     return graph
 
 
@@ -1741,7 +1876,7 @@ async def count_new_personal_facts_since(
         .where(
             Memory.user_id == owner.id,
             Memory.contact_id.is_(None),
-            Memory.is_active == True,
+            Memory.is_active,
         )
     )
     if since is not None:

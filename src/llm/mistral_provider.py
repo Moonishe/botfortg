@@ -1,5 +1,10 @@
 import httpx
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    AsyncOpenAI,
+    AuthenticationError,
+    PermissionDeniedError,
+)
 
 from src.config import LLMDefaults
 from src.llm.base import ChatMessage
@@ -22,8 +27,14 @@ class MistralProvider:
         try:
             await self._client.models.list()
             return True
+        except AuthenticationError:
+            return False  # invalid/revoked key
+        except PermissionDeniedError:
+            return False  # key lacks permission
+        except APIConnectionError:
+            raise  # network issue (timeout, connection refused) — let caller retry
         except Exception:
-            return False
+            return False  # unknown error — assume invalid
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
         model = (
@@ -47,6 +58,9 @@ class MistralProvider:
         result = resp.data[0].embedding
         cache_set(text, result, LLMDefaults.MISTRAL_EMBED)
         return result
+
+    async def close(self) -> None:
+        await self._client.close()
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         from src.core.actions.embedding_cache import get as cache_get, set as cache_set

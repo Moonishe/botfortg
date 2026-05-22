@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -17,20 +18,28 @@ logger = logging.getLogger(__name__)
 
 # in-memory rate limit: {user_id: deque of datetime}
 _draft_timestamps: dict[int, deque] = {}
+_draft_lock = asyncio.Lock()
 
 
-def _check_rate_limit(user_id: int, max_per_hour: int) -> bool:
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    if user_id not in _draft_timestamps:
-        _draft_timestamps[user_id] = deque()
-    q = _draft_timestamps[user_id]
-    # удалить старые (>1 часа)
-    while q and now - q[0] > timedelta(hours=1):
-        q.popleft()
-    if len(q) >= max_per_hour:
-        return False
-    q.append(now)
-    return True
+async def _check_rate_limit(user_id: int, max_per_hour: int) -> bool:
+    async with _draft_lock:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if user_id not in _draft_timestamps:
+            _draft_timestamps[user_id] = deque()
+        q = _draft_timestamps[user_id]
+        # удалить старые (>1 часа)
+        while q and now - q[0] > timedelta(hours=1):
+            q.popleft()
+        if len(q) >= max_per_hour:
+            return False
+        q.append(now)
+        # Очистка stale-ключей: удаляем user_id с пустыми или устаревшими deque
+        stale_threshold = timedelta(hours=2)
+        for uid in list(_draft_timestamps.keys()):
+            dq = _draft_timestamps[uid]
+            if not dq or (now - dq[-1]) > stale_threshold:
+                del _draft_timestamps[uid]
+        return True
 
 
 async def should_suggest(
@@ -45,7 +54,7 @@ async def should_suggest(
         urgency = await classify_urgency(text, provider=provider)
         if urgency == "normal":
             return False
-    return _check_rate_limit(user_id, settings.draft_max_per_hour)
+    return await _check_rate_limit(user_id, settings.draft_max_per_hour)
 
 
 async def suggest_draft(

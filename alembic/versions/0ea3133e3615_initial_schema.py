@@ -4,22 +4,35 @@ Revision ID: 0ea3133e3615
 Revises:
 Create Date: 2026-05-20 23:17:22.251602
 
-Note: The initial migration is empty because all ORM tables already exist
-in the database (created via Base.metadata.create_all in init_db()).
+Why NOT empty anymore
+---------------------
+Previous version was empty, causing "no such table" errors on fresh DBs
+when downstream migrations (318404aba419, 6c81883d69f4, etc.) tried to
+ALTER TABLE on tables that didn't exist.
 
-FTS5 virtual tables (messages_fts*, memories_fts*) are excluded from Alembic's
-view — they are created and managed by init_db() via raw SQL in session.py.
+Now calls ``Base.metadata.create_all(bind=op.get_bind())`` to stamp ALL
+ORM tables from the current model definitions in one shot.
 
-Legacy ALTER TABLE operations (columns added to users, memories, commitments,
-conversation_states) remain in init_db() for backward compatibility with
-existing databases. New schema changes should be added as Alembic migrations.
+FTS5 virtual tables (messages_fts*, memories_fts*) are excluded from
+Alembic via ``include_object`` in env.py — they are managed by raw SQL
+in init_db().
+
+Workflow for future schema changes
+-----------------------------------
+1. Edit the ORM model in models.py
+2. Generate a migration:
+       alembic revision --autogenerate -m "description"
+3. Review and apply:
+       alembic upgrade head
+4. Deploy — init_db() calls ``alembic upgrade head`` automatically.
 """
 
 from typing import Sequence, Union
 
-from alembic import op
-import sqlalchemy as sa
+import sys
+from pathlib import Path
 
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0ea3133e3615"
@@ -29,10 +42,23 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
-    pass
+    """Upgrade schema — create all ORM tables from current models."""
+    # Ensure src/ is on sys.path so we can import models
+    _root = Path(__file__).resolve().parent.parent
+    if str(_root / "src") not in sys.path:
+        sys.path.insert(0, str(_root / "src"))
+
+    from db.models import Base as _Base
+
+    _Base.metadata.create_all(bind=op.get_bind())
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
-    pass
+    """Downgrade schema — drop all ORM tables."""
+    _root = Path(__file__).resolve().parent.parent
+    if str(_root / "src") not in sys.path:
+        sys.path.insert(0, str(_root / "src"))
+
+    from db.models import Base as _Base
+
+    _Base.metadata.drop_all(bind=op.get_bind())

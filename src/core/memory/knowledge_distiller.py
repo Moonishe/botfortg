@@ -3,7 +3,6 @@
 import json
 import logging
 import re
-from datetime import datetime, timezone
 
 from src.db.repo import add_memory, get_or_create_user, list_memories
 from src.db.session import get_session
@@ -170,3 +169,11 @@ async def distillation_loop(owner_id: int) -> None:
         except Exception:
             logger.exception("Distillation loop error")
             await asyncio.sleep(settings.knowledge_distiller_interval_sec)
+
+
+from functools import partial
+from src.core.infra.task_manager import task_manager
+
+task_manager.register(
+    "distillation", partial(distillation_loop, settings.owner_telegram_id)
+)

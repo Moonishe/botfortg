@@ -1,14 +1,28 @@
 """Привод произвольного HTML к whitelist'у Telegram parse_mode=HTML.
 br/p превращаются в переносы, всё остальное вне whitelist'а вырезается."""
+
 from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
 
 
-_KEEP_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "code", "pre",
-              "a", "tg-spoiler", "blockquote"}
+_KEEP_TAGS = {
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "s",
+    "strike",
+    "code",
+    "pre",
+    "a",
+    "tg-spoiler",
+    "blockquote",
+}
 _NORMALIZE = {"strong": "b", "em": "i", "strike": "s"}
+_DANGEROUS_SCHEMES = {"javascript", "data", "vbscript"}
 _BLOCK_TO_NEWLINE = {"br", "p", "div", "ul", "ol", "section", "article"}
 _LIST_ITEM = {"li"}
 
@@ -51,8 +65,18 @@ class _Cleaner(HTMLParser):
                     href = v
                     break
             if href:
-                href = href.replace('"', "&quot;")
-                self.parts.append(f'<a href="{href}">')
+                href_lower = href.strip().lower()
+                if any(href_lower.startswith(s + ":") for s in _DANGEROUS_SCHEMES):
+                    self.parts.append("<a>")
+                else:
+                    href = (
+                        href.replace("&", "&amp;")
+                        .replace('"', "&quot;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace("'", "&#39;")
+                    )
+                    self.parts.append(f'<a href="{href}">')
             else:
                 self.parts.append("<a>")
         else:
@@ -73,7 +97,9 @@ class _Cleaner(HTMLParser):
         self.parts.append(f"</{norm}>")
 
     def handle_data(self, data: str):
-        self.parts.append(data)
+        self.parts.append(
+            data.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
 
     def handle_entityref(self, name: str):
         self.parts.append(f"&{name};")

@@ -2,7 +2,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import settings
@@ -12,6 +12,21 @@ logger = logging.getLogger(__name__)
 
 engine = create_async_engine(settings.database_url, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    """Ensure performance PRAGMAs are set on every new connection."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA cache_size=-64000")
+    cursor.execute("PRAGMA mmap_size=134217728")  # 128 MB (safe for containers)
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA temp_store=MEMORY")
+    cursor.execute("PRAGMA wal_autocheckpoint=1000")
+    cursor.close()
+
 
 # Alembic is configured for schema migrations (alembic/).
 # Future model changes should be captured via:
@@ -87,139 +102,78 @@ _MEMORY_FTS_SETUP = [
 ]
 
 
+async def _migrate_related_memory_to_links(conn) -> None:
+    """One-time data migration: related_memory_id → memory_links.
+
+    Copies old-style ``memories.related_memory_id`` + ``memories.relation_type``
+    into the ``memory_links`` table if the link doesn't already exist.
+    Safe to re-run: checks for existing links before inserting.
+
+    This is a DATA migration, not a schema migration, so it lives here
+    rather than in Alembic.
+    """
+    try:
+        result = await conn.execute(
+            text(
+                "SELECT id, related_memory_id, relation_type FROM memories WHERE related_memory_id IS NOT NULL"
+            )
+        )
+        for row in result.all():
+            mid, related_id, rel_type = row
+            # Проверить нет ли уже связи в memory_links
+            check = await conn.execute(
+                text(
+                    "SELECT id FROM memory_links WHERE source_id = :sid AND target_id = :tid"
+                ),
+                {"sid": mid, "tid": related_id},
+            )
+            if not check.first():
+                await conn.execute(
+                    text(
+                        "INSERT INTO memory_links (user_id, source_id, target_id, weight, relation_type, created_at) "
+                        "SELECT user_id, :sid, :tid, 0.7, :rel, datetime('now') FROM memories WHERE id = :sid"
+                    ),
+                    {"sid": mid, "tid": related_id, "rel": rel_type},
+                )
+    except Exception as e:
+        if (
+            "duplicate column name" in str(e).lower()
+            or "already exists" in str(e).lower()
+        ):
+            logger.debug(
+                "Migration for related_memory_id → memory_links: already applied"
+            )
+        else:
+            raise
+
+
 async def init_db() -> None:
     settings.data_dir  # триггерит создание директории
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.execute(text("PRAGMA synchronous=NORMAL"))
-        await conn.execute(text("PRAGMA cache_size=-8000"))  # ~8MB cache
-        await conn.execute(text("PRAGMA busy_timeout=30000"))
+        await conn.execute(text("PRAGMA cache_size=-64000"))  # 64 MB page cache
+        await conn.execute(text("PRAGMA mmap_size=134217728"))  # 128 MB mmap
+        await conn.execute(text("PRAGMA busy_timeout=30000"))  # 30s busy timeout
+        await conn.execute(text("PRAGMA temp_store=MEMORY"))  # temp tables in memory
+        await conn.execute(
+            text("PRAGMA wal_autocheckpoint=1000")
+        )  # checkpoint every 1000 pages
+
+        # Schema bootstrap: ORM models → create_all.
+        # Alembic (alembic upgrade head) is the canonical migration path and
+        # should be run as a pre-start step before the event loop starts.
+        # See "Migration Workflow" in alembic/README or run() in main.py.
         await conn.run_sync(Base.metadata.create_all)
+
+        # FTS5 virtual tables are not tracked by Alembic — raw SQL.
         for stmt in _FTS_SETUP:
             await conn.execute(text(stmt))
         for stmt in _MEMORY_FTS_SETUP:
             await conn.execute(text(stmt))
 
-        # Миграция: user-колонки (last_seen_online и др.)
-        for col, col_def in [
-            ("last_seen_online", "TIMESTAMP"),
-            ("absence_status", "VARCHAR(16)"),
-            ("absence_message", "TEXT"),
-            ("global_style_profile", "TEXT"),
-            ("global_style_updated_at", "TIMESTAMP"),
-        ]:
-            try:
-                await conn.execute(
-                    text(f"ALTER TABLE users ADD COLUMN {col} {col_def}")
-                )
-            except Exception as e:
-                if (
-                    "duplicate column name" in str(e).lower()
-                    or "already exists" in str(e).lower()
-                ):
-                    logger.debug("Migration for %s: column already exists", col)
-                else:
-                    raise
-
-        # Миграция: добавляем колонки adaptive scoring если их нет
-        for col, col_def in [
-            ("memory_type", "VARCHAR(24)"),
-            ("use_count", "INTEGER DEFAULT 0"),
-            ("last_used_at", "TIMESTAMP"),
-            ("expires_at", "TIMESTAMP"),
-            ("pinned", "BOOLEAN DEFAULT 0"),
-        ]:
-            try:
-                await conn.execute(
-                    text(f"ALTER TABLE memories ADD COLUMN {col} {col_def}")
-                )
-            except Exception as e:
-                if (
-                    "duplicate column name" in str(e).lower()
-                    or "already exists" in str(e).lower()
-                ):
-                    logger.debug("Migration for %s: column already exists", col)
-                else:
-                    raise
-
-        # Миграция: source_memory_id в commitments
-        try:
-            await conn.execute(
-                text("ALTER TABLE commitments ADD COLUMN source_memory_id BIGINT")
-            )
-        except Exception as e:
-            if (
-                "duplicate column name" in str(e).lower()
-                or "already exists" in str(e).lower()
-            ):
-                logger.debug("Migration for source_memory_id: column already exists")
-            else:
-                raise
-        try:
-            await conn.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_commitments_source_memory_id "
-                    "ON commitments(source_memory_id)"
-                )
-            )
-        except Exception as e:
-            if "already exists" in str(e).lower():
-                logger.debug(
-                    "Migration for ix_commitments_source_memory_id: index already exists"
-                )
-            else:
-                raise
-
-        # Миграция старых связей памяти (related_memory_id → memory_links)
-        try:
-            result = await conn.execute(
-                text(
-                    "SELECT id, related_memory_id, relation_type FROM memories WHERE related_memory_id IS NOT NULL"
-                )
-            )
-            for row in result.all():
-                mid, related_id, rel_type = row
-                # Проверить нет ли уже связи в memory_links
-                check = await conn.execute(
-                    text(
-                        "SELECT id FROM memory_links WHERE source_id = :sid AND target_id = :tid"
-                    ),
-                    {"sid": mid, "tid": related_id},
-                )
-                if not check.first():
-                    await conn.execute(
-                        text(
-                            "INSERT INTO memory_links (user_id, source_id, target_id, weight, relation_type, created_at) "
-                            "SELECT user_id, :sid, :tid, 0.7, :rel, datetime('now') FROM memories WHERE id = :sid"
-                        ),
-                        {"sid": mid, "tid": related_id, "rel": rel_type},
-                    )
-        except Exception as e:
-            if (
-                "duplicate column name" in str(e).lower()
-                or "already exists" in str(e).lower()
-            ):
-                logger.debug(
-                    "Migration for related_memory_id → memory_links: already applied"
-                )
-            else:
-                raise
-
-        # Миграция: radar_snoozed_until для ConversationState
-        try:
-            await conn.execute(
-                text(
-                    "ALTER TABLE conversation_states ADD COLUMN radar_snoozed_until DATETIME"
-                )
-            )
-        except Exception as e:
-            if (
-                "duplicate column name" in str(e).lower()
-                or "already exists" in str(e).lower()
-            ):
-                logger.debug("Migration for radar_snoozed_until: column already exists")
-            else:
-                raise
+        # Data migration (not schema): related_memory_id → memory_links.
+        await _migrate_related_memory_to_links(conn)
 
 
 @asynccontextmanager

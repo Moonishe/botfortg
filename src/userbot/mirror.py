@@ -11,11 +11,13 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import User as TgUser
 
+from src.core.infra.task_manager import track_ff
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.notifier import notifier
 from src.db.repo import (
     get_contact,
     get_or_create_user,
+    get_watched_peers,
     upsert_contact,
     upsert_conversation_state,
     upsert_message,
@@ -25,6 +27,9 @@ from src.llm.router import build_provider
 
 
 logger = logging.getLogger(__name__)
+
+# Semaphore to limit concurrent background inbox processing tasks
+_bg_semaphore = asyncio.Semaphore(50)
 
 
 def _classify(msg: TgMessage) -> str:
@@ -96,48 +101,49 @@ async def _process_incoming_bg(
     """
     from src.core.actions.inbox_manager import InboxAction, process_incoming
 
-    try:
-        async with get_session() as _im_session:
-            _im_owner = await get_or_create_user(_im_session, owner_telegram_id)
-            _im_contact = await get_contact(_im_session, _im_owner, peer_id)
-            _im_provider = await build_provider(_im_session, _im_owner)
-            decision = await process_incoming(
-                message_text=text,
-                sender_name=sender_name,
-                peer_id=peer_id,
-                owner=_im_owner,
-                contact=_im_contact,
-                provider=_im_provider,
-            )
+    async with _bg_semaphore:
+        try:
+            async with get_session() as _im_session:
+                _im_owner = await get_or_create_user(_im_session, owner_telegram_id)
+                _im_contact = await get_contact(_im_session, _im_owner, peer_id)
+                _im_provider = await build_provider(_im_session, _im_owner)
+                decision = await process_incoming(
+                    message_text=text,
+                    sender_name=sender_name,
+                    peer_id=peer_id,
+                    owner=_im_owner,
+                    contact=_im_contact,
+                    provider=_im_provider,
+                )
 
-            # Обновить ConversationState
-            status = "active"
-            if decision.action == InboxAction.QUEUE_FOR_DIGEST:
-                status = "waiting_reply"
-            await upsert_conversation_state(
-                _im_session,
-                _im_owner,
-                peer_id,
-                status=status,
-                increment_unread=True,
-                last_incoming_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            )
+                # Обновить ConversationState
+                status = "active"
+                if decision.action == InboxAction.QUEUE_FOR_DIGEST:
+                    status = "waiting_reply"
+                await upsert_conversation_state(
+                    _im_session,
+                    _im_owner,
+                    peer_id,
+                    status=status,
+                    increment_unread=True,
+                    last_incoming_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                )
 
-        # Применить решение (вне сессии)
-        if decision.action == InboxAction.NOTIFY_URGENT:
-            await notifier.notify(
-                f"🔴 <b>СРОЧНОЕ от {sender_name}!</b>\n\n<i>{text[:300]}</i>"
-            )
-        elif decision.action == InboxAction.DRAFT_SUGGEST:
-            await notification_queue.enqueue(
-                topic="inbox",
-                text=f"💬 <b>{sender_name}:</b> <i>{text[:200]}</i>\n\n→ Напиши ответ? /chat {sender_name}",
-                priority=2,
-                category="draft",
-            )
-        # SILENT_LOG / IGNORE — только сохранили в БД, ничего не делаем
-    except Exception:
-        logger.exception("Background inbox processing failed for peer %s", peer_id)
+            # Применить решение (вне сессии)
+            if decision.action == InboxAction.NOTIFY_URGENT:
+                await notifier.notify(
+                    f"🔴 <b>СРОЧНОЕ от {sender_name}!</b>\n\n<i>{text[:300]}</i>"
+                )
+            elif decision.action == InboxAction.DRAFT_SUGGEST:
+                await notification_queue.enqueue(
+                    topic="inbox",
+                    text=f"💬 <b>{sender_name}:</b> <i>{text[:200]}</i>\n\n→ Напиши ответ? /chat {sender_name}",
+                    priority=2,
+                    category="draft",
+                )
+            # SILENT_LOG / IGNORE — только сохранили в БД, ничего не делаем
+        except Exception:
+            logger.exception("Background inbox processing failed for peer %s", peer_id)
 
 
 def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
@@ -147,6 +153,13 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             peer_id = _peer_id_of(msg)
             if not peer_id:
                 return
+
+            # Проверка watched_peers — фильтрация чатов
+            async with get_session() as _w_session:
+                _w_owner = await get_or_create_user(_w_session, owner_telegram_id)
+                _watched = await get_watched_peers(_w_session, _w_owner)
+                if _watched and peer_id not in _watched:
+                    return
 
             kind = _classify(msg)
             text = msg.text or msg.message or None
@@ -219,7 +232,9 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
 
                 # детекция фраз отсутствия в исходящих сообщениях
                 if msg.out and msg.text:
-                    from src.core.scheduling.absence_detector import detect_absence_phrases
+                    from src.core.scheduling.absence_detector import (
+                        detect_absence_phrases,
+                    )
 
                     status, message_text = detect_absence_phrases(msg.text)
                     if status:
@@ -228,12 +243,14 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
 
             # ===== InboxManager: тяжёлая обработка — в фон =====
             if not msg.out and msg.text:
-                asyncio.create_task(
-                    _process_incoming_bg(
-                        owner_telegram_id=owner_telegram_id,
-                        peer_id=peer_id,
-                        sender_name=sender_name or str(peer_id),
-                        text=msg.text,
+                track_ff(
+                    asyncio.create_task(
+                        _process_incoming_bg(
+                            owner_telegram_id=owner_telegram_id,
+                            peer_id=peer_id,
+                            sender_name=sender_name or str(peer_id),
+                            text=msg.text,
+                        )
                     )
                 )
         except Exception:

@@ -48,13 +48,17 @@ async def extract(provider, messages_text: str) -> dict[str, Any]:
 
     user_msg = f"Переписка:\n{messages_text[:3000]}"
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=COMMITMENT_SYSTEM),
-            ChatMessage(role="user", content=user_msg),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=COMMITMENT_SYSTEM),
+                ChatMessage(role="user", content=user_msg),
+            ],
+            heavy=False,
+        )
+    except Exception as e:
+        logger.error("Commitment agent LLM error: %s", e)
+        return {"commitments": []}
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)

@@ -1,9 +1,7 @@
 """Contact Archetypes — классификация контактов по паттернам общения."""
 
-import json
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 
 from src.db.repo import (
     fetch_chat_messages,

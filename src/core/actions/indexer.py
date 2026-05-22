@@ -1,7 +1,6 @@
 """Индексация сообщений в Qdrant — запускается командой /index."""
 
 import logging
-from datetime import datetime
 
 from sqlalchemy import select, update
 
@@ -59,33 +58,39 @@ async def index_chat(
 
         # Batch embed — один API-вызов вместо N
         if texts_to_embed:
+            vecs = []
             try:
                 vecs = await provider.embed_batch(texts_to_embed)
             except Exception:
                 logger.exception("batch embed failed, falling back to single embed")
                 # Fallback: по одному
-                vecs = []
                 for t in texts_to_embed:
                     try:
                         vecs.append(await provider.embed(t))
                     except Exception:
                         vecs.append(None)
 
+            batch_points: list[dict] = []
             for (idx, m), vec in zip(valid_msg_map, vecs):
                 if vec is None:
                     continue
                 text = _msg_text_for_embed(m)
-                await get_vector_store().upsert(
-                    user_id=user.id,
-                    peer_id=contact.peer_id,
-                    peer_name=contact.display_name,
-                    message_id=m.message_id,
-                    text=text[:2000],
-                    date_iso=m.date.isoformat() if m.date else None,
-                    embedding=vec,
+                batch_points.append(
+                    {
+                        "user_id": user.id,
+                        "peer_id": contact.peer_id,
+                        "peer_name": contact.display_name,
+                        "message_id": m.message_id,
+                        "text": text[:2000],
+                        "date_iso": m.date.isoformat() if m.date else None,
+                        "embedding": vec,
+                    }
                 )
                 ids_done.append(m.id)
                 indexed += 1
+
+            if batch_points:
+                await get_vector_store().upsert_batch(points=batch_points)
 
         if ids_done:
             async with get_session() as session:

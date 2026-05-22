@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from src.llm.router import _ensure_utc
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import BaseFilter, Command, CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -14,6 +15,7 @@ from aiogram.types import (
 
 from src.bot.filters import OwnerOnly
 from src.core.contacts.contact_resolver import resolve
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_fuel import (
     format_depleted_contacts,
     format_fuel_line,
@@ -25,11 +27,8 @@ from src.db.repo import (
     add_commitment,
     add_key_slot,
     add_memory,
-    add_memory_candidate,
     delete_memory,
-    delete_memory_candidate,
     get_commitment_by_source_memory,
-    get_linked_memories,
     get_memory_stats,
     get_or_create_user,
     get_persona,
@@ -47,6 +46,151 @@ logger = logging.getLogger(__name__)
 router = Router(name="memory_cmd")
 router.message.filter(OwnerOnly())
 
+# ─── /keys import: очередь ожидающих импорта (без FSM) ────────────────
+
+_PENDING_IMPORTS: dict[int, str] = {}  # user_id → purpose
+
+# ─── /keys import helpers ─────────────────────────────────────────────
+
+_KEY_PREFIX_MAP: list[tuple[str, str]] = [
+    ("sk-or", "openrouter"),  # OpenRouter: sk-or-v1-...
+    ("sk-", "openai"),  # OpenAI: sk-proj-..., sk-...
+    ("sk-ant", "openai"),  # Anthropic через OpenAI-совместимость
+    ("AIza", "gemini"),  # Google Gemini
+    ("cfat_", "cloudflare"),  # Cloudflare API token
+    ("CF-", "cloudflare"),  # Cloudflare API key
+    ("ms-", "mistral"),  # Mistral API (не гарантировано)
+    ("mistral-", "mistral"),  # Mistral API key
+]
+
+_PROVIDER_ORDER = ("openrouter", "openai", "gemini", "mistral", "cloudflare")
+
+
+def _guess_provider(key: str) -> str | None:
+    """Угадывает провайдера по префиксу API-ключа."""
+    for prefix, provider in _KEY_PREFIX_MAP:
+        if key.startswith(prefix):
+            return provider
+    return None
+
+
+async def _detect_provider(key: str) -> str | None:
+    """Определяет провайдера: префикс → валидация → перебор."""
+    # 1. Префиксная эвристика
+    by_prefix = _guess_provider(key)
+    if by_prefix:
+        from src.llm.router import _provider_class_for
+
+        prov_class = _provider_class_for(by_prefix)
+        try:
+            prov = prov_class(key)
+            if await prov.validate_key():
+                return by_prefix
+        except Exception:
+            pass
+
+    # 2. Перебор всех провайдеров
+    from src.llm.router import _provider_class_for
+
+    for provider_name in _PROVIDER_ORDER:
+        if provider_name == by_prefix:
+            continue  # уже пробовали
+        try:
+            prov_class = _provider_class_for(provider_name)
+            prov = prov_class(key)
+            if await prov.validate_key():
+                return provider_name
+        except Exception:
+            continue
+
+    return None
+
+
+async def _do_import_keys(
+    message: Message, keys_text: str, purpose: str = "main"
+) -> None:
+    """Парсит и импортирует ключи с автоопределением провайдера."""
+    from src.llm.router import _provider_class_for
+    from src.crypto import decrypt
+
+    lines = keys_text.strip().split("\n")
+    raw_keys = []
+    for line in lines:
+        line = line.strip()
+        # Пропускаем комментарии и пустые строки
+        if not line or line.startswith("#"):
+            continue
+        raw_keys.append(line)
+
+    if not raw_keys:
+        await message.answer("❌ Не найдено ни одного ключа в сообщении.")
+        return
+
+    # Удаляем исходное сообщение (безопасность)
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with keys")
+
+    results: list[str] = []
+    by_provider: dict[str, int] = {}
+    total_found = 0
+
+    for i, api_key in enumerate(raw_keys):
+        detected = await _detect_provider(api_key)
+        if not detected:
+            results.append(f"  ❓ ключ #{i + 1} — провайдер не определён")
+            continue
+
+        by_provider[detected] = by_provider.get(detected, 0) + 1
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            slot = await add_key_slot(
+                session,
+                owner,
+                detected,
+                api_key,
+                purpose=purpose,
+                label=f"{detected}/{purpose}",
+                priority=i,
+            )
+
+        # Валидируем
+        try:
+            key = decrypt(slot.key_enc)
+            prov_class = _provider_class_for(detected)
+            prov = prov_class(key)
+            valid = await prov.validate_key()
+            if not valid:
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, message.from_user.id)
+                    bad_slot = await session.get(LlmKeySlot, slot.id)
+                    if bad_slot:
+                        await session.delete(bad_slot)
+                        await session.flush()
+                results.append(
+                    f"  #{slot.id} {detected}/{purpose} ❌ (не прошёл проверку)"
+                )
+            else:
+                results.append(f"  #{slot.id} {detected}/{purpose} ✅")
+                total_found += 1
+        except Exception:
+            results.append(f"  #{slot.id} {detected}/{purpose} ✅ (ошибка проверки)")
+            total_found += 1
+
+    # Итоговое сообщение
+    header = f"📥 <b>Импорт ключей</b> (purpose: {purpose})\n\n"
+    if by_provider:
+        header += "Найдено: " + ", ".join(
+            f"{p} ×{c}" for p, c in sorted(by_provider.items())
+        )
+        header += f"\nУспешно: {total_found}/{len(raw_keys)}\n\n"
+    else:
+        header += f"Успешно: 0/{len(raw_keys)}\n\n"
+
+    await message.answer(header + "\n".join(results))
+
 
 @router.message(Command("keys"))
 async def cmd_keys(message: Message) -> None:
@@ -57,8 +201,10 @@ async def cmd_keys(message: Message) -> None:
         purpose_raw = args[3].lower()
         api_keys_raw = " ".join(args[4:])
 
-        if provider not in ("openai", "gemini", "mistral"):
-            await message.answer("❌ Провайдер: openai, gemini или mistral")
+        if provider not in ("openrouter", "openai", "gemini", "mistral", "cloudflare"):
+            await message.answer(
+                "❌ Провайдер: openrouter, openai, gemini, mistral или cloudflare"
+            )
             return
 
         # Auto-increment priority when purpose ends with "+"
@@ -110,13 +256,15 @@ async def cmd_keys(message: Message) -> None:
                         if bad_slot:
                             await session.delete(bad_slot)
                             await session.flush()
-                    results.append(f"  #{slot.id} {api_key[:12]}… ❌")
+                    results.append(f"  #{slot.id} {provider}/{purpose} ❌")
                     failed += 1
                 else:
-                    results.append(f"  #{slot.id} {api_key[:12]}… ✅")
+                    results.append(f"  #{slot.id} {provider}/{purpose} ✅")
                     success += 1
             except Exception:
-                results.append(f"  #{slot.id} {api_key[:12]}… ✅ (ошибка проверки)")
+                results.append(
+                    f"  #{slot.id} {provider}/{purpose} ✅ (ошибка проверки)"
+                )
                 success += 1
 
         if len(keys) == 1 and success == 1:
@@ -134,7 +282,14 @@ async def cmd_keys(message: Message) -> None:
         return
 
     if len(args) >= 3 and args[1] == "remove":
-        slot_id = int(args[2])
+        try:
+            slot_id = int(args[2])
+        except ValueError:
+            await message.answer(
+                "❌ Неверный номер слота. Использование: <code>/keys remove &lt;номер&gt;</code>\n"
+                "Пример: <code>/keys remove 5</code>"
+            )
+            return
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
             slot = await session.get(LlmKeySlot, slot_id)
@@ -217,6 +372,46 @@ async def cmd_keys(message: Message) -> None:
             await message.answer("\n".join(lines))
             return
 
+    if len(args) >= 2 and args[1] == "import":
+        # /keys import [purpose] [keys] — автоимпорт ключей с определением провайдера
+        purpose = "main"
+        keys_text = ""
+        if len(args) >= 3:
+            if args[2].lower() in (
+                "main",
+                "draft",
+                "memory",
+                "background",
+                "search",
+                "analysis",
+                "urgent",
+                "fallback",
+            ):
+                purpose = args[2].lower()
+                keys_text = " ".join(args[3:]) if len(args) >= 4 else ""
+            else:
+                keys_text = " ".join(args[2:])
+
+        # Если ключи переданы в команде — парсим сразу
+        if keys_text.strip():
+            keys_text = keys_text.replace(",", "\n")
+            await _do_import_keys(message, keys_text, purpose)
+            return
+
+        # Иначе — ждём следующего сообщения
+        _PENDING_IMPORTS[message.from_user.id] = purpose
+        await message.answer(
+            "📥 <b>Отправь ключи:</b>\n\n"
+            "Один ключ на строку. Можно несколько.\n"
+            "Провайдер определится автоматически.\n\n"
+            "<i>Пример:</i>\n"
+            "<code>sk-proj-abcd1234...\n"
+            "cfat_xyz9876...\n"
+            "AIzaSyABC...</code>\n\n"
+            "Для отмены — /cancel"
+        )
+        return
+
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         slots = await list_key_slots(session, owner)
@@ -225,7 +420,7 @@ async def cmd_keys(message: Message) -> None:
                 "🔑 <b>Нет ключевых слотов.</b>\n\n"
                 "Добавь ключ через /keys add openai main sk-...\n"
                 "Где:\n"
-                "• провайдер: openai/gemini/mistral\n"
+                "• провайдер: openrouter/openai/gemini/mistral/cloudflare\n"
                 "• purpose: main/draft/memory/background/search/analysis/urgent/fallback\n"
                 "• ключ: сам API ключ"
             )
@@ -251,6 +446,9 @@ async def cmd_keys(message: Message) -> None:
         lines.append(
             "<i>/keys add &lt;provider&gt; &lt;purpose&gt; &lt;key1,key2,...&gt; — добавить ключи</i>"
         )
+        lines.append(
+            "<i>/keys import [purpose] [keys...] — автоимпорт с определением провайдера</i>"
+        )
         lines.append("<i>/keys remove &lt;slot_id&gt; — удалить слот</i>")
         lines.append("<i>/keys toggle &lt;slot_id&gt; — вкл/выкл слот</i>")
         await message.answer("\n".join(lines))
@@ -274,6 +472,37 @@ async def cb_keys_remove(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.edit_text(text)
     await callback.answer()
+
+
+class _PendingImportFilter(BaseFilter):
+    """Фильтр: сообщение от юзера, ожидающего импорта ключей.
+    Пропускает только если у юзера нет активного FSM-состояния.
+    """
+
+    async def __call__(
+        self, message: Message, state: FSMContext | None = None
+    ) -> bool | dict:
+        if message.from_user is None:
+            return False
+        if message.from_user.id not in _PENDING_IMPORTS:
+            return False
+        if state is not None and await state.get_state() is not None:
+            return False
+        return True
+
+
+@router.message(_PendingImportFilter())
+async def _pending_import_handler(message: Message) -> None:
+    """Принимает ключи после /keys import (без FSM)."""
+    uid = message.from_user.id  # type: ignore[union-attr]
+    purpose = _PENDING_IMPORTS.pop(uid)
+    keys_text = message.text or ""
+
+    if not keys_text.strip() or keys_text.strip().lower() in ("/cancel", "отмена"):
+        await message.answer("❌ Импорт отменён.")
+        return
+
+    await _do_import_keys(message, keys_text, purpose)
 
 
 @router.message(Command("llm_status"))
@@ -308,61 +537,6 @@ async def cmd_llm_status(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
-@router.callback_query(F.data.startswith("keys:remove:"))
-async def cb_keys_remove(callback: CallbackQuery) -> None:
-    """Удалить слот ключа по inline-кнопке."""
-    slot_id = int(callback.data.split(":")[2])
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        slot = await session.get(LlmKeySlot, slot_id)
-        if slot and slot.user_id == owner.id:
-            provider = slot.provider
-            purpose = slot.purpose
-            await session.delete(slot)
-            await session.commit()
-            text = f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
-        else:
-            text = "❌ Слот не найден или не твой."
-    if callback.message:
-        await callback.message.edit_text(text)
-    await callback.answer()
-
-
-@router.message(Command("llm_status"))
-async def cmd_llm_status(message: Message) -> None:
-    """Показать статус LLM: семафоры, слоты, использование."""
-    from src.llm.router import _PURPOSE_SEMAPHORES
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        slots = await list_key_slots(session, owner)
-
-    lines = ["<b>📊 LLM Status</b>", ""]
-    total_used = sum(s.usage_count or 0 for s in slots)
-    total_fail = sum(s.failure_count or 0 for s in slots)
-    lines.append(f"Всего вызовов: {total_used} | фейлов: {total_fail}")
-    lines.append("")
-
-    for purpose, sem in _PURPOSE_SEMAPHORES.items():
-        active = sem._value
-        limit = sem._bound_value if hasattr(sem, "_bound_value") else "?"
-        lines.append(f"🔹 {purpose}: {active}/{limit} слотов свободно")
-    lines.append("")
-    for s in slots[:10]:
-        status = (
-            "❌"
-            if not s.enabled
-            else "⏳"
-            if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
-            else "✅"
-        )
-        lines.append(
-            f"{status} {s.provider}/{s.purpose} — {s.usage_count}× ({s.failure_count}× фейлов)"
-        )
-
-    await message.answer("\n".join(lines))
-
-
 @router.message(Command("memory"))
 async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     """Показать память — всё или про конкретный контакт, или --inbox."""
@@ -385,7 +559,7 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
             }.get(c.sentiment or "", "⚪")
             mem_type = f" ({c.memory_type})" if c.memory_type else ""
             lines.append(
-                f"{i}. {sent_emoji} <i>{c.fact}</i>{mem_type}\n"
+                f"{i}. {sent_emoji} <i>{sanitize_html(c.fact)}</i>{mem_type}\n"
                 f"   важность={c.importance}, затухание={c.decay_rate}, источник={c.source}"
             )
             kb = InlineKeyboardMarkup(
@@ -465,7 +639,7 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
 
             narrative = await build_chain_narrative(contact_id, message.from_user.id)
             if narrative:
-                await message.answer(narrative)
+                await message.answer(sanitize_html(narrative))
             else:
                 await message.answer(
                     "Недостаточно данных для истории (нужно минимум 3 факта)."
@@ -542,12 +716,12 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
                 "reminded": "⏰",
             }.get(c.status, "📋")
             line = (
-                f"• {sent} [{date_str}] {m.fact}\n"
+                f"• {sent} [{date_str}] {sanitize_html(m.fact)}\n"
                 f"   {status_emoji} Задача: <b>{c.status}</b>"
             )
             await message.answer(line)
         else:
-            line = f"• {sent} [{date_str}] {m.fact}"
+            line = f"• {sent} [{date_str}] {sanitize_html(m.fact)}"
             # Кнопка создания задачи из факта памяти
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -589,9 +763,9 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
             display_fact = m.fact
             if display_fact.startswith("💡 "):
                 display_fact = display_fact[2:]
-            line = f"• 💡 <b>{display_fact}</b>"
+            line = f"• 💡 <b>{sanitize_html(display_fact)}</b>"
         else:
-            line = f"• {sent} [{date_str}]{rel_prefix} {m.fact}"
+            line = f"• {sent} [{date_str}]{rel_prefix} {sanitize_html(m.fact)}"
         if m.sentiment == "positive":
             positive_lines.append(line)
         elif m.sentiment == "negative":
@@ -678,7 +852,7 @@ async def cb_memory_stats(callback: CallbackQuery) -> None:
     lines.extend(
         [
             "",
-            f"<b>По источникам:</b>",
+            "<b>По источникам:</b>",
         ]
     )
     for source, count in stats["by_source"].items():
@@ -741,11 +915,11 @@ async def cmd_remember(
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        mem = await add_memory(
+        await add_memory(
             session, owner, fact=fact, contact_id=contact_id, source="user"
         )
 
-    await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
+    await message.answer(sanitize_html(f"🧠 Запомнил: <i>{fact}</i>"))
 
 
 @router.message(Command("habits"))
@@ -774,7 +948,11 @@ async def cmd_insights(message: Message) -> None:
         return
     # Если есть — каждый инсайт отдельным сообщением с клавиатурой
     for ins, kb in zip(insights[:5], keyboards):
-        detail = f"<b>{ins['title']}</b>\n{ins['detail']}\n💡 {ins['action']}"
+        detail = (
+            f"<b>{sanitize_html(ins['title'])}</b>\n"
+            f"{sanitize_html(ins['detail'])}\n"
+            f"💡 {sanitize_html(ins['action'])}"
+        )
         await message.answer(detail, reply_markup=kb)
 
 
@@ -797,13 +975,14 @@ async def cmd_forget(
         return
 
     async with get_session() as session:
+        owner = await session.merge(owner)
         for m in found:
             await delete_memory(session, owner, m.id)
 
     names = ", ".join(
         f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
     )
-    await message.answer(f"🗑 Забыл: {names}")
+    await message.answer(sanitize_html(f"🗑 Забыл: {names}"))
 
 
 @router.message(Command("archetypes"))
@@ -847,7 +1026,7 @@ async def cmd_distill(message: Message, userbot_manager: UserbotManager) -> None
         await message.answer(
             f"✅ <b>Дистилляция завершена:</b>\n"
             f"Сжато {result['deactivated']} фактов →\n"
-            f"<i>«{result['fact'][:200]}»</i>"
+            f"<i>«{sanitize_html(result['fact'][:200])}»</i>"
         )
     else:
         await message.answer("❌ Недостаточно фактов для дистилляции (нужно 10+).")
@@ -885,10 +1064,12 @@ async def cb_pattern_action(callback: CallbackQuery) -> None:
             )
         if callback.message:
             await callback.message.edit_text(
-                f"📅 Напоминание для <b>{name}</b>\n"
-                f"Напиши: <code>/remind за час до созвона с {name}</code>"
+                sanitize_html(
+                    f"📅 Напоминание для <b>{name}</b>\n"
+                    f"Напиши: <code>/remind за час до созвона с {name}</code>"
+                )
             )
-        await callback.answer(f"Напоминание для {name}")
+        await callback.answer(f"Напоминание для {sanitize_html(name)}")
         return
 
     if action == "history":
@@ -909,7 +1090,7 @@ async def cmd_instructions(message: Message) -> None:
     from src.core.intelligence.adaptive_instructions import get_active_rules
 
     async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
+        await get_or_create_user(session, message.from_user.id)
     rules = await get_active_rules(message.from_user.id)
     if not rules:
         await message.answer(
@@ -976,7 +1157,6 @@ async def cmd_warnings(message: Message) -> None:
 @router.callback_query(F.data.startswith("memb:"))
 async def cb_memory_inbox(callback: CallbackQuery) -> None:
     """Обрабатывает кнопки Inbox для MemoryCandidate."""
-    from datetime import datetime, timezone
 
     parts = callback.data.split(":")
     action = parts[1]
@@ -1004,14 +1184,14 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
             )
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
-                f"✅ Запомнил: <i>{candidate.fact}</i>"
+                f"✅ Запомнил: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт сохранён")
 
         elif action == "discard":
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
-                f"🗑 Удалил: <i>{candidate.fact}</i>"
+                f"🗑 Удалил: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт удалён")
 
@@ -1030,7 +1210,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
             )
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
-                f"⏳ Сохранено на неделю: <i>{candidate.fact}</i>"
+                f"⏳ Сохранено на неделю: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт сохранён временно")
 
@@ -1048,7 +1228,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
             )
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
-                f"♾ Сохранено навсегда: <i>{candidate.fact}</i>"
+                f"♾ Сохранено навсегда: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт сохранён навсегда")
 
@@ -1056,7 +1236,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
                 f"✏️ Напиши исправленный текст для факта:\n\n"
-                f"<i>{candidate.fact}</i>\n\n"
+                f"<i>{sanitize_html(candidate.fact)}</i>\n\n"
                 f"<code>/remember исправленный текст</code>"
             )
             await callback.answer("Напиши /remember с исправленным текстом")
@@ -1083,7 +1263,7 @@ async def cb_mem_to_task(callback: CallbackQuery) -> None:
             return
 
         # Создаём обязательство со ссылкой на факт памяти
-        c = await add_commitment(
+        await add_commitment(
             session,
             user_id=owner.id,
             peer_id=mem.contact_id or 0,
@@ -1096,7 +1276,9 @@ async def cb_mem_to_task(callback: CallbackQuery) -> None:
         )
 
     if callback.message:
-        await callback.message.edit_text(f"📋 Задача создана:\n<i>{mem.fact}</i>")
+        await callback.message.edit_text(
+            sanitize_html(f"📋 Задача создана:\n<i>{mem.fact}</i>")
+        )
     await callback.answer("✅ Задача создана")
 
 
@@ -1123,8 +1305,7 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
 @router.message(Command("clusters"))
 async def cmd_clusters(message: Message) -> None:
     """Показать кластеры памяти."""
-    from src.core.memory.memory_clusterer import rebuild_clusters
-    from src.db.repo import get_cluster_members, list_clusters_for_contact
+    from src.db.repo import list_clusters_for_contact
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -1147,7 +1328,6 @@ async def cmd_clusters(message: Message) -> None:
 @router.message(Command("persona"))
 async def cmd_persona(message: Message) -> None:
     """Показать/сбросить адаптивный профиль личности."""
-    from src.core.intelligence.adaptive_persona import format_persona_for_prompt
 
     args = (message.text or "").split()
 
@@ -1237,7 +1417,7 @@ def _format_timeline(
     from datetime import datetime, timedelta, timezone
     from collections import defaultdict
 
-    now = datetime.now(timezone.utc)
+    _now = datetime.now(timezone.utc)
 
     # Разделяем на долгосрочные (tier 3 или distillation) и обычные
     longterm = [m for m in items if m.memory_tier == 3 or m.source == "distillation"]
@@ -1262,10 +1442,8 @@ def _format_timeline(
 
     lines: list[str] = []
     if contact_id:
-        from src.db.repo import get_contact, get_or_create_user
-
         # contact name is already resolved, but we don't have it here directly
-        lines.append(f"📅 <b>История отношений:</b>\n")
+        lines.append("📅 <b>История отношений:</b>\n")
     else:
         lines.append("📅 <b>Хронология памяти:</b>\n")
 
@@ -1285,7 +1463,7 @@ def _format_timeline(
             sent_emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
                 m.sentiment or "", "⚪"
             )
-            lines.append(f"  • {sent_emoji} «{m.fact}»")
+            lines.append(f"  • {sent_emoji} «{sanitize_html(m.fact)}»")
         lines.append(f"  📊 Тренд: {trend}")
         lines.append("")
 
@@ -1296,7 +1474,7 @@ def _format_timeline(
             fact_text = m.fact
             if fact_text.startswith("💡 "):
                 fact_text = fact_text[2:]
-            lines.append(f"  • 💡 {fact_text}")
+            lines.append(f"  • 💡 {sanitize_html(fact_text)}")
         lines.append("")
 
     return "\n".join(lines) if lines else "Нет данных для хронологии."

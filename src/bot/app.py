@@ -15,6 +15,7 @@ from src.bot.handlers import (
     digest_cmd,
     draft_actions,
     explain_cmd,
+    humanize_cmd,
     free_text,
     free_text_memory,
     free_text_settings,
@@ -36,6 +37,7 @@ from src.bot.handlers import (
 )
 from src.config import settings
 from src.core.infra.notifier import notifier
+from src.core.scheduling.notification_queue import notification_queue
 from src.userbot.manager import UserbotManager
 
 
@@ -90,6 +92,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
         session=session,
     )
     notifier.attach(bot)
+    notification_queue.start()
 
     # Patch bot.send_message so ALL outbound messages (message.answer, etc.)
     # automatically get retry with exponential backoff.
@@ -117,6 +120,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(news_topics.router)
     dp.include_router(threads_cmd.router)
     dp.include_router(explain_cmd.router)
+    dp.include_router(humanize_cmd.router)
     dp.include_router(today_cmd.router)
     dp.include_router(skills_cmd.router)
     dp.include_router(trajectory_cmd.router)

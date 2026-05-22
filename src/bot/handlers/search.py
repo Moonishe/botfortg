@@ -8,6 +8,7 @@ from sqlalchemy import or_, select
 
 from src.bot.filters import OwnerOnly
 from src.core.contacts.chat_service import load_chat
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.contacts.contact_resolver import resolve
 from src.core.actions.indexer import index_chat
 from src.core.actions.vector_store import get_vector_store
@@ -77,11 +78,16 @@ async def cmd_index(
 @router.callback_query(F.data.startswith("search:idx:"))
 async def cb_idx_pick(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
     peer_id = int(callback.data.split(":")[2])
-    if callback.message:
+    if callback.message is not None:
         await callback.message.edit_text("⏳ Индексирую...")
-    await _do_index(
-        callback.message, peer_id, userbot_manager, telegram_id=callback.from_user.id
-    )
+        await _do_index(
+            callback.message,
+            peer_id,
+            userbot_manager,
+            telegram_id=callback.from_user.id,
+        )
+    else:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
     await callback.answer()
 
 
@@ -212,18 +218,22 @@ async def cmd_search(
     for hit in fts_hits:
         groups[hit.peer_id].append(hit)
 
-    await message.answer(f"🔍 Результаты по «<i>{query}</i>»:")
+    await message.answer(sanitize_html(f"🔍 Результаты по «<i>{query}</i>»:"))
 
     sent = 0
     for peer_id, hits in groups.items():
         peer_label = hits[0].peer_name or str(peer_id)
-        await message.answer(f"📁 {peer_label} ({len(hits)} совпадений)")
+        await message.answer(sanitize_html(f"📁 {peer_label} ({len(hits)} совпадений)"))
         for hit in hits[:5]:  # не более 5 на чат
             if sent >= 8:
                 break
             date_str = hit.date.strftime("%d.%m.%Y") if hit.date else ""
             body = hit.snippet[:200]
-            line = f"• «{body}» — {date_str}" if date_str else f"• «{body}»"
+            line = (
+                f"• «{sanitize_html(body)}» — {date_str}"
+                if date_str
+                else f"• «{sanitize_html(body)}»"
+            )
             await message.answer(
                 line, reply_markup=_result_keyboard(hit.peer_id, hit.message_id)
             )

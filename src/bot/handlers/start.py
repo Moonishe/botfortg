@@ -18,6 +18,18 @@ router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
 
 
+def _pretty_provider(name: str | None) -> str:
+    """Человеческое имя провайдера для отображения."""
+    names = {
+        "openrouter": "OpenRouter (DeepSeek V4)",
+        "openai": "OpenAI",
+        "gemini": "Gemini",
+        "mistral": "Mistral",
+        "cloudflare": "Cloudflare",
+    }
+    return names.get(name or "", "—")
+
+
 WELCOME = (
     "👋 <b>Привет! Я твой AI-ассистент для Telegram</b>\n\n"
     "<b>Аккаунт</b>\n"
@@ -42,7 +54,16 @@ WELCOME = (
     "🎭 /style &lt;имя&gt; — пересчитать профиль моего стиля общения с этим контактом\n"
     "🧠 /memory — показать память (факты о контактах)\n"
     "📬 /threads — активные переписки\n\n"
-    "📖 /help — эта подсказка"
+    "📖 /help — эта подсказка\n\n"
+    "<b>Можно писать своими словами:</b>\n"
+    "<i>• «Напиши Ивану что задержусь на 10 минут»</i> → отправка сообщения\n"
+    "<i>• «Что нового в чате с Петей?»</i> → саммари переписки\n"
+    "<i>• «Напомни завтра в 10 про отчёт»</i> → напоминание\n"
+    "<i>• «Где мы остановились с Машей?»</i> → catchup\n"
+    "<i>• «Запомни: у Насти ДР 15 июня»</i> → память\n"
+    "<i>• «Сделай краткую выжимку новостей про AI»</i> → дайджест\n"
+    "<i>• «Ответь Игорю: давай в среду»</i> → черновик ответа\n"
+    "<i>• «Какие у меня задачи?»</i> → список обещаний\n"
 )
 
 
@@ -51,8 +72,18 @@ async def cmd_start(message: Message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         has_session = owner.session is not None
-        llm = (owner.settings.llm_provider or "—").capitalize()
+        llm = _pretty_provider(owner.settings.llm_provider)
         tz = tz_short(owner.settings.timezone) if owner.settings.timezone else "UTC"
+
+        # Проверяем, новый ли пользователь (нет persona или 0 взаимодействий)
+        from src.db.models._learning import AdaptivePersona
+        from sqlalchemy import select
+
+        stmt = select(AdaptivePersona).where(AdaptivePersona.user_id == owner.id)
+        result = await session.execute(stmt)
+        persona = result.scalar_one_or_none()
+
+    is_new = (persona is None) or (persona.total_interactions == 0)
 
     auth_status = "Ты авторизован ✅" if has_session else "Не авторизован ❌"
 
@@ -63,6 +94,15 @@ async def cmd_start(message: Message) -> None:
         f"🤖 LLM: {llm}\n"
         f"🕐 Часовой пояс: {tz}\n\n"
     )
+
+    onboarding_text = ""
+    if is_new:
+        onboarding_text = (
+            "\n\n🎭 <b>Хочешь настроить личность бота под себя?</b>\n"
+            "Я могу общаться в разных стилях: профессионально, дружелюбно, "
+            "игриво, лаконично и даже с сарказмом!\n\n"
+            "Нажми кнопку ниже чтобы настроить."
+        )
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -76,9 +116,14 @@ async def cmd_start(message: Message) -> None:
                 InlineKeyboardButton(text="📋 Задачи", callback_data="nav:todos"),
                 InlineKeyboardButton(text="🧠 Память", callback_data="nav:memory"),
             ],
+            [
+                InlineKeyboardButton(
+                    text="🎭 Личность", callback_data="set:sec:personality"
+                ),
+            ],
         ]
     )
-    await message.answer(header + WELCOME, reply_markup=kb)
+    await message.answer(header + WELCOME + onboarding_text, reply_markup=kb)
 
 
 @router.message(Command("help"))
@@ -86,7 +131,7 @@ async def cmd_help(message: Message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         auth_status = "✅" if owner.session else "❌"
-        llm = (owner.settings.llm_provider or "—").capitalize()
+        llm = _pretty_provider(owner.settings.llm_provider)
     header = (
         f"📖 <b>Помощь по командам</b>\n"
         f"{'Ты авторизован' if owner.session else 'Не авторизован'} {auth_status} · "
@@ -114,3 +159,16 @@ async def cb_nav(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             f"🔄 Нажми в поле ввода: <code>{cmd}</code> и отправь."
         )
+
+
+@router.callback_query(F.data == "persona:skip_onboarding")
+async def cb_skip_onboarding(callback: CallbackQuery) -> None:
+    """Пользователь пропустил onboarding личности."""
+    await callback.answer(
+        "Ок, настройки можно изменить в любой момент в /settings → 🎭 Личность"
+    )
+    if callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
