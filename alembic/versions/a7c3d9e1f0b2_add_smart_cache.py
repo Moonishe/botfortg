@@ -23,7 +23,9 @@ def upgrade() -> None:
     """Upgrade schema — create smart_cache table."""
     # Guard: the table may already exist if created by the initial migration
     # (0ea3133e3615 now uses Base.metadata.create_all).
-    if op.has_table("smart_cache"):
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    if "smart_cache" in inspector.get_table_names():
         return
     op.create_table(
         "smart_cache",
