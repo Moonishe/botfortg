@@ -462,6 +462,19 @@ async def exec_full_analysis(intent, message) -> None:
 # ─── Key management handlers (natural language) ─────────────────────
 
 
+async def _count_key_slots(session, owner) -> int:
+    """Возвращает общее количество ключей у пользователя."""
+    from sqlalchemy import select, func
+    from src.db.models._auth import LlmKeySlot
+
+    r = await session.execute(
+        select(func.count())
+        .select_from(LlmKeySlot)
+        .where(LlmKeySlot.user_id == owner.id, LlmKeySlot.enabled.is_(True))
+    )
+    return r.scalar() or 0
+
+
 async def exec_add_api_key(intent: dict, message: Message) -> None:
     """Добавить API-ключ(и) через естественный язык."""
     provider = (intent.get("provider") or "").strip().lower()
@@ -484,11 +497,15 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
         await message.answer("❌ Пустой список ключей.")
         return
 
-    # Delete message with keys from chat (security)
+    # Delete message with keys from chat (security).
+    # In private chats bots can't delete user messages — we ask
+    # the user to delete it manually as fallback.
+    _deleted = False
     try:
         await message.delete()
+        _deleted = True
     except Exception:
-        logger.exception("failed to delete message with key")
+        pass  # expected in private chats — notify user below
 
     success = 0
     failed = 0
@@ -537,14 +554,24 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
             failed += 1
 
     if len(keys) == 1 and success == 1:
+        # Get total key count across all providers
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            total = await _count_key_slots(session, owner)
+
         if not is_new:
             await message.answer(
-                f"ℹ️ Ключ {provider}/{purpose} уже был добавлен ранее (слот #{last_slot_id})."
+                f"ℹ️ Ключ {provider}/{purpose} уже был добавлен ранее (слот #{last_slot_id}).\n"
+                f"🔑 Всего ключей: {total}"
             )
         else:
-            await message.answer(
-                f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{last_slot_id})"
+            msg = (
+                f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{last_slot_id})\n"
+                f"🔑 Всего ключей: {total}"
             )
+            if not _deleted:
+                msg += "\n\n⚠️ <i>Сообщение с ключом не удалось удалить — удали его вручную.</i>"
+            await message.answer(msg)
         return
     elif len(keys) == 1 and failed == 1:
         await message.answer(
