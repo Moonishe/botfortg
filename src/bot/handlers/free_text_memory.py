@@ -10,6 +10,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.filters import OwnerOnly
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
     add_memory,
@@ -26,6 +27,7 @@ from src.userbot import get_active_telethon_client
 
 logger = logging.getLogger(__name__)
 router = Router(name="free_text_memory")
+router.callback_query.filter(OwnerOnly())
 
 
 # ── exec-функции (вызываются из _dispatch в free_text.py) ──────────────

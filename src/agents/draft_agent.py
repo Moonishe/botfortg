@@ -105,3 +105,42 @@ async def draft(
             "tone": "neutral",
             "reasoning": "fallback",
         }
+
+
+async def draft_variants(
+    provider,
+    sender_name: str,
+    incoming_text: str,
+) -> list[dict]:
+    """Generate 3 tone variants: neutral, warm, brief.
+
+    Args:
+        provider: Объект LLMProvider с методом chat().
+        sender_name: Имя отправителя.
+        incoming_text: Текст входящего сообщения.
+
+    Returns:
+        Список словарей с ключами tone (str) и text (str).
+    """
+    prompt = (
+        f"Сгенерируй 3 варианта ответа в разных тонах для контакта {sender_name}.\n"
+        f"Входящее: {incoming_text}\n\n"
+        "Верни ТОЛЬКО JSON:\n"
+        '{"variants": [\n'
+        '  {"tone": "нейтральный", "text": "..."},\n'
+        '  {"tone": "тёплый", "text": "..."},\n'
+        '  {"tone": "краткий", "text": "..."}\n'
+        ']}"'
+    )
+    try:
+        raw = await provider.chat(
+            [ChatMessage(role="user", content=prompt)],
+            heavy=False,
+        )
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            data = json.loads(m.group(0))
+            return data.get("variants", [])
+    except Exception:
+        logger.debug("draft_variants failed", exc_info=True)
+    return []

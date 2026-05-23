@@ -146,13 +146,25 @@ class ToolRegistry:
         can be passed through -- they will be forwarded to the handler if
         its signature accepts ``**kwargs``.
 
+        **Security enforcement:** if the tool's ``ToolSpec.requires_confirmation``
+        is ``True``, the caller **must** pass ``_confirmed=True``.  Callers that
+        have not yet obtained user consent should pass ``_confirmed=False``
+        (or omit it) and this method will return ``{"error": "requires
+        confirmation"}`` without executing.
+
         Returns:
             The dict returned by the handler, or ``{"error": <message>}``
-            if the tool is not found or the handler raises.
+            if the tool is not found, requires confirmation, or the handler
+            raises.
         """
         spec = self.get(name)
         if spec is None:
             return {"error": f"Tool '{name}' not found"}
+
+        # Enforce requires_confirmation — caller must pass _confirmed=True
+        confirmed = params.pop("_confirmed", False)
+        if spec.requires_confirmation and not confirmed:
+            return {"error": "requires confirmation"}
 
         try:
             result = await spec.handler(**params)

@@ -18,6 +18,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.filters import OwnerOnly
 from src.bot.states import SettingsStates
 from src.config import LLMDefaults
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import HM_RE, TZ_PRESETS, is_valid_tz, tz_short
 from src.core.intelligence.adaptive_persona import (
     VALID_LEVELS,
@@ -1427,7 +1428,9 @@ async def step_auto_reply_text(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.auto_reply_text = text
     await state.clear()
-    await message.answer(f"✅ Текст автоответа сохранён:\n<i>«{text}»</i>")
+    await message.answer(
+        sanitize_html(f"✅ Текст автоответа сохранён:\n<i>«{text}»</i>")
+    )
 
 
 @router.message(SettingsStates.waiting_timezone)
@@ -1564,7 +1567,7 @@ async def step_alias(message: Message, state: FSMContext) -> None:
 
     await cache_invalidate(f"persona:{message.from_user.id}")
     await state.clear()
-    await message.answer(f"✅ Обращение сохранено: <b>{alias}</b>")
+    await message.answer(sanitize_html(f"✅ Обращение сохранено: <b>{alias}</b>"))
 
 
 @router.message(SettingsStates.waiting_custom_instructions)
@@ -1588,8 +1591,10 @@ async def step_custom_instructions(message: Message, state: FSMContext) -> None:
     await cache_invalidate(f"persona:{message.from_user.id}")
     await state.clear()
     await message.answer(
-        "✅ Инструкции сохранены!\n\n"
-        f"<i>«{text[:300]}{'…' if len(text) > 300 else ''}»</i>"
+        sanitize_html(
+            "✅ Инструкции сохранены!\n\n"
+            f"<i>«{text[:300]}{'…' if len(text) > 300 else ''}»</i>"
+        )
     )
 
 

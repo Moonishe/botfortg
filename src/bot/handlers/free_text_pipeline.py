@@ -1,19 +1,31 @@
 """Pipeline stages for _process_text — extracted from free_text.py."""
 
+import asyncio
 import json
 import logging
 import re
+import sys
 import time
+import uuid
 
-import asyncio
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.filters import OwnerOnly
 from src.core.actions.action_guard import guard_intent
+from src.core.actions.tool_registry import tool_registry
 from src.core.actions.trajectory import actions_from_intent
 from src.core.infra.task_manager import track_ff
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.intelligence.agent import route_intent
+from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 from src.core.intelligence.maestro import run_pipeline
 from src.core.memory import conversation_context as ctx_store
 from src.db.repo import add_memory, get_or_create_user
@@ -84,6 +96,129 @@ logger = logging.getLogger(__name__)
 
 _last_intent_ctx: dict[int, dict] = {}
 _LAST_INTENT_TTL = 900.0
+
+# ── Pending tool confirmations ────────────────────────────────────────
+# Stores tool calls awaiting user confirmation (from maestro tool loop / guardrails).
+# Format: {uid_str: {"telegram_id": int, "tool": str, "tool_params": dict, "ts": float}}
+_pending_confirmations: dict[str, dict] = {}
+_pending_confirmations_lock = asyncio.Lock()
+_PENDING_TTL = 300.0  # 5 минут — удаляем stale записи
+
+
+def _cleanup_stale_pending() -> None:
+    """Remove entries older than ``_PENDING_TTL`` seconds."""
+    now = time.monotonic()
+    for uid in list(_pending_confirmations.keys()):
+        entry = _pending_confirmations[uid]
+        if now - entry.get("ts", 0) > _PENDING_TTL:
+            del _pending_confirmations[uid]
+
+
+def _confirm_tool_keyboard(uid: str) -> InlineKeyboardMarkup:
+    """Inline-кнопки для подтверждения/отмены действия."""
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="✅ Выполнить", callback_data=f"tool:confirm:{uid}"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"tool:cancel:{uid}"),
+    )
+    return kb.as_markup()
+
+
+async def _store_tool_confirmation(
+    telegram_id: int, tool: str, tool_params: dict
+) -> str:
+    """Сохраняет ожидающее подтверждение и возвращает uid для callback."""
+    _cleanup_stale_pending()
+    uid = uuid.uuid4().hex[:12]
+    async with _pending_confirmations_lock:
+        _pending_confirmations[uid] = {
+            "telegram_id": telegram_id,
+            "tool": tool,
+            "tool_params": dict(tool_params),
+            "ts": time.monotonic(),
+        }
+    return uid
+
+
+async def _pop_tool_confirmation(uid: str, telegram_id: int) -> dict | None:
+    """Извлекает и удаляет подтверждение. Возвращает None если не найдено."""
+    _cleanup_stale_pending()
+    async with _pending_confirmations_lock:
+        pending = _pending_confirmations.pop(uid, None)
+    if pending is None:
+        return None
+    if pending.get("telegram_id") != telegram_id:
+        # Не совпадает владелец — кладём обратно
+        async with _pending_confirmations_lock:
+            _pending_confirmations[uid] = pending
+        return None
+    return pending
+
+
+# ── Tool confirmation callback router ─────────────────────────────────
+
+confirm_router = Router(name="free_text_tool_confirm")
+confirm_router.callback_query.filter(OwnerOnly())
+
+
+@confirm_router.callback_query(F.data.startswith("tool:confirm:"))
+async def _cb_tool_confirm(
+    callback: CallbackQuery,
+    state: FSMContext,
+    userbot_manager: UserbotManager,
+) -> None:
+    """Callback: пользователь подтвердил выполнение инструмента."""
+    uid = callback.data.split(":", 2)[2]
+    pending = await _pop_tool_confirmation(uid, callback.from_user.id)
+    if pending is None:
+        await callback.answer("⏳ Действие устарело или уже выполнено", show_alert=True)
+        return
+
+    tool_name = pending["tool"]
+    tool_params = pending["tool_params"]
+    logger.info(
+        "User %d confirmed tool %s with params %s",
+        callback.from_user.id,
+        tool_name,
+        tool_params,
+    )
+
+    try:
+        result = await tool_registry.execute(tool_name, _confirmed=True, **tool_params)
+        ok = result.get("ok", True) if isinstance(result, dict) else True
+        if callback.message:
+            if ok:
+                await callback.message.edit_text(
+                    sanitize_html(f"✅ {tool_name}: выполнено")
+                )
+            else:
+                await callback.message.edit_text(
+                    sanitize_html(f"⚠️ {tool_name}: выполнено с предупреждениями")
+                )
+        await callback.answer("✅ Выполнено")
+    except Exception as e:
+        logger.exception("Tool %s confirmation execution failed", tool_name)
+        await callback.answer(f"❌ Ошибка: {str(e)[:80]}", show_alert=True)
+        if callback.message:
+            await callback.message.edit_text(
+                sanitize_html(f"❌ Ошибка при выполнении: {e}")
+            )
+
+
+@confirm_router.callback_query(F.data.startswith("tool:cancel:"))
+async def _cb_tool_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    userbot_manager: UserbotManager,
+) -> None:
+    """Callback: пользователь отменил выполнение инструмента."""
+    uid = callback.data.split(":", 2)[2]
+    async with _pending_confirmations_lock:
+        _pending_confirmations.pop(uid, None)
+    await callback.answer("❌ Отменено")
+    if callback.message:
+        await callback.message.edit_text("❌ Действие отменено.")
+
 
 _APPEND_KEYWORDS = ("добавь", "и ещё", "также", "кстати", "плюс", "ещё", "а ещё")
 _REPLACE_KEYWORDS = ("нет", "лучше", "вместо", "точнее", "не так", "исправь", "поменяй")
@@ -466,6 +601,28 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     intent = guard.intent
     kind = intent.get("intent")
+
+    # ── Risk-based guardrail check for HIGH/CRITICAL actions ────────
+    if kind:
+        gr = guardrail_evaluate(kind, intent, context={"is_new_contact": False})
+        if gr.needs_confirm:
+            uid = await _store_tool_confirmation(message.from_user.id, kind, intent)
+            await safe_answer(
+                message,
+                sanitize_html(f"🤔 {gr.confirm_message}"),
+                reply_markup=_confirm_tool_keyboard(uid),
+            )
+            _fire_record_trajectory(
+                message.from_user.id,
+                request_text=message.text or "",
+                route_mode="dispatch_guard_confirm",
+                intent_json=intent,
+                actions_json=actions_from_intent(intent),
+                success=True,
+                error=None,
+            )
+            return
+
     handler_info = INTENT_HANDLERS.get(kind)
     if handler_info is not None:
         handler, _ = handler_info
@@ -611,6 +768,12 @@ async def execute_instant(
     tz_name: str | None = None,
 ) -> bool:
     """Выполняет INSTANT-ответ (персонализированный). Возвращает True."""
+    try:
+        from src.core.infra.hooks import hooks
+
+        await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
+    except Exception:
+        pass  # hooks are optional, never break core flow
     response = plan.final_response
     # Персонализация: добавляем имя + время суток в приветствия
     user_name = message.from_user.first_name
@@ -669,7 +832,6 @@ async def execute_fast_route(
             now_local=now_local_str,
             tz_name=tz_name,
             history_block=history_block,
-            memory_context=plan.memory_context,
             user_id=owner_telegram_id,
         )
     except Exception as e:
@@ -769,6 +931,12 @@ async def execute_maestro(
     injected_style: str | None = None,
 ) -> bool:
     """Выполняет MAESTRO pipeline. Возвращает True если обработано, False для fallback."""
+    try:
+        from src.core.infra.hooks import hooks
+
+        await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
+    except Exception:
+        pass  # hooks are optional, never break core flow
     rag_needed = plan.recall_mode == "deep"
     try:
         pipeline_result = await run_pipeline(
@@ -776,10 +944,47 @@ async def execute_maestro(
             raw,
             owner_id=owner_telegram_id,
             history_block=history_block,
-            memory_context=plan.memory_context,
             global_style=injected_style,
             rag_enabled=rag_needed,
         )
+
+        # ── Handle tool confirmation needed ──────────────────────────
+        if pipeline_result.get("confirmation_needed"):
+            confirm_msg = pipeline_result.get(
+                "confirm_message",
+                pipeline_result.get("final_response", "Подтверди действие"),
+            )
+            tool_name = pipeline_result.get("tool", "")
+            tool_params = pipeline_result.get("tool_params", {})
+            uid = await _store_tool_confirmation(
+                owner_telegram_id, tool_name, tool_params
+            )
+            await safe_answer(
+                message,
+                sanitize_html(f"🤔 {confirm_msg}"),
+                reply_markup=_confirm_tool_keyboard(uid),
+            )
+            _fire_record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="maestro_tool_confirm",
+                intent_json={"intent": tool_name, **tool_params},
+                actions_json=pipeline_result.get("plan", []),
+                success=True,
+                error=None,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
+            ctx_store.add_turn(
+                message.from_user.id,
+                raw[:200],
+                f"[tool confirmation: {tool_name}]",
+            )
+            return True
+
+        # ── Handle tool results from tool loop ───────────────────────
+        # Если maestro вернул tool_result, используем его для обогащения
+        # ответа, но итоговый ответ берём из final_response (LLM уже
+        # синтезировала его с учётом результатов инструмента).
         response_text = pipeline_result.get("final_response", "")
         if response_text:
             # Auto-save: fire-and-forget сохранение фактов о пользователе
@@ -796,9 +1001,17 @@ async def execute_maestro(
                 logger.debug("Maestro agents: %s", used)
             if errors:
                 logger.debug("Maestro agent errors: %s", errors)
+
+            # If there's a tool_result that wasn't rendered into final_response
+            # (edge case), append a brief note
+            tool_result = pipeline_result.get("tool_result")
+            extra_suffix = ""
+            if tool_result and not response_text:
+                extra_suffix = f"\n\n<code>⚙️ {json.dumps(tool_result, default=str, ensure_ascii=False)[:200]}</code>"
+
             await safe_answer(
                 message,
-                sanitize_html(response_text),
+                sanitize_html(response_text + extra_suffix),
                 reply_markup=memory_quick_keyboard(),
             )
             _fire_record_trajectory(
@@ -814,9 +1027,33 @@ async def execute_maestro(
             )
             ctx_store.add_turn(message.from_user.id, raw[:200], response_text[:400])
             await _post_turn_optimize(owner_telegram_id, raw, response_text)
+            try:
+                from src.core.infra.hooks import hooks
+
+                await hooks.emit(
+                    "on_message_post_maestro",
+                    user_id=owner_telegram_id,
+                    input=raw,
+                    response=response_text,
+                    plan=pipeline_result.get("plan", []),
+                )
+            except Exception:
+                pass  # hooks are optional, never break core flow
             return True
         return False
     except Exception:
+        try:
+            from src.core.infra.hooks import hooks
+
+            await hooks.emit(
+                "on_error",
+                error=str(sys.exc_info()[1])
+                if sys.exc_info()[1]
+                else "maestro pipeline failed",
+                context="free_text_pipeline.execute_maestro",
+            )
+        except Exception:
+            pass  # hooks are optional, never break core flow
         logger.debug("Maestro pipeline failed, falling back to route_intent")
         return False
 

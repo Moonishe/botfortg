@@ -6,7 +6,7 @@ Provides two categories of tools registered via the ``@tool`` decorator:
 - ``mcp_system``: status, version info about the bot runtime
 
 Safety:
-    All filesystem paths are validated against ``data_dir`` and ``PROJECT_ROOT``.
+    All filesystem paths are validated against ``data_dir`` only.
     Directory traversal (``..``) is explicitly blocked.
 """
 
@@ -31,9 +31,23 @@ logger = logging.getLogger(__name__)
 _ALLOWED_ROOTS: frozenset[Path] = frozenset(
     [
         settings.data_dir.resolve(),
-        PROJECT_ROOT.resolve(),
     ]
 )
+
+# Denied paths — files that must never be exposed via filesystem tools.
+_DENIED_PATHS: frozenset[str] = frozenset(
+    {
+        ".env",
+        "data/app.db",
+        "data/app.db-journal",
+        "data/app.db-shm",
+        "data/app.db-wal",
+    }
+)
+
+# Denied filename patterns (checked against the relative path).
+_DENIED_PREFIXES = (".env",)
+_DENIED_SUFFIXES = (".log",)
 
 
 def _safe_resolve(raw: str) -> Path | None:
@@ -42,7 +56,9 @@ def _safe_resolve(raw: str) -> Path | None:
     Safety rules:
     1. The original *raw* must not contain ``..`` as a path component
        (directory traversal is explicitly forbidden).
-    2. The resolved path must be under one of ``_ALLOWED_ROOTS``.
+    2. The resolved path must be under ``_ALLOWED_ROOTS`` (``data_dir`` only).
+       Unlike previous behaviour, ``PROJECT_ROOT`` itself is **not** an
+       allowed root — filesystem tools may **only** read from ``data/``.
     """
     # Normalise separators so checks work on both Unix and Windows
     normalised = raw.replace("/", os.sep).replace("\\", os.sep)
@@ -51,14 +67,37 @@ def _safe_resolve(raw: str) -> Path | None:
 
     resolved = (PROJECT_ROOT / raw).resolve()
 
+    # Check against allowed roots
     for root in _ALLOWED_ROOTS:
         try:
             resolved.relative_to(root)
-            return resolved
+            break
         except ValueError:
             continue
+    else:
+        return None
 
-    return None
+    # Check against denied paths
+    try:
+        rel = resolved.relative_to(PROJECT_ROOT)
+    except ValueError:
+        rel = resolved
+
+    rel_str = rel.as_posix()  # normalised forward-slash form
+
+    # Exact match
+    if rel_str in _DENIED_PATHS:
+        return None
+
+    # Prefix match (e.g. ".env.local", ".env.production")
+    if rel_str.startswith(_DENIED_PREFIXES):
+        return None
+
+    # Suffix match (e.g. "foo.log", "data/error.log")
+    if rel_str.endswith(_DENIED_SUFFIXES):
+        return None
+
+    return resolved
 
 
 # ── Helper: detect text file ──────────────────────────────────────────

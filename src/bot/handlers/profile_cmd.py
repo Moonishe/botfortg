@@ -28,6 +28,7 @@ from src.userbot.manager import UserbotManager
 logger = logging.getLogger(__name__)
 router = Router(name="profile_cmd")
 router.message.filter(OwnerOnly())
+router.callback_query.filter(OwnerOnly())
 
 
 def _load_json_field(val: str | None) -> list | str | None:

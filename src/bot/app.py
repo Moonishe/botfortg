@@ -12,6 +12,7 @@ from src.bot.handlers import (
     analyze_cmd,
     catchup_cmd,
     chat_cmd,
+    contact_cmd,
     digest_cmd,
     draft_actions,
     explain_cmd,
@@ -31,10 +32,12 @@ from src.bot.handlers import (
     start,
     style_cmd,
     threads_cmd,
+    timeline_cmd,
     today_cmd,
     todos,
     trajectory_cmd,
 )
+from src.bot.handlers.free_text_pipeline import confirm_router
 from src.config import settings
 from src.core.infra.notifier import notifier
 from src.core.scheduling.notification_queue import notification_queue
@@ -104,6 +107,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
 
     dp.include_router(start.router)
     dp.include_router(analyze_cmd.router)
+    dp.include_router(contact_cmd.router)
     dp.include_router(profile_cmd.router)
     dp.include_router(login.router)
     dp.include_router(settings_handlers.router)
@@ -119,6 +123,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(draft_actions.router)
     dp.include_router(news_topics.router)
     dp.include_router(threads_cmd.router)
+    dp.include_router(timeline_cmd.router)
     dp.include_router(explain_cmd.router)
     dp.include_router(humanize_cmd.router)
     dp.include_router(today_cmd.router)
@@ -126,6 +131,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(trajectory_cmd.router)
     dp.include_router(free_text_memory.router)
     dp.include_router(free_text_settings.router)
+    dp.include_router(confirm_router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text.router)
 

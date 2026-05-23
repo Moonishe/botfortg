@@ -7,6 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import or_, select
 
 from src.bot.filters import OwnerOnly
+from src.bot.handlers.rate_limiter import check_rate_limit
 from src.core.contacts.chat_service import load_chat
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.contacts.contact_resolver import resolve
@@ -44,6 +45,11 @@ def _result_keyboard(peer_id: int, message_id: int):
 async def cmd_index(
     message: Message, command: CommandObject, userbot_manager: UserbotManager
 ) -> None:
+    # ── Rate-limit ────────────────────────────────────────────────────
+    if not await check_rate_limit(message.from_user.id, window=5, max_requests=10):
+        await message.answer("Слишком часто. Подожди.")
+        return
+
     client = userbot_manager.get_client(message.from_user.id)
     if client is None:
         await message.answer("Сначала /login.")
@@ -132,6 +138,11 @@ async def cb_cancel(callback: CallbackQuery) -> None:
 async def cmd_search(
     message: Message, command: CommandObject, userbot_manager: UserbotManager
 ) -> None:
+    # ── Rate-limit ────────────────────────────────────────────────────
+    if not await check_rate_limit(message.from_user.id, window=5, max_requests=10):
+        await message.answer("Слишком часто. Подожди.")
+        return
+
     query = (command.args or "").strip()
     if not query:
         await message.answer("Использование: <code>/search текст запроса</code>")

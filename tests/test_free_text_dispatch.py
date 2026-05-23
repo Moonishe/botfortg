@@ -116,6 +116,8 @@ class TestDispatchLogic:
         intent = {"intent": "set_setting", "key": "theme", "value": "dark"}
         allowed_guard.intent = intent
 
+        from src.core.intelligence.guardrails import GuardrailResult
+
         with (
             patch.dict(
                 "src.bot.handlers.free_text_pipeline.INTENT_HANDLERS",
@@ -125,6 +127,10 @@ class TestDispatchLogic:
             patch(
                 "src.bot.handlers.free_text_pipeline.guard_intent",
                 return_value=allowed_guard,
+            ),
+            patch(
+                "src.bot.handlers.free_text_pipeline.guardrail_evaluate",
+                return_value=GuardrailResult(needs_confirm=False),
             ),
         ):
             await _dispatch(intent, msg, mock_state, mock_ubm, tz_name="UTC")
@@ -144,10 +150,16 @@ class TestDispatchLogic:
         intent = {"intent": "nonexistent_intent"}
         allowed_guard.intent = intent
 
+        from src.core.intelligence.guardrails import GuardrailResult
+
         with (
             patch(
                 "src.bot.handlers.free_text_pipeline.guard_intent",
                 return_value=allowed_guard,
+            ),
+            patch(
+                "src.bot.handlers.free_text_pipeline.guardrail_evaluate",
+                return_value=GuardrailResult(needs_confirm=False),
             ),
             patch(
                 "src.bot.handlers.free_text_pipeline._execute_intent",

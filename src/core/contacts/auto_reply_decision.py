@@ -1,13 +1,16 @@
 """Unified auto-reply decision layer.
 
 Consolidates cooldown, spam, archive, group, bot, offline-only,
-and recent-owner-message checks into a single async decision function.
+recent-owner-message, and global rate-limit checks into a single
+async decision function.
+
 Auto-reply handlers call ``decide()`` instead of duplicating inline logic.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -18,6 +21,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import AutoReplyLog, Contact, Message, User
 
 logger = logging.getLogger(__name__)
+
+# ── Global reply throttle (module-level) ────────────────────────────────
+# Prevents runaway LLM costs when many peers trigger auto-reply at once.
+# Key: "YYYY-MM-DD-HH" hour bucket, value: count of replies sent.
+_global_reply_count: dict[str, int] = {}
+_GLOBAL_REPLY_MAX_PER_HOUR = 100
+
+
+def _global_reply_hour_key() -> str:
+    """Return the current hour bucket key, e.g. ``"2026-05-23-14"``."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+
+
+def _global_reply_allow() -> bool:
+    """Check if the global hourly budget has been exhausted."""
+    key = _global_reply_hour_key()
+    count = _global_reply_count.get(key, 0)
+    return count < _GLOBAL_REPLY_MAX_PER_HOUR
+
+
+def _global_reply_increment() -> None:
+    """Increment the global reply counter for the current hour.
+    Cleans up stale keys on every call."""
+    key = _global_reply_hour_key()
+    _global_reply_count[key] = _global_reply_count.get(key, 0) + 1
+    # Purge stale buckets older than 2 hours
+    now_ts = time.time()
+    stale_cutoff = datetime.fromtimestamp(now_ts - 7200, tz=timezone.utc).strftime(
+        "%Y-%m-%d-%H"
+    )
+    for stale_key in list(_global_reply_count.keys()):
+        if stale_key < stale_cutoff:
+            del _global_reply_count[stale_key]
 
 
 class AutoReplyVerdict(Enum):
@@ -31,6 +67,7 @@ class AutoReplyVerdict(Enum):
     SKIP_SPAM = "spam"
     SKIP_RECENT_MY_MESSAGE = "recent"
     SKIP_OFFLINE_ONLY = "offline"
+    SKIP_GLOBAL_LIMIT = "global_limit"
 
 
 @dataclass
@@ -188,7 +225,14 @@ async def decide(
             reason="Owner is online and auto_mode is offline_only",
         )
 
-    # ── 8. Style selection ─────────────────────────────────────────────────
+    # ── 8. Global hourly rate-limit ────────────────────────────────────────
+    if not _global_reply_allow():
+        return AutoReplyChoice(
+            verdict=AutoReplyVerdict.SKIP_GLOBAL_LIMIT,
+            reason=f"Global hourly limit ({_GLOBAL_REPLY_MAX_PER_HOUR}/h) reached",
+        )
+
+    # ── 9. Style selection ─────────────────────────────────────────────────
     style = _select_style(contact, owner)
 
     return AutoReplyChoice(

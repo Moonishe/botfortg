@@ -1,7 +1,9 @@
-"""Per-user rate-limit для free-text LLM-запросов.
+"""Per-user rate-limit для free-text LLM-запросов и команд.
 
-Предотвращает спам-запросы к LLM: 1 запрос в 3 секунды на пользователя.
-Не блокирует команды (они без LLM).
+Предотвращает спам-запросы к LLM и дорогим командам.
+Поддерживает два режима:
+- Базовый: 1 запрос в 3 секунды на пользователя (без аргументов).
+- Sliding-window: N запросов за T секунд (с аргументами window/max_requests).
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Запись: {telegram_id: (last_request_time, lock)}
 _last_request: dict[int, tuple[float, asyncio.Lock]] = {}
+# Скользящее окно: {telegram_id: [timestamp, ...]}
+_request_history: dict[int, list[float]] = {}
 _locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 _MIN_INTERVAL: float = 3.0  # секунд между запросами одного пользователя
 _CLEANUP_TTL: float = 60.0  # удаляем записи старше 1 минуты
@@ -23,11 +27,24 @@ _LOCK_CLEANUP_INTERVAL: int = 1000  # каждые N вызовов check_rate_l
 _check_call_counter: int = 0
 
 
-async def check_rate_limit(telegram_id: int) -> bool:
+async def check_rate_limit(
+    telegram_id: int,
+    window: float | None = None,
+    max_requests: int | None = None,
+) -> bool:
     """Проверить rate-limit для пользователя.
 
-    Возвращает True если запрос разрешён, False если нужно подождать.
-    Автоматически чистит устаревшие записи.
+    Args:
+        telegram_id: ID пользователя Telegram.
+        window: Размер окна в секундах (для sliding-window режима).
+        max_requests: Максимальное число запросов в окне.
+
+    Returns:
+        True если запрос разрешён, False если нужно подождать.
+
+    Поведение:
+        - Без аргументов: классический lock, 1 запрос в 3 секунды.
+        - С window + max_requests: sliding-window, до max_requests запросов за window секунд.
     """
     global _check_call_counter
     now = time.monotonic()
@@ -43,6 +60,20 @@ async def check_rate_limit(telegram_id: int) -> bool:
             _check_call_counter = 0
             _cleanup_locks(now)
 
+        # Sliding-window режим
+        if window is not None and max_requests is not None:
+            history = _request_history.get(telegram_id, [])
+            cutoff = now - window
+            # Отсекаем устаревшие
+            history = [t for t in history if t > cutoff]
+            if len(history) >= max_requests:
+                _request_history[telegram_id] = history
+                return False
+            history.append(now)
+            _request_history[telegram_id] = history
+            return True
+
+        # Классический режим (1 запрос в 3 секунды)
         if telegram_id in _last_request:
             last_time, _ = _last_request[telegram_id]
             elapsed = now - last_time

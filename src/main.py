@@ -49,6 +49,13 @@ async def main() -> None:
 
     await init_db()
 
+    try:
+        from src.core.infra.hooks import hooks
+
+        await hooks.emit("on_startup")
+    except Exception:
+        pass  # hooks are optional, never break core flow
+
     await start_worker()
     start_voice_worker()
     notification_queue.start()
@@ -107,6 +114,13 @@ async def main() -> None:
         except Exception:
             logger.exception("vector_store shutdown failed")
 
+        try:
+            from src.core.infra.hooks import hooks
+
+            await hooks.emit("on_shutdown")
+        except Exception:
+            pass  # hooks are optional, never break core flow
+
         logger.info("Shutdown complete")
 
 
@@ -123,6 +137,19 @@ def run() -> None:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutdown requested")
+    except Exception:
+        logger.exception("Unhandled error in main")
+        try:
+            from src.core.infra.hooks import hooks
+
+            asyncio.run(
+                hooks.emit(
+                    "on_error", error="Unhandled error in main", context="main.run"
+                )
+            )
+        except Exception:
+            pass  # hooks are optional, never break core flow
+        raise
 
 
 if __name__ == "__main__":

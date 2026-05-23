@@ -45,6 +45,7 @@ from src.userbot.manager import UserbotManager
 logger = logging.getLogger(__name__)
 router = Router(name="memory_cmd")
 router.message.filter(OwnerOnly())
+router.callback_query.filter(OwnerOnly())
 
 # ─── /keys import: очередь ожидающих импорта (без FSM) ────────────────
 

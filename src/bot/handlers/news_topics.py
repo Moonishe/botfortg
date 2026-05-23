@@ -15,6 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.bot.states import NewsTopicStates
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import get_user_tz, tz_short
 from src.db.repo import (
     add_news_topic,
@@ -124,7 +125,7 @@ async def step_topic(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     text, kb = await _render(message.from_user.id)
-    await message.answer(f"✅ Добавил: <b>{topic}</b> (окно {hours}ч)")
+    await message.answer(sanitize_html(f"✅ Добавил: <b>{topic}</b> (окно {hours}ч)"))
     await message.answer(text, reply_markup=kb)
 
 

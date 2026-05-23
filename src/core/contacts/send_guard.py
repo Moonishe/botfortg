@@ -82,7 +82,7 @@ async def build_send_guard(
 
                     dos = (
                         _j.loads(prof.communication_dos)
-                        if prof.communication_dos.startswith("[")
+                        if (prof.communication_dos or "").startswith("[")
                         else [prof.communication_dos]
                     )
                     if dos:
@@ -94,7 +94,7 @@ async def build_send_guard(
 
                     donts = (
                         _j.loads(prof.communication_donts)
-                        if prof.communication_donts.startswith("[")
+                        if (prof.communication_donts or "").startswith("[")
                         else [prof.communication_donts]
                     )
                     if donts:

@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -174,6 +175,16 @@ async def _voice_worker() -> None:
                     raise  # propagate to outer handler for clean shutdown
                 except Exception:
                     logger.exception("Voice worker error")
+                    try:
+                        from src.core.infra.hooks import hooks
+
+                        await hooks.emit(
+                            "on_error",
+                            error="Voice worker error",
+                            context="free_text._voice_worker",
+                        )
+                    except Exception:
+                        pass  # hooks are optional, never break core flow
                 finally:
                     if got_job:
                         _voice_queue.task_done()
@@ -182,6 +193,16 @@ async def _voice_worker() -> None:
             break  # intentional shutdown
         except Exception:
             logger.critical("Voice worker crashed, restarting in 5s", exc_info=True)
+            try:
+                from src.core.infra.hooks import hooks
+
+                await hooks.emit(
+                    "on_error",
+                    error="Voice worker crashed",
+                    context="free_text._voice_worker",
+                )
+            except Exception:
+                pass  # hooks are optional, never break core flow
             await asyncio.sleep(5.0)
 
 
@@ -215,7 +236,6 @@ async def _process_text_fallback(
             now_local=now_local_str,
             tz_name=tz_name,
             history_block=history_block,
-            memory_context=plan.memory_context if plan else "",
             user_id=owner_telegram_id,
         )
     except Exception as e:
@@ -546,7 +566,23 @@ async def free_text(
         _active_tasks.pop(uid, None)
         await message.answer("⏯ Прервал предыдущую задачу. Обрабатываю новый запрос…")
 
-    await _process_text(raw, message, state, userbot_manager)
+    try:
+        await _process_text(raw, message, state, userbot_manager)
+    except Exception:
+        logger.exception("_process_text failed for user %s", uid)
+        try:
+            from src.core.infra.hooks import hooks
+
+            await hooks.emit(
+                "on_error",
+                error=str(sys.exc_info()[1])
+                if sys.exc_info()[1]
+                else "_process_text failed",
+                context="free_text.free_text",
+            )
+        except Exception:
+            pass  # hooks are optional, never break core flow
+        raise
 
 
 @router.message(F.voice | F.audio)

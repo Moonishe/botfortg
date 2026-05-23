@@ -60,7 +60,6 @@ TRUNCATION_PRIORITY = [
     "rag_context",
     "conversation_history",
     "deep_memory",
-    "memory_context",
 ]
 
 
@@ -89,6 +88,7 @@ class AssemblyContext:
     tz_name: str = ""
     history_block: str = ""
     self_profile: str = ""
+    frozen_snapshot: str = ""
 
 
 class PromptAssembler:
@@ -180,13 +180,6 @@ class PromptAssembler:
                 f"Формат: YYYY-MM-DDTHH:MM (без Z, без смещения)."
             )
 
-        # Memory context
-        if ctx.memory_context:
-            if ctx.target == "maestro":
-                parts.append(ctx.memory_context)
-            elif ctx.target == "agent":
-                parts.append(f"Факты из памяти:\n{ctx.memory_context}")
-
         if ctx.skill_index and ctx.target in {"agent", "maestro", "summarizer"}:
             parts.append(ctx.skill_index)
 
@@ -205,6 +198,10 @@ class PromptAssembler:
         # Self profile (для agent)
         if ctx.target == "agent" and ctx.self_profile:
             parts.append(ctx.self_profile)
+
+        # Frozen memory snapshot (top-3 facts pre-loaded)
+        if ctx.frozen_snapshot:
+            parts.append(ctx.frozen_snapshot)
 
         # RAG context
         if ctx.rag_context:

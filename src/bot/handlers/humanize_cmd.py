@@ -4,9 +4,11 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from src.bot.filters import OwnerOnly
 from src.core.humanizer import analyze_ai_score, humanize_text
 
 router = Router(name="humanize")
+router.message.filter(OwnerOnly())
 
 
 @router.message(Command("humanize"))

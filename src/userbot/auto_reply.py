@@ -19,6 +19,7 @@ from telethon.tl.types import (
 
 from src.core.contacts.auto_reply_decision import (
     AutoReplyVerdict,
+    _global_reply_increment,
     decide,
 )
 from src.core.contacts.chat_service import load_chat, message_to_text
@@ -181,7 +182,7 @@ async def _build_reply_text(
                     dos_list = (
                         json.loads(profile.communication_dos)
                         if isinstance(profile.communication_dos, str)
-                        and profile.communication_dos.startswith("[")
+                        and (profile.communication_dos or "").startswith("[")
                         else [profile.communication_dos]
                     )
                     profile_hints.append(f"МОЖНО: {', '.join(dos_list[:4])}")
@@ -189,7 +190,7 @@ async def _build_reply_text(
                     donts_list = (
                         json.loads(profile.communication_donts)
                         if isinstance(profile.communication_donts, str)
-                        and profile.communication_donts.startswith("[")
+                        and (profile.communication_donts or "").startswith("[")
                         else [profile.communication_donts]
                     )
                     profile_hints.append(f"НЕЛЬЗЯ: {', '.join(donts_list[:4])}")
@@ -378,6 +379,9 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     return
 
             await event.respond(reply)
+
+            # Трекаем глобальный лимит авто-ответов
+            _global_reply_increment()
 
             # Обновить ConversationState
             async with get_session() as _ar_session:

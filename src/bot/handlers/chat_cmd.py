@@ -12,6 +12,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
+from src.bot.handlers.rate_limiter import check_rate_limit
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.services.chat_actions import (
     catchup_action,
@@ -112,6 +113,11 @@ async def _ensure_client(message: Message, userbot_manager: UserbotManager):
 async def cmd_chat(
     message: Message, command: CommandObject, userbot_manager: UserbotManager
 ) -> None:
+    # ── Rate-limit ────────────────────────────────────────────────────
+    if not await check_rate_limit(message.from_user.id, window=5, max_requests=10):
+        await message.answer("Слишком часто. Подожди.")
+        return
+
     client = await _ensure_client(message, userbot_manager)
     if client is None:
         return

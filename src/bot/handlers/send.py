@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
+from src.bot.handlers.rate_limiter import check_rate_limit
 from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
 from src.core.contacts.contact_resolver import ContactCandidate, resolve
 from src.core.infra.text_sanitizer import sanitize_html
@@ -95,6 +96,11 @@ async def cmd_send(
     state: FSMContext,
     userbot_manager: UserbotManager,
 ) -> None:
+    # ── Rate-limit ────────────────────────────────────────────────────
+    if not await check_rate_limit(message.from_user.id, window=5, max_requests=10):
+        await message.answer("Слишком часто. Подожди.")
+        return
+
     client = userbot_manager.get_client(message.from_user.id)
     if client is None:
         await message.answer("Сначала /login.")

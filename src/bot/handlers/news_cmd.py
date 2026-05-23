@@ -1,4 +1,5 @@
 """/news <тема> и /news_channels — управление новостными каналами."""
+
 import re
 
 from aiogram import F, Router
@@ -7,6 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.scheduling.news import build_news_digest
 from src.db.repo import (
     get_or_create_user,
@@ -26,7 +28,9 @@ HOURS_RE = re.compile(r"--hours\s*=?\s*(\d+)")
 
 
 @router.message(Command("news"))
-async def cmd_news(message: Message, command: CommandObject, userbot_manager: UserbotManager) -> None:
+async def cmd_news(
+    message: Message, command: CommandObject, userbot_manager: UserbotManager
+) -> None:
     client = userbot_manager.get_client(message.from_user.id)
     if client is None:
         await message.answer("Сначала /login.")
@@ -56,7 +60,9 @@ async def cmd_news(message: Message, command: CommandObject, userbot_manager: Us
         await message.answer("Укажи тему после команды.")
         return
 
-    await message.answer(f"📰 Готовлю дайджест по «<i>{topic}</i>» за последние {hours}ч…")
+    await message.answer(
+        sanitize_html(f"📰 Готовлю дайджест по «<i>{topic}</i>» за последние {hours}ч…")
+    )
     text = await build_news_digest(client, message.from_user.id, topic, hours=hours)
     await message.answer(text, disable_web_page_preview=True)
 
@@ -88,11 +94,16 @@ async def cmd_news_channels(message: Message, userbot_manager: UserbotManager) -
     chunk = 20
     for i in range(0, len(channels), chunk):
         kb = InlineKeyboardBuilder()
-        for c in channels[i:i + chunk]:
+        for c in channels[i : i + chunk]:
             mark = "✅" if c.is_news_source else "▫"
             label = f"{mark} {c.display_name[:40]}"
-            kb.row(InlineKeyboardButton(text=label, callback_data=f"news:tog:{c.peer_id}"))
-        await message.answer(f"Список ({i + 1}–{i + len(channels[i:i+chunk])}):", reply_markup=kb.as_markup())
+            kb.row(
+                InlineKeyboardButton(text=label, callback_data=f"news:tog:{c.peer_id}")
+            )
+        await message.answer(
+            f"Список ({i + 1}–{i + len(channels[i : i + chunk])}):",
+            reply_markup=kb.as_markup(),
+        )
 
 
 @router.callback_query(F.data.startswith("news:tog:"))
@@ -117,10 +128,17 @@ async def cb_toggle(callback: CallbackQuery) -> None:
             new_row = []
             for btn in row:
                 if btn.callback_data == callback.data:
-                    new_row.append(InlineKeyboardButton(text=label_text, callback_data=btn.callback_data))
+                    new_row.append(
+                        InlineKeyboardButton(
+                            text=label_text, callback_data=btn.callback_data
+                        )
+                    )
                 else:
                     new_row.append(btn)
             new_kb.append(new_row)
         from aiogram.types import InlineKeyboardMarkup
-        await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=new_kb))
+
+        await callback.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=new_kb)
+        )
     await callback.answer("Включено" if new_value else "Выключено")

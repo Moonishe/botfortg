@@ -20,8 +20,13 @@ from src.db.session import get_session
 from src.llm.base import ChatMessage
 from src.llm.router import ExhaustedError
 
+from src.core.actions.tool_registry import tool_registry
+from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 
 logger = logging.getLogger(__name__)
+
+# ── Максимальное число итераций в tool‑loop ──
+MAX_TOOL_ITERATIONS = 5
 
 # ── Глобальный оркестратор агентов ──
 # Один экземпляр на всё приложение: кеш, health-трекинг, таймауты.
@@ -173,15 +178,12 @@ async def process(
     *,
     owner_id: int | None = None,
     history_block: str | None = None,
-    memory_context: str | None = None,
     global_style: str | None = None,
     self_profile: str | None = None,
     rag_enabled: bool = True,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     ctx_parts = []
-    if memory_context:
-        ctx_parts.append(f"Память о контактах:\n{memory_context}")
     if global_style:
         ctx_parts.append(f"Твой стиль общения:\n{global_style}")
     if self_profile:
@@ -219,26 +221,6 @@ async def process(
                 rag_context = "\n".join(rag_lines)
         except Exception:
             logger.debug("RAG search non-critical fail", exc_info=True)
-
-    # --- Memory recall via unified service (skip if already provided) ---
-    memory_recall_context = memory_context if memory_context else ""
-    if owner_id is not None and not memory_context:
-        try:
-            from src.core.memory.memory_recall import recall, format_recall_for_prompt
-
-            result = await recall(
-                owner_id,
-                query=user_text[:200],
-                contact_id=None,
-                limit=10,
-                include_self=True,
-                include_pinned=True,
-                include_tasks=True,
-            )
-            if result.facts:
-                memory_recall_context = format_recall_for_prompt(result)
-        except Exception:
-            logger.debug("Memory recall failed, proceeding without", exc_info=True)
 
     # --- Modular prompt assembly (Block 4) ---
     try:
@@ -295,7 +277,6 @@ async def process(
             target="maestro",
             user_id=owner_id or 0,
             user_message=user_text,
-            memory_context=memory_recall_context,
             rag_context=rag_context,
             persona_block=persona_block,
             style_match_block=style_match_block,
@@ -312,13 +293,34 @@ async def process(
                 )[0]
             except Exception:
                 logger.debug("Failed to build skill index", exc_info=True)
+
+        # --- Frozen memory snapshot: top-3 facts pre-loaded ---
+        frozen_snapshot_injected = False
+        if owner_id is not None:
+            try:
+                from src.core.memory.memory_recall import recall
+
+                _recall_result = await recall(
+                    telegram_id=owner_id,
+                    query=user_text,
+                    limit=3,
+                    include_deep=False,
+                    mode="normal",
+                )
+                if _recall_result.facts:
+                    _lines = ["[Память (топ-3)]"]
+                    for _f in _recall_result.facts:
+                        _lines.append(f"[{_f.reason}] {_f.fact}")
+                    ctx.frozen_snapshot = "\n".join(_lines)
+                    frozen_snapshot_injected = True
+            except Exception:
+                logger.debug("Frozen snapshot recall failed, skipping", exc_info=True)
+
         system = prompt_assembler.assemble(ctx)
     except Exception:
         # Fallback: старая сборка (обратная совместимость)
         logger.debug("Prompt assembler failed, using legacy assembly", exc_info=True)
         system = MAESTRO_SYSTEM
-        if memory_recall_context:
-            system = memory_recall_context + "\n\n" + system
         if rag_context:
             system = (
                 system
@@ -348,70 +350,160 @@ async def process(
             except Exception:
                 pass
 
-    try:
-        raw = await asyncio.wait_for(
-            provider.chat(
-                [
-                    ChatMessage(role="system", content=system),
-                    ChatMessage(role="user", content=user_msg),
-                ],
-                heavy=True,
-            ),
-            timeout=60.0,
+    # ── Append available tools to system prompt ──
+    tools_section = (
+        "\n\n## Доступные инструменты\n"
+        "### Для вызова инструмента используй JSON формата "
+        '`{"tool": "имя", "params": {...}}`.\n'
+        "### Для обычного ответа используй "
+        '`{"final_response": "твой ответ"}`.\n\n' + tool_registry.list_for_prompt()
+    )
+    if frozen_snapshot_injected:
+        tools_section += (
+            "\n\nВ системном промпте уже есть топ-3 факта из памяти. "
+            "Если их недостаточно — используй инструмент recall_memory."
         )
+    system += tools_section
+
+    # ── Tool‑calling loop ──
+    messages = [
+        ChatMessage(role="system", content=system),
+        ChatMessage(role="user", content=user_msg),
+    ]
+
+    for iteration in range(MAX_TOOL_ITERATIONS):
+        try:
+            raw = await asyncio.wait_for(
+                provider.chat(messages, heavy=True),
+                timeout=60.0,
+            )
+        except ExhaustedError:
+            logger.warning("Maestro ExhaustedError during process")
+            return {
+                "understood": "нет ключей",
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ...",
+            }
+        except asyncio.TimeoutError:
+            logger.warning("Maestro TimeoutError during process")
+            return {
+                "understood": "таймаут",
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": "⏱️ Ответ занял слишком много времени. Попробуй короче.",
+            }
+        except Exception as e:
+            if "context_length" in str(e).lower() or "token" in str(e).lower():
+                logger.warning("Maestro context overflow: %s", e)
+                return {
+                    "understood": "контекст переполнен",
+                    "plan": [],
+                    "agents_to_call": [],
+                    "final_response": "📏 Контекст переполнен. Упрости запрос или уменьши историю.",
+                }
+            if "rate" in str(e).lower():
+                logger.warning("Maestro rate limit: %s", e)
+                return {
+                    "understood": "лимит",
+                    "plan": [],
+                    "agents_to_call": [],
+                    "final_response": "🚦 Превышен лимит запросов. Подожди минуту.",
+                }
+            logger.exception("Maestro failed")
+            return {
+                "understood": "не понял",
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": "Извини, я не понял. Повтори пожалуйста.",
+            }
+
         raw = raw.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
             raw = re.sub(r"\n?\s*```\s*$", "", raw)
         m = re.search(r"\{[\s\S]*\}", raw)
-        if m:
-            return json.loads(m.group(0))
-        return {
-            "understood": raw,
-            "plan": [],
-            "agents_to_call": [],
-            "final_response": raw,
-        }
-    except ExhaustedError:
-        logger.warning("Maestro ExhaustedError during process")
-        return {
-            "understood": "нет ключей",
-            "plan": [],
-            "agents_to_call": [],
-            "final_response": "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ...",
-        }
-    except asyncio.TimeoutError:
-        logger.warning("Maestro TimeoutError during process")
-        return {
-            "understood": "таймаут",
-            "plan": [],
-            "agents_to_call": [],
-            "final_response": "⏱️ Ответ занял слишком много времени. Попробуй короче.",
-        }
-    except Exception as e:
-        if "context_length" in str(e).lower() or "token" in str(e).lower():
-            logger.warning("Maestro context overflow: %s", e)
+        if not m:
+            # Non‑JSON → treat as final_response text
             return {
-                "understood": "контекст переполнен",
+                "understood": raw,
                 "plan": [],
                 "agents_to_call": [],
-                "final_response": "📏 Контекст переполнен. Упрости запрос или уменьши историю.",
+                "final_response": raw,
             }
-        if "rate" in str(e).lower():
-            logger.warning("Maestro rate limit: %s", e)
+
+        parsed = json.loads(m.group(0))
+
+        # ── Tool call? ──
+        if (
+            isinstance(parsed, dict)
+            and "tool" in parsed
+            and isinstance(parsed["tool"], str)
+            and "params" in parsed
+            and isinstance(parsed["params"], dict)
+        ):
+            tool_name = parsed["tool"]
+            tool_params = parsed["params"]
+
+            # Guardrails evaluate
+            gr = guardrail_evaluate(tool_name, tool_params)
+            if gr.needs_confirm:
+                return {
+                    "understood": f"tool_confirmation: {tool_name}",
+                    "plan": [],
+                    "agents_to_call": [],
+                    "final_response": gr.confirm_message,
+                    "needs_clarification": None,
+                    "confirmation_needed": True,
+                    "confirm_message": gr.confirm_message,
+                    "tool": tool_name,
+                    "tool_params": gr.sanitized_params,
+                }
+
+            # Execute tool with runtime dependencies
+            runtime_kwargs: dict[str, Any] = {"provider": provider}
+            if owner_id is not None:
+                runtime_kwargs["user"] = owner_id
+            result = await tool_registry.execute(
+                tool_name, _confirmed=False, **gr.sanitized_params, **runtime_kwargs
+            )
+
+            # Feed result back to LLM
+            result_str = json.dumps(result, ensure_ascii=False, default=str)
+            if len(result_str) > 4000:
+                result_str = result_str[:4000] + "…"
+            messages.append(
+                ChatMessage(
+                    role="system",
+                    content=f"Tool result ({tool_name}): {result_str}",
+                )
+            )
+            # Continue loop for next LLM response
+            continue
+
+        # ── Final response? ──
+        if isinstance(parsed, dict) and "final_response" in parsed:
             return {
-                "understood": "лимит",
-                "plan": [],
-                "agents_to_call": [],
-                "final_response": "🚦 Превышен лимит запросов. Подожди минуту.",
+                "understood": parsed.get("understood", raw),
+                "plan": parsed.get("plan", []),
+                "agents_to_call": parsed.get("agents_to_call", []),
+                "final_response": parsed["final_response"],
+                "needs_clarification": parsed.get("needs_clarification"),
             }
-        logger.exception("Maestro failed")
-        return {
-            "understood": "не понял",
-            "plan": [],
-            "agents_to_call": [],
-            "final_response": "Извини, я не понял. Повтори пожалуйста.",
-        }
+
+        # Fallback: return full parsed JSON (backward compat)
+        return parsed
+
+    # ── Max iterations exhausted ──
+    logger.warning(
+        "Maestro tool loop exhausted after %d iterations", MAX_TOOL_ITERATIONS
+    )
+    return {
+        "understood": "tool loop exhausted",
+        "plan": [],
+        "agents_to_call": [],
+        "final_response": "Я зациклился на вызове инструментов. Попробуй переформулировать запрос покороче.",
+    }
 
 
 # ---- Agent dispatch table ----
@@ -608,7 +700,6 @@ async def run_pipeline(
     *,
     owner_id: int,
     history_block: str | None = None,
-    memory_context: str | None = None,
     global_style: str | None = None,
     self_profile: str | None = None,
     rag_enabled: bool = True,
@@ -633,35 +724,12 @@ async def run_pipeline(
         except Exception:
             logger.debug("Failed to load self_profile, continuing without")
 
-    # Maestro-only context compression: fast_route never reaches this function.
-    try:
-        from src.core.intelligence.context_compressor import compress_maestro_context
-
-        # Build message history from string context blocks
-        history: list[dict] = []
-        if memory_context:
-            history.append({"role": "system", "content": memory_context})
-        if history_block:
-            history.append({"role": "system", "content": history_block})
-
-        if history:
-            context_text, _ = await compress_maestro_context(
-                history=history,
-                owner_id=owner_id,
-            )
-            if context_text:
-                memory_context = context_text
-                history_block = None
-    except Exception:
-        logger.debug("Context compression skipped", exc_info=True)
-
     # --- Шаг 1: Maestro планирует ---
     plan = await process(
         provider,
         user_text,
         owner_id=owner_id,
         history_block=history_block,
-        memory_context=memory_context,
         global_style=global_style,
         self_profile=self_profile,
         rag_enabled=rag_enabled,

@@ -348,6 +348,14 @@ async def upsert_skill(
         skill.review_status = review_status
         skill.updated_at = datetime.now(timezone.utc)
     await session.flush()
+    try:
+        from src.core.infra.hooks import hooks
+
+        await hooks.emit(
+            "on_skill_created", skill_name=skill.name, user_id=user.telegram_id
+        )
+    except Exception:
+        pass  # hooks are optional, never break core flow
     return skill
 
 
@@ -971,6 +979,7 @@ async def list_open_commitments(
     user: User,
     *,
     direction: str | None = None,
+    peer_id: int | None = None,
 ) -> list[Commitment]:
     query = select(Commitment).where(
         Commitment.user_id == user.id,
@@ -978,6 +987,8 @@ async def list_open_commitments(
     )
     if direction:
         query = query.where(Commitment.direction == direction)
+    if peer_id is not None:
+        query = query.where(Commitment.peer_id == peer_id)
     query = query.order_by(
         Commitment.deadline_at.is_(None), Commitment.deadline_at.asc()
     )
@@ -1265,6 +1276,18 @@ async def add_memory(
     )
     session.add(mem)
     await session.flush()
+
+    try:
+        from src.core.infra.hooks import hooks
+
+        await hooks.emit(
+            "on_memory_saved",
+            memory_id=mem.id,
+            fact=fact,
+            user_id=user.telegram_id,
+        )
+    except Exception:
+        pass  # hooks are optional, never break core flow
 
     # Индексируем эмбеддинг в Qdrant для будущей дедупликации
     if embedding is not None and vector_store_obj is not None:
