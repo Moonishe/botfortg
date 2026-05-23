@@ -16,7 +16,10 @@ from src.bot.handlers import (
     digest_cmd,
     draft_actions,
     explain_cmd,
+    help_cmd,
     humanize_cmd,
+    inbox_cmd,
+    mode_cmd,
     free_text,
     free_text_memory,
     free_text_settings,
@@ -105,6 +108,8 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
 
     dp["userbot_manager"] = userbot_manager
 
+    dp.include_router(help_cmd.router)
+    dp.include_router(inbox_cmd.router)
     dp.include_router(start.router)
     dp.include_router(analyze_cmd.router)
     dp.include_router(contact_cmd.router)
@@ -126,6 +131,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(timeline_cmd.router)
     dp.include_router(explain_cmd.router)
     dp.include_router(humanize_cmd.router)
+    dp.include_router(mode_cmd.router)
     dp.include_router(today_cmd.router)
     dp.include_router(skills_cmd.router)
     dp.include_router(trajectory_cmd.router)

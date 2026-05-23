@@ -348,7 +348,7 @@ class TestProcess:
         provider = GenericErrorProvider()
         result = await process(provider, "test", owner_id=None, rag_enabled=False)
         assert result["understood"] == "не понял"
-        assert "не понял" in result["final_response"]
+        assert "Попробуй одну из команд" in result["final_response"]
 
 
 # ===========================================================================

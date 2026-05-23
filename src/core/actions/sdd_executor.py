@@ -154,7 +154,7 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
     **Available builtins:** ``print``, ``len``, ``range``, ``int``, ``str``,
     ``float``, ``bool``, ``list``, ``dict``, ``set``, ``tuple``, ``zip``,
     ``enumerate``, ``sorted``, ``min``, ``max``, ``sum``, ``any``, ``all``,
-    ``type``, ``isinstance``.
+    ``isinstance``.
 
     **Available via kwargs:** any keyword arguments passed by the caller
     (e.g. ``session``, ``user``, ``provider``, ``test_data``).
@@ -217,7 +217,6 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
         "sum": sum,
         "any": any,
         "all": all,
-        "type": type,
         "isinstance": isinstance,
         # Constants
         "True": True,

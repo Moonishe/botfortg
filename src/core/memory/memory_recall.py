@@ -21,6 +21,7 @@ from src.core.memory.hybrid_search import reciprocal_rank_fusion
 logger = logging.getLogger(__name__)
 
 _recall_cache: dict[str, tuple[float, RecallResult]] = {}
+_recall_lock: asyncio.Lock = asyncio.Lock()
 
 
 def _utc_now() -> datetime:
@@ -150,10 +151,11 @@ async def recall(
     _cache_key = f"{telegram_id}:{query}:{contact_id}:{mode}"
     _cache_now = time.monotonic()
     _state_modified = False
-    if _cache_key in _recall_cache:
-        _ts, _cached = _recall_cache[_cache_key]
-        if _cache_now - _ts < 60:
-            return _cached
+    async with _recall_lock:
+        if _cache_key in _recall_cache:
+            _ts, _cached = _recall_cache[_cache_key]
+            if _cache_now - _ts < 60:
+                return _cached
 
     result = RecallResult()
     mode = (mode or "deep").lower()
@@ -490,7 +492,8 @@ async def recall(
     # Only cache if no state was modified (use_count incrementation).
     # If use_count was updated, caching would serve stale counts on next call.
     if not _state_modified:
-        _recall_cache[_cache_key] = (_cache_now, result)
+        async with _recall_lock:
+            _recall_cache[_cache_key] = (_cache_now, result)
     return result
 
 

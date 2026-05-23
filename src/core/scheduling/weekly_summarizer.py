@@ -14,7 +14,9 @@ from src.db.repo import (
     add_memory,
     fetch_chat_messages,
     get_or_create_user,
+    list_active_conversations,
     list_contacts,
+    list_open_commitments,
     upsert_memory_cluster,
 )
 from src.db.session import get_session
@@ -125,10 +127,22 @@ async def weekly_summary_loop(owner_id: int) -> None:
                             )
                         ]
                     total_facts = 0
-                    for contact in contacts[:20]:  # макс 20 контактов
-                        facts = await summarize_contact_week(
-                            provider, owner_id, contact
-                        )
+                    sentiment_counts: dict[str, int] = {
+                        "positive": 0,
+                        "negative": 0,
+                        "neutral": 0,
+                    }
+                    semaphore = asyncio.Semaphore(3)
+
+                    async def _summarize_one(contact):
+                        async with semaphore:
+                            return contact, await summarize_contact_week(
+                                provider, owner_id, contact
+                            )
+
+                    contact_tasks = [_summarize_one(c) for c in contacts[:20]]
+                    for coro in asyncio.as_completed(contact_tasks):
+                        contact, facts = await coro
                         for f in facts:
                             await add_memory(
                                 session,
@@ -138,13 +152,84 @@ async def weekly_summary_loop(owner_id: int) -> None:
                                 sentiment=f.get("sentiment"),
                                 source="weekly",
                             )
+                            sentiment = f.get("sentiment")
+                            if sentiment in sentiment_counts:
+                                sentiment_counts[sentiment] += 1
                             total_facts += 1
-                        await asyncio.sleep(0.3)  # rate-limit LLM
                     if total_facts > 0:
+                        lines = [
+                            f"📊📝 <b>Недельное саммари:</b> {total_facts} фактов "
+                            f"из {len(contacts[:20])} контактов сохранено в память."
+                        ]
+
+                        # Section 1: Open commitments approaching deadline
+                        commits = await list_open_commitments(session, owner_safe)
+                        if commits:
+                            lines.append("")
+                            lines.append("📋 Обязательства на неделе:")
+                            for c in commits[:5]:
+                                deadline_str = (
+                                    f" ({c.deadline_at.strftime('%d.%m')})"
+                                    if c.deadline_at
+                                    else ""
+                                )
+                                lines.append(f"  • {c.text}{deadline_str}")
+
+                        # Section 2: People to reply to
+                        conv_states = await list_active_conversations(
+                            session, owner_safe, limit=50
+                        )
+                        cutoff_24h = datetime.now(timezone.utc).replace(
+                            tzinfo=None
+                        ) - timedelta(hours=24)
+                        contact_map = {c.peer_id: c.display_name for c in contacts}
+                        unreplied = []
+                        for cs in conv_states:
+                            if cs.last_incoming_at is None:
+                                continue
+                            if (
+                                cs.last_outgoing_at is not None
+                                and cs.last_outgoing_at > cs.last_incoming_at
+                            ):
+                                continue
+                            last_incoming = (
+                                cs.last_incoming_at.replace(tzinfo=None)
+                                if cs.last_incoming_at.tzinfo
+                                else cs.last_incoming_at
+                            )
+                            if last_incoming > cutoff_24h:
+                                continue
+                            name = contact_map.get(cs.peer_id, f"peer#{cs.peer_id}")
+                            unreplied.append(name)
+                        if unreplied:
+                            lines.append("")
+                            lines.append("👤 Стоит ответить:")
+                            for name in unreplied[:3]:
+                                lines.append(f"  • {name}")
+
+                        # Section 3: Emotional summary
+                        lines.append("")
+                        lines.append("🎭 Настроение недели:")
+                        total_s = sum(sentiment_counts.values())
+                        if total_s > 0:
+                            pos_ratio = sentiment_counts["positive"] / total_s * 100
+                            neg_ratio = sentiment_counts["negative"] / total_s * 100
+                            if pos_ratio > 60:
+                                tone = "Неделя прошла позитивно 😊"
+                            elif neg_ratio > 40:
+                                tone = "Было много сложных разговоров 😐"
+                            elif pos_ratio > neg_ratio:
+                                tone = "В целом хорошая неделя 🙂"
+                            else:
+                                tone = "Смешанные эмоции, были и хорошие, и трудные моменты 🤔"
+                        else:
+                            tone = "Недостаточно данных для анализа настроения"
+                        lines.append(f"  {tone}")
+
+                        text = "\n".join(lines)
                         await notification_queue.enqueue(
                             topic="weekly_summary",
-                            text=f"📊📝 <b>Недельное саммари:</b> {total_facts} фактов "
-                            f"из {len(contacts[:20])} контактов сохранено в память.",
+                            text=text,
                             priority=Notification.PRIORITY_MEDIUM,
                         )
                         # После сохранения weekly фактов — консолидация

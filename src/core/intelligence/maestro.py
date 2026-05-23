@@ -32,6 +32,18 @@ MAX_TOOL_ITERATIONS = 5
 # Один экземпляр на всё приложение: кеш, health-трекинг, таймауты.
 orchestrator = AgentOrchestrator(AGENT_SPECS)
 
+# ── Fallback подсказки, когда бот не понял запрос ──
+FALLBACK_HINTS = (
+    "🤔 Я не совсем понял. Попробуй одну из команд:\n\n"
+    "👤 /contact Имя — что я знаю о человеке\n"
+    "📅 /timeline тема — где обсуждали X\n"
+    "📝 /send Имя текст — написать человеку\n"
+    "🔍 /search запрос — найти в чатах\n"
+    "📋 /todos — твои обещания\n"
+    "📰 /news тема — дайджест каналов\n\n"
+    "Или просто напиши обычным языком — я попробую понять."
+)
+
 MAESTRO_SYSTEM = """Ты — главный AI-ассистент владельца Telegram. Ты общаешься с ним как живой собеседник.
 
 Пользователь НЕ пишет тебе команды. Он говорит как с другом — естественно, свободно. Твоя задача: ПОНЯТЬ его, а не искать ключевые слова.
@@ -181,6 +193,7 @@ async def process(
     global_style: str | None = None,
     self_profile: str | None = None,
     rag_enabled: bool = True,
+    contact_id: int | None = None,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     ctx_parts = []
@@ -239,7 +252,7 @@ async def process(
 
                 persona_block = await format_persona_for_prompt(owner_id) or ""
             except Exception:
-                pass
+                logger.debug("Failed to format persona for prompt", exc_info=True)
 
         # Собираем style‑match блок (динамический анализ стиля пользователя)
         style_match_block = ""
@@ -261,7 +274,7 @@ async def process(
 
                 confirmed_rules = await get_active_rules(owner_id)
             except Exception:
-                pass
+                logger.debug("Failed to load active rules", exc_info=True)
 
         # Load anti-AI setting from user settings
         anti_ai = False
@@ -271,7 +284,7 @@ async def process(
                     _owner = await get_or_create_user(_s, owner_id)
                     anti_ai = _owner.settings.anti_ai_enabled
             except Exception:
-                pass
+                logger.debug("Failed to load anti_ai setting", exc_info=True)
 
         ctx = AssemblyContext(
             target="maestro",
@@ -316,6 +329,17 @@ async def process(
             except Exception:
                 logger.debug("Frozen snapshot recall failed, skipping", exc_info=True)
 
+        # --- Contact-specific rules (pre-load for prompt injection) ---
+        if contact_id and contact_id > 0 and owner_id is not None:
+            try:
+                from src.core.contacts.contact_rules import get_contact_rules_block
+
+                _block = await get_contact_rules_block(owner_id, contact_id)
+                if _block:
+                    ctx.contact_rules_block = _block
+            except Exception:
+                logger.debug("Failed to load contact rules block", exc_info=True)
+
         system = prompt_assembler.assemble(ctx)
     except Exception:
         # Fallback: старая сборка (обратная совместимость)
@@ -337,7 +361,9 @@ async def process(
                 if rules_hint:
                     system += rules_hint
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to format rules for prompt (fallback)", exc_info=True
+                )
         if owner_id is not None:
             try:
                 from src.core.intelligence.adaptive_persona import (
@@ -348,7 +374,9 @@ async def process(
                 if persona_hint:
                     system += persona_hint
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to format persona for prompt (fallback)", exc_info=True
+                )
 
     # ── Append available tools to system prompt ──
     tools_section = (
@@ -415,7 +443,7 @@ async def process(
                 "understood": "не понял",
                 "plan": [],
                 "agents_to_call": [],
-                "final_response": "Извини, я не понял. Повтори пожалуйста.",
+                "final_response": FALLBACK_HINTS,
             }
 
         raw = raw.strip()
@@ -703,8 +731,13 @@ async def run_pipeline(
     global_style: str | None = None,
     self_profile: str | None = None,
     rag_enabled: bool = True,
+    contact_id: int | None = None,
 ) -> dict[str, Any]:
     """Полный пайплайн: Maestro → агенты → финальный ответ.
+
+    Args:
+        contact_id: peer_id контакта, если пишем конкретному человеку.
+                     Используется для инжекции per-contact правил.
 
     Returns:
         dict с ключами:
@@ -733,6 +766,7 @@ async def run_pipeline(
         global_style=global_style,
         self_profile=self_profile,
         rag_enabled=rag_enabled,
+        contact_id=contact_id,
     )
 
     used_agents = []
@@ -761,17 +795,12 @@ async def run_pipeline(
 
     # --- Шаг 2: Запустить агентов ---
     if not agents_to_call:
-        # Нет агентов и нет ответа — показываем understood или clarification
-        msg = (
-            plan.get("final_response")
-            or plan.get("needs_clarification")
-            or plan.get("understood", "Не понял. Повтори.")
-        )
-        if plan.get("needs_clarification"):
-            msg = f"🤔 {msg}"
+        # Нет агентов и нет ответа — показываем понятные подсказки
         return {
             "final_response": sanitize_html(
-                plan.get("understood", "Не понял. Повтори.")
+                plan.get("final_response")
+                or plan.get("needs_clarification")
+                or FALLBACK_HINTS
             ),
             "plan": plan.get("plan", []),
             "used_agents": [],
@@ -930,10 +959,7 @@ async def run_pipeline(
 
     # --- Ни один агент не дал результатов ---
     return {
-        "final_response": sanitize_html(
-            plan.get("final_response")
-            or plan.get("understood", "Не получилось выполнить. Попробуй иначе.")
-        ),
+        "final_response": sanitize_html(plan.get("final_response") or FALLBACK_HINTS),
         "plan": plan.get("plan", []),
         "used_agents": used_agents,
         "agent_errors": agent_errors,

@@ -89,6 +89,8 @@ class AssemblyContext:
     history_block: str = ""
     self_profile: str = ""
     frozen_snapshot: str = ""
+    # Per-contact rules block (pre-loaded and passed as string to avoid async in sync method)
+    contact_rules_block: str = ""
 
 
 class PromptAssembler:
@@ -164,6 +166,10 @@ class PromptAssembler:
             for r in ctx.confirmed_rules:
                 rules_lines.append(f"- {r}")
             parts.append("\n".join(rules_lines))
+
+        # Contact-specific rules (pre-loaded, injected only when contact_id is set)
+        if ctx.contact_rules_block:
+            parts.append(ctx.contact_rules_block)
 
         return "\n".join(parts)
 

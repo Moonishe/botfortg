@@ -104,6 +104,10 @@ class ContactProfile(Base):
         Text, nullable=True
     )  # JSON ["договориться о встрече", "вернуть долг"]
 
+    custom_instructions: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON {"rules": ["rule1", "rule2"]} — per-contact style rules
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

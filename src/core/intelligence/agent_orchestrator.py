@@ -338,6 +338,91 @@ class AgentOrchestrator:
 
         return all_results, all_errors
 
+    async def execute_parallel(
+        self,
+        owner_id: int,
+        query: str,
+        agents: list[str],
+        provider=None,
+        max_concurrent: int = 4,
+        *,
+        executor=None,
+    ) -> list[dict[str, Any]]:
+        """Legion-style parallel execution of multiple agents.
+
+        Все агенты запускаются одновременно (с ограничением max_concurrent).
+        Результаты собираются и синтезируются в один ответ.
+
+        Args:
+            owner_id: telegram user id владельца
+            query: общий запрос для всех агентов
+            agents: список имён агентов для параллельного запуска
+            provider: LLMProvider (обязателен при первом вызове)
+            max_concurrent: макс. параллельных LLM-вызовов
+            executor: callable для вызова одиночного агента.
+                По умолчанию — _execute_agent из maestro.
+
+        Returns:
+            list[dict] — результаты агентов (порядок не гарантирован).
+        """
+        if executor is None:
+            from src.core.intelligence.maestro import _execute_agent as executor  # noqa: E402
+
+        # Фильтруем только известных агентов
+        known_agents = [name for name in agents if name in self._specs]
+        unknown = set(agents) - set(known_agents)
+        if unknown:
+            logger.warning("execute_parallel: unknown agents skipped: %s", unknown)
+
+        if not known_agents:
+            return []
+
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def _run_one(agent_name: str) -> dict[str, Any]:
+            """Запуск одного агента под семафором."""
+            async with semaphore:
+                spec_ref: dict[str, Any] = {
+                    "agent": agent_name,
+                    "query": query,
+                }
+                return await self._execute_single(
+                    spec_ref, provider, owner_id, executor=executor
+                )
+
+        tasks = [_run_one(name) for name in known_agents]
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Собираем результаты
+        results: list[dict[str, Any]] = []
+        for i, result in enumerate(raw_results):
+            agent_name = known_agents[i]
+            if isinstance(result, Exception):
+                results.append(
+                    {
+                        "agent": agent_name,
+                        "success": False,
+                        "error": f"{type(result).__name__}: {result}",
+                        "data": {},
+                    }
+                )
+            elif isinstance(result, dict):
+                results.append(result)
+
+        # Синтез
+        synthesized = await self._synthesize(provider, query, results)
+        if synthesized:
+            results.append(
+                {
+                    "agent": "_synthesis_",
+                    "success": True,
+                    "data": synthesized,
+                    "query": query,
+                }
+            )
+
+        return results
+
     def get_health(self) -> dict[str, dict[str, Any]]:
         """Снимок здоровья всех агентов (для /health, мониторинга)."""
         return self._health.snapshot()
@@ -483,6 +568,41 @@ class AgentOrchestrator:
             "success": False,
             "error": str(last_error) if last_error else "неизвестная ошибка",
             "data": {},
+        }
+
+    async def _synthesize(
+        self,
+        provider: Any,
+        query: str,
+        agent_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Синтезирует результаты параллельных агентов в один ответ.
+
+        Простая реализация: конкатенирует с заголовками.
+        В будущем — LLM-сводка.
+        """
+        if not agent_results:
+            return {"summary": "No agent results", "query": query}
+        if len(agent_results) == 1:
+            r = agent_results[0]
+            return {
+                "summary": r.get("data", ""),
+                "query": query,
+                "agent": r.get("agent", "agent"),
+            }
+
+        parts: list[str] = []
+        for r in agent_results:
+            agent_name = r.get("agent", "unknown")
+            data = r.get("data", "")
+            status = "OK" if r.get("success", False) else "FAIL"
+            parts.append(f"[{agent_name}] ({status}): {data}")
+
+        return {
+            "summary": "\n".join(parts),
+            "query": query,
+            "agents_merged": len(agent_results),
+            "success": any(r.get("success", False) for r in agent_results),
         }
 
     def _topo_sort(

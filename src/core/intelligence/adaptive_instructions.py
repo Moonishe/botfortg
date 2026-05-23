@@ -10,6 +10,20 @@ from src.db.repo import get_or_create_user
 
 logger = logging.getLogger(__name__)
 
+# Паттерны для per-contact правил
+CONTACT_RULE_PATTERNS = [
+    # "с Олей будь вежливее", "для Саши не используй мат"
+    (
+        r"(?:с|для|в чате с|когда пишешь)\s+(.+?)\s+(будь|не|всегда|никогда|используй|избегай)\s+(.+)",
+        "contact_first",
+    ),
+    # "не используй мат с Артёмом", "будь вежливее для Оли"
+    (
+        r"(будь|не|всегда|никогда|используй|избегай)\s+(.+?)\s+(?:с|для|в чате с)\s+(.+?)$",
+        "rule_first",
+    ),
+]
+
 # Правила которые применяются АВТОМАТИЧЕСКИ (безопасные)
 SAFE_CATEGORIES = {"tone", "format"}
 
@@ -72,6 +86,30 @@ async def detect_instruction(user_text: str, telegram_id: int) -> dict | None:
                 "is_safe": is_safe,
                 "action": "applied" if is_safe else "asked",
             }
+    return None
+
+
+async def detect_contact_rule(user_text: str) -> dict | None:
+    """Распознаёт per-contact правило в тексте пользователя.
+
+    Returns:
+        {"contact_name": str, "rule": str} или None.
+
+    Примеры:
+        "с Олей будь вежливее" → {"contact_name": "Олей", "rule": "вежливее"}
+        "не используй мат с Артёмом" → {"contact_name": "Артёмом", "rule": "используй мат"}
+    """
+    text_lower = user_text.lower().strip()
+    for pattern, mode in CONTACT_RULE_PATTERNS:
+        m = re.search(pattern, text_lower)
+        if m:
+            if mode == "contact_first":
+                contact_name = m.group(1).strip()
+                rule = (m.group(2) + " " + m.group(3)).strip()
+            else:
+                contact_name = m.group(3).strip()
+                rule = (m.group(1) + " " + m.group(2)).strip()
+            return {"contact_name": contact_name, "rule": rule}
     return None
 
 

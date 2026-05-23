@@ -685,6 +685,76 @@ async def check_instructions(
     return False
 
 
+async def check_contact_rules(
+    raw: str,
+    owner_telegram_id: int,
+    message: Message,
+    userbot_manager: UserbotManager,
+) -> bool:
+    """Проверяет per-contact правила (например, «с Олей будь вежливее»).
+
+    Возвращает True если обработано (early return).
+    """
+    try:
+        from src.core.intelligence.adaptive_instructions import detect_contact_rule
+
+        detected = await detect_contact_rule(raw)
+        if not detected:
+            return False
+
+        contact_name = detected["contact_name"]
+        rule_text = detected["rule"]
+
+        # Разрешаем контакт по имени
+        from src.core.contacts.contact_resolver import resolve
+        from src.db.repo import get_or_create_user
+        from src.db.session import get_session
+
+        contact = None
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_telegram_id)
+            client = userbot_manager.get_client(owner_telegram_id)
+            if client is None:
+                logger.warning(
+                    "check_contact_rules: no telethon client for user %s",
+                    owner_telegram_id,
+                )
+                return False
+
+            candidates = await resolve(
+                client, owner, contact_name, limit=3, min_score=60
+            )
+            if candidates and candidates[0].score >= 60:
+                contact = candidates[0]
+
+        if not contact:
+            await message.answer(
+                sanitize_html(
+                    f"🤔 Не могу найти контакт «{contact_name}» в твоей телефонной книге."
+                )
+            )
+            return True
+
+        # Сохраняем правило
+        from src.core.contacts.contact_rules import add_contact_rule
+
+        ok = await add_contact_rule(owner_telegram_id, contact.peer_id, rule_text)
+        if ok:
+            await message.answer(
+                sanitize_html(
+                    f"✅ Понял! Для контакта {contact.label()} буду соблюдать правило: «{rule_text}»."
+                )
+            )
+        else:
+            await message.answer(
+                sanitize_html(f"⚠️ Не удалось сохранить правило для {contact.label()}.")
+            )
+        return True
+    except Exception:
+        logger.exception("check_contact_rules failed")
+        return False
+
+
 async def check_persona(raw: str, owner_telegram_id: int, message: Message) -> bool:
     """Проверяет adaptive persona.
 

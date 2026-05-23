@@ -88,8 +88,12 @@ async def cmd_timeline(
         name = r["display_name"] or str(r["peer_id"])
         lines.append(f"🧑 {sanitize_html(name)} ({r['total_matches']} совпад.)")
         for s in r["snippets"]:
+            date_str = s["date"].strftime("%d.%m") if s.get("date") else ""
             text = (s["text"] or "")[:80]
-            lines.append(f"  «{sanitize_html(text)}»")
+            if date_str:
+                lines.append(f"  {date_str} «{sanitize_html(text)}»")
+            else:
+                lines.append(f"  «{sanitize_html(text)}»")
         shown += 1
 
     await message.answer("\n".join(lines))

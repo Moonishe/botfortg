@@ -825,7 +825,7 @@ async def cross_chat_search(
     Returns:
         List of dicts with keys:
           peer_id, display_name, total_matches, snippets
-        Each snippet is a dict: {"sender_name": str | None, "text": str}
+        Each snippet is a dict: {"sender_name": str | None, "text": str, "date": datetime | None}
     """
     fts_q = _fts_query_for(query)
     if not fts_q:
@@ -865,7 +865,7 @@ async def cross_chat_search(
         params[f"pid_{i}"] = pid
 
     snippet_sql = f"""
-        SELECT m.peer_id, m.sender_name,
+        SELECT m.peer_id, m.sender_name, m.date,
                snippet(messages_fts, -1, '<b>', '</b>', '…', 64) AS snippet
         FROM messages_fts
         JOIN messages m ON m.id = messages_fts.rowid
@@ -886,6 +886,7 @@ async def cross_chat_search(
                 {
                     "sender_name": r["sender_name"],
                     "text": r["snippet"] or "",
+                    "date": r["date"],
                 }
             )
 

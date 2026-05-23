@@ -99,51 +99,50 @@ class NotificationQueue:
             )
             pending = list(result.scalars().all())
 
-        if not pending:
-            return 0
+            if not pending:
+                return 0
 
-        # Разделяем: свежие (в окне) — группируем, старые — отправляем по одному
-        window_start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-            seconds=self._window_seconds
-        )
-        fresh = [n for n in pending if n.created_at >= window_start]
-        stale = [n for n in pending if n.created_at < window_start]
+            # Разделяем: свежие (в окне) — группируем, старые — отправляем по одному
+            window_start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                seconds=self._window_seconds
+            )
+            fresh = [n for n in pending if n.created_at >= window_start]
+            stale = [n for n in pending if n.created_at < window_start]
 
-        # Группировка свежих по (topic, priority_bucket)
-        groups: dict[str, list[Notification]] = defaultdict(list)
-        for n in fresh:
-            if n.priority <= Notification.PRIORITY_HIGH:
-                bucket = "high"
-            elif n.priority == Notification.PRIORITY_MEDIUM:
-                bucket = "medium"
-            else:
-                bucket = "low"
-            key = f"{n.topic}:{bucket}"
-            groups[key].append(n)
+            # Группировка свежих по (topic, priority_bucket)
+            groups: dict[str, list[Notification]] = defaultdict(list)
+            for n in fresh:
+                if n.priority <= Notification.PRIORITY_HIGH:
+                    bucket = "high"
+                elif n.priority == Notification.PRIORITY_MEDIUM:
+                    bucket = "medium"
+                else:
+                    bucket = "low"
+                key = f"{n.topic}:{bucket}"
+                groups[key].append(n)
 
-        # Старые — каждое в своей группе для немедленной отправки
-        for n in stale:
-            key = f"{n.topic}:stale_{n.id}"
-            groups[key] = [n]
+            # Старые — каждое в своей группе для немедленной отправки
+            for n in stale:
+                key = f"{n.topic}:stale_{n.id}"
+                groups[key] = [n]
 
-        batch_id = uuid.uuid4().hex[:12]
-        total_flushed = 0
+            batch_id = uuid.uuid4().hex[:12]
+            total_flushed = 0
 
-        for key, group in groups.items():
-            topic = key.split(":")[0]
-            batch = group[: self._max_batch_size]
-            text = self._format_batch(topic, batch)
+            for key, group in groups.items():
+                topic = key.split(":")[0]
+                batch = group[: self._max_batch_size]
+                text = self._format_batch(topic, batch)
 
-            try:
-                await notifier.notify(text)
-                total_flushed += len(batch)
-            except Exception:
-                logger.exception("Failed to send batch for topic %s", topic)
-                continue
+                try:
+                    await notifier.notify(text)
+                    total_flushed += len(batch)
+                except Exception:
+                    logger.exception("Failed to send batch for topic %s", topic)
+                    continue
 
-            # Помечаем отправленные как flushed
-            ids = [n.id for n in batch]
-            async with SessionLocal() as session:
+                # Помечаем отправленные как flushed (в той же транзакции, что и SELECT FOR UPDATE)
+                ids = [n.id for n in batch]
                 await session.execute(
                     update(Notification)
                     .where(Notification.id.in_(ids))
@@ -152,12 +151,12 @@ class NotificationQueue:
                         batch_id=batch_id,
                     )
                 )
-                await session.commit()
 
-            # Остаток (>max_batch_size) — оставляем на следующий flush
-            # (они остаются с flushed_at=NULL и будут обработаны в следующей итерации)
+                # Остаток (>max_batch_size) — оставляем на следующий flush
+                # (они остаются с flushed_at=NULL и будут обработаны в следующей итерации)
 
-        return total_flushed
+            await session.commit()
+            return total_flushed
 
     def _format_batch(self, topic: str, notifications: list[Notification]) -> str:
         """Форматирует сгруппированные уведомления в одно сообщение."""

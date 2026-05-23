@@ -130,7 +130,7 @@ async def draft_variants(
         '  {"tone": "нейтральный", "text": "..."},\n'
         '  {"tone": "тёплый", "text": "..."},\n'
         '  {"tone": "краткий", "text": "..."}\n'
-        ']}"'
+        "]}"
     )
     try:
         raw = await provider.chat(

@@ -39,6 +39,7 @@ from src.core.intelligence.character_evolution import maybe_evolve_after_turn
 from .free_text_pipeline import (
     _dispatch,
     _save_intent_context,
+    check_contact_rules,
     check_followup,
     check_instructions,
     check_persona,
@@ -61,6 +62,7 @@ _voice_worker_task: asyncio.Task | None = None
 # Per-user active tasks for priority preemption
 # Light tasks (instant, fast_route, send, draft) preempt heavy tasks (maestro, analysis)
 _active_tasks: dict[int, asyncio.Task] = {}
+_active_tasks_lock = asyncio.Lock()
 
 
 _HEAVY_MODES = frozenset({"maestro", "analysis"})
@@ -324,6 +326,10 @@ async def _process_text(
     if await check_instructions(raw, owner_telegram_id, message):
         return
 
+    # Stage 1b: Contact-specific rules (e.g. "с Олей будь вежливее")
+    if await check_contact_rules(raw, owner_telegram_id, message, userbot_manager):
+        return
+
     # Stage 2: Adaptive persona
     if await check_persona(raw, owner_telegram_id, message):
         return
@@ -463,11 +469,13 @@ async def _process_text(
                     )
                 )
             finally:
-                if _active_tasks.get(owner_telegram_id) is _my_task:
-                    _active_tasks.pop(owner_telegram_id, None)
+                async with _active_tasks_lock:
+                    if _active_tasks.get(owner_telegram_id) is _my_task:
+                        _active_tasks.pop(owner_telegram_id, None)
 
         task = asyncio.create_task(_run_maestro_background())
-        _active_tasks[owner_telegram_id] = task
+        async with _active_tasks_lock:
+            _active_tasks[owner_telegram_id] = task
         await message.answer("⏳ Обрабатываю, сейчас вернусь…")
         return
 
@@ -557,13 +565,21 @@ async def free_text(
         raw = raw[:1997] + "...(truncated)"
     # Priority preemption: if a heavy task is running, cancel it for the new request
     uid = message.from_user.id
-    existing = _active_tasks.get(uid)
-    if existing and not existing.done():
-        logger.info(
-            "Preempting running task for user %s with new request: %s", uid, raw[:80]
-        )
-        existing.cancel()
-        _active_tasks.pop(uid, None)
+    async with _active_tasks_lock:
+        existing = _active_tasks.get(uid)
+        if existing and not existing.done():
+            logger.info(
+                "Preempting running task for user %s with new request: %s",
+                uid,
+                raw[:80],
+            )
+            existing.cancel()
+            _active_tasks.pop(uid, None)
+            should_send_preempt = True
+        else:
+            should_send_preempt = False
+
+    if should_send_preempt:
         await message.answer("⏯ Прервал предыдущую задачу. Обрабатываю новый запрос…")
 
     try:

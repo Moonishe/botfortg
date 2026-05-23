@@ -8,6 +8,8 @@ import json
 import logging
 import re
 
+from src.llm.base import ChatMessage
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,7 +30,7 @@ class LLMResponse:
 
 async def safe_llm_call(
     provider: Any,
-    messages: list[dict[str, str]],
+    messages: list[ChatMessage | dict[str, str]],
     *,
     heavy: bool = True,
     parse_json: bool = False,
@@ -55,12 +57,20 @@ async def safe_llm_call(
     """
     from src.llm.router import ExhaustedError
 
+    # Normalize messages: convert dicts to ChatMessage
+    chat_messages: list[ChatMessage] = [
+        m
+        if isinstance(m, ChatMessage)
+        else ChatMessage(role=m["role"], content=m["content"])  # type: ignore[arg-type]
+        for m in messages
+    ]
+
     # NOTE: temperature / max_tokens are accepted but NOT forwarded to
     # provider.chat() because LLMProvider protocol only accepts messages + heavy.
     # They are stored in response.metadata for future use when the protocol grows.
     try:
         raw = await asyncio.wait_for(
-            provider.chat(messages, heavy=heavy),
+            provider.chat(chat_messages, heavy=heavy),
             timeout=timeout,
         )
     except ExhaustedError:
@@ -146,7 +156,7 @@ def response_as_error_text(resp: LLMResponse) -> str:
 
 async def fast_llm_json(
     provider: Any,
-    messages: list[dict[str, str]],
+    messages: list[ChatMessage | dict[str, str]],
     *,
     heavy: bool = False,
     timeout: float = 90.0,

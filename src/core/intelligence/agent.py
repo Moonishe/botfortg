@@ -358,6 +358,7 @@ async def route_intent(
     tz_name: str | None = None,
     history_block: str | None = None,
     memory_context: str | None = None,
+    contact_id: int | None = None,
 ) -> dict[str, Any]:
     """now_local + tz_name инжектятся в системный промпт, чтобы LLM мог парсить
     относительные даты («завтра в 18:00») в корректный UTC ISO.
@@ -424,6 +425,20 @@ async def route_intent(
                 )[0]
             except Exception:
                 logger.debug("Failed to build skill index", exc_info=True)
+
+        # --- Contact-specific rules (pre-load for prompt injection) ---
+        if contact_id and contact_id > 0 and user_id is not None:
+            try:
+                from src.core.contacts.contact_rules import get_contact_rules_block
+
+                _block = await get_contact_rules_block(user_id, contact_id)
+                if _block:
+                    ctx.contact_rules_block = _block
+            except Exception:
+                logger.debug(
+                    "Failed to load contact rules block in route_intent", exc_info=True
+                )
+
         system = prompt_assembler.assemble(ctx)
     except Exception:
         # Fallback: старая сборка (обратная совместимость)

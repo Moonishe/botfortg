@@ -5,7 +5,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -49,6 +49,75 @@ router.callback_query.filter(OwnerOnly())
 
 def _check(value: bool) -> str:
     return "✅" if value else "❌"
+
+
+SEARCHABLE_SETTINGS: dict[str, str] = {
+    # Раздел: Часовой пояс
+    "timezone": "Часовой пояс (IANA, напр. Europe/Moscow)",
+    # Раздел: Авто-ответ
+    "auto_reply_enabled": "Включить авто-ответ при оффлайн",
+    "auto_reply_cooldown_min": "Кулдаун между авто-ответами (мин)",
+    "auto_reply_mode": "Режим авто-ответа (заготовка/умный)",
+    "auto_reply_text": "Текст заготовки для авто-ответа",
+    "auto_reply_close_contacts": "Авто-ответ только близким контактам",
+    "notify_on_auto_reply": "Уведомлять об отправленных авто-ответах",
+    # Раздел: Авто-режим
+    "auto_mode": "Режим работы (оффлайн/всегда/умный)",
+    "quiet_hours_start": "Начало тихих часов",
+    "quiet_hours_end": "Конец тихих часов",
+    # Раздел: Дайджест
+    "digest_enabled": "Включить утренний дайджест",
+    "digest_time": "Время отправки дайджеста (UTC)",
+    # Раздел: Напоминания
+    "reminders_enabled": "Включить напоминания о дедлайнах",
+    "reminder_lead_hours": "За сколько часов напоминать о дедлайне",
+    "reminder_overdue_enabled": "Алерт при просрочке дедлайна",
+    # Раздел: Smart-дайджест
+    "smart_digest_enabled": "Включить smart дайджест",
+    "smart_digest_interval_min": "Интервал smart дайджеста (мин)",
+    "urgent_notify_enabled": "Мгновенные уведомления о срочных сообщениях",
+    # Раздел: Новости
+    "news_enabled": "Включить авто-новости",
+    "news_digest_time": "Время отправки авто-новостей",
+    "news_window_hours": "Окно поиска новостей (ч)",
+    # Раздел: LLM
+    "llm_provider": "LLM-провайдер (openai/gemini/mistral/cloudflare/openrouter)",
+    "use_heavy_model": "Использовать тяжёлую модель LLM",
+    # Раздел: Транскрипция
+    "transcription_mode": "Режим транскрипции (local/api/hybrid)",
+    "transcription_api_provider": "API-провайдер транскрипции",
+    # Раздел: Черновики
+    "draft_suggestions_enabled": "Включить авто-черновики ответов",
+    "draft_only_important": "Черновики только для важных сообщений",
+    "draft_max_per_hour": "Максимум черновиков в час",
+    # Раздел: Приватность
+    "ignore_archived": "Игнорировать архивные чаты",
+    # Раздел: Синхронизация
+    "auto_sync_enabled": "Включить авто-синхронизацию",
+    "auto_sync_interval_sec": "Интервал авто-синхронизации (сек)",
+    "auto_extract_memories": "Авто-извлечение памяти из переписок",
+    "include_saved_messages": "Индексировать Избранное (Saved Messages)",
+    # Раздел: API-ключи
+    "openai_key": "API ключ OpenAI",
+    "gemini_key": "API ключ Gemini",
+    "mistral_key": "API ключ Mistral",
+    "cloudflare_key": "API ключ Cloudflare",
+    # Раздел: Папки
+    "monitored_folders": "Отслеживаемые папки Telegram",
+    "monitor_only_selected_folders": "Мониторить только выбранные папки",
+    # Раздел: Личность
+    "alias": "Псевдоним (обращение к владельцу)",
+    "custom_instructions": "Пользовательские инструкции для личности",
+    "base_tone": "Базовый тон личности",
+    "warmth": "Теплота общения (low/normal/high)",
+    "enthusiasm": "Восторженность (low/normal/high)",
+    "headings_lists": "Заголовки и списки (low/normal/high)",
+    "emoji_level": "Уровень использования эмодзи (low/normal/high)",
+    "adaptive_mode_enabled": "Адаптивный режим личности",
+    # Anti-AI
+    "anti_ai_enabled": "Включить Anti-AI защиту",
+    "anti_ai_mode": "Режим Anti-AI (off/log/fix)",
+}
 
 
 # ---------- Главное меню ----------
@@ -145,7 +214,28 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
 
 @router.message(Command("settings"))
-async def cmd_settings(message: Message) -> None:
+async def cmd_settings(message: Message, command: CommandObject) -> None:
+    """/settings поиск <keyword> — быстрый поиск по настройкам."""
+    args = (command.args or "").strip()
+    if args.startswith("поиск "):
+        query = args[6:].strip().lower()
+        if not query:
+            await message.answer("Использование: /settings поиск <ключевое слово>")
+            return
+
+        results = []
+        for key, desc in SEARCHABLE_SETTINGS.items():
+            if query in key.lower() or query in desc.lower():
+                results.append(f"• <b>{key}</b> — {desc}")
+
+        if results:
+            await message.answer(
+                f"🔍 Результаты по «{query}»:\n\n" + "\n".join(results[:15])
+            )
+        else:
+            await message.answer(f"❌ Ничего не найдено по «{query}».")
+        return
+
     text, kb = await _render_menu(message.from_user.id)
     await message.answer(text, reply_markup=kb)
 
@@ -163,6 +253,17 @@ async def _safe_edit(message, text: str, kb) -> None:
 
 @router.callback_query(F.data == "set:menu")
 async def cb_menu(callback: CallbackQuery) -> None:
+    text, kb = await _render_menu(callback.from_user.id)
+    await _safe_edit(callback.message, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings:back")
+async def cb_settings_back(callback: CallbackQuery) -> None:
+    await _show_main_menu(callback)
+
+
+async def _show_main_menu(callback: CallbackQuery) -> None:
     text, kb = await _render_menu(callback.from_user.id)
     await _safe_edit(callback.message, text, kb)
     await callback.answer()
@@ -405,7 +506,7 @@ async def cb_open_section(callback: CallbackQuery) -> None:
 
 
 def _back_row():
-    return [InlineKeyboardButton(text="← Меню настроек", callback_data="set:menu")]
+    return [InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back")]
 
 
 async def _render_section(

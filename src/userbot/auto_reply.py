@@ -254,6 +254,16 @@ async def _build_reply_text(
     if profile_prompt:
         system += profile_prompt
 
+    # Per-contact rules (custom_instructions)
+    try:
+        from src.core.contacts.contact_rules import get_contact_rules_block
+
+        _rules_block = await get_contact_rules_block(owner_telegram_id, peer_id)
+        if _rules_block:
+            system += "\n\n" + _rules_block
+    except Exception:
+        logger.debug("Failed to load contact rules block in auto-reply", exc_info=True)
+
     user_prompt = (
         f"Собеседник: {sender_name}.\n"
         f"Контекст последних сообщений:\n{history_text}\n\n"

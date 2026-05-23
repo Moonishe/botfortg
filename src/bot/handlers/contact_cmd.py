@@ -10,6 +10,7 @@ from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
 from src.core.contacts.contact_resolver import resolve
+from src.core.contacts.health_score import get_contact_health
 from src.core.memory.context_files import get_contact_context
 from src.core.memory.memory_recall import recall
 from src.core.infra.text_sanitizer import sanitize_html
@@ -164,6 +165,14 @@ async def cmd_contact(
     if profile is not None and profile.closeness is not None:
         closeness_pct = round(profile.closeness * 10)
         lines.append(f"❤️ Closeness: {closeness_pct}/10")
+
+    # ── Contact health ───────────────────────────────────────────────
+    health = await get_contact_health(message.from_user.id, peer_id)
+    lines.append(f"💚 <b>Здоровье:</b> {health['score']}/100 {health['status']}")
+    if health["days_since_last"] > 0:
+        lines.append(f"  • Последнее сообщение: {health['days_since_last']} дн. назад")
+    if health["open_commitments"] > 0:
+        lines.append(f"  • Открытых обещаний: {health['open_commitments']}")
 
     # ── Style profile ────────────────────────────────────────────────
     style_lines = _format_style_profile(contact.style_profile)
