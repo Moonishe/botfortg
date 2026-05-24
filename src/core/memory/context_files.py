@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 from pathlib import Path
 
 from src.config import settings
@@ -25,6 +26,23 @@ _MAX_CONTEXT_CHARS = 2000
 
 # === LLM-WIKI constants ===
 OWNER_KEY = "_owner"  # special key for owner profile
+
+# Per-file locks for thread-safe append (TOCTOU prevention)
+_file_locks: dict[str, threading.Lock] = {}
+_file_cleanup_counter = 0
+
+
+def _get_file_lock(key: str) -> threading.Lock:
+    global _file_cleanup_counter
+    if key not in _file_locks:
+        _file_locks[key] = threading.Lock()
+    # Cleanup every 1000 accesses
+    _file_cleanup_counter += 1
+    if _file_cleanup_counter % 1000 == 0:
+        for k in list(_file_locks.keys()):
+            if not _file_locks[k].locked():
+                del _file_locks[k]
+    return _file_locks[key]
 
 
 def get_contact_context(contact_name: str) -> str | None:
@@ -124,54 +142,56 @@ def append_to_context(key: str, text: str, max_lines: int = 500) -> None:
     - Adds timestamp prefix to new lines
     """
     safe_k = key.lower().replace(" ", "-")[:64]
-    CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = CONTEXTS_DIR / f"{safe_k}.md"
+    lock = _get_file_lock(safe_k)
+    with lock:
+        CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = CONTEXTS_DIR / f"{safe_k}.md"
 
-    # Normalize text
-    line = text.strip()
-    if not line:
-        return
+        # Normalize text
+        line = text.strip()
+        if not line:
+            return
 
-    # Read existing or create header
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-        existing_lowered = existing.lower()
-    else:
-        header = f"# {key}\n\nАвто-сгенерированный контекст.\n\n"
-        path.write_text(header, encoding="utf-8")
-        existing = header
-        existing_lowered = header.lower()
+        # Read existing or create header
+        if path.exists():
+            existing = path.read_text(encoding="utf-8")
+            existing_lowered = existing.lower()
+        else:
+            header = f"# {key}\n\nАвто-сгенерированный контекст.\n\n"
+            path.write_text(header, encoding="utf-8")
+            existing = header
+            existing_lowered = header.lower()
 
-    # Dedup — skip if same text already exists
-    if line.lower() in existing_lowered:
-        return
+        # Dedup — skip if same text already exists
+        if line.lower() in existing_lowered:
+            return
 
-    # Append with timestamp
-    from datetime import datetime, timezone
+        # Append with timestamp
+        from datetime import datetime, timezone
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    new_line = f"- [{ts}] {line}\n"
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        new_line = f"- [{ts}] {line}\n"
 
-    # Cap total lines
-    current_lines = existing.split("\n")
-    if len(current_lines) >= max_lines:
-        # Remove oldest fact line (keep header)
-        header_end = 0
-        for i, l in enumerate(current_lines):
-            if l.startswith("- ["):
-                header_end = i
-                break
-        if header_end > 0:
-            current_lines.pop(header_end)
-        # Remove first fact line after header
-        for i, l in enumerate(current_lines):
-            if l.startswith("- ["):
-                current_lines.pop(i)
-                break
+        # Cap total lines
+        current_lines = existing.split("\n")
+        if len(current_lines) >= max_lines:
+            # Remove oldest fact line (keep header)
+            header_end = 0
+            for i, l in enumerate(current_lines):
+                if l.startswith("- ["):
+                    header_end = i
+                    break
+            if header_end > 0:
+                current_lines.pop(header_end)
+            # Remove first fact line after header
+            for i, l in enumerate(current_lines):
+                if l.startswith("- ["):
+                    current_lines.pop(i)
+                    break
 
-    current_lines.append(new_line.rstrip("\n"))
-    path.write_text("\n".join(current_lines) + "\n", encoding="utf-8")
-    logger.debug("Appended to '%s': %s", key, line[:80])
+        current_lines.append(new_line.rstrip("\n"))
+        path.write_text("\n".join(current_lines) + "\n", encoding="utf-8")
+        logger.debug("Appended to '%s': %s", key, line[:80])
 
 
 def list_context_files() -> list[str]:
