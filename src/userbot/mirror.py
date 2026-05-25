@@ -154,6 +154,16 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             if not peer_id:
                 return
 
+            # Don't process messages until onboarding is complete
+            try:
+                from src.bot.filters import get_onboarding_phase
+
+                phase = await get_onboarding_phase(owner_telegram_id)
+                if phase < 4:
+                    return  # silently skip — bot not ready yet
+            except Exception:
+                pass  # can't check onboarding — continue cautiously
+
             # Проверка watched_peers — фильтрация чатов
             async with get_session() as _w_session:
                 _w_owner = await get_or_create_user(_w_session, owner_telegram_id)
