@@ -27,6 +27,7 @@ from src.userbot import get_active_telethon_client
 
 logger = logging.getLogger(__name__)
 router = Router(name="free_text_memory")
+router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
 
 

@@ -242,7 +242,19 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                         owner.absence_message = message_text or msg.text[:100]
 
             # ===== InboxManager: тяжёлая обработка — в фон =====
-            if not msg.out and msg.text:
+            # Skip bot senders — prevents feedback loop with control bot.
+            # Use sender entity (not chat) so it works in groups too.
+            # Fail-safe: if we can't determine, skip processing.
+            _is_bot_sender = True  # default: skip (fail-safe)
+            if msg.out:
+                _is_bot_sender = False  # our own messages are not from bots
+            elif msg.sender_id:
+                try:
+                    _sender_entity = await client.get_entity(msg.sender_id)
+                    _is_bot_sender = bool(getattr(_sender_entity, "bot", False))
+                except Exception:
+                    _is_bot_sender = True  # can't resolve → skip (fail-safe)
+            if not msg.out and msg.text and not _is_bot_sender:
                 track_ff(
                     asyncio.create_task(
                         _process_incoming_bg(

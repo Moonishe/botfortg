@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from src.config import settings
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import (
@@ -340,21 +342,41 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             is_bot = bool(getattr(sender, "bot", False))
             is_private = bool(event.is_private)
 
+            # ── Skip bots: never auto-reply or pair with bot accounts ────
+            if is_bot:
+                return
+
             # ── Pairing guard: unknown contacts must be approved ──────────
             sender_id = sender.id
             if sender_id > 0:  # skip non-real contacts (0, negative)
                 from src.core.security.pairing import pairing
 
-                if not await pairing.is_allowed(sender_id):
-                    if pairing.is_pending(sender_id):
-                        await event.reply("⏳ Ожидаю подтверждения от владельца.")
-                    else:
-                        code = pairing.start_pairing(sender_id)
-                        await event.reply(
-                            f"🔒 Я тебя не знаю. Твой код подтверждения: **{code}**\n"
-                            f"Передай его владельцу для доступа."
-                        )
-                    return  # Skip all auto-reply logic
+                try:
+                    # Auto-pair: if sender is the bot owner, allow immediately
+                    if sender_id == settings.owner_telegram_id:
+                        await pairing.approve(sender_id, "auto-owner")
+                    elif not await pairing.is_allowed(sender_id):
+                        if pairing.is_pending(sender_id):
+                            # Rate-limit: don't spam the same pending message
+                            _last_pending_msg: dict[int, float] = {}
+                            now_cooldown = time.monotonic()
+                            if (
+                                sender_id not in _last_pending_msg
+                                or now_cooldown - _last_pending_msg[sender_id] > 60
+                            ):
+                                _last_pending_msg[sender_id] = now_cooldown
+                                await event.reply(
+                                    "⏳ Ожидаю подтверждения от владельца."
+                                )
+                        else:
+                            code = pairing.start_pairing(sender_id)
+                            await event.reply(
+                                f"🔒 Я тебя не знаю. Твой код подтверждения: **{code}**\n"
+                                f"Передай его владельцу для доступа."
+                            )
+                        return  # Skip all auto-reply logic
+                except Exception:
+                    logger.exception("Pairing guard failed, allowing message through")
 
             async with get_session() as session:
                 owner: User = await get_or_create_user(session, owner_telegram_id)

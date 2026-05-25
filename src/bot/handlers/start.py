@@ -375,13 +375,13 @@ async def step_onboarding_llm_key(message: Message, state: FSMContext) -> None:
         )
         return
 
-    validated = await _validate_key(provider, raw)
+    validated, error_hint = await _validate_key(provider, raw)
     if not validated:
-        await message.answer(
-            f"❌ Ключ <b>{provider}</b> не прошёл проверку. "
-            "Убедись что ключ правильный и попробуй ещё раз.\n"
-            "/cancel — отмена."
+        hint = (
+            error_hint
+            or f"Ключ {provider} не прошёл проверку. Убедись что ключ правильный."
         )
+        await message.answer(f"❌ {hint}\n/cancel — отмена.")
         return
 
     # Сохраняем ключ
@@ -402,34 +402,49 @@ async def step_onboarding_llm_key(message: Message, state: FSMContext) -> None:
 def _detect_provider(key: str) -> str | None:
     """Пытается определить провайдера по формату ключа."""
     key = key.strip()
+    if key.startswith("sk-or-"):
+        return "openrouter"
     if key.startswith("sk-"):
         return "openai"
     if key.startswith("AIzaSy"):
         return "gemini"
     if key.startswith("Nb"):
         return "mistral"
-    # Generic fallback — пусть пользователь указывает явно
+    # Cloudflare — Workers AI tokens (long base64, no standard prefix)
+    if len(key) > 64 and not key.startswith("sk-") and not key.startswith("AIzaSy"):
+        return "cloudflare"
     return None
 
 
-async def _validate_key(provider: str, key: str) -> bool:
-    """Валидирует ключ через провайдера."""
+async def _validate_key(provider: str, key: str) -> tuple[bool, str | None]:
+    """Валидирует ключ через провайдера. Возвращает (valid, error_hint)."""
     try:
         if provider == "openai":
-            return await OpenAIProvider(key).validate_key()
+            return (await OpenAIProvider(key).validate_key(), None)
         if provider == "gemini":
-            return await GeminiProvider(key).validate_key()
+            return (await GeminiProvider(key).validate_key(), None)
         if provider == "mistral":
             from src.llm.mistral_provider import MistralProvider
 
-            return await MistralProvider(key).validate_key()
+            return (await MistralProvider(key).validate_key(), None)
         if provider == "cloudflare":
             from src.llm.cloudflare_provider import CloudflareProvider
 
-            return await CloudflareProvider(key).validate_key()
-    except Exception:
+            return (await CloudflareProvider(key).validate_key(), None)
+        if provider == "openrouter":
+            from src.llm.openrouter_provider import OpenRouterProvider
+
+            return (await OpenRouterProvider(key).validate_key(), None)
+    except Exception as e:
+        err_str = str(e).lower()
+        if any(
+            w in err_str
+            for w in ("timeout", "connect", "resolve", "network", "refused", "reset")
+        ):
+            return (False, "Сетевая ошибка. Проверь подключение и попробуй снова.")
         logger.exception("Key validation failed for %s", provider)
-    return False
+        return (False, "Не удалось проверить ключ. Попробуй позже.")
+    return (False, f"Неизвестный провайдер: {provider}")
 
 
 # ─── Step 3: Timezone ─────────────────────────────────────────────────
