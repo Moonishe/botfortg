@@ -126,6 +126,28 @@ MISTRAL = ProviderInfo(
     description="Французский LLM, хорошее соотношение цена/качество",
 )
 
+GROK = ProviderInfo(
+    name="grok",
+    display="Grok (xAI)",
+    category="llm",
+    tier="paid",
+    key_prefix="xai-",
+    default_endpoint="https://api.x.ai/v1",
+    models=["grok-4.3", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"],
+    description="xAI Grok, OpenAI-совместимый API",
+)
+
+MIMO = ProviderInfo(
+    name="mimo",
+    display="MiMo (Xiaomi)",
+    category="llm",
+    tier="paid",
+    key_prefix="",
+    default_endpoint="https://api.xiaomimimo.com/v1",
+    models=["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-flash", "mimo-v2-omni"],
+    description="Xiaomi MiMo, OpenAI-совместимый, мультимодальный",
+)
+
 # ── Custom / Local ────────────────────────────────────────────────────
 
 CUSTOM_OPENAI = ProviderInfo(
@@ -196,6 +218,41 @@ ASSEMBLYAI = ProviderInfo(
     description="Качественная транскрипция. Платно.",
 )
 
+# ── TTS ───────────────────────────────────────────────────────────────
+
+OPENAI_TTS = ProviderInfo(
+    name="openai-tts",
+    display="OpenAI TTS",
+    category="tts",
+    tier="paid",
+    key_prefix="sk-",
+    default_endpoint="https://api.openai.com/v1",
+    models=["tts-1", "tts-1-hd"],
+    description="OpenAI синтез речи. 6 голосов.",
+)
+
+MIMO_TTS = ProviderInfo(
+    name="mimo-tts",
+    display="MiMo TTS",
+    category="tts",
+    tier="paid",
+    key_prefix="",
+    default_endpoint="https://api.xiaomimimo.com/v1",
+    models=["mimo-v2.5-tts", "mimo-v2.5-tts-voiceclone", "mimo-v2.5-tts-voicedesign"],
+    description="Xiaomi MiMo синтез речи с клонированием голоса.",
+)
+
+MISTRAL_TTS = ProviderInfo(
+    name="mistral-tts",
+    display="Mistral TTS",
+    category="tts",
+    tier="paid",
+    key_prefix="",
+    default_endpoint="https://api.mistral.ai/v1",
+    models=["mistral-tts", "mistral-small-tts"],
+    description="Mistral синтез речи.",
+)
+
 # ── Catalogs for UI ───────────────────────────────────────────────────
 
 LLM_PROVIDERS = [
@@ -205,25 +262,33 @@ LLM_PROVIDERS = [
     OPENAI,
     ANTHROPIC,
     DEEPSEEK,
+    GROK,
+    MIMO,
     MISTRAL,
     CUSTOM_OPENAI,
     LOCAL,
 ]
 STT_PROVIDERS = [WHISPER_LOCAL, WHISPER_OPENAI, DEEPGRAM, ASSEMBLYAI]
 
+TTS_PROVIDERS = [
+    OPENAI_TTS,
+    MIMO_TTS,
+    MISTRAL_TTS,
+]
+
 
 def get_provider(name: str) -> ProviderInfo | None:
-    for p in LLM_PROVIDERS + STT_PROVIDERS:
+    for p in LLM_PROVIDERS + STT_PROVIDERS + TTS_PROVIDERS:
         if p.name == name:
             return p
     return None
 
 
 def get_providers_by_category(category: str) -> list[ProviderInfo]:
-    all_providers = LLM_PROVIDERS + STT_PROVIDERS
+    all_providers = LLM_PROVIDERS + STT_PROVIDERS + TTS_PROVIDERS
     return [p for p in all_providers if p.category == category]
 
 
 def get_providers_by_tier(tier: str) -> list[ProviderInfo]:
-    all_providers = LLM_PROVIDERS + STT_PROVIDERS
+    all_providers = LLM_PROVIDERS + STT_PROVIDERS + TTS_PROVIDERS
     return [p for p in all_providers if p.tier == tier]

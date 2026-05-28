@@ -76,3 +76,26 @@ class VisionProvider(Protocol):
         *,
         task_type: str = "default",
     ) -> str: ...
+
+
+class TTSProvider(Protocol):
+    """Protocol for text-to-speech providers."""
+
+    name: str
+
+    async def validate_key(self) -> bool:
+        """Validate API key with a lightweight request."""
+        ...
+
+    async def synthesize(
+        self, text: str, *, voice: str = "default", speed: float = 1.0
+    ) -> bytes:
+        """Synthesize speech from text. Returns raw audio bytes."""
+        ...
+
+    async def list_voices(self) -> list[str]:
+        """Return available voice IDs."""
+        ...
+
+    async def close(self) -> None:
+        """Close underlying HTTP client."""

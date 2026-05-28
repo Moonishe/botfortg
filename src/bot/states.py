@@ -26,6 +26,9 @@ class SettingsStates(StatesGroup):
     waiting_custom_instructions = State()
     waiting_alias = State()
     waiting_deepseek_key = State()
+    waiting_grok_key = State()
+    waiting_mimo_key = State()
+    waiting_groq_key = State()
     waiting_custom_model_name = State()
 
 
@@ -40,6 +43,16 @@ class DraftStates(StatesGroup):
 class OnboardingStates(StatesGroup):
     waiting_start = State()
     waiting_login = State()
+    waiting_provider_choice = State()  # новый: выбор провайдера инлайн-клавиатурой
     waiting_llm_key = State()
     waiting_timezone = State()
     waiting_sync_choice = State()
+
+
+class CustomProviderStates(StatesGroup):
+    """FSM для добавления кастомного провайдера через онбординг."""
+
+    waiting_provider_name = State()
+    waiting_endpoint = State()
+    waiting_key = State()
+    waiting_model = State()

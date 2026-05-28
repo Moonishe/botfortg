@@ -12,14 +12,15 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
 from src.bot.filters import OwnerOnly, is_onboarded
-from src.bot.states import OnboardingStates
+from src.bot.states import CustomProviderStates, OnboardingStates
 from src.db.models._contacts import Contact
 from src.db.models._learning import AdaptivePersona
 from src.db.models._memory import Memory
-from src.db.repo import get_or_create_user, upsert_api_key
+from src.db.repo import add_key_slot, get_or_create_user, upsert_api_key
 from src.db.session import get_session
 from src.core.infra.timeutil import TZ_PRESETS, is_valid_tz, tz_short
 from src.llm.gemini_provider import GeminiProvider
@@ -333,44 +334,95 @@ async def step_onboarding_login(message: Message, state: FSMContext) -> None:
 
 
 async def _send_llm_key_step(chat_id: int, bot) -> None:
-    """Отправляет сообщение шага «Ключ для ИИ»."""
+    """Отправляет сообщение шага «Подключи мозг» с выбором провайдера."""
     text = (
-        "🔑 <b>Шаг 2/4 — подключи мозг</b>\n\n"
-        "Форматы ключей:\n"
-        "• OpenAI:      sk-proj-...\n"
-        "• Anthropic:   sk-ant-api03-...\n"
-        "• Gemini:      AIzaSy...\n"
-        "• Mistral:     Nb...\n"
-        "• OpenRouter:  sk-or-...\n"
-        "• Cloudflare:  (длинный токен)\n"
-        "• Groq:        gsk_..."
+        "🧠 <b>Шаг 2/4 — подключи мозг</b>\n\n"
+        "Выбери провайдера, которому доверяешь. "
+        "Можно добавить несколько — бот будет переключаться при ошибках.\n\n"
+        "<b>💬 Чат-модели:</b>"
     )
-    await bot.send_message(chat_id, text)
+    kb = InlineKeyboardBuilder()
+    # Row 1: OpenAI, Gemini
+    kb.row(
+        InlineKeyboardButton(text="🤖 OpenAI", callback_data="onb:provider:openai"),
+        InlineKeyboardButton(text="🔮 Gemini", callback_data="onb:provider:gemini"),
+    )
+    # Row 2: Mistral, Anthropic
+    kb.row(
+        InlineKeyboardButton(text="🌪️ Mistral", callback_data="onb:provider:mistral"),
+        InlineKeyboardButton(
+            text="🧬 Anthropic", callback_data="onb:provider:anthropic"
+        ),
+    )
+    # Row 3: DeepSeek, Grok
+    kb.row(
+        InlineKeyboardButton(text="🐋 DeepSeek", callback_data="onb:provider:deepseek"),
+        InlineKeyboardButton(text="⚡ Grok (xAI)", callback_data="onb:provider:grok"),
+    )
+    # Row 4: Groq, MiMo
+    kb.row(
+        InlineKeyboardButton(text="🚀 Groq", callback_data="onb:provider:groq"),
+        InlineKeyboardButton(
+            text="📱 MiMo (Xiaomi)", callback_data="onb:provider:mimo"
+        ),
+    )
+    # Row 5: Cloudflare, OpenRouter
+    kb.row(
+        InlineKeyboardButton(
+            text="☁️ Cloudflare", callback_data="onb:provider:cloudflare"
+        ),
+        InlineKeyboardButton(
+            text="🔗 OpenRouter", callback_data="onb:provider:openrouter"
+        ),
+    )
+    # Row 6: TTS providers (collapsed)
+    kb.row(
+        InlineKeyboardButton(text="🔊 TTS (озвучка)", callback_data="onb:category:tts"),
+    )
+    # Row 7: Custom provider
+    kb.row(
+        InlineKeyboardButton(
+            text="➕ Свой провайдер", callback_data="onb:custom:start"
+        ),
+    )
+    # Row 8: Skip
+    kb.row(
+        InlineKeyboardButton(text="⏭️ Пропустить", callback_data="onb:skip:llm_key"),
+    )
+    await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("onb:provider:"))
+async def cb_onboarding_pick_provider(call: CallbackQuery, state: FSMContext) -> None:
+    """Пользователь выбрал провайдера — запрашиваем ключ."""
+    provider = call.data.split(":", 2)[2]
+    await call.answer()
+
+    # Сохраняем выбранного провайдера в стейт
+    await state.update_data(onboarding_provider=provider)
+    await state.set_state(OnboardingStates.waiting_llm_key)
+
+    hint = _key_hint_for_provider(provider)
+    await call.message.answer(
+        f"🔑 <b>{provider_display_name(provider)}</b>\n\n"
+        f"Пришли API-ключ.\n{hint}\n\n"
+        "/cancel — назад к выбору."
+    )
 
 
 @router.message(OnboardingStates.waiting_llm_key)
-async def step_onboarding_llm_key(message: Message, state: FSMContext) -> None:
-    """Обрабатывает отправленный LLM-ключ."""
+async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> None:
+    """Обрабатывает введённый API-ключ."""
     raw = (message.text or "").strip()
     if not raw:
         await message.answer("Пустой ключ. Пришли API-ключ или /cancel.")
         return
 
+    data = await state.get_data()
+    provider = data.get("onboarding_provider", "openai")
     tg_id = message.from_user.id
 
-    # Пробуем определить провайдера и валидировать
-    provider = _detect_provider(raw)
-    if provider is None:
-        await message.answer(
-            "❌ Не удалось определить провайдера по формату ключа.\n\n"
-            "Поддерживаются:\n"
-            "• <b>OpenAI</b> — начинается на <code>sk-</code>\n"
-            "• <b>Gemini</b> — AIzaSy...\n\n"
-            "Попробуй ещё раз или /cancel."
-        )
-        return
-
-    validated, error_hint = await _validate_key(provider, raw)
+    validated, error_hint = await _validate_key_v2(provider, raw)
     if not validated:
         hint = (
             error_hint
@@ -379,7 +431,6 @@ async def step_onboarding_llm_key(message: Message, state: FSMContext) -> None:
         await message.answer(f"❌ {hint}\n/cancel — отмена.")
         return
 
-    # Сохраняем ключ
     try:
         await message.delete()
     except Exception:
@@ -390,7 +441,172 @@ async def step_onboarding_llm_key(message: Message, state: FSMContext) -> None:
         await upsert_api_key(session, owner, provider, raw)
 
     await state.set_state(OnboardingStates.waiting_timezone)
-    await message.answer(f"✅ Ключ <b>{provider}</b> сохранён и проверен!")
+    await message.answer(
+        f"✅ Ключ <b>{provider_display_name(provider)}</b> сохранён и проверен!"
+    )
+    await _send_timezone_step(message.chat.id, message.bot)
+
+
+# ─── Step 2b: TTS provider category ──────────────────────────────────
+
+
+@router.callback_query(F.data == "onb:category:tts")
+async def cb_onboarding_tts_category(call: CallbackQuery) -> None:
+    """Показывает TTS провайдеров."""
+    await call.answer()
+    text = (
+        "🔊 <b>TTS провайдеры (озвучка)</b>\n\n"
+        "Синтез речи — бот сможет озвучивать ответы голосом.\n"
+        "Выбери провайдера:"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="🎵 OpenAI TTS", callback_data="onb:provider:openai-tts"
+        ),
+        InlineKeyboardButton(text="📱 MiMo TTS", callback_data="onb:provider:mimo-tts"),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="🌪️ Mistral TTS", callback_data="onb:provider:mistral-tts"
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:back:provider_select"),
+    )
+    await call.message.edit_text(text, reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data == "onb:back:provider_select")
+async def cb_onboarding_back_to_providers(call: CallbackQuery) -> None:
+    """Возвращается к выбору провайдера."""
+    await call.answer()
+    await _send_llm_key_step(call.message.chat.id, call.bot)
+    await call.message.delete()
+
+
+@router.callback_query(F.data == "onb:skip:llm_key")
+async def cb_onboarding_skip_llm(call: CallbackQuery, state: FSMContext) -> None:
+    """Пропускает добавление LLM-ключа."""
+    await call.answer()
+    await state.set_state(OnboardingStates.waiting_timezone)
+    await call.message.edit_text("⏭️ <b>LLM-ключ пропущен.</b>")
+    await _send_timezone_step(call.message.chat.id, call.bot)
+
+
+@router.callback_query(F.data == "onb:custom:start")
+async def cb_onboarding_custom_start(call: CallbackQuery, state: FSMContext) -> None:
+    """Начинает добавление кастомного провайдера."""
+    await call.answer()
+    await state.set_state(CustomProviderStates.waiting_provider_name)
+    await call.message.answer(
+        "➕ <b>Свой провайдер</b>\n\n"
+        'Шаг 1/4: Пришли название провайдера (например, "My Local LLM").\n'
+        "/cancel — назад к выбору."
+    )
+
+
+# ─── Step 2c: Custom provider FSM flow ────────────────────────────────
+
+
+@router.message(CustomProviderStates.waiting_provider_name)
+async def step_custom_provider_name(message: Message, state: FSMContext) -> None:
+    """Сохраняет название кастомного провайдера."""
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Название не может быть пустым. /cancel — отмена.")
+        return
+    await state.update_data(custom_provider_name=name)
+    await state.set_state(CustomProviderStates.waiting_endpoint)
+    await message.answer(
+        f"✅ Название: <b>{name}</b>\n\n"
+        "Шаг 2/4: Пришли endpoint URL (например, https://api.openai.com/v1).\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(CustomProviderStates.waiting_endpoint)
+async def step_custom_provider_endpoint(message: Message, state: FSMContext) -> None:
+    """Сохраняет endpoint URL."""
+    url = (message.text or "").strip()
+    if not url:
+        await message.answer("URL не может быть пустым. /cancel — отмена.")
+        return
+    await state.update_data(custom_provider_endpoint=url)
+    await state.set_state(CustomProviderStates.waiting_key)
+    await message.answer(
+        f"✅ Endpoint: <code>{url}</code>\n\n"
+        "Шаг 3/4: Пришли API-ключ.\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(CustomProviderStates.waiting_key)
+async def step_custom_provider_key(message: Message, state: FSMContext) -> None:
+    """Сохраняет ключ."""
+    key = (message.text or "").strip()
+    if not key:
+        await message.answer("Ключ не может быть пустым. /cancel — отмена.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.update_data(custom_provider_key=key)
+    await state.set_state(CustomProviderStates.waiting_model)
+    await message.answer(
+        "✅ Ключ сохранён.\n\n"
+        "Шаг 4/4: Пришли название модели через запятую "
+        "(лёгкая, тяжёлая, vision).\n"
+        "Например: <code>llama3:8b,llama3:70b,llava:13b</code>\n\n"
+        "Если модель одна — просто пришли её название.\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(CustomProviderStates.waiting_model)
+async def step_custom_provider_model(message: Message, state: FSMContext) -> None:
+    """Сохраняет модели и завершает кастомного провайдера."""
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Укажи хотя бы одну модель. /cancel — отмена.")
+        return
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    models = {
+        "chat_light": parts[0] if len(parts) >= 1 else "default",
+        "chat_heavy": parts[1] if len(parts) >= 2 else parts[0] if parts else "default",
+        "vision": parts[2] if len(parts) >= 3 else None,
+    }
+
+    data = await state.get_data()
+    provider_name = data.get("custom_provider_name", "custom")
+    endpoint = data.get("custom_provider_endpoint", "")
+    key = data.get("custom_provider_key", "")
+    tg_id = message.from_user.id
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, tg_id)
+        # Сохраняем каждый слот с метаданными
+        for purpose, model in models.items():
+            if model:
+                await add_key_slot(
+                    session,
+                    owner,
+                    "custom",
+                    key,
+                    purpose=purpose,
+                    model=model,
+                    endpoint=endpoint,
+                    label=provider_name,
+                    category="llm",
+                )
+
+    await state.set_state(OnboardingStates.waiting_timezone)
+    await message.answer(
+        f"✅ Кастомный провайдер <b>{provider_name}</b> добавлен!\n"
+        f"Модели: {', '.join(v for v in models.values() if v)}"
+    )
     await _send_timezone_step(message.chat.id, message.bot)
 
 
@@ -446,6 +662,75 @@ async def _validate_key(provider: str, key: str) -> tuple[bool, str | None]:
         logger.exception("Key validation failed for %s", provider)
         return (False, "Не удалось проверить ключ. Попробуй позже.")
     return (False, f"Неизвестный провайдер: {provider}")
+
+
+def provider_display_name(provider: str) -> str:
+    """Возвращает человекочитаемое имя провайдера."""
+    names = {
+        "openai": "OpenAI",
+        "gemini": "Gemini",
+        "mistral": "Mistral",
+        "anthropic": "Anthropic",
+        "deepseek": "DeepSeek",
+        "grok": "Grok (xAI)",
+        "groq": "Groq",
+        "mimo": "MiMo (Xiaomi)",
+        "cloudflare": "Cloudflare",
+        "openrouter": "OpenRouter",
+        "custom": "Свой провайдер",
+    }
+    return names.get(provider, provider)
+
+
+def _key_hint_for_provider(provider: str) -> str:
+    """Возвращает подсказку формата ключа для провайдера."""
+    hints = {
+        "openai": "Формат: <code>sk-...</code>",
+        "gemini": "Формат: <code>AIzaSy...</code>",
+        "mistral": "Формат: <code>Nb...</code>",
+        "anthropic": "Формат: <code>sk-ant-...</code>",
+        "deepseek": "Формат: <code>sk-...</code>",
+        "grok": "Формат: <code>xai-...</code>",
+        "groq": "Формат: <code>gsk_...</code>",
+        "mimo": "Любой формат",
+        "cloudflare": "Длинный токен (base64)",
+        "openrouter": "Формат: <code>sk-or-...</code>",
+        "custom": "Любой формат",
+    }
+    return hints.get(provider, "")
+
+
+async def _validate_key_v2(provider: str, key: str) -> tuple[bool, str | None]:
+    """Валидирует ключ через провайдера. Возвращает (valid, error_hint)."""
+    try:
+        providers_map = {
+            "openai": ("src.llm.openai_provider", "OpenAIProvider"),
+            "gemini": ("src.llm.gemini_provider", "GeminiProvider"),
+            "mistral": ("src.llm.mistral_provider", "MistralProvider"),
+            "cloudflare": ("src.llm.cloudflare_provider", "CloudflareProvider"),
+            "openrouter": ("src.llm.openrouter_provider", "OpenRouterProvider"),
+            "anthropic": ("src.llm.anthropic_provider", "AnthropicProvider"),
+            "deepseek": ("src.llm.deepseek_provider", "DeepSeekProvider"),
+            "grok": ("src.llm.grok_provider", "GrokProvider"),
+            "mimo": ("src.llm.mimo_provider", "MiMoProvider"),
+            "groq": ("src.llm.groq_provider", "GroqProvider"),
+        }
+        if provider not in providers_map:
+            return (False, f"Неизвестный провайдер: {provider}")
+
+        mod_name, class_name = providers_map[provider]
+        mod = __import__(mod_name, fromlist=[class_name])
+        provider_cls = getattr(mod, class_name)
+        return (await provider_cls(key).validate_key(), None)
+    except Exception as e:
+        err_str = str(e).lower()
+        if any(
+            w in err_str
+            for w in ("timeout", "connect", "resolve", "network", "refused", "reset")
+        ):
+            return (False, "Сетевая ошибка. Проверь подключение и попробуй снова.")
+        logger.exception("Key validation failed for %s", provider)
+        return (False, "Не удалось проверить ключ. Попробуй позже.")
 
 
 # ─── Step 3: Timezone ─────────────────────────────────────────────────
@@ -786,8 +1071,8 @@ async def advance_onboarding_after_login(message: Message, state: FSMContext) ->
     if has_session and has_llm_key and has_tz:
         return False
 
-    # Переходим к шагу LLM ключа
-    await state.set_state(OnboardingStates.waiting_llm_key)
+    # Переходим к выбору провайдера
+    await state.set_state(OnboardingStates.waiting_provider_choice)
     await message.answer(
         "✅ Готово! <b>Шаг 2/4 — API-ключ</b>\n\nТеперь нужен ключ для доступа к LLM. Выбери провайдера:"
     )

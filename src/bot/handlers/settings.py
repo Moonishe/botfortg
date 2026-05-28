@@ -37,6 +37,9 @@ from src.userbot import get_active_telethon_client, get_userbot_manager
 from src.llm.cloudflare_provider import CloudflareProvider
 from src.llm.deepseek_provider import DeepSeekProvider
 from src.llm.gemini_provider import GeminiProvider
+from src.llm.grok_provider import GrokProvider
+from src.llm.groq_provider import GroqProvider
+from src.llm.mimo_provider import MiMoProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
 
@@ -135,6 +138,9 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         mistral_key = await get_api_key(session, owner, "mistral")
         cloudflare_key = await get_api_key(session, owner, "cloudflare")
         deepseek_key = await get_api_key(session, owner, "deepseek")
+        grok_key = await get_api_key(session, owner, "grok")
+        mimo_key = await get_api_key(session, owner, "mimo")
+        groq_key = await get_api_key(session, owner, "groq")
 
         # ── Extract ORM values to local vars (session-safe) ──────────
         _tz = s.timezone
@@ -173,7 +179,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"📊 Smart дайджест: {_check(_smart_digest_enabled)} (каждые {_smart_digest_interval_min}м)\n"
         f"🤖 LLM: <b>{_llm_provider}</b> · {'тяжёлая' if _use_heavy_model else 'лёгкая'}\n"
         f"🎤 Транскрипция: <b>{_transcription_mode}</b> ({_transcription_api_provider})\n"
-        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))}\n\n"
+        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))} · Grok {_check(bool(grok_key))} · MiMo {_check(bool(mimo_key))} · Groq {_check(bool(groq_key))}\n\n"
         "<i>Тапни раздел, чтобы открыть его настройки и описание.</i>"
     )
     kb = InlineKeyboardBuilder()
@@ -552,6 +558,9 @@ async def _render_section(
         mistral_key = await get_api_key(session, owner, "mistral")
         cloudflare_key = await get_api_key(session, owner, "cloudflare")
         deepseek_key = await get_api_key(session, owner, "deepseek")
+        grok_key = await get_api_key(session, owner, "grok")
+        mimo_key = await get_api_key(session, owner, "mimo")
+        groq_key = await get_api_key(session, owner, "groq")
 
         kb = InlineKeyboardBuilder()
 
@@ -1113,7 +1122,10 @@ async def _render_section(
                 f"Gemini: {_check(bool(gemini_key))}\n"
                 f"Mistral: {_check(bool(mistral_key))}\n"
                 f"DeepSeek: {_check(bool(deepseek_key))}\n"
-                f"Cloudflare: {_check(bool(cloudflare_key))}"
+                f"Cloudflare: {_check(bool(cloudflare_key))}\n"
+                f"Grok: {_check(bool(grok_key))}\n"
+                f"MiMo: {_check(bool(mimo_key))}\n"
+                f"Groq: {_check(bool(groq_key))}"
             )
             kb.row(
                 InlineKeyboardButton(
@@ -1134,6 +1146,19 @@ async def _render_section(
             kb.row(
                 InlineKeyboardButton(
                     text="🔑 Cloudflare key", callback_data="set:input:cloudflare_key"
+                ),
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text="🔑 Grok key", callback_data="set:input:grok_key"
+                ),
+                InlineKeyboardButton(
+                    text="🔑 MiMo key", callback_data="set:input:mimo_key"
+                ),
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text="🔑 Groq key", callback_data="set:input:groq_key"
                 ),
             )
             kb.row(*_back_row())
@@ -1455,6 +1480,39 @@ async def cb_input_deepseek(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.answer(
         "Пришли DeepSeek API key с <code>platform.deepseek.com</code>. "
         "Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:grok_key")
+async def cb_input_grok(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_grok_key)
+    await callback.message.answer(
+        "Пришли Grok API key с <code>console.x.ai</code>. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:mimo_key")
+async def cb_input_mimo(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_mimo_key)
+    await callback.message.answer(
+        "Пришли MiMo API key. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:groq_key")
+async def cb_input_groq(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_groq_key)
+    await callback.message.answer(
+        "Пришли Groq API key с <code>console.groq.com</code>. Проверю и сохраню. /cancel — отмена.\n\n"
         "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
         "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
     )
@@ -1870,6 +1928,93 @@ async def step_deepseek_key(message: Message, state: FSMContext) -> None:
     count = len(parts)
     await message.answer(
         f"✅ Сохранено DeepSeek ключей: {count}.\n🔑 В базе DeepSeek ключей: {total}."
+    )
+
+
+@router.message(SettingsStates.waiting_grok_key)
+async def step_grok_key(message: Message, state: FSMContext) -> None:
+    """Сохраняет Grok API ключ."""
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with grok key")
+    if not await GrokProvider(parts[0]).validate_key():
+        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        await upsert_api_key(session, owner, "grok", ",".join(parts))
+        total = await _count_slots_for_provider(session, owner, "grok")
+    await state.clear()
+    count = len(parts)
+    await message.answer(
+        f"✅ Сохранено Grok ключей: {count}.\n🔑 В базе Grok ключей: {total}."
+    )
+
+
+@router.message(SettingsStates.waiting_mimo_key)
+async def step_mimo_key(message: Message, state: FSMContext) -> None:
+    """Сохраняет MiMo API ключ."""
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with mimo key")
+    if not await MiMoProvider(parts[0]).validate_key():
+        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        await upsert_api_key(session, owner, "mimo", ",".join(parts))
+        total = await _count_slots_for_provider(session, owner, "mimo")
+    await state.clear()
+    count = len(parts)
+    await message.answer(
+        f"✅ Сохранено MiMo ключей: {count}.\n🔑 В базе MiMo ключей: {total}."
+    )
+
+
+@router.message(SettingsStates.waiting_groq_key)
+async def step_groq_key(message: Message, state: FSMContext) -> None:
+    """Сохраняет Groq API ключ."""
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with groq key")
+    if not await GroqProvider(parts[0]).validate_key():
+        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        await upsert_api_key(session, owner, "groq", ",".join(parts))
+        total = await _count_slots_for_provider(session, owner, "groq")
+    await state.clear()
+    count = len(parts)
+    await message.answer(
+        f"✅ Сохранено Groq ключей: {count}.\n🔑 В базе Groq ключей: {total}."
     )
 
 

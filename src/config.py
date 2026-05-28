@@ -60,6 +60,18 @@ class LLMDefaults:
     DEEPSEEK_CHAT_HEAVY = _LazyModel("deepseek_chat_heavy_model")
     DEEPSEEK_EMBED = _LazyModel("deepseek_embed_model")
 
+    GROK_CHAT_LIGHT = _LazyModel("grok_chat_light_model")
+    GROK_CHAT_HEAVY = _LazyModel("grok_chat_heavy_model")
+    GROK_EMBED = _LazyModel("grok_embed_model")
+
+    MIMO_CHAT_LIGHT = _LazyModel("mimo_chat_light_model")
+    MIMO_CHAT_HEAVY = _LazyModel("mimo_chat_heavy_model")
+    MIMO_EMBED = _LazyModel("mimo_embed_model")
+
+    GROQ_CHAT_LIGHT = _LazyModel("groq_chat_light_model")
+    GROQ_CHAT_HEAVY = _LazyModel("groq_chat_heavy_model")
+    GROQ_EMBED = _LazyModel("groq_embed_model")
+
     OPENAI_BASE_URL = _LazyModel("openai_base_url")
 
 
@@ -227,6 +239,37 @@ class Settings(BaseSettings):
     )
     deepseek_embed_model: str = Field(
         "deepseek-embedding", description="DeepSeek модель эмбеддингов"
+    )
+
+    # --- Grok (xAI) ---
+    grok_chat_light_model: str = Field("grok-4.3", description="Grok лёгкая чат-модель")
+    grok_chat_heavy_model: str = Field(
+        "grok-4.20-0309-reasoning", description="Grok тяжёлая чат-модель"
+    )
+    grok_embed_model: str = Field(
+        "text-embedding-3-small", description="Grok модель эмбеддингов (fallback)"
+    )
+
+    # --- MiMo (Xiaomi) ---
+    mimo_chat_light_model: str = Field(
+        "mimo-v2-flash", description="MiMo лёгкая чат-модель"
+    )
+    mimo_chat_heavy_model: str = Field(
+        "mimo-v2.5-pro", description="MiMo тяжёлая чат-модель"
+    )
+    mimo_embed_model: str = Field(
+        "text-embedding-3-small", description="MiMo модель эмбеддингов (fallback)"
+    )
+
+    # --- Groq ---
+    groq_chat_light_model: str = Field(
+        "llama-3.3-70b-versatile", description="Groq лёгкая чат-модель"
+    )
+    groq_chat_heavy_model: str = Field(
+        "mixtral-8x7b-32768", description="Groq тяжёлая чат-модель"
+    )
+    groq_embed_model: str = Field(
+        "text-embedding-3-small", description="Groq модель эмбеддингов (fallback)"
     )
 
     embedding_dim: int = Field(

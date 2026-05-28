@@ -16,7 +16,7 @@ from telethon.errors import (
 
 from src.config import settings
 from src.bot.filters import OwnerOnly
-from src.bot.states import LoginStates
+from src.bot.states import CustomProviderStates, LoginStates, OnboardingStates
 from src.db.repo import (
     delete_telegram_session,
     get_or_create_user,
@@ -44,6 +44,16 @@ async def cmd_cancel(
     if current is None:
         await message.answer("Нечего отменять.")
         return
+
+    # Если пользователь в процессе кастомного провайдера — возвращаем к выбору
+    if current and current.startswith("CustomProviderStates"):
+        await state.set_state(OnboardingStates.waiting_provider_choice)
+        await message.answer("⏪ Отменено.")
+        from src.bot.handlers.start import _send_llm_key_step
+
+        await _send_llm_key_step(message.chat.id, message.bot)
+        return
+
     await userbot_manager.cancel_pending(message.from_user.id)
     await state.clear()
     await message.answer("Отменено.")

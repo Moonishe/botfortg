@@ -25,6 +25,10 @@ from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
 from src.llm.openrouter_provider import OpenRouterProvider
 from src.llm.deepseek_provider import DeepSeekProvider
+from src.llm.grok_provider import GrokProvider
+from src.llm.mimo_provider import MiMoProvider
+from src.llm.groq_provider import GroqProvider
+from src.llm.custom_provider import CustomProvider
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +206,17 @@ def _score_provider(name: str, now: float) -> float:
     return metrics.score(now)
 
 
-PROVIDER_ORDER = ("deepseek", "openrouter", "openai", "gemini", "mistral", "cloudflare")
+PROVIDER_ORDER = (
+    "deepseek",
+    "grok",
+    "mimo",
+    "groq",
+    "openrouter",
+    "openai",
+    "gemini",
+    "mistral",
+    "cloudflare",
+)
 RETRYABLE_MARKERS = (
     "429",
     "500",
@@ -1070,6 +1084,10 @@ def _provider_class_for(name: str) -> type | None:
     """Маппинг имени провайдера → класс."""
     return {
         "deepseek": DeepSeekProvider,
+        "grok": GrokProvider,
+        "mimo": MiMoProvider,
+        "groq": GroqProvider,
+        "custom": CustomProvider,
         "openrouter": OpenRouterProvider,
         "openai": OpenAIProvider,
         "anthropic": AnthropicProvider,
