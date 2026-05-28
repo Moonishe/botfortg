@@ -53,11 +53,6 @@ WORKDIR /app
 # Copy virtual env from builder (all pip packages)
 COPY --from=builder /venv /venv
 
-# Install Playwright Chromium browser + system deps
-ENV PLAYWRIGHT_BROWSERS_PATH=/venv/playwright-browsers
-RUN playwright install-deps chromium \
-    && playwright install chromium
-
 # Copy application code
 COPY src/ ./src/
 COPY skills/ ./skills/
@@ -68,7 +63,12 @@ COPY alembic/ alembic/
 
 # data — mounted as volume (DB, sessions, qdrant, media, model cache)
 RUN mkdir -p /app/data \
-    && useradd -m appuser \
+    && useradd -m appuser
+
+# Install Playwright Chromium browser + system deps (must be in /app for appuser access)
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/data/playwright-browsers
+RUN playwright install-deps chromium \
+    && playwright install chromium \
     && chown -R appuser:appuser /app
 
 USER appuser
