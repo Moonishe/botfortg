@@ -12,7 +12,12 @@ class OpenAIProvider(OpenAICompatEmbedMixin):
     name = "openai"
 
     def __init__(
-        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        embed_model: str | None = None,
     ) -> None:
         base_url = _validate_base_url(base_url)
         kwargs: dict = dict(api_key=api_key, timeout=httpx.Timeout(60.0, connect=10.0))
@@ -20,7 +25,7 @@ class OpenAIProvider(OpenAICompatEmbedMixin):
             kwargs["base_url"] = base_url
         self._client = AsyncOpenAI(**kwargs)
         self._model = model
-        self._embed_model = LLMDefaults.OPENAI_EMBED
+        self._embed_model = embed_model
 
     def _resolve_model(self, heavy: bool) -> str:
         return self._model or (

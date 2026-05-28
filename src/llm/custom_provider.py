@@ -29,12 +29,13 @@ class CustomProvider(OpenAICompatEmbedMixin):
         *,
         endpoint: str,
         model: str | None = None,
+        embed_model: str | None = None,
         label: str = "Custom",
     ) -> None:
         endpoint_safe = _validate_base_url(endpoint)
         self._label = label
         self._model = model
-        self._embed_model = "text-embedding-3-small"
+        self._embed_model = embed_model
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=endpoint_safe,

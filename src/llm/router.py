@@ -439,6 +439,7 @@ class MultiKeyProvider:
         slot_ids: list[int] | None = None,
         endpoints: list[str | None] | None = None,
         models: list[str | None] | None = None,
+        embed_model: str | None = None,
         session_provider: Callable[[], tuple[AsyncSession, object]] | None = None,
         purpose: str = "main",
         **kwargs: object,
@@ -451,6 +452,7 @@ class MultiKeyProvider:
         self._slot_ids = slot_ids or []
         self._endpoints = endpoints or []
         self._models = models or []
+        self._embed_model = embed_model
         self._session_provider = session_provider
         self._kwargs = kwargs
         self._idx = 0
@@ -527,6 +529,8 @@ class MultiKeyProvider:
                     provider_kwargs["model"] = self._model
                 elif self._models and idx < len(self._models):
                     provider_kwargs["model"] = self._models[idx]
+                if self._embed_model:
+                    provider_kwargs["embed_model"] = self._embed_model
                 provider = self._provider_class(key, **provider_kwargs)
             except Exception as exc:
                 last_error = exc
@@ -1169,6 +1173,7 @@ async def build_provider(
     user: User,
     purpose: str = "main",
     task_type: str = TaskType.DEFAULT,
+    embed_model: str | None = None,
 ) -> LLMProvider | None:
     """Строит провайдер с авто-ротацией ключей из LlmKeySlot.
 
@@ -1213,6 +1218,7 @@ async def build_provider(
                     slot_ids=slot_ids,
                     endpoints=endpoints,
                     models=models,
+                    embed_model=embed_model,
                     # сессия для DB-трекинга открывается внутри _try_with_retry
                     # (lambda захватывает user для совместимости, session не используется)
                     session_provider=lambda: (None, user),
@@ -1257,7 +1263,11 @@ async def build_provider(
         if provider_class is None:
             logger.warning("Unknown provider class for %s, skipping", name)
             continue
-        providers.append(MultiKeyProvider(name, provider_class, keys, purpose=purpose))
+        providers.append(
+            MultiKeyProvider(
+                name, provider_class, keys, purpose=purpose, embed_model=embed_model
+            )
+        )
     if not providers:
         # Проверяем: есть слоты но все в кулдауне?
         try:

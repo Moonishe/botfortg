@@ -24,7 +24,12 @@ class MiMoProvider(OpenAICompatEmbedMixin):
     name = "mimo"
 
     def __init__(
-        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        embed_model: str | None = None,
     ) -> None:
         base_url = _validate_base_url(base_url)
         kwargs: dict = dict(
@@ -34,11 +39,7 @@ class MiMoProvider(OpenAICompatEmbedMixin):
         )
         self._client = AsyncOpenAI(**kwargs)
         self._model = model
-        self._embed_model = (
-            LLMDefaults.MIMO_EMBED
-            if hasattr(LLMDefaults, "MIMO_EMBED")
-            else "text-embedding-3-small"
-        )
+        self._embed_model = embed_model
 
     def _resolve_model(self, heavy: bool) -> str:
         return self._model or (

@@ -41,36 +41,29 @@ class LLMDefaults:
     # через переменные окружения (см. .env или export).
     OPENAI_CHAT_LIGHT = _LazyModel("openai_chat_light_model")
     OPENAI_CHAT_HEAVY = _LazyModel("openai_chat_heavy_model")
-    OPENAI_EMBED = _LazyModel("openai_embed_model")
 
     GEMINI_CHAT_LIGHT = _LazyModel("gemini_chat_light_model")
     GEMINI_CHAT_HEAVY = _LazyModel("gemini_chat_heavy_model")
-    GEMINI_EMBED = _LazyModel("gemini_embed_model")
+    GEMINI_STT = _LazyModel("gemini_stt_model")
 
     MISTRAL_CHAT_LIGHT = _LazyModel("mistral_chat_light_model")
     MISTRAL_CHAT_HEAVY = _LazyModel("mistral_chat_heavy_model")
-    MISTRAL_EMBED = _LazyModel("mistral_embed_model")
     MISTRAL_STT = _LazyModel("mistral_stt_model")
 
     CLOUDFLARE_CHAT_LIGHT = _LazyModel("cloudflare_chat_light_model")
     CLOUDFLARE_CHAT_HEAVY = _LazyModel("cloudflare_chat_heavy_model")
-    CLOUDFLARE_EMBED = _LazyModel("cloudflare_embed_model")
 
     DEEPSEEK_CHAT_LIGHT = _LazyModel("deepseek_chat_light_model")
     DEEPSEEK_CHAT_HEAVY = _LazyModel("deepseek_chat_heavy_model")
-    DEEPSEEK_EMBED = _LazyModel("deepseek_embed_model")
 
     GROK_CHAT_LIGHT = _LazyModel("grok_chat_light_model")
     GROK_CHAT_HEAVY = _LazyModel("grok_chat_heavy_model")
-    GROK_EMBED = _LazyModel("grok_embed_model")
 
     MIMO_CHAT_LIGHT = _LazyModel("mimo_chat_light_model")
     MIMO_CHAT_HEAVY = _LazyModel("mimo_chat_heavy_model")
-    MIMO_EMBED = _LazyModel("mimo_embed_model")
 
     GROQ_CHAT_LIGHT = _LazyModel("groq_chat_light_model")
     GROQ_CHAT_HEAVY = _LazyModel("groq_chat_heavy_model")
-    GROQ_EMBED = _LazyModel("groq_embed_model")
 
     OPENAI_BASE_URL = _LazyModel("openai_base_url")
 
@@ -162,9 +155,6 @@ class Settings(BaseSettings):
     openai_chat_heavy_model: str = Field(
         "gpt-5.5", description="OpenAI тяжёлая чат-модель"
     )
-    openai_embed_model: str = Field(
-        "text-embedding-3-small", description="OpenAI модель эмбеддингов"
-    )
 
     # --- Agent-specific model overrides (empty = use defaults) ---
     maestro_model: str = Field("", description="Model for maestro (empty = auto)")
@@ -185,8 +175,8 @@ class Settings(BaseSettings):
     gemini_chat_heavy_model: str = Field(
         "gemini-3.1-pro", description="Gemini тяжёлая чат-модель"
     )
-    gemini_embed_model: str = Field(
-        "text-embedding-004", description="Gemini модель эмбеддингов"
+    gemini_stt_model: str = Field(
+        "gemini-3.1-flash-lite", description="Gemini модель для транскрипции голосовых"
     )
 
     mistral_chat_light_model: str = Field(
@@ -194,9 +184,6 @@ class Settings(BaseSettings):
     )
     mistral_chat_heavy_model: str = Field(
         "mistral-medium-latest", description="Mistral тяжёлая чат-модель"
-    )
-    mistral_embed_model: str = Field(
-        "mistral-embed", description="Mistral модель эмбеддингов"
     )
     mistral_stt_model: str = Field(
         "voxtral-mini-transcribe-latest", description="Mistral STT модель"
@@ -222,32 +209,19 @@ class Settings(BaseSettings):
         description="Cloudflare лёгкая чат-модель (Qwen3 30B — $0.05/$0.34 per M)",
     )
     cloudflare_chat_heavy_model: str = Field(
-        "@cf/moonshotai/kimi-k2.6",
-        description="Cloudflare тяжёлая чат-модель (Kimi K2.6 1T — $0.95/$4 per M)",
+        "@cf/moonshotai/kimi-k2.6", description="Cloudflare тяжёлая чат-модель"
     )
-    cloudflare_embed_model: str = Field(
-        "@cf/baai/bge-m3",
-        description="Cloudflare модель эмбеддингов (BGE-M3 multilingual — $0.012/M)",
-    )
-
-    # --- DeepSeek ---
     deepseek_chat_light_model: str = Field(
         "deepseek-chat", description="DeepSeek лёгкая чат-модель"
     )
     deepseek_chat_heavy_model: str = Field(
         "deepseek-reasoner", description="DeepSeek тяжёлая чат-модель"
     )
-    deepseek_embed_model: str = Field(
-        "deepseek-embedding", description="DeepSeek модель эмбеддингов"
-    )
 
     # --- Grok (xAI) ---
     grok_chat_light_model: str = Field("grok-4.3", description="Grok лёгкая чат-модель")
     grok_chat_heavy_model: str = Field(
         "grok-4.20-0309-reasoning", description="Grok тяжёлая чат-модель"
-    )
-    grok_embed_model: str = Field(
-        "text-embedding-3-small", description="Grok модель эмбеддингов (fallback)"
     )
 
     # --- MiMo (Xiaomi) ---
@@ -257,9 +231,6 @@ class Settings(BaseSettings):
     mimo_chat_heavy_model: str = Field(
         "mimo-v2.5-pro", description="MiMo тяжёлая чат-модель"
     )
-    mimo_embed_model: str = Field(
-        "text-embedding-3-small", description="MiMo модель эмбеддингов (fallback)"
-    )
 
     # --- Groq ---
     groq_chat_light_model: str = Field(
@@ -267,9 +238,6 @@ class Settings(BaseSettings):
     )
     groq_chat_heavy_model: str = Field(
         "mixtral-8x7b-32768", description="Groq тяжёлая чат-модель"
-    )
-    groq_embed_model: str = Field(
-        "text-embedding-3-small", description="Groq модель эмбеддингов (fallback)"
     )
 
     embedding_dim: int = Field(

@@ -78,6 +78,7 @@ class TranscriptionService:
         self, path: Path, gemini_key: str, language: str | None
     ) -> str:
         from google import genai
+        from src.config import LLMDefaults
 
         client = genai.Client(api_key=gemini_key)
 
@@ -87,7 +88,7 @@ class TranscriptionService:
             if language:
                 prompt += f" The audio language is {language}."
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=LLMDefaults.GEMINI_STT,
                 contents=[prompt, audio_file],
             )
             return resp.text or ""
@@ -103,9 +104,14 @@ class TranscriptionService:
         suffix = path.suffix.lstrip(".") or "ogg"
         mime = f"audio/{suffix}" if suffix != "oga" else "audio/ogg"
 
-        data = {"model": LLMDefaults.MISTRAL_STT}
-        if language:
-            data["language"] = language
+        data = {
+            "model": LLMDefaults.MISTRAL_STT,
+            "language": language or "ru",
+            "diarize": "false",
+            "temperature": "0",
+            "stream": "false",
+            "timestamp_granularities": "segment",
+        }
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             with path.open("rb") as f:
@@ -129,7 +135,6 @@ class TranscriptionService:
         """Transcribe via any STT provider using LlmKeySlot config."""
         import httpx
 
-        path.suffix.lstrip(".") or "ogg"
         url = (endpoint or "").rstrip("/")
         if not url:
             if provider_name == "deepgram":
@@ -139,12 +144,23 @@ class TranscriptionService:
             else:
                 raise ValueError(f"No endpoint for {provider_name}")
 
+        params: dict[str, str] = {}
+        if model:
+            params["model"] = model
+
+        # Дефолтные настройки для Deepgram Nova-3 (русский, умное форматирование)
+        if provider_name == "deepgram":
+            params.setdefault("language", "ru")
+            params.setdefault("smart_format", "true")
+            params.setdefault("numerals", "true")
+            params.setdefault("diarize", "true")
+            params.setdefault("profanity_filter", "false")
+            params.setdefault("punctuate", "true")
+            params.setdefault("dictation", "false")
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             with path.open("rb") as f:
                 headers = {"Authorization": f"Bearer {api_key}"}
-                params: dict[str, str] = {}
-                if model:
-                    params["model"] = model
                 resp = await client.post(
                     url, headers=headers, params=params, content=f.read()
                 )

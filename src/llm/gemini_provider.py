@@ -26,10 +26,16 @@ class GeminiProvider:
     name = "gemini"
 
     def __init__(
-        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        embed_model: str | None = None,
     ) -> None:
         self._client = genai.Client(api_key=api_key, http_options={"timeout": 60000})
         self._model = model
+        self._embed_model = embed_model
 
     async def validate_key(self) -> bool:
         def _check() -> bool:
@@ -71,19 +77,19 @@ class GeminiProvider:
     async def embed(self, text: str) -> list[float]:
         from src.core.actions.embedding_cache import get as cache_get, set as cache_set
 
-        cached = cache_get(text, LLMDefaults.GEMINI_EMBED)
+        cached = cache_get(text, self._embed_model)
         if cached is not None:
             return cached
 
         def _call() -> list[float]:
             resp = self._client.models.embed_content(
-                model=LLMDefaults.GEMINI_EMBED,
+                model=self._embed_model,
                 contents=text,
             )
             return list(resp.embeddings[0].values)
 
         result = await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
-        cache_set(text, result, LLMDefaults.GEMINI_EMBED)
+        cache_set(text, result, self._embed_model)
         return result
 
     async def list_models(self) -> list[str]:
@@ -107,7 +113,7 @@ class GeminiProvider:
         uncached_texts: list[str] = []
         uncached_indices: list[int] = []
         for i, t in enumerate(texts):
-            cached = cache_get(t, LLMDefaults.GEMINI_EMBED)
+            cached = cache_get(t, self._embed_model)
             if cached is not None:
                 results[i] = cached
             else:
@@ -123,7 +129,7 @@ class GeminiProvider:
 
                 def _call(chunk: list[str] = chunk) -> list[list[float]]:
                     resp = self._client.models.embed_content(
-                        model=LLMDefaults.GEMINI_EMBED,
+                        model=self._embed_model,
                         contents=chunk,
                     )
                     return [list(e.values) for e in resp.embeddings]
@@ -133,7 +139,7 @@ class GeminiProvider:
                 )
 
             for idx, emb in zip(uncached_indices, api_results):
-                cache_set(texts[idx], emb, LLMDefaults.GEMINI_EMBED)
+                cache_set(texts[idx], emb, self._embed_model)
                 results[idx] = emb
 
         return results  # type: ignore[return-value]
