@@ -544,7 +544,18 @@ BOOL_KEYS = {
 }
 
 CHOICE_KEYS = {
-    "llm_provider": {"openrouter", "openai", "gemini", "mistral", "cloudflare"},
+    "llm_provider": {
+        "openrouter",
+        "openai",
+        "gemini",
+        "mistral",
+        "cloudflare",
+        "deepseek",
+        "grok",
+        "mimo",
+        "groq",
+        "custom",
+    },
     "transcription_mode": {"local", "api", "hybrid"},
     "transcription_api_provider": {"openai", "gemini", "mistral"},
     "auto_reply_mode": {"static", "smart"},
@@ -1004,6 +1015,19 @@ async def _render_section(
             )
 
             # ── LLM provider buttons ──
+            # Показываем если есть кастомные оверрайды
+            try:
+                overrides = json.loads(s.model_overrides) if s.model_overrides else {}
+            except (json.JSONDecodeError, TypeError):
+                overrides = {}
+            if overrides:
+                ov_count = len(overrides)
+                text += (
+                    f"\n⚠️ <b>Активны переопределения ({ov_count} задач)</b> — "
+                    "нажми «🧠 Модели задач» чтобы посмотреть"
+                )
+
+            # ── LLM provider buttons ──
             kb.row(
                 InlineKeyboardButton(
                     text=("• " if s.llm_provider == "openai" else "") + "OpenAI",
@@ -1033,6 +1057,56 @@ async def _render_section(
                     callback_data="set:choose:llm_provider:cloudflare",
                 ),
             )
+            # DeepSeek, Grok, MiMo, Groq — дополнительные провайдеры
+            kb.row(
+                InlineKeyboardButton(
+                    text=("• " if s.llm_provider == "deepseek" else "") + "DeepSeek",
+                    callback_data="set:choose:llm_provider:deepseek",
+                ),
+                InlineKeyboardButton(
+                    text=("• " if s.llm_provider == "grok" else "") + "Grok (xAI)",
+                    callback_data="set:choose:llm_provider:grok",
+                ),
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text=("• " if s.llm_provider == "mimo" else "") + "MiMo (Xiaomi)",
+                    callback_data="set:choose:llm_provider:mimo",
+                ),
+                InlineKeyboardButton(
+                    text=("• " if s.llm_provider == "groq" else "") + "Groq",
+                    callback_data="set:choose:llm_provider:groq",
+                ),
+            )
+            # Свой провайдер — показываем все кастомные
+            custom_slots = await list_key_slots(session, owner)
+            custom_names = sorted(
+                {
+                    s.provider
+                    for s in custom_slots
+                    if s.provider
+                    not in {
+                        "openai",
+                        "gemini",
+                        "mistral",
+                        "deepseek",
+                        "cloudflare",
+                        "grok",
+                        "mimo",
+                        "groq",
+                        "openrouter",
+                    }
+                    and s.enabled
+                }
+            )
+            if custom_names:
+                for cn in custom_names:
+                    kb.row(
+                        InlineKeyboardButton(
+                            text=("• " if s.llm_provider == cn else "") + cn,
+                            callback_data=f"set:choose:llm_provider:{cn}",
+                        )
+                    )
             kb.row(
                 InlineKeyboardButton(
                     text=f"{_check(s.use_heavy_model)} Тяжёлая модель",
@@ -1438,6 +1512,25 @@ async def _render_section(
             kb.row(*_back_row())
 
         elif section == "keys":
+            # Load custom key slots from LlmKeySlot
+            custom_slots = await list_key_slots(session, owner)
+            custom_providers = {
+                s.provider
+                for s in custom_slots
+                if s.provider
+                not in {
+                    "openai",
+                    "gemini",
+                    "mistral",
+                    "deepseek",
+                    "cloudflare",
+                    "grok",
+                    "mimo",
+                    "groq",
+                }
+                and s.enabled
+            }
+
             text = (
                 "🔑 <b>API-ключи</b>\n\n"
                 "Хранятся зашифрованными (Fernet). Можно перезаписать в любой момент.\n\n"
@@ -1451,6 +1544,10 @@ async def _render_section(
                 f"Groq: {_check(bool(groq_key))}\n"
                 f"Свой: {_check(bool(custom_key))}"
             )
+            if custom_providers:
+                text += "\n\n🛠 <b>Кастомные провайдеры:</b>"
+                for cp in sorted(custom_providers):
+                    text += f"\n{cp}: ✅"
             kb.row(
                 InlineKeyboardButton(
                     text="🔑 OpenAI key", callback_data="set:input:openai_key"
@@ -2499,6 +2596,12 @@ async def step_custom_endpoint(message: Message, state: FSMContext) -> None:
 async def step_custom_key(message: Message, state: FSMContext) -> None:
     """Шаг 3/4: API-ключ + валидация."""
     raw = (message.text or "").strip()
+    if raw == "/cancel":
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("🚫 Отменено.", reply_markup=kb)
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2536,6 +2639,12 @@ async def step_custom_key(message: Message, state: FSMContext) -> None:
 async def step_custom_models(message: Message, state: FSMContext) -> None:
     """Шаг 4/4: модели — создаёт слоты в БД."""
     raw_models = (message.text or "").strip()
+    if raw_models == "/cancel":
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("🚫 Отменено.", reply_markup=kb)
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw_models:
         await message.answer("Введи хотя бы одну модель. /cancel — отмена.")
         return
