@@ -1079,26 +1079,29 @@ async def _render_section(
                 ),
             )
             # Свой провайдер — показываем все кастомные
-            custom_slots = await list_key_slots(session, owner)
-            custom_names = sorted(
-                {
-                    s.provider
-                    for s in custom_slots
-                    if s.provider
-                    not in {
-                        "openai",
-                        "gemini",
-                        "mistral",
-                        "deepseek",
-                        "cloudflare",
-                        "grok",
-                        "mimo",
-                        "groq",
-                        "openrouter",
+            try:
+                custom_slots = await list_key_slots(session, owner)
+                custom_names = sorted(
+                    {
+                        s.provider
+                        for s in custom_slots
+                        if s.provider
+                        not in {
+                            "openai",
+                            "gemini",
+                            "mistral",
+                            "deepseek",
+                            "cloudflare",
+                            "grok",
+                            "mimo",
+                            "groq",
+                            "openrouter",
+                        }
+                        and s.enabled
                     }
-                    and s.enabled
-                }
-            )
+                )
+            except Exception:
+                custom_names = []
             if custom_names:
                 for cn in custom_names:
                     kb.row(
