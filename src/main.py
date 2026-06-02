@@ -49,6 +49,7 @@ def _register_background_tasks() -> None:
 
 
 async def main() -> None:
+    print("=== main() STARTING ===", flush=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
@@ -239,6 +240,7 @@ def run() -> None:
     _cfg = alembic.config.Config(str(PROJECT_ROOT / "alembic.ini"))
     alembic.command.upgrade(_cfg, "head")
 
+    print("=== ENTERING asyncio.run(main()) ===", flush=True)
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
