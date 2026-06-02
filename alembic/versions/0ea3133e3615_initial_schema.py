@@ -42,15 +42,37 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema — create all ORM tables from current models."""
+    """Upgrade schema — create all ORM tables from current models.
+
+    SAFETY: If the database already has tables (e.g. persistent volume on
+    Railway with a previously deployed schema), skip create_all() entirely
+    to avoid deadlocking SQLite or triggering model imports that clash.
+    This migration is idempotent — it only materialises tables on a truly
+    fresh (empty) database.
+    """
     # Ensure src/ is on sys.path so we can import models
     _root = Path(__file__).resolve().parent.parent
     if str(_root / "src") not in sys.path:
         sys.path.insert(0, str(_root / "src"))
 
+    _bind = op.get_bind()
+    _existing = _bind.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name != 'alembic_version' LIMIT 1"
+    ).fetchone()
+
+    if _existing is not None:
+        # Tables already exist — database was seeded by a previous deploy.
+        # Skip create_all() to avoid import side-effects and deadlocks.
+        import logging
+
+        logging.getLogger("alembic").info(
+            "Skipping initial_schema.create_all — DB already has table %r", _existing[0]
+        )
+        return
+
     from db.models import Base as _Base
 
-    _Base.metadata.create_all(bind=op.get_bind())
+    _Base.metadata.create_all(bind=_bind)
 
 
 def downgrade() -> None:
