@@ -250,7 +250,7 @@ def run() -> None:
     head_rev = _script.get_current_head()
 
     sys.stderr.write(
-        f"=== alembic upgrade head START (timeout=30s, head={head_rev}) ===\n"
+        f"=== alembic upgrade head START (timeout=120s, head={head_rev}) ===\n"
     )
     sys.stderr.flush()
 
@@ -258,7 +258,7 @@ def run() -> None:
     alembic_ok = False
     try:
         future = executor.submit(alembic.command.upgrade, _cfg, "head")
-        future.result(timeout=30)
+        future.result(timeout=120)
         alembic_ok = True
         sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
         sys.stderr.flush()

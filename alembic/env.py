@@ -102,11 +102,33 @@ async def run_async_migrations() -> None:
 
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = settings.database_url
+
+    # Add SQLite PRAGMAs for reliability (WAL mode + busy_timeout)
+    connect_args = {}
+    if "sqlite" in settings.database_url:
+        connect_args = {
+            "timeout": 30,  # 30 second busy_timeout
+            "check_same_thread": False,  # Required for async usage
+        }
+
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
+
+    # Set PRAGMAs via event listener (WAL mode + synchronous=NORMAL)
+    from sqlalchemy import event
+
+    @event.listens_for(connectable.sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, connection_record):
+        if "sqlite" in settings.database_url:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
