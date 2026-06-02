@@ -243,34 +243,13 @@ def run() -> None:
     import alembic.config
 
     _cfg = alembic.config.Config(str(PROJECT_ROOT / "alembic.ini"))
+    sys.stderr.write("=== alembic upgrade head START ===\n")
+    sys.stderr.flush()
     alembic.command.upgrade(_cfg, "head")
-
     sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
     sys.stderr.flush()
 
-    try:
-        asyncio.run(main())
-    except BaseException as exc:
-        sys.stderr.write(f"=== FATAL: {type(exc).__name__}: {exc} ===\n")
-        traceback.print_exc(file=sys.stderr)
-        sys.stderr.flush()
-        # Also try the logger in case basicConfig already ran
-        try:
-            logger.exception("Unhandled error in main")
-        except Exception:
-            pass
-        try:
-            from src.core.infra.hooks import hooks
-
-            asyncio.run(
-                hooks.emit(
-                    "on_error", error=f"Unhandled error: {exc}", context="main.run"
-                )
-            )
-        except Exception:
-            pass
-        if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            raise
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
