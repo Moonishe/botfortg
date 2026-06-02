@@ -297,7 +297,9 @@ class AgentOrchestrator:
                 (cooldown, timeout, unknown agent)
         """
         if executor is None:
-            from src.core.intelligence.maestro import _execute_agent as executor  # noqa: E402
+            from src.core.intelligence.agent_dispatcher import (
+                _execute_agent as executor,
+            )  # noqa: E402
 
         if not agents_to_call:
             return [], []
@@ -366,7 +368,9 @@ class AgentOrchestrator:
             list[dict] — результаты агентов (порядок не гарантирован).
         """
         if executor is None:
-            from src.core.intelligence.maestro import _execute_agent as executor  # noqa: E402
+            from src.core.intelligence.agent_dispatcher import (
+                _execute_agent as executor,
+            )  # noqa: E402
 
         # Фильтруем только известных агентов
         known_agents = [name for name in agents if name in self._specs]

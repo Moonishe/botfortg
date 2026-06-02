@@ -24,9 +24,11 @@ from src.core.intelligence.maestro import (
     process,
     run_pipeline,
     _agent_result_as_text,
+    _extract_json_object,
+)
+from src.core.intelligence.agent_dispatcher import (
     _execute_agent,
     _execute_agents_parallel,
-    _extract_json_object,
 )
 
 
@@ -463,7 +465,7 @@ class TestExecuteAgentsParallel:
             {"agent": "memory", "query": "test2"},
         ]
         with mock.patch(
-            "src.core.intelligence.maestro._execute_agent",
+            "src.core.intelligence.agent_dispatcher._execute_agent",
             side_effect=fake_execute,
         ) as mock_exec:
             results = await _execute_agents_parallel(

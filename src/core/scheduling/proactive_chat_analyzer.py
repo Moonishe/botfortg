@@ -21,7 +21,7 @@ from src.db.repo import get_or_create_user, list_contacts
 from src.db.session import get_session
 from src.llm.base import TaskType
 from src.llm.router import build_provider
-from src.userbot import get_active_telethon_client
+from src.core.infra.userbot_gateway import get_userbot_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ MIN_NEW_MESSAGES = 20
 
 async def _proactive_scan(telegram_id: int) -> None:
     """Тихий фоновый анализ самых активных чатов."""
-    client = get_active_telethon_client(telegram_id)
+    client = get_userbot_gateway().get_client(telegram_id)
     if client is None:
         return
 

@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
 from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
-from src.llm._ssrf_guard import validate_base_url as _validate_base_url
+from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 

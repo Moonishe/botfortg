@@ -100,7 +100,7 @@ class TestCrypto:
 
 
 class TestSSRFGuard:
-    """src.llm._ssrf_guard — SSRF prevention via validate_base_url()."""
+    """src.core.security.ssrf_guard — SSRF prevention via validate_base_url()."""
 
     pytestmark = pytest.mark.asyncio
 
@@ -108,7 +108,7 @@ class TestSSRFGuard:
 
     async def test_blocks_loopback_ip(self) -> None:
         """127.0.0.1 should be rejected as loopback."""
-        from src.llm._ssrf_guard import validate_base_url
+        from src.core.security.ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="loopback"):
             validate_base_url("http://127.0.0.1:8080/v1")
@@ -117,7 +117,7 @@ class TestSSRFGuard:
 
     async def test_blocks_private_ip(self) -> None:
         """192.168.x.x should be rejected as private network."""
-        from src.llm._ssrf_guard import validate_base_url
+        from src.core.security.ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="private"):
             validate_base_url("http://192.168.1.100/api")
@@ -126,7 +126,7 @@ class TestSSRFGuard:
 
     async def test_blocks_localhost_hostname(self) -> None:
         """'localhost' hostname should be rejected before DNS resolution."""
-        from src.llm._ssrf_guard import validate_base_url
+        from src.core.security.ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="Localhost"):
             validate_base_url("https://localhost:3000")
@@ -135,7 +135,7 @@ class TestSSRFGuard:
 
     async def test_blocks_ipv6_mapped_loopback(self) -> None:
         """::ffff:127.0.0.1 (IPv4-mapped IPv6 loopback) should be rejected."""
-        from src.llm._ssrf_guard import validate_base_url
+        from src.core.security.ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="loopback"):
             validate_base_url("http://[::ffff:127.0.0.1]:8080")
@@ -144,7 +144,7 @@ class TestSSRFGuard:
 
     async def test_allows_public_url(self) -> None:
         """A well-known public API URL should pass validation."""
-        from src.llm._ssrf_guard import validate_base_url
+        from src.core.security.ssrf_guard import validate_base_url
 
         url = "https://api.openai.com/v1"
         result = validate_base_url(url)

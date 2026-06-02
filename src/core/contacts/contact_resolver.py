@@ -11,7 +11,7 @@ from telethon import TelegramClient
 from src.db.models import Contact, User
 from src.db.repo import list_contacts
 from src.db.session import get_session
-from src.userbot.dialogs import sync_dialogs
+from src.core.infra.userbot_gateway import get_userbot_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ async def resolve(
         )
 
     if not contacts:
-        await sync_dialogs(client, user)
+        await get_userbot_gateway().sync_dialogs(client, user)
         async with get_session() as session:
             contacts = await list_contacts(
                 session, user, kinds=kinds, include_bots=include_bots

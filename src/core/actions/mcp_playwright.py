@@ -32,7 +32,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.config import PROJECT_ROOT, settings
-from src.core.security.ssrf_guard import _check_ssrf, _check_ssrf_async
+from src.core.security.ssrf_guard import _check_ssrf_async
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -343,7 +343,7 @@ async def _handle_navigate(
     page = await _browser_manager.ensure_page()
     wait_sec = kwargs.get("wait", 3)
 
-    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load")
+    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load", max_redirects=0)
     await asyncio.sleep(wait_sec)
 
     title = await page.title()
@@ -368,7 +368,7 @@ async def _handle_screenshot(
     page = await _browser_manager.ensure_page()
     full_page = kwargs.get("full_page", False)
 
-    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load")
+    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load", max_redirects=0)
     await asyncio.sleep(3)
 
     # Ensure screenshots directory exists
@@ -403,7 +403,7 @@ async def _handle_click(
 
     page = await _browser_manager.ensure_page()
 
-    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load")
+    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load", max_redirects=0)
     await asyncio.sleep(2)
 
     element = await page.query_selector(selector)
@@ -441,7 +441,7 @@ async def _handle_evaluate(
 
     page = await _browser_manager.ensure_page()
 
-    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load")
+    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load", max_redirects=0)
     await asyncio.sleep(2)
 
     result = await page.evaluate(js_code)
@@ -460,7 +460,7 @@ async def _handle_snapshot(
     """Navigate to *url*, return accessibility tree text."""
     page = await _browser_manager.ensure_page()
 
-    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load")
+    await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load", max_redirects=0)
     await asyncio.sleep(3)
 
     # Use Playwright's built-in accessibility snapshot

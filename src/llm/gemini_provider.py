@@ -4,6 +4,7 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 
+from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 GEMINI_CHAT_LIGHT = "gemini-3-flash"
@@ -35,6 +36,14 @@ class GeminiProvider:
         model: str | None = None,
         embed_model: str | None = None,
     ) -> None:
+        if base_url:
+            raise ValueError(
+                "GeminiProvider does not support custom base_url. "
+                "Use the native Google API endpoint."
+            )
+        _validate_base_url(
+            base_url
+        )  # defense-in-depth: guards against non-None custom URLs
         self._client = genai.Client(api_key=api_key, http_options={"timeout": 60000})
         self._model = model
         self._embed_model = embed_model

@@ -14,7 +14,6 @@ All blocking operations are run in a thread-pool executor with timeout.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import socket
 import subprocess
@@ -22,6 +21,7 @@ import sys
 from typing import Any
 
 from src.core.actions.tool_registry import ToolActionSpec, tool
+from src.core.security.ssrf_guard import _check_ssrf_async
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ async def mcp_network(
             if not host or not host.strip():
                 return {"error": "host parameter is required for action='ping'"}
             host = host.strip()
-            unsafe = _validate_public_host(host)
+            unsafe = await _check_ssrf_async(f"https://{host}")
             if unsafe:
                 return unsafe
             n = max(1, min(count, _PING_COUNT_MAX))
@@ -127,7 +127,7 @@ async def mcp_network(
             if not host or not host.strip():
                 return {"error": "host parameter is required for action='dns'"}
             host = host.strip()
-            unsafe = _validate_public_host(host)
+            unsafe = await _check_ssrf_async(f"https://{host}")
             if unsafe:
                 return unsafe
             return await _dns(host)
@@ -137,7 +137,7 @@ async def mcp_network(
             if not ports:
                 return {"error": "ports parameter is required for action='ports'"}
             host = host.strip()
-            unsafe = _validate_public_host(host)
+            unsafe = await _check_ssrf_async(f"https://{host}")
             if unsafe:
                 return unsafe
             return await _check_ports(host, ports)
@@ -156,52 +156,6 @@ async def mcp_network(
 # ══════════════════════════════════════════════════════════════════════════
 # Action implementations
 # ══════════════════════════════════════════════════════════════════════════
-
-
-def _validate_public_host(host: str) -> dict[str, Any] | None:
-    """Block network probes against local or private infrastructure.
-
-    TODO: Consider migrating to the canonical SSRF guard at
-    ``src.core.security.ssrf_guard`` to avoid duplicating DNS rebinding
-    and private-IP detection logic.
-    """
-    if host.lower().strip("[]") in {"localhost", "localhost.localdomain"}:
-        return {"error": f"Refusing to probe local/private host {host!r}"}
-
-    try:
-        literal = ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        literal = None
-
-    if literal is None:
-        try:
-            raw_addresses = [info[4][0] for info in socket.getaddrinfo(host, None)]
-        except socket.gaierror as exc:
-            return {"error": f"DNS resolution failed for {host!r}: {exc}"}
-    else:
-        raw_addresses = [str(literal)]
-
-    for raw_addr in raw_addresses:
-        try:
-            addr = ipaddress.ip_address(raw_addr)
-        except ValueError:
-            continue
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        ):
-            return {
-                "error": (
-                    f"Refusing to probe local/private host {host!r} "
-                    f"(resolved to {raw_addr!r})"
-                )
-            }
-
-    return None
 
 
 async def _ping(host: str, count: int) -> dict[str, Any]:

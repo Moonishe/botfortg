@@ -52,7 +52,7 @@ from src.db.repo import (
 from src.db.session import get_session
 from src.llm.base import TaskType
 from src.llm.router import build_provider
-from src.userbot.manager import UserbotManager
+from src.core.infra.userbot_gateway import get_userbot_gateway
 
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,6 @@ class ChatActionResult:
 async def _load_chat_context(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: UserbotManager,
     limit: int = 50,
 ) -> dict | None:
     """Загружает полный контекст для чат-действия.
@@ -85,7 +84,7 @@ async def _load_chat_context(
     Returns dict с ключами: client, owner, contact, messages, provider
     или None если не удалось (ошибку уже отправил вызывающий).
     """
-    client = userbot_manager.get_client(telegram_id)
+    client = get_userbot_gateway().get_client(telegram_id)
     if client is None:
         return None  # вызывающий должен сообщить "/login"
 
@@ -130,11 +129,11 @@ async def get_chat_message_count(telegram_id: int, peer_id: int) -> int:
 async def summarize_chat_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: UserbotManager,
+    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
     limit: int = 50,
 ) -> ChatActionResult | None:
     """Саммари последних сообщений с контактом."""
-    ctx = await _load_chat_context(telegram_id, peer_id, userbot_manager, limit=limit)
+    ctx = await _load_chat_context(telegram_id, peer_id, limit=limit)
     if ctx is None:
         return None
 
@@ -156,11 +155,11 @@ async def summarize_chat_action(
 async def extract_tasks_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: UserbotManager,
+    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
     limit: int = 50,
 ) -> ChatActionResult | None:
     """Извлечение задач/обязательств из чата."""
-    ctx = await _load_chat_context(telegram_id, peer_id, userbot_manager, limit=limit)
+    ctx = await _load_chat_context(telegram_id, peer_id, limit=limit)
     if ctx is None:
         return None
 
@@ -195,12 +194,12 @@ async def extract_tasks_action(
 async def draft_reply_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: UserbotManager,
+    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
     instruction: str = "",
     limit: int = 50,
 ) -> ChatActionResult | None:
     """Черновик ответа контакту. Создаёт pending action для подтверждения отправки."""
-    ctx = await _load_chat_context(telegram_id, peer_id, userbot_manager, limit=limit)
+    ctx = await _load_chat_context(telegram_id, peer_id, limit=limit)
     if ctx is None:
         return None
 
@@ -245,11 +244,11 @@ async def draft_reply_action(
 async def catchup_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: UserbotManager,
+    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
     limit: int = 50,
 ) -> ChatActionResult | None:
     """«Где мы остановились» с контактом."""
-    ctx = await _load_chat_context(telegram_id, peer_id, userbot_manager, limit=limit)
+    ctx = await _load_chat_context(telegram_id, peer_id, limit=limit)
     if ctx is None:
         return None
 
@@ -326,7 +325,7 @@ async def _load_memory_context(
 async def ask_chat_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: UserbotManager,
+    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
     user_query: str = "",
     limit: int = 50,
 ) -> ChatActionResult | None:
@@ -335,11 +334,11 @@ async def ask_chat_action(
     Args:
         telegram_id: ID владельца
         peer_id: ID чата/контакта
-        userbot_manager: менеджер userbot'ов
+        userbot_manager: менеджер userbot'ов (устарел, используется gateway)
         user_query: вопрос пользователя
         limit: сколько сообщений загрузить
     """
-    ctx = await _load_chat_context(telegram_id, peer_id, userbot_manager, limit=limit)
+    ctx = await _load_chat_context(telegram_id, peer_id, limit=limit)
     if ctx is None:
         return None
 

@@ -79,9 +79,9 @@ async def scheduled_messages_loop() -> None:
     while True:
         try:
             from src.config import settings
-            from src.userbot import get_active_telethon_client
+            from src.core.infra.userbot_gateway import get_userbot_gateway
 
-            client = get_active_telethon_client(settings.owner_telegram_id)
+            client = get_userbot_gateway().get_client(settings.owner_telegram_id)
             if client is None:
                 logger.debug("Userbot not available, skipping scheduled tick")
             await _check_once(client)

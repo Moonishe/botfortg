@@ -44,10 +44,10 @@ _RE_GENERIC_NAME = _re.compile(GENERIC_NAME_PATTERN)
 
 
 def _get_active_telethon_client(telegram_id: int):
-    """Получить активный Telethon-клиент из синглтона UserbotManager."""
-    from src.userbot import get_active_telethon_client
+    """Получить активный Telethon-клиент через gateway."""
+    from src.core.infra.userbot_gateway import get_userbot_gateway
 
-    return get_active_telethon_client(telegram_id)
+    return get_userbot_gateway().get_client(telegram_id)
 
 
 @dataclass

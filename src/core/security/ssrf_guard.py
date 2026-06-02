@@ -66,6 +66,84 @@ _SSRF_BLOCKED_HOSTS = frozenset(
 )
 
 # ══════════════════════════════════════════════════════════════════════════
+# Shared helper — parse URL, check blocklist + non‑standard IP notation
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _is_nonstandard_ip_notation(hostname: str) -> str | None:
+    """Return error reason if *hostname* is non-standard IP notation, else None.
+
+    Detects hex (``0x7f000001``), octal (``0127``), and decimal-long
+    (``2130706433``) IP encodings that could bypass naive blocklists.
+    Legitimate domain names (``0x.org``) are not blocked — the hex check
+    requires ALL remaining characters to be hex digits.
+    """
+    if not hostname:
+        return None
+    hostname_stripped = hostname.strip("[]")
+    if (
+        (
+            hostname_stripped.startswith(("0x", "0X"))
+            and all(c in "0123456789abcdefABCDEF" for c in hostname_stripped[2:])
+        )
+        or (
+            hostname_stripped.startswith("0")
+            and hostname_stripped.isdigit()
+            and len(hostname_stripped) > 1
+        )
+        or (
+            hostname_stripped.isdigit()
+            and len(hostname_stripped) >= 10
+            and int(hostname_stripped) <= 0xFFFFFFFF
+        )
+    ):
+        return (
+            f"Non-standard IP notation detected: {hostname!r}. "
+            f"Use standard dotted-decimal or hostname."
+        )
+    return None
+
+
+def _parse_and_prefilter_url(url: str) -> tuple[str, dict[str, Any] | None]:
+    """Parse URL, check blocklist and hex/octal/decimal notation.
+
+    Returns
+    -------
+    ``(hostname, error_dict_or_None)``
+        If the URL is parseable and passes all pre‑filter checks,
+        *error_dict_or_None* is ``None`` and the caller should proceed
+        to DNS resolution.
+        Otherwise an error dict is returned with an ``"error"`` key.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        return ("", {"error": f"Cannot parse URL: {exc}"})
+
+    hostname = parsed.hostname or ""
+
+    # Direct match against blocklist
+    if hostname.lower() in _SSRF_BLOCKED_HOSTS:
+        return (
+            hostname,
+            {
+                "error": (
+                    f"SSRF protection: requests to {hostname!r} are not allowed. "
+                    f"Use an external URL instead."
+                )
+            },
+        )
+
+    # Detect hex/octal/decimal IP notation before DNS resolution
+    if hostname:
+        _notation_error = _is_nonstandard_ip_notation(hostname)
+        if _notation_error:
+            return (hostname, {"error": f"SSRF protection: {_notation_error}"})
+
+    return (hostname, None)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # _check_ssrf — full SSRF validation (used by MCP tools)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -82,22 +160,16 @@ def _check_ssrf(url: str) -> dict[str, Any] | None:
     - IPv6 loopback (``::1``), link-local (``fe80::/10``), ULA (``fc00::/7``).
     - AWS metadata endpoint (``169.254.169.254``).
     - IPv4-mapped IPv6 addresses that resolve to private IPv4.
+
+    DNS rebinding limitation: this function resolves the hostname once and
+    validates resolved IPs. By the time the HTTP client opens its own
+    connection, DNS could have been repointed to a different IP. For
+    high-security deployments, use a pre-resolved IP scheme + custom
+    Host header, or a sandbox/proxy with outbound ACLs.
     """
-    try:
-        parsed = urlparse(url)
-    except Exception as exc:
-        return {"error": f"Cannot parse URL: {exc}"}
-
-    hostname = parsed.hostname or ""
-
-    # Direct match against blocklist
-    if hostname.lower() in _SSRF_BLOCKED_HOSTS:
-        return {
-            "error": (
-                f"SSRF protection: requests to {hostname!r} are not allowed. "
-                f"Use an external URL instead."
-            )
-        }
+    hostname, error = _parse_and_prefilter_url(url)
+    if error:
+        return error
 
     # Resolve DNS first — prevents rebinding attacks
     # Uses getaddrinfo for full IPv4 + IPv6 support
@@ -106,7 +178,7 @@ def _check_ssrf(url: str) -> dict[str, Any] | None:
     except socket.gaierror:
         return {"error": f"SSRF protection: cannot resolve hostname {hostname!r}."}
 
-    for family, _, _, _, sockaddr in addrinfo:
+    for _family, _, _, _, sockaddr in addrinfo:
         ip_addr = str(sockaddr[0])
         reason = _is_ip_blocked(ip_addr)
         if reason:
@@ -153,6 +225,10 @@ def _is_ip_blocked(ip_str: str) -> str | None:
         return "link-local"
     if ip.is_unspecified:
         return "unspecified address"
+    if ip.is_reserved:
+        return "reserved address"
+    if ip.is_multicast:
+        return "multicast address"
     # IPv4-mapped IPv6 (::ffff:x.x.x.x)
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         mapped = ip.ipv4_mapped
@@ -173,27 +249,16 @@ async def _check_ssrf_async(url: str) -> dict[str, Any] | None:
     asyncio event loop on ``socket.getaddrinfo``.  The sync ``_check_ssrf``
     remains available for sync code paths (startup, constructors).
     """
-    try:
-        parsed = urlparse(url)
-    except Exception as exc:
-        return {"error": f"Cannot parse URL: {exc}"}
-
-    hostname = parsed.hostname or ""
-
-    if hostname.lower() in _SSRF_BLOCKED_HOSTS:
-        return {
-            "error": (
-                f"SSRF protection: requests to {hostname!r} are not allowed. "
-                f"Use an external URL instead."
-            )
-        }
+    hostname, error = _parse_and_prefilter_url(url)
+    if error:
+        return error
 
     try:
         addrinfo = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
     except socket.gaierror:
         return {"error": f"SSRF protection: cannot resolve hostname {hostname!r}."}
 
-    for family, _, _, _, sockaddr in addrinfo:
+    for _family, _, _, _, sockaddr in addrinfo:
         ip_addr = str(sockaddr[0])
         reason = _is_ip_blocked(ip_addr)
         if reason:
@@ -238,7 +303,12 @@ def validate_base_url(url: str | None) -> str | None:
     if hostname in ("localhost",):
         raise ValueError("Localhost endpoints not allowed")
 
-    # Try to parse as IP address — catches hex, octal, decimal, IPv6-mapped
+    # Defense-in-depth: block hex/octal/decimal IP notation
+    _notation_error = _is_nonstandard_ip_notation(hostname)
+    if _notation_error:
+        raise ValueError(_notation_error)
+
+    # Try to parse as IP address — catches dotted, IPv6-mapped
     try:
         ip = ipaddress.ip_address(hostname)
     except ValueError:
@@ -247,7 +317,7 @@ def validate_base_url(url: str | None) -> str | None:
             addrinfos = socket.getaddrinfo(
                 hostname, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
             )
-            for family, _, _, _, sockaddr in addrinfos:
+            for _family, _, _, _, sockaddr in addrinfos:
                 ip_str = str(sockaddr[0])
                 reason = _is_ip_blocked(ip_str)
                 if reason:

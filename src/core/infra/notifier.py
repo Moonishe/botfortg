@@ -6,7 +6,7 @@ from collections import deque
 from typing import TYPE_CHECKING
 
 from src.config import settings
-from src.bot.tg_sender import send_with_retry
+from src.core.infra._retry import send_with_retry
 
 
 if TYPE_CHECKING:

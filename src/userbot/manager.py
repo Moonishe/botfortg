@@ -204,3 +204,26 @@ class UserbotManager:
         self._pending.clear()
 
         logger.info("UserbotManager shutdown complete")
+
+
+# ── Gateway registration (Protocol from core layer) ──────────────────────
+
+
+class _UserbotGatewayImpl:
+    """Implements UserbotGateway protocol — bridges core ↔ userbot layer."""
+
+    def get_client(self, telegram_id: int):
+        """Return active Telethon client for user, or None."""
+        mgr = _MANAGER_SINGLETON
+        return mgr.get_client(telegram_id) if mgr else None
+
+    async def sync_dialogs(self, client, user, *, limit=500):
+        """Sync Telegram dialogs to local DB."""
+        from src.userbot.dialogs import sync_dialogs
+
+        return await sync_dialogs(client, user, limit=limit)
+
+
+from src.core.infra.userbot_gateway import set_userbot_gateway
+
+set_userbot_gateway(_UserbotGatewayImpl())

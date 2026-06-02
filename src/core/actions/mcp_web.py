@@ -20,7 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from src.core.actions.tool_registry import tool
-from src.core.security.ssrf_guard import _check_ssrf, _check_ssrf_async
+from src.core.security.ssrf_guard import _check_ssrf_async
 
 logger = logging.getLogger(__name__)
 

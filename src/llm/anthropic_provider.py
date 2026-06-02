@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 
-from src.llm._ssrf_guard import validate_base_url as _validate_base_url
+from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 logger = logging.getLogger(__name__)
