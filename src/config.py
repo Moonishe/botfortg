@@ -1,7 +1,7 @@
 from pathlib import Path
 from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,16 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # Empty string in .env → None for optional fields.
+    # Prevents ValidationError when .env has ``API_ID=`` (empty)
+    # instead of the line being absent entirely.
+    @field_validator("api_id", "api_hash", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v: object) -> object:
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
     bot_token: str = Field(..., description="Токен control-бота из @BotFather")
     owner_telegram_id: int = Field(
