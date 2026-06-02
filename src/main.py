@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from src.bot.app import run_bot
 from src.bot.handlers.free_text import start_voice_worker, stop_voice_worker
@@ -238,16 +240,52 @@ def run() -> None:
     sys.stderr.write("=== run() START ===\n")
     sys.stderr.flush()
 
-    # --- Schema migrations (Alembic — CANONICAL) ---
+    # --- Schema migrations (Alembic — with 30s timeout on Railway) ---
     import alembic.command
     import alembic.config
+    from alembic.script import ScriptDirectory
 
     _cfg = alembic.config.Config(str(PROJECT_ROOT / "alembic.ini"))
-    sys.stderr.write("=== alembic upgrade head START ===\n")
+    _script = ScriptDirectory.from_config(_cfg)
+    head_rev = _script.get_current_head()
+
+    sys.stderr.write(
+        f"=== alembic upgrade head START (timeout=30s, head={head_rev}) ===\n"
+    )
     sys.stderr.flush()
-    alembic.command.upgrade(_cfg, "head")
-    sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
-    sys.stderr.flush()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(alembic.command.upgrade, _cfg, "head")
+            future.result(timeout=30)
+        sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
+        sys.stderr.flush()
+    except FutureTimeoutError:
+        sys.stderr.write(
+            "=== alembic TIMEOUT — stamping head and using init_db() fallback ===\n"
+        )
+        sys.stderr.flush()
+        # Alembic hung — stamp the head revision and let init_db() create tables
+        import sqlite3
+        import asyncio as _asyncio
+
+        _db_url = str(PROJECT_ROOT / "data" / "database.db")
+        _conn = sqlite3.connect(_db_url)
+        _conn.execute(
+            "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"
+        )
+        _conn.execute(
+            "INSERT OR REPLACE INTO alembic_version (version_num) VALUES (?)",
+            (head_rev,),
+        )
+        _conn.commit()
+        _conn.close()
+        sys.stderr.write(f"=== alembic stamped head={head_rev} manually ===\n")
+        sys.stderr.flush()
+    except Exception:
+        sys.stderr.write("=== alembic CRASHED ===\n")
+        sys.stderr.flush()
+        raise
 
     asyncio.run(main())
 
