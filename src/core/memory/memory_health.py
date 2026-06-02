@@ -213,6 +213,18 @@ async def calculate_health_score(owner_id: int) -> dict:
             "diagnostics": diagnostics,
         }
         await set_cache(cache_key, result)
+
+        # ---- Phase 2: record health metric ----
+        try:
+            from src.core.memory.memory_metrics import memory_metrics
+
+            await memory_metrics.record_health(
+                score=result["score"],
+                components=result,
+            )
+        except Exception:
+            pass
+
         return result
 
 

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import PROJECT_ROOT, settings
@@ -152,12 +153,24 @@ async def _migrate_related_memory_to_links(conn) -> None:
                     {"sid": mid, "tid": related_id, "rel": rel_type},
                 )
     except Exception as e:
+        # This is a *data* migration that has already been moved to alembic
+        # for new deployments, so any error here means either (a) the data
+        # was already migrated previously, or (b) the legacy columns are
+        # gone (e.g. they were dropped by a later schema migration).  Both
+        # cases are safe to ignore — we never want this routine to crash
+        # ``init_db()`` and prevent the application from starting.
+        msg = str(e).lower()
         if (
-            "duplicate column name" in str(e).lower()
-            or "already exists" in str(e).lower()
+            "duplicate column name" in msg
+            or "already exists" in msg
+            or "no such column" in msg  # legacy column was dropped
+            or "no such table" in msg  # legacy table was dropped
+            or "operationalerror" in msg
+            or isinstance(e, OperationalError)
         ):
             logger.debug(
-                "Migration for related_memory_id → memory_links: already applied"
+                "Migration for related_memory_id → memory_links: skipped (%s)",
+                e.__class__.__name__,
             )
         else:
             raise

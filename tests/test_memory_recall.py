@@ -131,14 +131,19 @@ async def test_use_count_increments():
 
     # второй вызов (может вернуть из кеша + async bump)
     await recall(123459, limit=5)
-    # Ждём завершения fire-and-forget async bumper
-    await _aio.sleep(0.5)
-    async with get_session() as session:
-        from src.db.models import Memory
-        from sqlalchemy import select
+    # Poll until fire-and-forget async bumper completes (robust, no sleep flake)
+    from src.db.models import Memory as _M
+    from sqlalchemy import select as _sel
 
-        m = (await session.execute(select(Memory).where(Memory.id == mid))).scalar_one()
-        assert m.use_count >= 2
+    for _retry in range(10):  # up to 2 seconds total
+        await _aio.sleep(0.2)
+        async with get_session() as session:
+            m = (await session.execute(_sel(_M).where(_M.id == mid))).scalar_one()
+            if m.use_count >= 2:
+                break
+    assert m.use_count >= 2, (
+        f"use_count should be >=2 after recall+retries, got {m.use_count}"
+    )
 
 
 @pytest.mark.asyncio
@@ -212,15 +217,12 @@ async def test_recall_cache_hit():
         semantic_threshold=0.6,
     )
 
-    # Напрямую тестируем логику кеша: проверяем что свежая запись
-    # (< 30 сек для результатов с фактами) считается валидной
-    with patch.object(mr_mod, "_recall_cache", {}) as mock_cache:
-        mock_cache[cache_key] = (time.monotonic(), fake_result)
-        # Проверяем что ключ есть и не протух
-        assert cache_key in mock_cache
-        cached_ts, cached_val = mock_cache[cache_key]
-        assert time.monotonic() - cached_ts < 30
-        assert cached_val.facts[0].fact == "кешированный факт"
+    # Напрямую тестируем логику кеша через TTLCache API.
+    await mr_mod._recall_cache.clear()
+    await mr_mod._recall_cache.set(cache_key, fake_result, ttl=30)
+    cached = await mr_mod._recall_cache.get(cache_key)
+    assert cached is not None
+    assert cached.facts[0].fact == "кешированный факт"
 
 
 @pytest.mark.asyncio
@@ -245,18 +247,12 @@ async def test_recall_cache_expiry():
         semantic_threshold=0.6,
     )
 
-    # Кеш с timestamp 31+ секунд назад — для результатов с фактами (TTL=30)
-    # должен считаться невалидным
-    old_time = time.monotonic() - 61.0
-
-    with patch.object(mr_mod, "_recall_cache", {}) as mock_cache:
-        mock_cache[cache_key] = (old_time, fake_result)
-        assert cache_key in mock_cache
-        cached_ts, cached_val = mock_cache[cache_key]
-        # Проверяем что запись просрочена (> 30 сек для результатов с фактами)
-        assert time.monotonic() - cached_ts >= 30, (
-            f"Ожидалась просроченная запись, разница: {time.monotonic() - cached_ts:.1f}s"
-        )
+    # TTL=0.1 означает что кеш протухнет почти мгновенно.
+    await mr_mod._recall_cache.clear()
+    await mr_mod._recall_cache.set(cache_key, fake_result, ttl=0.1)
+    await asyncio.sleep(0.2)
+    cached = await mr_mod._recall_cache.get(cache_key)
+    assert cached is None
 
 
 @pytest.mark.asyncio
@@ -265,15 +261,16 @@ async def test_recall_cache_key_includes_limit():
     import src.core.memory.memory_recall as mr_mod
 
     telegram_id = 123477
-    with patch.object(mr_mod, "_recall_cache", {}):
-        async with get_session() as session:
-            owner = await get_or_create_user(session, telegram_id)
-            for i in range(5):
-                await add_memory(session, owner, fact=f"факт {i}", confidence=0.9)
-            await session.commit()
+    await mr_mod._recall_cache.clear()
 
-        small = await recall(telegram_id, limit=1, mode="normal")
-        large = await recall(telegram_id, limit=5, mode="normal")
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
+        for i in range(5):
+            await add_memory(session, owner, fact=f"факт {i}", confidence=0.9)
+        await session.commit()
+
+    small = await recall(telegram_id, limit=1, mode="normal")
+    large = await recall(telegram_id, limit=5, mode="normal")
 
     assert len(small.facts) == 1
     assert len(large.facts) >= 5

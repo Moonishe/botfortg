@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from src.config import PROJECT_ROOT, settings
+from src.core.infra.task_manager import track_ff
 from src.core.security.prompt_injection_scanner import safe_read_context_file
 
 if TYPE_CHECKING:
@@ -44,6 +45,9 @@ _FTS5_KEYWORDS = frozenset({"or", "and", "not", "near"})
 _QDRANT_COLLECTION = "contexts"
 _qdrant_client: QdrantClient | None = None
 _qdrant_dim: int | None = None
+# Guard concurrent first-callers: _get_qdrant() is called from asyncio.to_thread,
+# so a threading.Lock (not asyncio.Lock) is required for mutual exclusion.
+_qdrant_init_lock: threading.Lock = threading.Lock()
 
 
 def _fts5_simple_query(query: str) -> str:
@@ -256,11 +260,11 @@ def list_context_files() -> list[str]:
     )
 
 
-def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
-    """Search across all context files using FTS5 with ranked results.
+def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
+    """Sync FTS5/substring search — body of the original ``search_in_contexts``.
 
-    Falls back to substring search if the FTS5 table doesn't exist.
-    Returns [{"key": "оля", "snippet": "...<b>контекст</b>...", "rank": 0.5}, ...]
+    Runs SQLite I/O in a worker thread via ``asyncio.to_thread`` from the
+    async wrapper below. Kept private; callers should use the async version.
     """
     if not CONTEXTS_DIR.exists():
         return []
@@ -269,6 +273,7 @@ def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
 
     # ── Try FTS5 first ──────────────────────────────────────────────
     if db_path.exists():
+        conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(str(db_path))
             fts_q = _fts5_simple_query(query)
@@ -280,7 +285,6 @@ def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
                     "ORDER BY rank LIMIT ?",
                     (fts_q, limit),
                 ).fetchall()
-                conn.close()
                 if rows:
                     return [
                         {
@@ -293,10 +297,11 @@ def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
         except sqlite3.OperationalError:
             pass  # FTS5 table doesn't exist → fall back to substring
         finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     # ── Fallback: substring search (with injection scanning) ───────
     results: list[dict] = []
@@ -316,6 +321,15 @@ def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
             if len(results) >= limit:
                 break
     return results
+
+
+async def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
+    """Async wrapper around ``_sync_search_in_contexts`` — runs SQLite I/O in a worker thread.
+
+    Falls back to substring search if the FTS5 table doesn't exist.
+    Returns [{"key": "оля", "snippet": "...<b>контекст</b>...", "rank": 0.5}, ...]
+    """
+    return await asyncio.to_thread(_sync_search_in_contexts, query, limit=limit)
 
 
 def init_owner_context() -> None:
@@ -517,14 +531,22 @@ def _setup_auto_save_hook() -> None:
 
 
 def _get_qdrant() -> "QdrantClient":
-    """Lazy-init Qdrant client for context vector search."""
-    global _qdrant_client
-    if _qdrant_client is None:
-        from qdrant_client import QdrantClient
+    """Lazy-init Qdrant client for context vector search.
 
-        path = settings.data_dir / "qdrant"
-        path.mkdir(parents=True, exist_ok=True)
-        _qdrant_client = QdrantClient(path=str(path))
+    Thread-safe via ``_qdrant_init_lock`` — concurrent first-callers from
+    ``asyncio.to_thread`` would otherwise race on the cache miss and could
+    create duplicate clients (leaking file handles and SQLite locks).
+    """
+    global _qdrant_client
+    if _qdrant_client is not None:
+        return _qdrant_client
+    with _qdrant_init_lock:
+        if _qdrant_client is None:
+            from qdrant_client import QdrantClient
+
+            path = settings.data_dir / "qdrant"
+            path.mkdir(parents=True, exist_ok=True)
+            _qdrant_client = QdrantClient(path=str(path))
     return _qdrant_client
 
 
@@ -615,7 +637,7 @@ async def search_contexts_hybrid(
     query: str, provider=None, limit: int = 5
 ) -> list[dict]:
     """Hybrid search: FTS5 + semantic via RRF. Falls back to FTS5-only if no provider."""
-    fts_results = search_in_contexts(query, limit=limit * 2)
+    fts_results = await search_in_contexts(query, limit=limit * 2)
     sem_results: list[dict] = []
     if provider:
         sem_results = await search_contexts_semantic(query, provider, limit=limit * 2)
@@ -667,7 +689,7 @@ def _schedule_semantic_index(key: str, content: str) -> None:
     """
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_index_with_provider(key, content))
+        track_ff(loop.create_task(_index_with_provider(key, content)))
     except RuntimeError:
         pass  # no running event loop — skip
 

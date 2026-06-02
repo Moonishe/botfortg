@@ -13,10 +13,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import time
 
+from src.core.memory.memory_mode import MemoryMode
+
 from src.config import settings
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import TaskType
+from src.core.infra.task_manager import track_ff
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
 from src.llm.router import build_provider
 from src.core.memory.hybrid_search import reciprocal_rank_fusion
@@ -24,13 +27,15 @@ from src.core.memory.temporal_layers import compute_retention
 
 logger = logging.getLogger(__name__)
 
-_recall_cache: dict[str, tuple[float, RecallResult]] = {}
-_recall_lock: asyncio.Lock = asyncio.Lock()
-_RECALL_CACHE_MAX = settings.recall_cache_max_size
-_RECALL_CACHE_RESULT_TTL = (
-    settings.recall_cache_result_ttl
-)  # TTL for results WITH facts
-_RECALL_CACHE_EMPTY_TTL = settings.recall_cache_empty_ttl  # TTL for empty results
+from src.core.memory.ttl_cache import TTLCache
+
+_RECALL_CACHE_RESULT_TTL = settings.recall_cache_result_ttl
+_RECALL_CACHE_EMPTY_TTL = settings.recall_cache_empty_ttl
+_recall_cache: "TTLCache[str, RecallResult]" = TTLCache(
+    max_size=settings.recall_cache_max_size,
+    default_ttl=_RECALL_CACHE_RESULT_TTL,
+    name="recall",
+)
 
 
 def _utc_now() -> datetime:
@@ -201,7 +206,7 @@ async def recall(
     include_tasks: bool = True,
     include_deep: bool = True,
     semantic_threshold: float = settings.recall_semantic_threshold,
-    mode: str = "deep",
+    mode: MemoryMode | str = MemoryMode.DEEP,
 ) -> RecallResult:
     """
     Единый recall-сервис памяти.
@@ -216,17 +221,18 @@ async def recall(
     7. contact-факты (связанные с конкретным контактом)
     8. deep — tier 2-3 префетч + BFS по MemoryLink графу (опционально)
 
+    mode: MemoryMode enum (Phase 2) или строка ("light"/"normal"/"deep").
+           None / неизвестное значение → MemoryMode.DEEP.
+
     Возвращает список RecalledFact с причинами.
     """
-    mode = (mode or "deep").lower()
-    if mode not in {"light", "normal", "deep"}:
-        mode = "deep"
-    include_deep = include_deep and mode == "deep"
+    mode = MemoryMode.from_string(mode) if isinstance(mode, str) else mode
+    include_deep = include_deep and mode.includes_deep
     _cache_key = _make_recall_cache_key(
         telegram_id=telegram_id,
         query=query,
         contact_id=contact_id,
-        mode=mode,
+        mode=mode.value,
         limit=limit,
         include_self=include_self,
         include_pinned=include_pinned,
@@ -234,27 +240,20 @@ async def recall(
         include_deep=include_deep,
         semantic_threshold=semantic_threshold,
     )
-    _cache_now = time.monotonic()
-    async with _recall_lock:
-        if _cache_key in _recall_cache:
-            ts, cached = _recall_cache[_cache_key]
-            # Check TTL based on whether result has facts
-            ttl = _RECALL_CACHE_RESULT_TTL if cached.facts else _RECALL_CACHE_EMPTY_TTL
-            if _cache_now - ts < ttl:
-                # Async increment use_count — don't block the return
-                if cached.facts:
-                    cached_ids = [f.memory_id for f in cached.facts if f.memory_id]
-                    if cached_ids:
-                        asyncio.create_task(_bump_use_counts(cached_ids))
-                return cached
-            else:
-                del _recall_cache[_cache_key]
+    cached = await _recall_cache.get(_cache_key)
+    if cached is not None:
+        # Async increment use_count — don't block the return
+        if cached.facts:
+            cached_ids = [f.memory_id for f in cached.facts if f.memory_id]
+            if cached_ids:
+                track_ff(asyncio.create_task(_bump_use_counts(cached_ids)))
+        return cached
 
     result = RecallResult()
-    include_semantic = bool(query) and mode in {"normal", "deep"}
-    _include_frequent = mode in {"normal", "deep"}
-    include_self_facts = include_self and mode in {"normal", "deep"}
-    include_contact_facts = mode in {"normal", "deep"}
+    include_semantic = bool(query) and mode.includes_semantic
+    _include_frequent = mode.includes_frequent
+    include_self_facts = include_self and mode.includes_self_facts
+    include_contact_facts = mode.includes_contact_facts
     now = _utc_now()
     seen_ids: set[int] = set()
     ranked: list[RecalledFact] = []
@@ -676,21 +675,15 @@ async def recall(
 
         # Cache ALL results (before use_count increment so cache is clean).
         # On cache hit, _bump_use_counts fires a background increment.
-        async with _recall_lock:
-            if len(_recall_cache) >= _RECALL_CACHE_MAX:
-                # Evict 10% of oldest entries (not just 1)
-                evict_count = max(1, int(_RECALL_CACHE_MAX * 0.1))
-                sorted_items = sorted(_recall_cache.items(), key=lambda x: x[1][0])
-                for i in range(evict_count):
-                    if i < len(sorted_items):
-                        del _recall_cache[sorted_items[i][0]]
-            _recall_cache[_cache_key] = (_cache_now, result)
+        # Different TTL: results with facts live longer than empty results.
+        ttl = _RECALL_CACHE_RESULT_TTL if result.facts else _RECALL_CACHE_EMPTY_TTL
+        await _recall_cache.set(_cache_key, result, ttl=ttl)
 
         # Инкрементируем use_count для возвращённых фактов — в отдельной сессии,
         # чтобы не мутировать внешнюю сессию вызывающего кода.
         recalled_ids = [f.memory_id for f in result.facts if f.memory_id]
         if recalled_ids:
-            asyncio.create_task(_bump_use_counts(recalled_ids))
+            track_ff(asyncio.create_task(_bump_use_counts(recalled_ids)))
     finally:
         if _close_session and _session_cm is not None:
             await _session_cm.__aexit__(*sys.exc_info())

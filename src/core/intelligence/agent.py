@@ -554,4 +554,39 @@ async def route_intent(
         raise
     result = _safe_parse(raw)
     result["used_skills"] = _used_skills_meta
+
+    # B7 fix: если LLM вернула admit_ignorance с низкой уверенностью —
+    # пробуем web_search для фактчекинга. Делаем best-effort: не ломаем
+    # основной flow при ошибке сети/поиска. Результат подмешиваем в reply.
+    # B7+B1 guard: уважаем user override "не гугли" через should_skip_web_search.
+    try:
+        if (
+            isinstance(result, dict)
+            and result.get("intent") == "admit_ignorance"
+            and float(result.get("confidence", 1.0) or 1.0) < 0.7
+        ):
+            from src.core.infra.text_filters import should_skip_web_search
+
+            if should_skip_web_search(user_text):
+                pass  # user forbade web search, respect override
+            else:
+                from src.core.actions.mcp_web_search import web_search
+
+                search = await web_search(query=user_text[:300], limit=2)
+                if search.get("ok") and search.get("results"):
+                    # Snippets are pre-sanitized by web_sanitizer in mcp_web_search.
+                    snippets = "; ".join(
+                        f"{r.get('title', '')}: {r.get('snippet', '')[:150]}"
+                        for r in search["results"]
+                        if r.get("title") or r.get("snippet")
+                    )
+                    if snippets:
+                        base_reply = result.get("reply", "")
+                        result["reply"] = (
+                            f"{base_reply}\n\n🔎 Нашёл в интернете: {snippets}"
+                        )
+    except Exception:
+        # best-effort: search-фоллбэк не должен ломать основной ответ
+        pass
+
     return result

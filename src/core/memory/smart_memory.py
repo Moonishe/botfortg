@@ -8,6 +8,7 @@ After sync completes, this module:
 5. Shows progress per contact
 """
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -19,9 +20,16 @@ from src.core.memory.memory_queue import MemoryJob, enqueue
 from src.db.repo import fetch_chat_messages, get_or_create_user, list_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider, TaskType
-from src.bot.pending_questions import add_question
+from src.core.memory.pending_questions import add_question
 
 logger = logging.getLogger(__name__)
+
+# Cap concurrent LLM calls to avoid hammering the provider when many
+# contacts are processed in parallel. Each contact triggers up to 2 calls
+# (owner facts + contact facts); the gather below issues them concurrently
+# per contact, so the semaphore bounds the absolute fan-out.
+_MAX_CONCURRENT_LLM = 4
+_llm_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_LLM)
 
 # Regex для поиска дат в тексте факта
 _DATE_PATTERNS = [
@@ -233,13 +241,33 @@ async def smart_extract_after_sync(
 
         transcript = messages_to_transcript(messages)
 
-        # --- 1. Извлекаем факты о ВЛАДЕЛЬЦЕ (contact=None) ---
-        owner_facts, skipped = await _extract_llm_filtered(
-            provider,
-            owner_id,
-            contact=None,
-            transcript=transcript,
+        # --- 1 + 2. Извлекаем факты о ВЛАДЕЛЬЦЕ и КОНТАКТЕ параллельно ---
+        # Fan-out reduction: both LLM calls share the same transcript and
+        # are independent, so we run them concurrently. The semaphore in
+        # _extract_llm_filtered caps absolute concurrency; return_exceptions
+        # ensures a failure on one branch does not cancel the other.
+        (owner_result, contact_result) = await asyncio.gather(
+            _extract_llm_filtered(
+                provider,
+                owner_id,
+                contact=None,
+                transcript=transcript,
+            ),
+            _extract_llm_filtered(
+                provider,
+                owner_id,
+                contact=contact,
+                transcript=transcript,
+            ),
+            return_exceptions=True,
         )
+
+        if isinstance(owner_result, BaseException):
+            logger.warning("Owner-facts extraction failed: %s", owner_result)
+            owner_facts: list[dict] = []
+            skipped = 0
+        else:
+            owner_facts, skipped = owner_result  # type: ignore[assignment]
         total_skipped += skipped
         if owner_facts:
             await _save_facts_to_queue(owner_id, contact_id=None, facts=owner_facts)
@@ -248,13 +276,12 @@ async def smart_extract_after_sync(
                 if len(_recent_facts) < 10:
                     _recent_facts.append(fact["fact"])
 
-        # --- 2. Извлекаем факты о КОНТАКТЕ ---
-        contact_facts, skipped = await _extract_llm_filtered(
-            provider,
-            owner_id,
-            contact=contact,
-            transcript=transcript,
-        )
+        if isinstance(contact_result, BaseException):
+            logger.warning("Contact-facts extraction failed: %s", contact_result)
+            contact_facts: list[dict] = []
+            skipped = 0
+        else:
+            contact_facts, skipped = contact_result  # type: ignore[assignment]
         total_skipped += skipped
         if contact_facts:
             contact_peer_id = contact.peer_id if contact else None
@@ -320,13 +347,14 @@ async def _extract_llm_filtered(
         )
 
     try:
-        raw = await provider.chat(
-            [
-                ChatMessage(role="system", content=MEMORIES_SYSTEM),
-                ChatMessage(role="user", content=user_prompt),
-            ],
-            task_type=TaskType.MEMORY,
-        )
+        async with _llm_semaphore:
+            raw = await provider.chat(
+                [
+                    ChatMessage(role="system", content=MEMORIES_SYSTEM),
+                    ChatMessage(role="user", content=user_prompt),
+                ],
+                task_type=TaskType.MEMORY,
+            )
     except (ConnectionError, OSError, ValueError):
         logger.exception("Smart memory LLM call failed")
         return [], 0

@@ -62,6 +62,10 @@ def _sanitize_for_prompt(text: str) -> str:
 
     Removes anything that looks like an XML/HTML tag (e.g. <system>, </skill_index>).
     Also strips common injection patterns like "ignore all instructions".
+
+    NOTE: ``sanitize_for_prompt`` (public alias, defined just below) is the
+    canonical name for cross-module imports.  ``_sanitize_for_prompt`` is kept
+    as a back-compat private alias.
     """
     import re
 
@@ -74,6 +78,14 @@ def _sanitize_for_prompt(text: str) -> str:
         text,
     )
     return text
+
+
+# Public alias for cross-module use.  Other modules should import
+# ``sanitize_for_prompt`` from here instead of reaching into the
+# underscore-prefixed private name.  Keeping both names means internal
+# callers (and any existing user code) keep working unchanged.
+sanitize_for_prompt = _sanitize_for_prompt
+__all__ = ["sanitize_for_prompt", "_sanitize_for_prompt"]
 
 
 # ── Public API ─────────────────────────────────────────────────────────

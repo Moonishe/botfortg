@@ -202,6 +202,21 @@ async def main() -> None:
         except Exception:
             logger.exception("vector_store shutdown failed")
 
+        # Close the shared Playwright browser (singleton in mcp_playwright).
+        # Without this explicit close, the Chromium process leaks across
+        # reloads in dev and only gets killed when the interpreter exits.
+        try:
+            from src.core.actions.mcp_playwright import _browser_manager
+
+            await asyncio.wait_for(_browser_manager.close(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("playwright browser shutdown timed out")
+        except Exception:
+            logger.debug(
+                "playwright browser shutdown failed (likely never started)",
+                exc_info=True,
+            )
+
         try:
             from src.core.infra.hooks import hooks
 

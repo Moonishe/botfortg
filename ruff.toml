@@ -7,3 +7,25 @@ extend-exclude = [
 
 [lint]
 ignore = ["E402"]
+
+# Incremental rule adoption (from audit N12):
+# Phase 1: low-noise, high-value rules
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "B",   # flake8-bugbear — real bugs
+    "C4",  # flake8-comprehensions — readability
+    "UP",  # pyupgrade — modernize syntax
+    "SIM", # flake8-simplify — readability
+    "RUF", # ruff-specific — anti-patterns
+]
+
+# Deferred rules (add after fixing current violations):
+# "S",   # flake8-bandit — security (31 S110 try-except-pass, 26 S311 non-crypto random, etc.)
+# "PT",  # flake8-pytest-style — test files only
+# "TCH", # flake8-type-checking — needs type annotations first
+# "PIE", # flake8-pie — misc lints
+
+[lint.per-file-ignores]
+"src/agents/*.py" = ["E501"]  # long Russian docstrings
+"tests/*.py" = ["S101"]       # assert in tests is fine

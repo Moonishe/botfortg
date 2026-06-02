@@ -60,7 +60,7 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
         try:
             from src.core.memory.context_files import search_in_contexts
 
-            ctx_results = await asyncio.to_thread(search_in_contexts, q, limit=3)
+            ctx_results = await search_in_contexts(q, limit=3)
             for c in ctx_results[:3]:
                 snippet = (c.get("snippet", "") or c.get("content", "") or str(c))[:200]
                 key = c.get("key", "")

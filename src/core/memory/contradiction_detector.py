@@ -361,8 +361,12 @@ async def check_contradiction_response(
         old_memory_id = pending.get("memory_id")
         if old_memory_id:
             try:
+                from datetime import datetime, timedelta, timezone
+
+                from sqlalchemy import select
+
                 from src.db.models import Memory
-                from src.db.repo import get_or_create_user
+                from src.db.repo import get_or_create_user, link_memories
                 from src.db.session import get_session
 
                 async with get_session() as link_session:
@@ -371,9 +375,76 @@ async def check_contradiction_response(
                     if old_mem is not None and old_mem.user_id == link_owner.id:
                         old_mem.sentiment = "contradictory"
                         old_mem.is_active = False
+
+                        # ── Phase 1A: link supersedes evolution chain ────
+                        # Ищем факт, который только что был извлечён из raw text
+                        # пользователя (через enqueue в free_text._process_text)
+                        # в последние 5 минут. Если нашли — связываем с
+                        # old_mem через MemoryLink(relation_type="supersedes"),
+                        # чтобы follow_supersedes_chain показывал эволюцию.
+                        try:
+                            threshold = datetime.now(timezone.utc) - timedelta(
+                                minutes=5
+                            )
+                            contact_filter = (
+                                Memory.contact_id.is_(None)
+                                if old_mem.contact_id is None
+                                else Memory.contact_id == old_mem.contact_id
+                            )
+                            new_mem_result = await link_session.execute(
+                                select(Memory)
+                                .where(
+                                    Memory.user_id == link_owner.id,
+                                    Memory.id != old_mem.id,
+                                    Memory.is_active.is_(True),
+                                    contact_filter,
+                                    Memory.created_at >= threshold,
+                                )
+                                .order_by(Memory.created_at.desc())
+                                .limit(1)
+                            )
+                            new_mem = new_mem_result.scalar_one_or_none()
+                            if new_mem is not None:
+                                link_result = await link_memories(
+                                    link_session,
+                                    link_owner,
+                                    source_id=new_mem.id,
+                                    target_id=old_mem.id,
+                                    weight=0.95,
+                                    relation_type="supersedes",
+                                )
+                                if link_result is not None:
+                                    logger.debug(
+                                        "Created supersedes link new=%d old=%d for user %d",
+                                        new_mem.id,
+                                        old_mem.id,
+                                        link_owner.id,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Failed to create supersedes link "
+                                        "new=%d old=%d for user %d "
+                                        "(link_memories returned None)",
+                                        new_mem.id,
+                                        old_mem.id,
+                                        link_owner.id,
+                                    )
+                        except Exception:
+                            logger.debug(
+                                "Failed to create supersedes link", exc_info=True
+                            )
+
                         await link_session.commit()
             except Exception:
                 logger.debug("Failed to mark contradicted fact", exc_info=True)
+
+        # ---- Phase 2: record contradiction metric ----
+        try:
+            from src.core.memory.memory_metrics import memory_metrics
+
+            await memory_metrics.record_contradiction()
+        except Exception:
+            pass
 
         return (
             f"🧠 Понял! Запомню, что «{pending['contradicted_fact']}» "

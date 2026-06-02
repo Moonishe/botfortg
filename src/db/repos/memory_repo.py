@@ -29,6 +29,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── Whitelist допустимых relation_type для MemoryLink ────────────────
+# Используется в link_memories() для отсева LLM-галлюцинаций вроде
+# «supersede» (без 's') или «replaces». Полный список должен совпадать с
+# RELATION_EMOJI.keys() в src/core/memory/memory_chain.py и с LLM-промптом
+# MEMORIES_SYSTEM в src/core/memory/memory_extractor.py.
+_VALID_RELATION_TYPES: frozenset[str] = frozenset(
+    {
+        "cause",
+        "effect",
+        "contradicts",
+        "supports",
+        "continues",
+        "example_of",
+        "supersedes",
+        "co_temporal",
+        "co_entity",
+        "preceded",
+    }
+)
+
+
 @dataclass
 class FtsHit:
     user_id: int
@@ -1058,6 +1079,19 @@ async def link_memories(
     relation_type: str | None = None,
 ) -> MemoryLink | None:
     """Создать/обновить связь между фактами памяти (many-to-many)."""
+
+    # Валидация relation_type: LLM может галлюцинировать значения вроде
+    # «supersede» (без 's') или «replaces». Такие значения молча попадут в БД
+    # и не будут найдены ни одним relation-фильтром. Приводим к None вместо
+    # райза — вызывающий код не должен падать из-за LLM-ошибки.
+    if relation_type is not None and relation_type not in _VALID_RELATION_TYPES:
+        logger.warning(
+            "Invalid relation_type=%r for link %d->%d, dropping relation",
+            relation_type,
+            source_id,
+            target_id,
+        )
+        relation_type = None
 
     # Проверить что оба факта принадлежат пользователю
     result = await session.execute(

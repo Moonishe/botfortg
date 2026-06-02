@@ -164,7 +164,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
 
             # Don't run heavy processing until onboarding is complete, but still mirror messages.
             try:
-                from src.bot.filters import get_onboarding_phase
+                from src.core.onboarding import get_onboarding_phase
 
                 phase = await get_onboarding_phase(owner_telegram_id)
                 if phase < 4:

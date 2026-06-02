@@ -46,19 +46,9 @@ _pending_lock: asyncio.Lock = asyncio.Lock()
 
 # ── Sanitization ────────────────────────────────────────────────────
 
-
-def _sanitize_search_snippet(text: str) -> str:
-    """Очистить веб-сниппет от потенциального prompt injection."""
-    if not text:
-        return ""
-    # Убираем типичные injection-паттерны
-    text = re.sub(r"(?i)ignore\s+(all\s+)?previous\s+instructions", "[filtered]", text)
-    text = re.sub(r"(?i)you\s+are\s+now\s+", "[filtered]", text)
-    text = re.sub(r"(?i)system\s*:\s*", "[filtered]", text)
-    text = re.sub(r"(?i)assistant\s*:\s*", "[filtered]", text)
-    text = re.sub(r"(?i)\bdo\s+not\s+(follow|obey)\b", "[filtered]", text)
-    # Обрезаем до безопасной длины
-    return text[:_SEARCH_SNIPPET_MAX_LEN]
+from src.core.security.web_sanitizer import (
+    sanitize_search_snippet as _sanitize_search_snippet,
+)
 
 
 # ── Pending state management ────────────────────────────────────────

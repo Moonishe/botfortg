@@ -3,9 +3,9 @@
 import logging
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
-from src.db.models import MemoryLink
+from src.db.models import Memory, MemoryLink
 from src.db.repo import (
     get_contact,
     get_linked_memories,
@@ -23,6 +23,7 @@ RELATION_EMOJI = {
     "supports": "✅",
     "continues": "➡️",
     "example_of": "📌",
+    "supersedes": "🔄",
     None: "•",
 }
 
@@ -33,6 +34,7 @@ RELATION_WORD = {
     "supports": "и это подтверждает что",
     "continues": "затем",
     "example_of": "например",
+    "supersedes": "обновлено на",
     None: "",
 }
 
@@ -148,3 +150,93 @@ def format_chain_compact(memories: list, contact_name: str = "") -> str:
         )
         lines.append(f"{emoji} {m.fact if hasattr(m, 'fact') else str(m)}")
     return "\n".join(lines)
+
+
+async def follow_supersedes_chain(
+    session, owner, start_memory_id: int, max_depth: int = 20
+) -> list[dict]:
+    """Обход цепочки supersedes-связей в обе стороны от start_memory_id.
+
+    Возвращает список узлов в хронологическом порядке. Каждый элемент:
+    {memory_id, fact, is_head, is_tail, created_at, relation_type, related_to}.
+
+    Семантика:
+    - link_memories(source=B, target=A, relation_type="supersedes") означает
+      «B supersedes A» (B новее, A старее). link_memories создаёт двустороннюю
+      связь, поэтому A→B тоже существует с тем же relation_type.
+    - is_head=True — самый новый узел в цепочке (head эволюции);
+    - is_tail=True — самый старый узел в цепочке (origin).
+
+    Защита от циклов: visited set. На двусторонней связи A↔B
+    (link_memories создаёт обе) BFS завершится за один обход, не зациклится.
+    """
+    if not start_memory_id:
+        return []
+
+    visited: set[int] = set()
+    queue: list[int] = [start_memory_id]
+    nodes: list[dict] = []
+
+    # Загружаем стартовый узел
+    start_mem = await session.get(Memory, start_memory_id)
+    if start_mem is None or start_mem.user_id != owner.id:
+        return []
+
+    while queue and len(visited) < max_depth:
+        mid = queue.pop(0)
+        if mid in visited:
+            continue
+        visited.add(mid)
+
+        mem = await session.get(Memory, mid)
+        if mem is None or mem.user_id != owner.id:
+            continue
+
+        # Найти все supersedes-связи для текущего узла (в обе стороны)
+        result = await session.execute(
+            select(MemoryLink).where(
+                MemoryLink.user_id == owner.id,
+                MemoryLink.relation_type == "supersedes",
+                or_(
+                    MemoryLink.source_id == mid,
+                    MemoryLink.target_id == mid,
+                ),
+            )
+        )
+        for link in result.scalars().all():
+            other_id = link.target_id if link.source_id == mid else link.source_id
+            if other_id not in visited:
+                queue.append(other_id)
+
+    # Загружаем все узлы разом для сортировки
+    if visited:
+        result = await session.execute(select(Memory).where(Memory.id.in_(visited)))
+        mem_map = {m.id: m for m in result.scalars().all()}
+    else:
+        mem_map = {}
+
+    for mid in visited:
+        m = mem_map.get(mid)
+        if m is None:
+            continue
+        nodes.append(
+            {
+                "memory_id": m.id,
+                "fact": m.fact,
+                "sentiment": m.sentiment,
+                "memory_type": getattr(m, "memory_type", None),
+                "created_at": m.created_at,
+            }
+        )
+
+    # Сортировка по created_at (старые сначала)
+    nodes.sort(key=lambda x: x["created_at"] or datetime.min)
+
+    # is_head — самый новый; is_tail — самый старый
+    for n in nodes:
+        n["is_head"] = False
+        n["is_tail"] = False
+    if nodes:
+        nodes[-1]["is_head"] = True
+        nodes[0]["is_tail"] = True
+    return nodes

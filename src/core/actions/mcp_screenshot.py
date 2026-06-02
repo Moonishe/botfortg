@@ -19,6 +19,7 @@ import time
 from typing import Any
 
 from src.config import PROJECT_ROOT
+from src.core.actions.mcp_playwright import _browser_manager
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -102,17 +103,6 @@ async def _take_screenshot(
     full_page: bool,
 ) -> dict[str, Any]:
     """Headless Chromium screenshot via Playwright."""
-    # Lazy import — playwright is an optional dependency
-    try:
-        from playwright.async_api import async_playwright  # type: ignore[import-untyped]
-    except ImportError:
-        return {
-            "error": (
-                "playwright not installed: "
-                "pip install playwright && playwright install chromium"
-            )
-        }
-
     # Ensure output directory exists
     _SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -122,30 +112,33 @@ async def _take_screenshot(
     output_path = _SCREENSHOTS_DIR / filename
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=_BROWSER_ARGS,
-            )
+        # Reuse the shared singleton browser from mcp_playwright — saves
+        # the 1-2 s Chromium startup cost on every screenshot call.
+        # If playwright is not installed, _browser_manager.get_browser()
+        # raises a RuntimeError with a helpful install hint.
+        browser = await _browser_manager.get_browser()
+        try:
+            page = await browser.new_page()
+
+            # Navigate with timeout
+            await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load")
+
+            # Brief wait for dynamic content
+            await asyncio.sleep(_LOAD_WAIT_SEC)
+
+            if action == "element":
+                element = await page.query_selector(selector)
+                if element is None:
+                    return {"error": f"Selector {selector!r} not found on the page"}
+                await element.screenshot(path=str(output_path))
+            else:
+                await page.screenshot(path=str(output_path), full_page=full_page)
+
+        finally:
             try:
-                page = await browser.new_page()
-
-                # Navigate with timeout
-                await page.goto(url, timeout=_NAVIGATE_TIMEOUT, wait_until="load")
-
-                # Brief wait for dynamic content
-                await asyncio.sleep(_LOAD_WAIT_SEC)
-
-                if action == "element":
-                    element = await page.query_selector(selector)
-                    if element is None:
-                        return {"error": f"Selector {selector!r} not found on the page"}
-                    await element.screenshot(path=str(output_path))
-                else:
-                    await page.screenshot(path=str(output_path), full_page=full_page)
-
-            finally:
-                await browser.close()
+                await page.close()
+            except Exception:
+                logger.debug("Error closing screenshot page", exc_info=True)
 
     except Exception as exc:
         logger.warning("Screenshot failed: %s", exc)

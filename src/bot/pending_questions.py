@@ -1,4 +1,10 @@
-"""Pending question queue — accumulate questions during async operations."""
+"""Pending question queue — accumulate questions during async operations.
+
+This module is a thin re-export shim. The canonical implementation lives
+in :mod:`src.core.memory.pending_questions`; see that module for the
+in-memory + DB queue logic. Bot-side callers can keep importing from
+``src.bot.pending_questions`` for backward compatibility.
+"""
 
 from __future__ import annotations
 
@@ -11,21 +17,6 @@ logger = logging.getLogger(__name__)
 
 _pending: dict[int, list[str]] = {}  # telegram_id → questions
 _lock = asyncio.Lock()
-
-
-async def add_question(telegram_id: int, question: str) -> None:
-    # In-memory (fast)
-    async with _lock:
-        _pending.setdefault(telegram_id, []).append(question)
-    # DB (persistent)
-    try:
-        async with get_session() as session:
-            from src.db.repo import add_pending_question, get_or_create_user
-
-            owner = await get_or_create_user(session, telegram_id)
-            await add_pending_question(session, owner.id, question)
-    except Exception:
-        logger.debug("Failed to persist pending question", exc_info=True)
 
 
 async def get_pending(telegram_id: int) -> list[str]:

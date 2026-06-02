@@ -159,7 +159,12 @@ async def mcp_network(
 
 
 def _validate_public_host(host: str) -> dict[str, Any] | None:
-    """Block network probes against local or private infrastructure."""
+    """Block network probes against local or private infrastructure.
+
+    TODO: Consider migrating to the canonical SSRF guard at
+    ``src.core.security.ssrf_guard`` to avoid duplicating DNS rebinding
+    and private-IP detection logic.
+    """
     if host.lower().strip("[]") in {"localhost", "localhost.localdomain"}:
         return {"error": f"Refusing to probe local/private host {host!r}"}
 

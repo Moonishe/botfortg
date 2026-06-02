@@ -96,7 +96,7 @@ async def _search_contexts_tool(
                     query, provider=provider, limit=limit
                 )
             else:
-                results = search_in_contexts(query, limit=limit)
+                results = await search_in_contexts(query, limit=limit)
             return {"ok": True, "results": results, "count": len(results)}
         except Exception:
             logger.exception("search_contexts tool failed")

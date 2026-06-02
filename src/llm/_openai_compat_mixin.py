@@ -18,7 +18,7 @@ from typing import Any
 
 from openai import APIConnectionError, AuthenticationError, PermissionDeniedError
 
-from src.core.actions.embedding_cache import get as cache_get, set as cache_set
+from src.core.actions.embedding_cache import aget, aset
 
 
 class OpenAICompatBaseMixin:
@@ -69,12 +69,12 @@ class OpenAICompatEmbedMixin(OpenAICompatBaseMixin):
     _embed_model: str
 
     async def embed(self, text: str) -> list[float]:
-        cached = cache_get(text, self._embed_model)
+        cached = await aget(text, self._embed_model)
         if cached is not None:
             return cached
         resp = await self._client.embeddings.create(model=self._embed_model, input=text)
         result = resp.data[0].embedding
-        cache_set(text, result, self._embed_model)
+        await aset(text, result, self._embed_model)
         return result
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -85,7 +85,7 @@ class OpenAICompatEmbedMixin(OpenAICompatBaseMixin):
         uncached_texts: list[str] = []
         uncached_indices: list[int] = []
         for i, t in enumerate(texts):
-            cached = cache_get(t, self._embed_model)
+            cached = await aget(t, self._embed_model)
             if cached is not None:
                 results[i] = cached
             else:
@@ -98,7 +98,7 @@ class OpenAICompatEmbedMixin(OpenAICompatBaseMixin):
             )
             api_results = [d.embedding for d in resp.data]
             for idx, emb in zip(uncached_indices, api_results):
-                cache_set(texts[idx], emb, self._embed_model)
+                await aset(texts[idx], emb, self._embed_model)
                 results[idx] = emb
 
         return results  # type: ignore[return-value]

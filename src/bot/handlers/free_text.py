@@ -457,6 +457,44 @@ async def _process_text(
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = await ctx_store.render_history_block(message.from_user.id)
 
+    # ── Stage -1: Background fact extraction (enqueue) ───────────────
+    # Без этого extract_and_save_memories() НЕ вызывается в main flow,
+    # а значит supersedes evolution chains в Stage 0c не работают:
+    # 5-минутное окно в check_contradiction_response остаётся пустым,
+    # потому что новый факт физически не создаётся между двумя ходами
+    # пользователя. pre_filter отсекает шумовые сообщения, чтобы не
+    # тратить LLM-токены на «привет», «ок», «ага» и т.п.
+    try:
+        from src.core.memory._queue_core import MemoryJob, enqueue
+        from src.core.memory.pre_filter import should_extract
+
+        if should_extract(raw):
+            await enqueue(
+                MemoryJob(
+                    telegram_id=owner_telegram_id,
+                    messages_text=raw,
+                    job_type="extract",
+                    source="chat",
+                )
+            )
+            # ---- Phase 2: record pre-filter accept ----
+            try:
+                from src.core.memory.memory_metrics import memory_metrics
+
+                await memory_metrics.record_pre_filter(accepted=True)
+            except Exception:
+                pass
+        else:
+            # ---- Phase 2: record pre-filter reject ----
+            try:
+                from src.core.memory.memory_metrics import memory_metrics
+
+                await memory_metrics.record_pre_filter(accepted=False)
+            except Exception:
+                pass
+    except Exception:
+        logger.debug("Background extract enqueue failed", exc_info=True)
+
     # ── Stage 0: Smart emoji/sticker replies ─────────────────────────
     from src.core.contacts.smart_reply import get_simple_reply
 

@@ -217,6 +217,12 @@ PROVIDER_ORDER = (
     "gemini",
     "mistral",
     "cloudflare",
+    # anthropic and custom must also participate in the fallback chain.
+    # Keeping them at the end because they require explicit user-provided
+    # credentials and a base_url (custom) / specific model (anthropic) — the
+    # free-tier providers above are tried first.
+    "anthropic",
+    "custom",
 )
 RETRYABLE_MARKERS = (
     "429",

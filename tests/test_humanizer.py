@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.core.humanizer import (
     analyze_ai_score,
     apply_anti_ai_mode,
@@ -309,3 +311,8 @@ class TestPreservationCheck:
         original = "Спроси у @username про задачу"
         result = _preservation_check(original, original)
         assert result == original
+
+
+# TestWebSearchPrompts removed — DEPRECATED after B14.
+# .md files renamed to .md.deprecated (FIX-5).
+# Runtime coverage lives in tests/test_soul_blocks_runtime.py.

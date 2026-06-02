@@ -111,7 +111,7 @@ class TestSSRFGuard:
         from src.llm._ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="loopback"):
-            await validate_base_url("http://127.0.0.1:8080/v1")
+            validate_base_url("http://127.0.0.1:8080/v1")
 
     # ── blocked: private network ─────────────────────────────────────────
 
@@ -120,7 +120,7 @@ class TestSSRFGuard:
         from src.llm._ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="private"):
-            await validate_base_url("http://192.168.1.100/api")
+            validate_base_url("http://192.168.1.100/api")
 
     # ── blocked: localhost hostname ──────────────────────────────────────
 
@@ -129,7 +129,7 @@ class TestSSRFGuard:
         from src.llm._ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="Localhost"):
-            await validate_base_url("https://localhost:3000")
+            validate_base_url("https://localhost:3000")
 
     # ── blocked: IPv6-mapped loopback ────────────────────────────────────
 
@@ -138,7 +138,7 @@ class TestSSRFGuard:
         from src.llm._ssrf_guard import validate_base_url
 
         with pytest.raises(ValueError, match="loopback"):
-            await validate_base_url("http://[::ffff:127.0.0.1]:8080")
+            validate_base_url("http://[::ffff:127.0.0.1]:8080")
 
     # ── allowed: public URL ──────────────────────────────────────────────
 

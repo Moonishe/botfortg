@@ -5,6 +5,7 @@ L2 (SQLite) — персистентность между перезапуска
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -195,3 +196,16 @@ def size() -> int:
     """Return the number of entries in the in-memory cache."""
     with _lock:
         return len(_cache)
+
+
+# ── Async wrappers (run sync body in worker thread) ─────────────────────────
+
+
+async def aget(text: str, model: str = "") -> list[float] | None:
+    """Async wrapper around sync ``get`` — runs SQLite I/O in a worker thread."""
+    return await asyncio.to_thread(get, text, model)
+
+
+async def aset(text: str, embedding: list[float], model: str = "") -> None:
+    """Async wrapper around sync ``set`` — runs SQLite I/O in a worker thread."""
+    await asyncio.to_thread(set, text, embedding, model)

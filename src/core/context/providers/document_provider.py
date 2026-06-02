@@ -30,8 +30,7 @@ class DocumentProvider:
         import asyncio
 
         from src.config import settings
-        from src.core.actions.embedding_cache import get as cache_get
-        from src.core.actions.embedding_cache import set as cache_set
+        from src.core.actions.embedding_cache import aget, aset
         from src.llm.router import build_provider
         from src.llm.base import TaskType
         from src.db.session import get_session
@@ -54,11 +53,11 @@ class DocumentProvider:
         model = getattr(provider, "_embed_model", None) or "text-embedding-3-small"
 
         # Try cache first
-        query_vec = cache_get(query, model)
+        query_vec = await aget(query, model)
         if query_vec is None:
             try:
                 query_vec = await provider.embed(query[:500])
-                cache_set(query[:500], query_vec, model)
+                await aset(query[:500], query_vec, model)
             except Exception:
                 return []
 

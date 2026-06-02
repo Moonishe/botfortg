@@ -12,17 +12,15 @@ server is required — the tool works purely over HTTP.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import re
-import socket
 from typing import Any
-from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 from src.core.actions.tool_registry import tool
+from src.core.security.ssrf_guard import _check_ssrf, _check_ssrf_async
 
 logger = logging.getLogger(__name__)
 
@@ -43,18 +41,8 @@ _REQUEST_HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
-# ── SSRF blocklist ───────────────────────────────────────────────────────
-
-_SSRF_BLOCKED_HOSTS = frozenset(
-    {
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "::1",
-        "[::1]",
-        "169.254.169.254",
-    }
-)
+# ── SSRF protection via shared canonical guard ────────────────────────────
+# See: src.core.security.ssrf_guard
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -236,7 +224,7 @@ async def _web_fetch(url: str) -> dict[str, Any]:
         return {"error": "URL must start with http:// or https://"}
 
     # ── SSRF protection ───────────────────────────────────────────────
-    ssrf_error = _check_ssrf(url)
+    ssrf_error = await _check_ssrf_async(url)
     if ssrf_error:
         return ssrf_error
 
@@ -287,62 +275,6 @@ async def _web_fetch(url: str) -> dict[str, Any]:
         "truncated": total_len > _MAX_FETCH_CHARS,
         "total_chars": total_len,
     }
-
-
-# ── SSRF guard ─────────────────────────────────────────────────────────
-
-
-def _check_ssrf(url: str) -> dict[str, Any] | None:
-    """Return an error dict if *url* targets a blocked host, else ``None``.
-
-    Resolves the hostname to an IP first (prevents DNS rebinding attacks),
-    then checks against blocklists for:
-    - ``localhost`` and all variants (``127.0.0.1``, ``0.0.0.0``, ``::1``).
-    - Private / link-local / reserved IP ranges (``10.x.x.x``,
-      ``172.16-31.x.x``, ``192.168.x.x``, ``169.254.x.x``,
-      ``127.x.x.x``, ``255.255.255.255``).
-    - IPv6 loopback (``::1``), link-local (``fe80::/10``), ULA (``fc00::/7``).
-    - AWS metadata endpoint (``169.254.169.254``).
-    - IPv4-mapped IPv6 addresses that resolve to private IPv4.
-    """
-    try:
-        parsed = urlparse(url)
-    except Exception as exc:
-        return {"error": f"Cannot parse URL: {exc}"}
-
-    hostname = parsed.hostname or ""
-
-    # Direct match against blocklist
-    if hostname.lower() in _SSRF_BLOCKED_HOSTS:
-        return {
-            "error": (
-                f"SSRF protection: requests to {hostname!r} are not allowed. "
-                f"Use an external URL instead."
-            )
-        }
-
-    # Resolve DNS first — prevents rebinding attacks
-    # Uses getaddrinfo for full IPv4 + IPv6 support
-    try:
-        addrinfo = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        return {"error": f"SSRF protection: cannot resolve hostname {hostname!r}."}
-
-    for family, _, _, _, sockaddr in addrinfo:
-        ip = sockaddr[0]
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            continue
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return {
-                "error": (
-                    f"SSRF protection: requests to {hostname!r} "
-                    f"(resolved to {ip!r}) are not allowed."
-                )
-            }
-
-    return None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────

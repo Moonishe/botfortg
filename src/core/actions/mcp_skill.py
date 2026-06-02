@@ -31,12 +31,12 @@ async def use_skill(
         return {"error": "skill_name обязателен"}
 
     try:
-        from src.bot.handlers import skills as skills_mod
-
-        # Ищем скилл по имени
+        # Layering fix: src/core/* must not import from src/bot/*.
+        # The previous `from src.bot.handlers import skills` import was broken
+        # (the target file does not exist), and `find_skill` is not defined
+        # anywhere in the codebase. Inline the None-fallback here and rely on
+        # the registry to be wired later.
         skill = None
-        if hasattr(skills_mod, "find_skill"):
-            skill = skills_mod.find_skill(skill_name)
 
         if not skill:
             return {

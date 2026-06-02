@@ -16,7 +16,7 @@ Actions:
     — returns accessibility tree text.
 
 Security:
-- SSRF protection via ``_check_ssrf()`` from ``mcp_http``.
+- SSRF protection via ``_check_ssrf()`` from ``core.security.ssrf_guard``.
 - Only ``http://`` and ``https://`` schemes are allowed.
 - Screenshots are saved only to ``data/screenshots/``.
 """
@@ -32,7 +32,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.config import PROJECT_ROOT, settings
-from src.core.actions.mcp_http import _check_ssrf
+from src.core.security.ssrf_guard import _check_ssrf, _check_ssrf_async
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,20 @@ class _BrowserManager:
 
             self._touch()
             return self._page
+
+    async def get_browser(self) -> Any:
+        """Return the singleton browser instance (lazy-init if needed).
+
+        Unlike ``ensure_page()``, this does NOT touch the manager's own
+        ``_page`` slot — callers get the bare browser and create their own
+        pages (used by ``mcp_screenshot`` which has its own page lifecycle).
+        """
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("BrowserManager has been closed")
+            if self._playwright is None:
+                await self._init_browser()
+            return self._browser
 
     async def close_page(self) -> None:
         """Close the current page (keep browser alive)."""
@@ -284,7 +298,7 @@ async def mcp_playwright(
                 }
 
             # SSRF protection
-            ssrf_error = _check_ssrf(url)
+            ssrf_error = await _check_ssrf_async(url)
             if ssrf_error:
                 return ssrf_error
 
