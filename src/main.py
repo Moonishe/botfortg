@@ -49,7 +49,10 @@ def _register_background_tasks() -> None:
 
 
 async def main() -> None:
-    print("=== main() STARTING ===", flush=True)
+    import sys
+
+    sys.stderr.write("=== main() START ===\n")
+    sys.stderr.flush()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
@@ -229,35 +232,45 @@ async def main() -> None:
 
 
 def run() -> None:
+    import sys
+    import traceback
+
+    sys.stderr.write("=== run() START ===\n")
+    sys.stderr.flush()
+
     # --- Schema migrations (Alembic — CANONICAL) ---
-    # Run synchronously before the event loop starts.  This avoids
-    # asyncio.run() nesting inside the existing event loop.
-    # init_db() in session.py will detect the alembic_version table
-    # and skip its create_all fallback — see init_db() docstring.
     import alembic.command
     import alembic.config
 
     _cfg = alembic.config.Config(str(PROJECT_ROOT / "alembic.ini"))
     alembic.command.upgrade(_cfg, "head")
 
-    print("=== ENTERING asyncio.run(main()) ===", flush=True)
+    sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
+    sys.stderr.flush()
+
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Shutdown requested")
-    except Exception:
-        logger.exception("Unhandled error in main")
+    except BaseException as exc:
+        sys.stderr.write(f"=== FATAL: {type(exc).__name__}: {exc} ===\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        # Also try the logger in case basicConfig already ran
+        try:
+            logger.exception("Unhandled error in main")
+        except Exception:
+            pass
         try:
             from src.core.infra.hooks import hooks
 
             asyncio.run(
                 hooks.emit(
-                    "on_error", error="Unhandled error in main", context="main.run"
+                    "on_error", error=f"Unhandled error: {exc}", context="main.run"
                 )
             )
         except Exception:
-            pass  # hooks are optional, never break core flow
-        raise
+            pass
+        if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
 
 
 if __name__ == "__main__":
