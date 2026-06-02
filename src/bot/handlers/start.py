@@ -2,7 +2,7 @@
 
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
@@ -388,13 +388,19 @@ async def _send_llm_key_step(chat_id: int, bot) -> None:
     kb.row(
         InlineKeyboardButton(text="🔊 TTS (озвучка)", callback_data="onb:category:tts"),
     )
-    # Row 7: Custom provider
+    # Row 7: STT providers (transcription)
+    kb.row(
+        InlineKeyboardButton(
+            text="🎙️ STT (транскрипция)", callback_data="onb:category:stt"
+        ),
+    )
+    # Row 8: Custom provider
     kb.row(
         InlineKeyboardButton(
             text="➕ Свой провайдер", callback_data="onb:custom:start"
         ),
     )
-    # Row 8: Skip
+    # Row 9: Skip
     kb.row(
         InlineKeyboardButton(text="⏭️ Пропустить", callback_data="onb:skip:llm_key"),
     )
@@ -585,9 +591,156 @@ async def cb_onboarding_tts_category(call: CallbackQuery) -> None:
         InlineKeyboardButton(text="🌪️ Mistral TTS", callback_data="onb:tts:mistral-tts"),
     )
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:back:provider_select"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:back"),
     )
     await call.message.edit_text(text, reply_markup=kb.as_markup())
+
+
+async def _send_stt_key_step(chat_id: int, bot: Bot) -> None:
+    """Отправляет шаг выбора STT провайдера."""
+    text = "🎙 <b>Шаг 2.2: Речевая транскрипция (STT)</b>\n\n"
+    text += "Преобразование голоса в текст для лучшего понимания.\n\n"
+    text += "Доступные провайдеры:"
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="🎯 Whisper (OpenAI)", callback_data="onb:stt:openai"
+        ),
+        InlineKeyboardButton(text="💎 Deepgram", callback_data="onb:stt:deepgram"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="🤖 Gemini STT", callback_data="onb:stt:gemini"),
+        InlineKeyboardButton(text="🎤 AssemblyAI", callback_data="onb:stt:assemblyai"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:back"),
+    )
+    await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data == "onb:category:stt")
+async def cb_onboarding_stt_category(call: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор категории STT."""
+    await state.set_state(OnboardingStates.waiting_stt_provider)
+    await _send_stt_key_step(call.message.chat.id, call.bot)
+
+
+@router.callback_query(F.data.startswith("onb:stt:"))
+async def cb_onboarding_stt_provider(call: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор конкретного STT провайдера."""
+    provider = call.data.split(":")[-1]  # openai, deepgram, gemini, assemblyai
+    await state.update_data(stt_provider=provider)
+    await state.set_state(OnboardingStates.waiting_stt_key)
+
+    provider_names = {
+        "openai": "Whisper (OpenAI)",
+        "deepgram": "Deepgram",
+        "gemini": "Gemini STT",
+        "assemblyai": "AssemblyAI",
+    }
+    provider_name = provider_names.get(provider, provider)
+
+    text = f"🔑 <b>Введи API-ключ для {provider_name}</b>\n\n"
+    text += "Ключ будет сохранён в зашифрованном виде.\n"
+    text += "Напиши /cancel для отмены."
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:category:stt"),
+    )
+    await call.message.edit_text(text, reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data == "onb:back")
+async def cb_onboarding_back(call: CallbackQuery, state: FSMContext) -> None:
+    """Возврат назад в onboarding."""
+    await call.answer()
+    current_state = await state.get_state()
+
+    # Определяем, куда возвращаться
+    if current_state == OnboardingStates.waiting_stt_provider.state:
+        await _send_llm_key_step(call.message.chat.id, call.bot)
+    elif current_state == OnboardingStates.waiting_stt_key.state:
+        await _send_stt_key_step(call.message.chat.id, call.bot)
+        await state.set_state(OnboardingStates.waiting_stt_provider)
+    else:
+        await _send_llm_key_step(call.message.chat.id, call.bot)
+
+
+# Обработчик для сохранения STT ключа
+async def handle_stt_key_input(message: Message, state: FSMContext) -> None:
+    """Сохраняет STT ключ с category='stt'."""
+    if message.text and message.text.startswith("/"):
+        if message.text == "/cancel":
+            await state.set_state(OnboardingStates.waiting_stt_provider)
+            await _send_stt_key_step(message.chat.id, message.bot)
+            await message.reply("❌ Ввод ключа отменён.")
+            return
+
+    key = message.text.strip() if message.text else ""
+    if not key:
+        await message.reply(
+            "❌ Ключ не может быть пустым. Попробуй ещё раз или /cancel"
+        )
+        return
+
+    data = await state.get_data()
+    provider = data.get("stt_provider", "openai")
+
+    try:
+        async with get_session() as session:
+            user = await get_or_create_user(session, message.from_user.id)
+            slot, is_new = await add_key_slot(
+                session,
+                user,
+                provider,
+                key,
+                purpose="main",
+                category="stt",
+            )
+            await session.commit()
+
+        provider_names = {
+            "openai": "Whisper (OpenAI)",
+            "deepgram": "Deepgram",
+            "gemini": "Gemini STT",
+            "assemblyai": "AssemblyAI",
+        }
+        provider_name = provider_names.get(provider, provider)
+
+        if is_new:
+            text = f"✅ <b>Ключ для {provider_name} успешно сохранён!</b>\n\n"
+        else:
+            text = f"ℹ️ <b>Этот ключ уже был добавлен ранее.</b>\n\n"
+
+        text += "Теперь можешь продолжить настройку или завершить.\n\n"
+        text += "Что дальше?"
+
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            InlineKeyboardButton(
+                text="➕ Ещё STT ключ", callback_data="onb:category:stt"
+            ),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="go_settings"),
+        )
+        kb.row(
+            InlineKeyboardButton(text="✅ Завершить", callback_data="onb:finish"),
+        )
+        await message.reply(text, reply_markup=kb.as_markup())
+        await state.clear()
+
+    except Exception as e:
+        logger.exception("Failed to save STT key")
+        await message.reply(
+            f"❌ Ошибка сохранения ключа: {e}\n\nПопробуй ещё раз или /cancel"
+        )
+
+
+# Регистрируем обработчик STT ключа
+@router.message(OnboardingStates.waiting_stt_key)
+async def on_stt_key_message(message: Message, state: FSMContext) -> None:
+    """Роутер для обработки STT ключа."""
+    await handle_stt_key_input(message, state)
 
 
 @router.callback_query(F.data.startswith("onb:tts:"))

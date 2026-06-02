@@ -53,6 +53,8 @@ class OnboardingStates(StatesGroup):
     waiting_login = State()
     waiting_provider_choice = State()  # новый: выбор провайдера инлайн-клавиатурой
     waiting_llm_key = State()
+    waiting_stt_provider = State()
+    waiting_stt_key = State()
     waiting_timezone = State()
     waiting_sync_choice = State()
 
