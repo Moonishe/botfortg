@@ -16,6 +16,7 @@ _KEY_PATTERNS = [
     r"gsk_[A-Za-z0-9]{20,}",  # Groq
     r"dl-[A-Za-z0-9_-]{20,}",  # Deepgram
     r"Nb[A-Za-z0-9_-]{20,}",  # Mistral (some formats)
+    r"\d{8,10}:[\w-]{35,}",  # Telegram bot token
 ]
 
 _MASKED_REPLACEMENT = "***"
