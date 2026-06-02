@@ -211,28 +211,41 @@ async def init_db() -> None:
         )  # checkpoint every 1000 pages
 
         # --- Schema: Alembic-canonical, create_all as bootstrap fallback ---
-        result = await conn.execute(
+        # Check if *any* ORM table exists (not just alembic_version).
+        # On Railway, alembic stamps the version table but create_all
+        # may have failed — we must detect this and re-create tables.
+        _has_orm_tables = await conn.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name != 'alembic_version' LIMIT 1"
+            )
+        )
+        _has_orm_tables = _has_orm_tables.first() is not None
+
+        if _has_orm_tables:
+            logger.debug(
+                "ORM tables found — schema is up-to-date; "
+                "skipping Base.metadata.create_all"
+            )
+        else:
+            logger.warning(
+                "No ORM tables found — bootstrapping schema via "
+                "Base.metadata.create_all. This happens on fresh DB, "
+                "or after Railway volume reset."
+            )
+            await conn.run_sync(Base.metadata.create_all)
+
+        # Ensure alembic_version is stamped (needed if create_all was skipped
+        # but the version table was never created, e.g. after volume reset).
+        _has_version = await conn.execute(
             text(
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name='alembic_version'"
             )
         )
-        alembic_applied = result.first() is not None
+        _has_version = _has_version.first() is not None
 
-        if alembic_applied:
-            logger.debug(
-                "alembic_version table found — Alembic is canonical; "
-                "skipping Base.metadata.create_all"
-            )
-        else:
-            logger.warning(
-                "alembic_version table NOT found — bootstrapping schema via "
-                "Base.metadata.create_all. This should only happen on a "
-                "fresh database or if main() is called directly. Alembic "
-                "remains the canonical migration path going forward."
-            )
-            await conn.run_sync(Base.metadata.create_all)
-
+        if not _has_version:
             # Stamp the head revision so Alembic knows all migrations are
             # already applied (create_all built the current ORM schema).
             _alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))

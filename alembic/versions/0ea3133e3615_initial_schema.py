@@ -42,37 +42,26 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema — create all ORM tables from current models.
+    """Initial schema — intentionally a no-op.
 
-    SAFETY: If the database already has tables (e.g. persistent volume on
-    Railway with a previously deployed schema), skip create_all() entirely
-    to avoid deadlocking SQLite or triggering model imports that clash.
-    This migration is idempotent — it only materialises tables on a truly
-    fresh (empty) database.
-    """
-    # Ensure src/ is on sys.path so we can import models
-    _root = Path(__file__).resolve().parent.parent
-    if str(_root / "src") not in sys.path:
-        sys.path.insert(0, str(_root / "src"))
+    Table creation is handled by ``init_db()`` in ``src/db/session.py``
+    which runs *after* alembic, with all imports already resolved.  Calling
+    ``Base.metadata.create_all()`` here causes a deadlock on persistent
+    volumes (Railway) because:
 
-    _bind = op.get_bind()
-    _existing = _bind.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name != 'alembic_version' LIMIT 1"
-    ).fetchone()
+    1. Importing ``db.models`` inside an alembic migration triggers
+       model-import side-effects that open a *second* SQLite connection
+       to the same file.
+    2. The second connection blocks on the first (alembic's) → deadlock.
 
-    if _existing is not None:
-        # Tables already exist — database was seeded by a previous deploy.
-        # Skip create_all() to avoid import side-effects and deadlocks.
-        import logging
+    This migration exists purely to mark the initial alembic version so
+    downstream revisions (column additions etc.) can assume the tables
+    already exist (they were created by a prior deploy or by init_db)."""
+    import logging
 
-        logging.getLogger("alembic").info(
-            "Skipping initial_schema.create_all — DB already has table %r", _existing[0]
-        )
-        return
-
-    from db.models import Base as _Base
-
-    _Base.metadata.create_all(bind=_bind)
+    logging.getLogger("alembic").info(
+        "initial_schema: no-op, tables handled by init_db()"
+    )
 
 
 def downgrade() -> None:
