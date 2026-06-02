@@ -42,7 +42,7 @@ SETTING_FIELDS: dict[str, str] = {
     "use_heavy_model": "bool",
     "llm_provider": "choice:openrouter,openai,gemini,mistral,cloudflare",
     "transcription_mode": "choice:local,api,hybrid",
-    "transcription_api_provider": "choice:openai,gemini,mistral",
+    "transcription_api_provider": "choice:openai,gemini,mistral,deepgram,assemblyai",
     "auto_sync_enabled": "bool",
     "auto_sync_interval_sec": "int",
     "auto_extract_memories": "bool",

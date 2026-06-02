@@ -299,6 +299,12 @@ def _build_model_keyboard(provider_name: str) -> InlineKeyboardMarkup | None:
     if p.models:
         for m in p.models:
             kb.button(text=f"📦 {m}", callback_data=f"keys:model:{p.name}:{m}")
+    elif p.category in ("stt", "tts"):
+        # STT/TTS провайдеры без предопределённых моделей — пропускаем выбор модели
+        kb.button(
+            text="➡️ Continue without model",
+            callback_data=f"keys:model:{p.name}:none",
+        )
     # Custom/local провайдеры — кнопка ручного ввода модели
     if p.tier in ("custom", "local"):
         kb.button(
@@ -680,6 +686,22 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             f"🔧 Введи название модели для <b>{provider_name}</b>.\n"
             f"Например: <code>gpt-4o</code> или <code>claude-3-opus</code>",
+            reply_markup=None,
+        )
+    elif model == "none":
+        # STT/TTS провайдер без модели → сразу запрашиваем ключ
+        p = get_provider(provider_name)
+        key_prefix = p.key_prefix if p and p.key_prefix else "API-ключ"
+        _PENDING_KEY_ENTRIES[callback.from_user.id] = {
+            "provider": provider_name,
+            "model": None,
+            "model_pending": False,
+        }
+        display = p.display if p else provider_name
+        await callback.message.edit_text(
+            f"📦 <b>{display}</b>\n"
+            f"Вставь {key_prefix}\n"
+            f"Или: <code>{provider_name}:ключ</code>",
             reply_markup=None,
         )
     else:

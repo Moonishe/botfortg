@@ -31,11 +31,14 @@ from src.core.intelligence.smart_autorouter import make_plan
 from src.core.memory import conversation_context as ctx_store
 from src.core.infra.timeutil import now_in_tz
 from src.core.infra.transcription import transcription_service
+from src.crypto import decrypt
+from src.db.models import LlmKeySlot
 from src.db.repo import (
     get_api_key,
     get_or_create_user,
 )
 from src.db.session import get_session
+from sqlalchemy import and_, select
 from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 from src.llm.vision_provider import OpenAIVisionProvider, VisionResult
@@ -225,6 +228,9 @@ async def _voice_worker() -> None:
                         openai_key,
                         gemini_key,
                         mistral_key,
+                        custom_stt_key,
+                        custom_stt_model,
+                        custom_stt_endpoint,
                     ) = job
 
                     try:
@@ -236,6 +242,9 @@ async def _voice_worker() -> None:
                             gemini_key=gemini_key,
                             mistral_key=mistral_key,
                             api_provider=api_provider,
+                            custom_stt_key=custom_stt_key,
+                            custom_stt_model=custom_stt_model,
+                            custom_stt_endpoint=custom_stt_endpoint,
                         )
                     except Exception:
                         logger.exception("voice transcription failed in worker")
@@ -1327,6 +1336,26 @@ async def free_voice(
         mistral_key = await get_api_key(session, owner, "mistral")
         api_provider = getattr(owner.settings, "transcription_api_provider", "openai")
 
+        # Retrieve STT-specific keys for Deepgram/AssemblyAI from LlmKeySlot
+        custom_stt_key = None
+        custom_stt_model = None
+        custom_stt_endpoint = None
+        if api_provider in ("deepgram", "assemblyai"):
+            slots = await session.execute(
+                select(LlmKeySlot).where(
+                    and_(
+                        LlmKeySlot.user_id == owner.id,
+                        LlmKeySlot.provider == api_provider,
+                        LlmKeySlot.category == "stt",
+                    )
+                )
+            )
+            slot = slots.scalar_one_or_none()
+            if slot:
+                custom_stt_key = decrypt(slot.key_enc)
+                custom_stt_model = slot.model
+                custom_stt_endpoint = slot.endpoint
+
     # 2. Скачивание .ogg файла (быстрая сетевая операция)
     media_dir = settings.data_dir / "media" / "control_bot"
     media_dir.mkdir(parents=True, exist_ok=True)
@@ -1359,6 +1388,9 @@ async def free_voice(
                     openai_key,
                     gemini_key,
                     mistral_key,
+                    custom_stt_key,
+                    custom_stt_model,
+                    custom_stt_endpoint,
                 )
             ),
             timeout=settings.voice_queue_timeout,

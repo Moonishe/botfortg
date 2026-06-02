@@ -151,7 +151,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         groq_key = await get_api_key(session, owner, "groq")
         custom_key = await get_api_key(session, owner, "custom")
 
-        # Also check LlmKeySlot for custom providers
+        # Also check LlmKeySlot for custom/stt providers
         try:
             all_slots = await list_key_slots(session, owner)
             has_custom_slots = any(
@@ -165,12 +165,22 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
                     "grok",
                     "mimo",
                     "groq",
+                    "deepgram",
+                    "assemblyai",
                 }
                 and s.enabled
                 for s in all_slots
             )
+            has_deepgram = any(
+                s.provider == "deepgram" and s.enabled for s in all_slots
+            )
+            has_assemblyai = any(
+                s.provider == "assemblyai" and s.enabled for s in all_slots
+            )
         except Exception:
             has_custom_slots = False
+            has_deepgram = False
+            has_assemblyai = False
 
         custom_ok = bool(custom_key) or has_custom_slots
 
@@ -208,7 +218,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"📰 Новости: {_check(_news_enabled)} (окно {_news_window_hours}ч)\n"
         f"🛡 Игнорировать архив: {_check(_ignore_archived)}\n"
         f"🧠 LLM: <b>{_llm_provider}</b> · {'тяжёлая' if _use_heavy_model else 'лёгкая'} · tr: {_transcription_mode}\n"
-        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))} · Grok {_check(bool(grok_key))} · MiMo {_check(bool(mimo_key))} · Groq {_check(bool(groq_key))} · Свой {_check(bool(custom_key))}\n\n"
+        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))} · Grok {_check(bool(grok_key))} · MiMo {_check(bool(mimo_key))} · Groq {_check(bool(groq_key))} · Deepgram {_check(has_deepgram)} · AssemblyAI {_check(has_assemblyai)} · Свой {_check(bool(custom_key))}\n\n"
         "<i>Тапни раздел, чтобы открыть его настройки и описание.</i>"
     )
     kb = InlineKeyboardBuilder()
@@ -583,7 +593,13 @@ CHOICE_KEYS = {
         "custom",
     },
     "transcription_mode": {"local", "api", "hybrid"},
-    "transcription_api_provider": {"openai", "gemini", "mistral"},
+    "transcription_api_provider": {
+        "openai",
+        "gemini",
+        "mistral",
+        "deepgram",
+        "assemblyai",
+    },
     "auto_reply_mode": {"static", "smart"},
     "auto_mode": {"offline_only", "always", "smart"},
     # Личность (ChatGPT-style)
@@ -1035,6 +1051,8 @@ async def _render_section(
                 "openai": "OpenAI Whisper",
                 "gemini": "Gemini (бесплатно)",
                 "mistral": "Mistral (бесплатно)",
+                "deepgram": "Deepgram",
+                "assemblyai": "AssemblyAI",
             }
             api_label = tts_labels.get(api_provider, "OpenAI Whisper")
 
@@ -1161,7 +1179,7 @@ async def _render_section(
                         callback_data=f"set:choose:transcription_mode:{mode}",
                     )
                 )
-            for prov in ("openai", "gemini", "mistral"):
+            for prov in ("openai", "gemini", "mistral", "deepgram", "assemblyai"):
                 prov_label = tts_labels.get(prov, prov)
                 kb.row(
                     InlineKeyboardButton(
@@ -1566,9 +1584,18 @@ async def _render_section(
                     "grok",
                     "mimo",
                     "groq",
+                    "deepgram",
+                    "assemblyai",
                 }
                 and s.enabled
             }
+
+            has_deepgram = any(
+                s.provider == "deepgram" and s.enabled for s in custom_slots
+            )
+            has_assemblyai = any(
+                s.provider == "assemblyai" and s.enabled for s in custom_slots
+            )
 
             text = (
                 "🔑 <b>API-ключи</b>\n\n"
@@ -1581,6 +1608,8 @@ async def _render_section(
                 f"Grok: {_check(bool(grok_key))}\n"
                 f"MiMo: {_check(bool(mimo_key))}\n"
                 f"Groq: {_check(bool(groq_key))}\n"
+                f"Deepgram: {_check(has_deepgram)}\n"
+                f"AssemblyAI: {_check(has_assemblyai)}\n"
                 f"Свой: {_check(bool(custom_key))}"
             )
             if custom_providers:
@@ -1619,6 +1648,14 @@ async def _render_section(
             kb.row(
                 InlineKeyboardButton(
                     text="🔑 Groq key", callback_data="set:input:groq_key"
+                ),
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text="🔑 Deepgram key", callback_data="set:input:deepgram_key"
+                ),
+                InlineKeyboardButton(
+                    text="🔑 AssemblyAI key", callback_data="set:input:assemblyai_key"
                 ),
             )
             kb.row(
@@ -1958,6 +1995,28 @@ async def cb_input_groq(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "set:input:deepgram_key")
+async def cb_input_deepgram(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_deepgram_key)
+    await callback.message.answer(
+        "🔑 Введите ваш Deepgram API Key:\n\n"
+        "Получить ключ: https://console.deepgram.com/\n"
+        "/cancel — отмена."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:input:assemblyai_key")
+async def cb_input_assemblyai(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_assemblyai_key)
+    await callback.message.answer(
+        "🔑 Введите ваш AssemblyAI API Key:\n\n"
+        "Получить ключ: https://www.assemblyai.com/\n"
+        "/cancel — отмена."
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "set:input:custom_name")
 async def cb_input_custom_name(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_custom_name)
@@ -2247,6 +2306,12 @@ async def _count_slots_for_provider(session, owner, provider: str) -> int:
 @router.message(SettingsStates.waiting_openai_key)
 async def step_openai_key(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2282,6 +2347,12 @@ async def step_openai_key(message: Message, state: FSMContext) -> None:
 @router.message(SettingsStates.waiting_gemini_key)
 async def step_gemini_key(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2317,6 +2388,12 @@ async def step_gemini_key(message: Message, state: FSMContext) -> None:
 @router.message(SettingsStates.waiting_mistral_key)
 async def step_mistral_key(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2352,6 +2429,12 @@ async def step_mistral_key(message: Message, state: FSMContext) -> None:
 @router.message(SettingsStates.waiting_cloudflare_key)
 async def step_cloudflare_key(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2389,6 +2472,12 @@ async def step_cloudflare_key(message: Message, state: FSMContext) -> None:
 @router.message(SettingsStates.waiting_deepseek_key)
 async def step_deepseek_key(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2425,6 +2514,12 @@ async def step_deepseek_key(message: Message, state: FSMContext) -> None:
 async def step_grok_key(message: Message, state: FSMContext) -> None:
     """Сохраняет Grok API ключ."""
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2460,6 +2555,12 @@ async def step_grok_key(message: Message, state: FSMContext) -> None:
 async def step_mimo_key(message: Message, state: FSMContext) -> None:
     """Сохраняет MiMo API ключ, затем спрашивает регион."""
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2561,6 +2662,12 @@ async def cb_mimo_region(callback: CallbackQuery, state: FSMContext) -> None:
 async def step_groq_key(message: Message, state: FSMContext) -> None:
     """Сохраняет Groq API ключ."""
     raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
         return
@@ -2587,6 +2694,104 @@ async def step_groq_key(message: Message, state: FSMContext) -> None:
     kb.adjust(2)
     await message.answer(
         f"✅ Сохранено Groq ключей: {count}.\n🔑 В базе Groq ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.message(SettingsStates.waiting_deepgram_key)
+async def step_deepgram_key(message: Message, state: FSMContext) -> None:
+    """Сохраняет Deepgram API ключ."""
+    raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with deepgram key")
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        for single_key in parts:
+            await add_key_slot(
+                session,
+                owner,
+                "deepgram",
+                single_key,
+                purpose="main",
+                label="deepgram/main",
+                priority=0,
+                category="stt",
+            )
+        total = await _count_slots_for_provider(session, owner, "deepgram")
+    await state.clear()
+    count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:deepgram_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
+    await message.answer(
+        f"✅ Сохранено Deepgram ключей: {count}.\n🔑 В базе Deepgram ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.message(SettingsStates.waiting_assemblyai_key)
+async def step_assemblyai_key(message: Message, state: FSMContext) -> None:
+    """Сохраняет AssemblyAI API ключ."""
+    raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("❌ Ввод ключа отменён.")
+        await message.answer(text, reply_markup=kb)
+        return
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with assemblyai key")
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        for single_key in parts:
+            await add_key_slot(
+                session,
+                owner,
+                "assemblyai",
+                single_key,
+                purpose="main",
+                label="assemblyai/main",
+                priority=0,
+                category="stt",
+            )
+        total = await _count_slots_for_provider(session, owner, "assemblyai")
+    await state.clear()
+    count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:assemblyai_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
+    await message.answer(
+        f"✅ Сохранено AssemblyAI ключей: {count}.\n🔑 В базе AssemblyAI ключей: {total}.\n\n"
         "Добавить ещё?",
         reply_markup=kb.as_markup(),
     )
@@ -2648,10 +2853,10 @@ async def step_custom_endpoint(message: Message, state: FSMContext) -> None:
 async def step_custom_key(message: Message, state: FSMContext) -> None:
     """Шаг 3/4: API-ключ + валидация."""
     raw = (message.text or "").strip()
-    if raw == "/cancel":
+    if raw in ("/cancel", "/back", "/menu"):
         await state.clear()
         text, kb = await _render_menu(message.from_user.id)
-        await message.answer("🚫 Отменено.")
+        await message.answer("❌ Ввод ключа отменён.")
         await message.answer(text, reply_markup=kb)
         return
     if not raw:

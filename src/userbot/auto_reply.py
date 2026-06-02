@@ -40,6 +40,7 @@ from src.db.repo import (
 from src.db.session import get_session
 from src.llm.base import ChatMessage
 from src.llm.router import build_provider
+from src.core.infra.text_sanitizer import sanitize_html
 
 
 logger = logging.getLogger(__name__)
@@ -361,20 +362,20 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             if is_bot:
                 return
 
-            # ── Spam detection: stickers, garbage — mute reply ──────────
-            sender_id = sender.id
-            if sender_id != settings.owner_telegram_id:
-                _msg_text = (msg.text or msg.message or "").strip()
-                _is_sticker_only = msg.sticker is not None and not _msg_text
-                _is_garbage = len(_msg_text) < 2 and not msg.sticker
-                if _is_sticker_only or _is_garbage:
-                    await event.reply("🚫 Ты в муте. Сиди.")
-                    return
-
             async with get_session() as session:
                 owner: User = await get_or_create_user(session, owner_telegram_id)
                 if owner.settings is None or not owner.settings.auto_reply_enabled:
                     return
+
+                # ── Spam detection: garbage — mute reply ───────────────────
+                # AFTER auto_reply_enabled check to prevent unsolicited messages
+                sender_id = sender.id
+                if sender_id != settings.owner_telegram_id:
+                    _msg_text = (msg.text or msg.message or "").strip()
+                    _is_garbage = len(_msg_text) < 2 and not msg.sticker
+                    if _is_garbage:
+                        await event.reply("🚫🤡 Ты в муте. Сиди.")
+                        return
 
                 # запомним / обновим контакт до принятия решения
                 parts = [
@@ -502,9 +503,9 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
             await notification_queue.enqueue(
                 topic="auto_reply",
-                text=f"🤖 <b>Авто-ответ</b> для <b>{display}</b>\n\n"
-                f"<i>Им:</i> {incoming_text[:200]}\n"
-                f"<i>Я:</i> {reply}",
+                text=f"🤖 <b>Авто-ответ</b> для <b>{sanitize_html(display)}</b>\n\n"
+                f"<i>Им:</i> {sanitize_html(incoming_text[:200])}\n"
+                f"<i>Я:</i> {sanitize_html(reply)}",
                 priority=2,
                 category="auto_reply",
             )

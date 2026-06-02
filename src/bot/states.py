@@ -29,6 +29,8 @@ class SettingsStates(StatesGroup):
     waiting_grok_key = State()
     waiting_mimo_key = State()
     waiting_groq_key = State()
+    waiting_deepgram_key = State()
+    waiting_assemblyai_key = State()
     waiting_mimo_region = State()
     waiting_custom_model_name = State()
     waiting_custom_name = State()
