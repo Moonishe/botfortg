@@ -254,10 +254,12 @@ def run() -> None:
     )
     sys.stderr.flush()
 
+    executor = ThreadPoolExecutor(max_workers=1)
+    alembic_ok = False
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(alembic.command.upgrade, _cfg, "head")
-            future.result(timeout=30)
+        future = executor.submit(alembic.command.upgrade, _cfg, "head")
+        future.result(timeout=30)
+        alembic_ok = True
         sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
         sys.stderr.flush()
     except FutureTimeoutError:
@@ -267,9 +269,8 @@ def run() -> None:
         sys.stderr.flush()
         # Alembic hung — stamp the head revision and let init_db() create tables
         import sqlite3
-        import asyncio as _asyncio
 
-        _db_url = str(PROJECT_ROOT / "data" / "database.db")
+        _db_url = str(PROJECT_ROOT / "data" / "app.db")
         _conn = sqlite3.connect(_db_url)
         _conn.execute(
             "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"
@@ -286,6 +287,8 @@ def run() -> None:
         sys.stderr.write("=== alembic CRASHED ===\n")
         sys.stderr.flush()
         raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     asyncio.run(main())
 

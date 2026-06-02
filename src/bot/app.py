@@ -138,6 +138,10 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
         if tg_id != settings.owner_telegram_id:
             return await handler(message, data)
 
+        # Всегда пропускаем голосовые/аудио — они обрабатываются отдельно
+        if getattr(message, "voice", None) or getattr(message, "audio", None):
+            return await handler(message, data)
+
         # Всегда пропускаем команды онбординга
         text = message.text or ""
         if text.startswith(("/start", "/login", "/cancel")):
