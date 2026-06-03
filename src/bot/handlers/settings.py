@@ -1,4 +1,4 @@
-﻿"""/settings — главное меню и разделы. callback_data: set:sec / set:tog / set:choose / set:input."""
+"""/settings — главное меню и разделы. callback_data: set:sec / set:tog / set:choose / set:input."""
 
 import io
 import json
