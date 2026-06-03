@@ -40,7 +40,7 @@ jobs:
       - name: Check alembic heads
         env:
           DATABASE_URL: sqlite+aiosqlite:///test.db
-          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          ENCRYPTION_KEY: aNsQCpPtGWIQwr3nHefOPnjB4y51WxhJ9UcP6hrN5GM=
           BOT_TOKEN: 123456:test
           OWNER_TELEGRAM_ID: "123456789"
           API_ID: "12345"
@@ -50,7 +50,7 @@ jobs:
       - name: Check alembic history
         env:
           DATABASE_URL: sqlite+aiosqlite:///test.db
-          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          ENCRYPTION_KEY: aNsQCpPtGWIQwr3nHefOPnjB4y51WxhJ9UcP6hrN5GM=
           BOT_TOKEN: 123456:test
           OWNER_TELEGRAM_ID: "123456789"
           API_ID: "12345"
@@ -60,7 +60,7 @@ jobs:
       - name: Check clean alembic upgrade
         env:
           DATABASE_URL: sqlite+aiosqlite:///clean-upgrade.db
-          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          ENCRYPTION_KEY: aNsQCpPtGWIQwr3nHefOPnjB4y51WxhJ9UcP6hrN5GM=
           BOT_TOKEN: 123456:test
           OWNER_TELEGRAM_ID: "123456789"
           API_ID: "12345"
@@ -70,7 +70,7 @@ jobs:
       - name: Run tests
         env:
           DATABASE_URL: sqlite+aiosqlite:///test.db
-          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          ENCRYPTION_KEY: aNsQCpPtGWIQwr3nHefOPnjB4y51WxhJ9UcP6hrN5GM=
           BOT_TOKEN: 123456:test
           OWNER_TELEGRAM_ID: "123456789"
           API_ID: "12345"

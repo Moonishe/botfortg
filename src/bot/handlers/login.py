@@ -85,69 +85,42 @@ async def cmd_login(
         )
         return
 
-    # Предзаполняем дефолтные значения из конфига или хардкод
-    _default_api_id = settings.api_id if settings.api_id is not None else 2040
-    _default_api_hash = (
-        settings.api_hash
-        if settings.api_hash is not None
-        else "b18441a1ff607e10a989891a5462e627"
-    )
-    await state.update_data(api_id=_default_api_id, api_hash=_default_api_hash)
+    if settings.api_id is None or settings.api_hash is None:
+        await message.answer(
+            "❌ Telegram API credentials не настроены.\n"
+            "Добавь в .env:\n"
+            "API_ID=12345\n"
+            "API_HASH=your_api_hash\n"
+            "Получить: https://my.telegram.org"
+        )
+        return
 
-    await state.set_state(LoginStates.api_id)
-    await message.answer(
-        "🔐 <b>Подключение Telegram-аккаунта</b>\n\n"
-        "Получи <code>api_id</code> и <code>api_hash</code> на https://my.telegram.org → API development tools.\n"
-        "Никому их не отправляй, кроме этого бота. Я храню их в зашифрованном виде.\n\n"
-        f"Введи <b>api_id</b> или напиши <b>1</b> — поставлю дефолтный (<code>{_default_api_id}</code>).\n"
-        f"{CANCEL_HINT}"
-    )
+    await state.update_data(api_id=settings.api_id, api_hash=settings.api_hash)
+    await state.set_state(LoginStates.phone)
+    await message.answer("📞 Введи номер телефона Telegram")
 
 
 @router.message(LoginStates.api_id)
 async def step_api_id(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
-    if text == "1":
-        # Хардкод-дефолт или из .env
-        text = str(settings.api_id if settings.api_id is not None else 2040)
     if not text.isdigit():
         await message.answer("api_id — это число. Попробуй ещё раз или /cancel.")
         return
     await state.update_data(api_id=int(text))
     await state.set_state(LoginStates.api_hash)
-    _default_hash = (
-        settings.api_hash
-        if settings.api_hash is not None
-        else "b18441a1ff607e10a989891a5462e627"
-    )
     await message.answer(
-        "Отлично. Теперь введи <b>api_hash</b> (32 hex-символа).\n"
-        f"Напиши <b>1</b> — поставлю дефолтный (<code>{_default_hash[:4]}••••{_default_hash[-4:]}</code>).\n"
-        "Или введи свой."
+        "Отлично. Теперь введи <b>api_hash</b> (32 hex-символа).\nВведи свой api_hash."
     )
 
 
 @router.message(LoginStates.api_hash)
 async def step_api_hash(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
-    # Auto-accept default api_hash if user types keyword or presses Enter
-    _default_hash = (
-        settings.api_hash
-        if settings.api_hash is not None
-        else "b18441a1ff607e10a989891a5462e627"
-    )
-    if not text or text.lower() in (
-        "дефолтный",
-        "дефолт",
-        "1",
-        "default",
-        "стандартный",
-        "да",
-        "ок",
-        "yes",
-        "ok",
-    ):
-        text = _default_hash
+    if not text:
+        await message.answer(
+            "api_hash не может быть пустым. Попробуй ещё раз или /cancel."
+        )
+        return
     if len(text) != 32 or not all(c in "0123456789abcdefABCDEF" for c in text):
         await message.answer(
             "api_hash должен быть строкой из 32 hex-символов. Попробуй ещё раз или /cancel."

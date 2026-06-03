@@ -63,6 +63,11 @@ async def main() -> None:
 
     await init_db()
 
+    # --- LLM router: initialize global locks (safe: inside event loop) ---
+    from src.llm.router import ensure_locks_initialized
+
+    await ensure_locks_initialized()
+
     # --- Cold-start skill seeding ---
     if settings.skill_seed_on_startup:
         from sqlalchemy import select as _s

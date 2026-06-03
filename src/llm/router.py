@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -163,15 +163,12 @@ class _ProviderMetrics:
 
 _PROVIDER_METRICS: dict[str, _ProviderMetrics] = {}
 _PROVIDER_METRICS_LOCK: asyncio.Lock | None = (
-    None  # lazy-init on first use (Python 3.10+ loop safety)
+    None  # initialized via ensure_locks_initialized() at startup
 )
 
 
 async def _record_provider_success(name: str, latency: float) -> None:
     """Записывает успешный вызов провайдера с замеренной латентностью."""
-    global _PROVIDER_METRICS_LOCK
-    if _PROVIDER_METRICS_LOCK is None:
-        _PROVIDER_METRICS_LOCK = asyncio.Lock()
     now = asyncio.get_running_loop().time()
     async with _PROVIDER_METRICS_LOCK:
         metrics = _PROVIDER_METRICS.get(name)
@@ -186,9 +183,6 @@ async def _record_provider_success(name: str, latency: float) -> None:
 
 async def _record_provider_failure(name: str) -> None:
     """Записывает неудачный вызов провайдера."""
-    global _PROVIDER_METRICS_LOCK
-    if _PROVIDER_METRICS_LOCK is None:
-        _PROVIDER_METRICS_LOCK = asyncio.Lock()
     now = asyncio.get_running_loop().time()
     async with _PROVIDER_METRICS_LOCK:
         metrics = _PROVIDER_METRICS.get(name)
@@ -252,19 +246,31 @@ MAX_RETRIES_PER_KEY = 3
 RETRY_BASE_DELAY = 1.0  # seconds
 _CIRCUIT_BREAKERS: dict[tuple[str, str], _KeyCircuitBreaker] = {}
 _CIRCUIT_BREAKERS_LOCK: asyncio.Lock | None = (
-    None  # lazy-init on first use (Python 3.10+ loop safety)
+    None  # initialized via ensure_locks_initialized() at startup
 )
 
 # Per-purpose лимиты параллельных запросов
 _PURPOSE_SEMAPHORES: dict[str, asyncio.Semaphore] | None = (
-    None  # lazy-init on first use
+    None  # initialized via ensure_locks_initialized() at startup
 )
 
+_locks_initialized = False
 
-async def acquire_purpose_slot(purpose: str) -> asyncio.Semaphore:
-    """Захватывает слот для purpose. Возвращает семафор."""
-    global _PURPOSE_SEMAPHORES
-    if _PURPOSE_SEMAPHORES is None:
+
+async def ensure_locks_initialized() -> None:
+    """Инициализирует глобальные locks внутри event loop контекста.
+
+    Вызывается при старте приложения — безопасная альтернатива lazy-init,
+    который имеет race condition при первом обращении.
+    """
+    global \
+        _PROVIDER_METRICS_LOCK, \
+        _CIRCUIT_BREAKERS_LOCK, \
+        _PURPOSE_SEMAPHORES, \
+        _locks_initialized
+    if not _locks_initialized:
+        _PROVIDER_METRICS_LOCK = asyncio.Lock()
+        _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
         _PURPOSE_SEMAPHORES = {
             "main": asyncio.Semaphore(2),
             "draft": asyncio.Semaphore(1),
@@ -274,6 +280,14 @@ async def acquire_purpose_slot(purpose: str) -> asyncio.Semaphore:
             "urgent": asyncio.Semaphore(2),
             "fallback": asyncio.Semaphore(2),
         }
+        _locks_initialized = True
+
+
+async def acquire_purpose_slot(purpose: str) -> asyncio.Semaphore:
+    """Захватывает слот для purpose. Возвращает семафор."""
+    assert _PURPOSE_SEMAPHORES is not None, (
+        "ensure_locks_initialized() must be called at startup"
+    )
     sem = _PURPOSE_SEMAPHORES.get(purpose)
     if sem is None:
         sem = _PURPOSE_SEMAPHORES.get("fallback", asyncio.Semaphore(1))
@@ -330,10 +344,6 @@ async def _restore_cooldowns(slot_ids: list[int]) -> None:
     """
     if not slot_ids:
         return
-
-    global _CIRCUIT_BREAKERS_LOCK
-    if _CIRCUIT_BREAKERS_LOCK is None:
-        _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
 
     try:
         from sqlalchemy import select
@@ -494,9 +504,6 @@ class MultiKeyProvider:
         При временной ошибке помечает слот как упавший (DB cooldown).
         Записывает метрики для Adaptive Provider Selection.
         """
-        global _CIRCUIT_BREAKERS_LOCK
-        if _CIRCUIT_BREAKERS_LOCK is None:
-            _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
         start_time = asyncio.get_running_loop().time()
         last_error: Exception | None = None
         now = start_time
@@ -708,9 +715,6 @@ class MultiKeyProvider:
         Falls back to regular chat() if no provider supports streaming."""
         # Resolve heavy: explicit True/False wins; if not passed, use _default_heavy
         effective_heavy = self._default_heavy if heavy is _UNSET else heavy
-        global _CIRCUIT_BREAKERS_LOCK
-        if _CIRCUIT_BREAKERS_LOCK is None:
-            _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
         model_override = self._resolve_model_for_task(task_type)
         sem = await acquire_purpose_slot(self._current_purpose)
         try:

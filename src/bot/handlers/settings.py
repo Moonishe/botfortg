@@ -51,6 +51,7 @@ from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
 from src.llm.custom_provider import CustomProvider
 
+from src.bot.handlers._key_input import make_key_handler
 
 logger = logging.getLogger(__name__)
 router = Router(name="settings")
@@ -2303,252 +2304,52 @@ async def _count_slots_for_provider(session, owner, provider: str) -> int:
     return len(slots)
 
 
-@router.message(SettingsStates.waiting_openai_key)
-async def step_openai_key(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with openai key")
-    # Валидируем первый ключ как индикатор; остальные считаем рабочими
-    if not await OpenAIProvider(parts[0]).validate_key():
-        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "openai", ",".join(parts))
-        total = await _count_slots_for_provider(session, owner, "openai")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:openai_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено OpenAI ключей: {count}.\n🔑 В базе OpenAI ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
+# --- API key handlers (созданы через фабрику _key_input.make_key_handler) ---
 
+step_openai_key = make_key_handler(
+    SettingsStates.waiting_openai_key,
+    "openai",
+    OpenAIProvider,
+    provider_label="OpenAI",
+)
+router.message.register(step_openai_key, SettingsStates.waiting_openai_key)
 
-@router.message(SettingsStates.waiting_gemini_key)
-async def step_gemini_key(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with gemini key")
-    # Валидируем первый ключ как индикатор; остальные считаем рабочими
-    if not await GeminiProvider(parts[0]).validate_key():
-        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "gemini", ",".join(parts))
-        total = await _count_slots_for_provider(session, owner, "gemini")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:gemini_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено Gemini ключей: {count}.\n🔑 В базе Gemini ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
+step_gemini_key = make_key_handler(
+    SettingsStates.waiting_gemini_key,
+    "gemini",
+    GeminiProvider,
+)
+router.message.register(step_gemini_key, SettingsStates.waiting_gemini_key)
 
+step_mistral_key = make_key_handler(
+    SettingsStates.waiting_mistral_key,
+    "mistral",
+    MistralProvider,
+)
+router.message.register(step_mistral_key, SettingsStates.waiting_mistral_key)
 
-@router.message(SettingsStates.waiting_mistral_key)
-async def step_mistral_key(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with mistral key")
-    # Валидируем первый ключ как индикатор; остальные считаем рабочими
-    if not await MistralProvider(parts[0]).validate_key():
-        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "mistral", ",".join(parts))
-        total = await _count_slots_for_provider(session, owner, "mistral")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:mistral_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено Mistral ключей: {count}.\n🔑 В базе Mistral ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
+step_cloudflare_key = make_key_handler(
+    SettingsStates.waiting_cloudflare_key,
+    "cloudflare",
+    CloudflareProvider,
+    validation_error_msg="❌ Ключ не работает. Проверь API Token и CLOUDFLARE_ACCOUNT_ID в .env. /cancel.",
+)
+router.message.register(step_cloudflare_key, SettingsStates.waiting_cloudflare_key)
 
+step_deepseek_key = make_key_handler(
+    SettingsStates.waiting_deepseek_key,
+    "deepseek",
+    DeepSeekProvider,
+    provider_label="DeepSeek",
+)
+router.message.register(step_deepseek_key, SettingsStates.waiting_deepseek_key)
 
-@router.message(SettingsStates.waiting_cloudflare_key)
-async def step_cloudflare_key(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with cloudflare key")
-    # Валидируем первый ключ как индикатор; остальные считаем рабочими
-    if not await CloudflareProvider(parts[0]).validate_key():
-        await message.answer(
-            "❌ Ключ не работает. Проверь API Token и CLOUDFLARE_ACCOUNT_ID в .env. /cancel."
-        )
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "cloudflare", ",".join(parts))
-        total = await _count_slots_for_provider(session, owner, "cloudflare")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:cloudflare_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено Cloudflare ключей: {count}.\n🔑 В базе Cloudflare ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
-
-
-@router.message(SettingsStates.waiting_deepseek_key)
-async def step_deepseek_key(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with deepseek key")
-    # Валидируем первый ключ как индикатор; остальные считаем рабочими
-    if not await DeepSeekProvider(parts[0]).validate_key():
-        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "deepseek", ",".join(parts))
-        total = await _count_slots_for_provider(session, owner, "deepseek")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:deepseek_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено DeepSeek ключей: {count}.\n🔑 В базе DeepSeek ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
-
-
-@router.message(SettingsStates.waiting_grok_key)
-async def step_grok_key(message: Message, state: FSMContext) -> None:
-    """Сохраняет Grok API ключ."""
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with grok key")
-    if not await GrokProvider(parts[0]).validate_key():
-        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "grok", ",".join(parts))
-        total = await _count_slots_for_provider(session, owner, "grok")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:grok_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено Grok ключей: {count}.\n🔑 В базе Grok ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
+step_grok_key = make_key_handler(
+    SettingsStates.waiting_grok_key,
+    "grok",
+    GrokProvider,
+)
+router.message.register(step_grok_key, SettingsStates.waiting_grok_key)
 
 
 @router.message(SettingsStates.waiting_mimo_key)
@@ -2658,143 +2459,27 @@ async def cb_mimo_region(callback: CallbackQuery, state: FSMContext) -> None:
         )
 
 
-@router.message(SettingsStates.waiting_groq_key)
-async def step_groq_key(message: Message, state: FSMContext) -> None:
-    """Сохраняет Groq API ключ."""
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with groq key")
-    if not await GroqProvider(parts[0]).validate_key():
-        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "groq", ",".join(parts))
-        total = await _count_slots_for_provider(session, owner, "groq")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:groq_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено Groq ключей: {count}.\n🔑 В базе Groq ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
+step_groq_key = make_key_handler(
+    SettingsStates.waiting_groq_key,
+    "groq",
+    GroqProvider,
+)
+router.message.register(step_groq_key, SettingsStates.waiting_groq_key)
 
+step_deepgram_key = make_key_handler(
+    SettingsStates.waiting_deepgram_key,
+    "deepgram",
+    category="stt",
+)
+router.message.register(step_deepgram_key, SettingsStates.waiting_deepgram_key)
 
-@router.message(SettingsStates.waiting_deepgram_key)
-async def step_deepgram_key(message: Message, state: FSMContext) -> None:
-    """Сохраняет Deepgram API ключ."""
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with deepgram key")
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        for single_key in parts:
-            await add_key_slot(
-                session,
-                owner,
-                "deepgram",
-                single_key,
-                purpose="main",
-                label="deepgram/main",
-                priority=0,
-                category="stt",
-            )
-        total = await _count_slots_for_provider(session, owner, "deepgram")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:deepgram_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено Deepgram ключей: {count}.\n🔑 В базе Deepgram ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
-
-
-@router.message(SettingsStates.waiting_assemblyai_key)
-async def step_assemblyai_key(message: Message, state: FSMContext) -> None:
-    """Сохраняет AssemblyAI API ключ."""
-    raw = (message.text or "").strip()
-    if raw in ("/cancel", "/back", "/menu"):
-        await state.clear()
-        text, kb = await _render_menu(message.from_user.id)
-        await message.answer("❌ Ввод ключа отменён.")
-        await message.answer(text, reply_markup=kb)
-        return
-    if not raw:
-        await message.answer("Пустой ключ. Повтори или /cancel.")
-        return
-    parts = [k.strip() for k in raw.split(",") if k.strip()]
-    if not parts:
-        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:
-        logger.exception("failed to delete message with assemblyai key")
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        for single_key in parts:
-            await add_key_slot(
-                session,
-                owner,
-                "assemblyai",
-                single_key,
-                purpose="main",
-                label="assemblyai/main",
-                priority=0,
-                category="stt",
-            )
-        total = await _count_slots_for_provider(session, owner, "assemblyai")
-    await state.clear()
-    count = len(parts)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Ещё ключ", callback_data="set:input:assemblyai_key")
-    kb.button(text="✅ Назад", callback_data="set:done:key")
-    kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено AssemblyAI ключей: {count}.\n🔑 В базе AssemblyAI ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
+step_assemblyai_key = make_key_handler(
+    SettingsStates.waiting_assemblyai_key,
+    "assemblyai",
+    category="stt",
+    provider_label="AssemblyAI",
+)
+router.message.register(step_assemblyai_key, SettingsStates.waiting_assemblyai_key)
 
 
 # ── Custom provider FSM (4 шага) ──

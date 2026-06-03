@@ -145,7 +145,7 @@ _singalong_search_cache: dict = {}
 _voice_queue: asyncio.Queue = asyncio.Queue(
     maxsize=max(settings.max_voice_queue_size, 1)
 )
-_voice_worker_task: asyncio.Task | None = None
+_voice_worker_tasks: list[asyncio.Task] = []
 
 # Per-user active tasks for priority preemption
 # Light tasks (instant, fast_route, send, draft) preempt heavy tasks (maestro, analysis)
@@ -174,30 +174,40 @@ def _get_waiting_message() -> str:
     return random.choice(_WAITING_MESSAGES)
 
 
-def start_voice_worker() -> asyncio.Task:
-    """Запустить фонового worker'а для транскрипции голоса (если ещё не запущен).
+VOICE_WORKER_COUNT = 2
+
+
+def start_voice_worker() -> list[asyncio.Task]:
+    """Запустить фоновых worker'ов для транскрипции голоса (если ещё не запущены).
 
     Вызывается при старте приложения (main.py).
+    Запускает VOICE_WORKER_COUNT параллельных worker'ов, чтобы очередь не
+    блокировалась при нескольких голосовых подряд.
     """
-    global _voice_worker_task
-    if _voice_worker_task is None or _voice_worker_task.done():
-        _voice_worker_task = asyncio.create_task(
-            _voice_worker(), name="voice-transcription-worker"
-        )
-    return _voice_worker_task
+    global _voice_worker_tasks
+    if not _voice_worker_tasks or all(t.done() for t in _voice_worker_tasks):
+        _voice_worker_tasks = [
+            asyncio.create_task(_voice_worker(), name=f"voice-transcription-worker-{i}")
+            for i in range(VOICE_WORKER_COUNT)
+        ]
+    return _voice_worker_tasks
 
 
 async def stop_voice_worker() -> None:
-    """Остановить voice worker (graceful shutdown)."""
-    global _voice_worker_task
-    if _voice_worker_task and not _voice_worker_task.done():
-        _voice_worker_task.cancel()
-        try:
-            await _voice_worker_task
-        except asyncio.CancelledError:
-            pass
-        _voice_worker_task = None
-        logger.info("Voice transcription worker stopped")
+    """Остановить всех voice worker'ов (graceful shutdown)."""
+    global _voice_worker_tasks
+    for task in _voice_worker_tasks:
+        if not task.done():
+            task.cancel()
+    # Дожидаемся завершения всех отменённых задач
+    results = await asyncio.gather(*_voice_worker_tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
+            logger.warning("Voice worker stopped with error: %s", r)
+    _voice_worker_tasks.clear()
+    logger.info(
+        "Voice transcription workers stopped (%d tasks)", len(_voice_worker_tasks)
+    )
 
 
 async def _voice_worker() -> None:

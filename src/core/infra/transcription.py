@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from io import BytesIO
 from pathlib import Path
 
 from src.db.repo import cache_transcript, get_cached_transcript
@@ -7,6 +8,16 @@ from src.db.session import get_session
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _read_file_bytes(file_path: Path) -> bytes:
+    """Read file bytes in a thread to avoid blocking the event loop."""
+
+    def _read() -> bytes:
+        with open(file_path, "rb") as f:
+            return f.read()
+
+    return await asyncio.to_thread(_read)
 
 
 class TranscriptionService:
@@ -66,12 +77,12 @@ class TranscriptionService:
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=openai_key)
-        with path.open("rb") as f:
-            resp = await client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                language=language,
-            )
+        file_bytes = await _read_file_bytes(path)
+        resp = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=BytesIO(file_bytes),
+            language=language,
+        )
         return resp.text
 
     async def _transcribe_gemini(
@@ -111,14 +122,14 @@ class TranscriptionService:
             "timestamp_granularities": "segment",
         }
 
+        file_bytes = await _read_file_bytes(path)
         async with httpx.AsyncClient(timeout=120.0) as client:
-            with path.open("rb") as f:
-                resp = await client.post(
-                    "https://api.mistral.ai/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {mistral_key}"},
-                    data=data,
-                    files={"file": (path.name, f, mime)},
-                )
+            resp = await client.post(
+                "https://api.mistral.ai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {mistral_key}"},
+                data=data,
+                files={"file": (path.name, BytesIO(file_bytes), mime)},
+            )
             resp.raise_for_status()
             return resp.json().get("text", "")
 
@@ -156,12 +167,12 @@ class TranscriptionService:
             params.setdefault("punctuate", "true")
             params.setdefault("dictation", "false")
 
+        file_bytes = await _read_file_bytes(path)
         async with httpx.AsyncClient(timeout=120.0) as client:
-            with path.open("rb") as f:
-                headers = {"Authorization": f"Bearer {api_key}"}
-                resp = await client.post(
-                    url, headers=headers, params=params, content=f.read()
-                )
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = await client.post(
+                url, headers=headers, params=params, content=file_bytes
+            )
             resp.raise_for_status()
             data = resp.json()
             # Extract text — different providers have different response formats
