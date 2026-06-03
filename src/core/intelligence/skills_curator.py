@@ -14,6 +14,8 @@ from functools import partial
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
+from httpx import HTTPStatusError, RequestError
 
 from src.config import settings
 from src.core.infra.task_manager import task_manager
@@ -688,7 +690,7 @@ async def curator_loop(owner_telegram_id: int) -> None:
             approved = await auto_approve_high_confidence()
             if approved:
                 logger.info("curator_loop: auto-approved %d skills", approved)
-        except Exception:
+        except SQLAlchemyError:
             logger.exception("curator_loop: auto_approve_high_confidence failed")
 
         try:
@@ -703,7 +705,7 @@ async def curator_loop(owner_telegram_id: int) -> None:
                         f"from recent trajectories."
                     ),
                 )
-        except Exception:
+        except (SQLAlchemyError, RequestError, HTTPStatusError):
             logger.exception("curator_loop: suggest_skills_from_trajectories failed")
 
         try:
@@ -719,7 +721,7 @@ async def curator_loop(owner_telegram_id: int) -> None:
                         f"from analysis: {', '.join(names[:5])}."
                     ),
                 )
-        except Exception:
+        except (SQLAlchemyError, RequestError, HTTPStatusError):
             logger.exception("curator_loop: propose_skills_from_analysis failed")
 
         # V3: Auto-rollback regressed skills (0 токенов)
@@ -735,7 +737,7 @@ async def curator_loop(owner_telegram_id: int) -> None:
                         f"Check /skills for details."
                     ),
                 )
-        except Exception:
+        except SQLAlchemyError:
             logger.exception("curator_loop: rollback_all_regressed failed")
 
         # Health decay: отключаем мёртвые навыки
@@ -746,7 +748,7 @@ async def curator_loop(owner_telegram_id: int) -> None:
                 logger.info(
                     f"Decayed {decayed} stale skills for user {owner_telegram_id}"
                 )
-        except Exception:
+        except SQLAlchemyError:
             logger.exception("curator_loop: decay_stale_skills failed")
 
         await asyncio.sleep(interval_sec)

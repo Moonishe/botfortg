@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import enum
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
@@ -430,7 +431,7 @@ async def _restore_cooldowns(slot_ids: list[int]) -> None:
                     count,
                     provider_name,
                 )
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("Failed to restore cooldowns from DB")
 
 
@@ -584,7 +585,7 @@ class MultiKeyProvider:
                             try:
                                 async with get_session() as fresh_s:
                                     await mark_key_used(fresh_s, self._slot_ids[idx])
-                            except Exception:
+                            except SQLAlchemyError:
                                 logger.exception(
                                     "Failed to mark key slot %d as used",
                                     self._slot_ids[idx],
@@ -625,7 +626,7 @@ class MultiKeyProvider:
                                 await mark_key_failure(
                                     fresh_s, self._slot_ids[idx], error_msg
                                 )
-                        except Exception:
+                        except SQLAlchemyError:
                             logger.exception(
                                 "Failed to mark key slot %d as failed",
                                 self._slot_ids[idx],
@@ -777,7 +778,7 @@ class MultiKeyProvider:
                             try:
                                 async with get_session() as fresh_s:
                                     await mark_key_used(fresh_s, self._slot_ids[idx])
-                            except Exception:
+                            except SQLAlchemyError:
                                 logger.exception(
                                     "Failed to mark key slot %d as used",
                                     self._slot_ids[idx],
@@ -820,7 +821,7 @@ class MultiKeyProvider:
                                         await mark_key_failure(
                                             fresh_s, self._slot_ids[idx], error_msg
                                         )
-                                except Exception:
+                                except SQLAlchemyError:
                                     logger.exception(
                                         "Failed to mark key slot %d as failed",
                                         self._slot_ids[idx],
@@ -876,7 +877,7 @@ class MultiKeyProvider:
     async def validate_key(self) -> bool:
         try:
             return await self._try_with_retry(lambda p: p.validate_key())
-        except Exception:
+        except Exception:  # TODO: specify exceptions
             return False
 
     async def close(self) -> None:
@@ -1419,7 +1420,7 @@ async def build_provider(
                     )
             await cache_put(cache_key, result, ttl=300)
             return result
-    except Exception:
+    except (SQLAlchemyError, ValueError, TypeError):
         logger.exception("LlmKeySlot lookup failed, falling back to old ApiKey table")
 
     # Fallback: старый ApiKey
@@ -1482,8 +1483,8 @@ async def build_provider(
             else:
                 logger.warning("build_provider: нет ключей для провайдера.")
                 return None
-        except Exception:
-            pass
+        except (SQLAlchemyError, ValueError):
+            logger.exception("Failed to check key cooldown slots")
         return None
     if len(providers) > 1:
         logger.info(

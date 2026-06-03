@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass, field
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
 
 from src.config import parse_telethon_proxy, settings
@@ -115,7 +115,7 @@ class UserbotManager:
                             "FloodWait retry: session expired for %s",
                             user.telegram_id,
                         )
-                except Exception:
+                except (RPCError, ConnectionError):
                     logger.exception(
                         "Failed to restore client for user %s", user.telegram_id
                     )
@@ -140,11 +140,11 @@ class UserbotManager:
         if client is not None:
             try:
                 await client.log_out()
-            except Exception:
+            except RPCError:
                 logger.exception("log_out failed")
             try:
                 await client.disconnect()
-            except Exception:
+            except RPCError:
                 logger.exception("userbot disconnect failed")
             finally:
                 self._clients.pop(telegram_id, None)
@@ -170,7 +170,7 @@ class UserbotManager:
         if pending is not None:
             try:
                 await pending.client.disconnect()
-            except Exception:
+            except RPCError:
                 logger.exception("userbot disconnect failed")
 
     def clear_pending(self, telegram_id: int) -> PendingLogin | None:
@@ -191,7 +191,7 @@ class UserbotManager:
         for tg_id, client in list(self._clients.items()):
             try:
                 await client.disconnect()
-            except Exception:
+            except RPCError:
                 logger.exception("Error disconnecting client %s", tg_id)
         self._clients.clear()
 
@@ -199,7 +199,7 @@ class UserbotManager:
         for tg_id, pending in list(self._pending.items()):
             try:
                 await pending.client.disconnect()
-            except Exception:
+            except RPCError:
                 logger.exception("Error disconnecting pending client %s", tg_id)
         self._pending.clear()
 

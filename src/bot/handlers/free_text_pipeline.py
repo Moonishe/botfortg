@@ -8,6 +8,8 @@ import sys
 import time
 import uuid
 
+from httpx import RequestError, HTTPStatusError
+
 from src.config import settings
 
 from aiogram import F, Router
@@ -19,6 +21,7 @@ from aiogram.types import (
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramAPIError
 
 from src.bot.filters import OwnerOnly
 from src.core.actions.action_guard import guard_intent
@@ -32,6 +35,8 @@ from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 from src.core.intelligence.maestro import run_pipeline
 from src.core.memory import conversation_context as ctx_store
 from src.core.memory.memory_recall import recall
+from sqlalchemy.exc import SQLAlchemyError
+
 from src.db.repo import add_memory, get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
@@ -116,7 +121,37 @@ logger = logging.getLogger(__name__)
 
 # ── Follow-up context ────────────────────────────────────────────────
 
-_last_intent_ctx: dict[int, dict] = {}
+
+class _IntentContextCache:
+    def __init__(self, ttl_sec: float = 900.0):
+        self._cache: dict[int, dict] = {}
+        self._ttl = ttl_sec
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: int) -> dict | None:
+        async with self._lock:
+            entry = self._cache.get(key)
+            if not entry or time.monotonic() > entry["expires_at"]:
+                self._cache.pop(key, None)
+                return None
+            return entry
+
+    async def set(self, key: int, value: dict) -> None:
+        async with self._lock:
+            self._cache[key] = {
+                **value,
+                "expires_at": time.monotonic() + self._ttl,
+            }
+
+    async def cleanup_stale(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            stale_keys = [k for k, v in self._cache.items() if now > v["expires_at"]]
+            for k in stale_keys:
+                self._cache.pop(k, None)
+
+
+_last_intent_ctx = _IntentContextCache(ttl_sec=900.0)
 _LAST_INTENT_TTL = 900.0
 
 # ── Pending tool confirmations ────────────────────────────────────────
@@ -137,7 +172,7 @@ async def _get_anti_ai_mode(owner_telegram_id: int) -> str:
             mode = getattr(user_settings, "anti_ai_mode", None)
             enabled = getattr(user_settings, "anti_ai_enabled", None)
             return normalize_anti_ai_mode(mode, enabled=enabled)
-    except Exception:
+    except SQLAlchemyError:
         logger.debug("failed to load anti_ai_mode", exc_info=True)
         return "off"
 
@@ -461,25 +496,21 @@ async def _maybe_auto_save_facts(
                     )
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except (RequestError, HTTPStatusError, SQLAlchemyError, json.JSONDecodeError):
             logger.debug("Auto-save facts skipped", exc_info=True)
 
     track_ff(asyncio.create_task(_do_save()))
 
 
-def _save_intent_context(tg_id: int, intent: dict) -> None:
-    _last_intent_ctx[tg_id] = {
-        "intent": intent,
-        "expires_at": time.monotonic() + _LAST_INTENT_TTL,
-    }
+async def _save_intent_context(tg_id: int, intent: dict) -> None:
+    await _last_intent_ctx.set(tg_id, {"intent": intent})
 
 
-def _detect_followup(raw: str, tg_id: int) -> tuple[dict, str] | None:
+async def _detect_followup(raw: str, tg_id: int) -> tuple[dict, str] | None:
     """Если raw — продолжение предыдущего intent'а, вернуть (модифицированный intent, update_type).
     update_type: "append", "replace", "multi_add". Возвращает None если не продолжение."""
-    entry = _last_intent_ctx.get(tg_id)
-    if not entry or time.monotonic() > entry["expires_at"]:
-        _last_intent_ctx.pop(tg_id, None)
+    entry = await _last_intent_ctx.get(tg_id)
+    if not entry:
         return None
     prev = entry["intent"]
     stripped = raw.strip().lower()
@@ -685,7 +716,9 @@ async def _dag_dispatch(
         for sub in sub_intents:
             try:
                 await _dispatch(sub, message, state, userbot_manager, tz_name=tz_name)
-            except Exception:
+            except (
+                Exception
+            ):  # TODO: specify exceptions (_dispatch can raise many types)
                 logger.exception(
                     "DAG fallback: sub-intent %s failed", sub.get("intent", "?")
                 )
@@ -847,7 +880,7 @@ async def check_instructions(
                         )
                     )
                     return True
-    except Exception:
+    except (SQLAlchemyError, TelegramAPIError, RequestError, HTTPStatusError):
         logger.exception("adaptive instruction check failed")
     return False
 
@@ -917,7 +950,7 @@ async def check_contact_rules(
                 sanitize_html(f"⚠️ Не удалось сохранить правило для {contact.label()}.")
             )
         return True
-    except Exception:
+    except (SQLAlchemyError, TelegramAPIError, RequestError, HTTPStatusError):
         logger.exception("check_contact_rules failed")
         return False
 
@@ -949,10 +982,10 @@ async def check_persona(raw: str, owner_telegram_id: int, message: Message) -> b
         # Не блокирует — возвращает False, чтобы сообщение обрабатывалось дальше
         try:
             await auto_adapt_from_context(owner_telegram_id, raw, provider=None)
-        except Exception:
+        except (RequestError, HTTPStatusError):
             logger.debug("auto_adapt_from_context failed", exc_info=True)
 
-    except Exception:
+    except (RequestError, HTTPStatusError, TelegramAPIError):
         logger.exception("adaptive persona check failed")
     return False
 
@@ -967,7 +1000,7 @@ async def check_followup(
     turn_started: float,
 ) -> bool:
     """Проверяет follow-up контекст. Возвращает True если обработано."""
-    followup = _detect_followup(raw, owner_telegram_id)
+    followup = await _detect_followup(raw, owner_telegram_id)
     if followup:
         intent, _update_type = followup
         await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
@@ -984,7 +1017,7 @@ async def check_followup(
             )
         except Exception:
             logger.debug("record_action failed in followup", exc_info=True)
-        _save_intent_context(owner_telegram_id, intent)
+        await _save_intent_context(owner_telegram_id, intent)
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -1302,7 +1335,7 @@ async def execute_fast_route(
         for sub in intent.get("actions", intent.get("intents", [])):
             _learn_routing(raw, sub.get("intent", ""))
 
-    _save_intent_context(owner_telegram_id, intent)
+    await _save_intent_context(owner_telegram_id, intent)
 
     _fire_record_trajectory(
         owner_telegram_id,
@@ -1400,7 +1433,7 @@ async def execute_maestro(
                     "Upgraded to deep recall: %d facts found in thinking time",
                     len(_deep.facts),
                 )
-        except Exception:
+        except (SQLAlchemyError, RequestError, HTTPStatusError):
             logger.debug("Enhanced recall in thinking time failed", exc_info=True)
     try:
         pipeline_result = await run_pipeline(
@@ -1488,7 +1521,7 @@ async def execute_maestro(
                 )
 
                 style_block = await get_or_update_style_profile(owner_telegram_id)
-            except Exception:
+            except (SQLAlchemyError, RequestError, HTTPStatusError):
                 style_block = None
 
             if settings.streaming_enabled:
@@ -1508,10 +1541,10 @@ async def execute_maestro(
                             display_text = full_text + settings.streaming_cursor
                             try:
                                 await sent_msg.edit_text(display_text[:4000])
-                            except Exception:
+                            except TelegramAPIError:
                                 pass  # message deleted or too old
                             last_update = now
-                except Exception:
+                except (RequestError, HTTPStatusError):
                     logger.debug("Stream interrupted", exc_info=True)
             else:
                 # Non-streaming: accumulate text silently
@@ -1520,13 +1553,13 @@ async def execute_maestro(
                 try:
                     async for chunk in stream:
                         full_text += chunk
-                except Exception:
+                except (RequestError, HTTPStatusError):
                     logger.debug("Stream interrupted", exc_info=True)
 
             if not full_text.strip():
                 try:
                     await sent_msg.edit_text("⚠️ Не получилось сгенерировать ответ")
-                except Exception:
+                except TelegramAPIError:
                     await message.answer("⚠️ Не получилось сгенерировать ответ")
                 return True
 
@@ -1553,7 +1586,7 @@ async def execute_maestro(
                     humanized = await humanize_deep(
                         humanized, provider, user_style=style_block or ""
                     )
-                except Exception:
+                except (RequestError, HTTPStatusError):
                     logger.debug("humanize_deep failed on streamed text", exc_info=True)
 
             humanizer_changed = humanized != original_text
@@ -1565,7 +1598,7 @@ async def execute_maestro(
                 await sent_msg.edit_text(
                     response_text[:4000], reply_markup=memory_quick_keyboard()
                 )
-            except Exception:
+            except TelegramAPIError:
                 await safe_answer(
                     message, response_text, reply_markup=memory_quick_keyboard()
                 )
@@ -1656,7 +1689,7 @@ async def execute_maestro(
                 )
 
                 style_block = await get_or_update_style_profile(owner_telegram_id)
-            except Exception:
+            except (SQLAlchemyError, RequestError, HTTPStatusError):
                 style_block = None
 
             # Stage 1: Anti-AI mode (off/log/fix). Fix clips endings and applies light replacements.
@@ -1684,7 +1717,7 @@ async def execute_maestro(
                     humanized = await humanize_deep(
                         humanized, provider, user_style=user_style_hint
                     )
-                except Exception:
+                except (RequestError, HTTPStatusError):
                     logger.debug(
                         "humanize_deep failed, using light humanized", exc_info=True
                     )

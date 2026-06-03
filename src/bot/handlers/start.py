@@ -15,6 +15,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
+from src.bot.callbacks import OnboardingCB, SettingsCB
 from src.bot.filters import OwnerOnly, is_onboarded
 from src.bot.states import CustomProviderStates, OnboardingStates
 from src.db.models._contacts import Contact
@@ -112,7 +113,7 @@ def _greeting_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🎭 Личность", callback_data="set:sec:personality"
+                    text="🎭 Личность", callback_data=SettingsCB.section("personality")
                 ),
             ],
         ]
@@ -136,7 +137,7 @@ async def cmd_start(message: Message) -> None:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🚀 Начать", callback_data="onboarding:start"
+                    text="🚀 Начать", callback_data=OnboardingCB.start()
                 ),
             ],
         ]
@@ -265,7 +266,7 @@ async def cb_skip_onboarding(callback: CallbackQuery) -> None:
 # ─── Step 1: Welcome → "🚀 Начать" callback ───────────────────────────
 
 
-@router.callback_query(F.data == "onboarding:start")
+@router.callback_query(F.data == OnboardingCB.start())
 async def cb_onboarding_start(callback: CallbackQuery, state: FSMContext) -> None:
     """Пользователь нажал «Начать» — переходим к шагу авторизации."""
     await state.set_state(OnboardingStates.waiting_login)
@@ -293,7 +294,7 @@ async def _send_login_step(chat_id: int, bot, state: FSMContext | None = None) -
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔑 /login", callback_data="onboarding:hint_login"
+                    text="🔑 /login", callback_data=OnboardingCB.hint_login()
                 ),
             ],
         ]
@@ -306,7 +307,7 @@ async def _send_login_step(chat_id: int, bot, state: FSMContext | None = None) -
     )
 
 
-@router.callback_query(F.data == "onboarding:hint_login")
+@router.callback_query(F.data == OnboardingCB.hint_login())
 async def cb_onboarding_hint_login(callback: CallbackQuery) -> None:
     """Подсказка как отправить /login."""
     await callback.answer()
@@ -353,61 +354,77 @@ async def _send_llm_key_step(chat_id: int, bot) -> None:
     kb = InlineKeyboardBuilder()
     # Row 1: OpenAI, Gemini
     kb.row(
-        InlineKeyboardButton(text="🤖 OpenAI", callback_data="onb:provider:openai"),
-        InlineKeyboardButton(text="🔮 Gemini", callback_data="onb:provider:gemini"),
+        InlineKeyboardButton(
+            text="🤖 OpenAI", callback_data=OnboardingCB.provider("openai")
+        ),
+        InlineKeyboardButton(
+            text="🔮 Gemini", callback_data=OnboardingCB.provider("gemini")
+        ),
     )
     # Row 2: Mistral, Anthropic
     kb.row(
-        InlineKeyboardButton(text="🌪️ Mistral", callback_data="onb:provider:mistral"),
         InlineKeyboardButton(
-            text="🧬 Anthropic", callback_data="onb:provider:anthropic"
+            text="🌪️ Mistral", callback_data=OnboardingCB.provider("mistral")
+        ),
+        InlineKeyboardButton(
+            text="🧬 Anthropic", callback_data=OnboardingCB.provider("anthropic")
         ),
     )
     # Row 3: DeepSeek, Grok
     kb.row(
-        InlineKeyboardButton(text="🐋 DeepSeek", callback_data="onb:provider:deepseek"),
-        InlineKeyboardButton(text="⚡ Grok (xAI)", callback_data="onb:provider:grok"),
+        InlineKeyboardButton(
+            text="🐋 DeepSeek", callback_data=OnboardingCB.provider("deepseek")
+        ),
+        InlineKeyboardButton(
+            text="⚡ Grok (xAI)", callback_data=OnboardingCB.provider("grok")
+        ),
     )
     # Row 4: Groq, MiMo
     kb.row(
-        InlineKeyboardButton(text="🚀 Groq", callback_data="onb:provider:groq"),
         InlineKeyboardButton(
-            text="📱 MiMo (Xiaomi)", callback_data="onb:provider:mimo"
+            text="🚀 Groq", callback_data=OnboardingCB.provider("groq")
+        ),
+        InlineKeyboardButton(
+            text="📱 MiMo (Xiaomi)", callback_data=OnboardingCB.provider("mimo")
         ),
     )
     # Row 5: Cloudflare, OpenRouter
     kb.row(
         InlineKeyboardButton(
-            text="☁️ Cloudflare", callback_data="onb:provider:cloudflare"
+            text="☁️ Cloudflare", callback_data=OnboardingCB.provider("cloudflare")
         ),
         InlineKeyboardButton(
-            text="🔗 OpenRouter", callback_data="onb:provider:openrouter"
+            text="🔗 OpenRouter", callback_data=OnboardingCB.provider("openrouter")
         ),
     )
     # Row 6: TTS providers (collapsed)
     kb.row(
-        InlineKeyboardButton(text="🔊 TTS (озвучка)", callback_data="onb:category:tts"),
+        InlineKeyboardButton(
+            text="🔊 TTS (озвучка)", callback_data=OnboardingCB.category("tts")
+        ),
     )
     # Row 7: STT providers (transcription)
     kb.row(
         InlineKeyboardButton(
-            text="🎙️ STT (транскрипция)", callback_data="onb:category:stt"
+            text="🎙️ STT (транскрипция)", callback_data=OnboardingCB.category("stt")
         ),
     )
     # Row 8: Custom provider
     kb.row(
         InlineKeyboardButton(
-            text="➕ Свой провайдер", callback_data="onb:custom:start"
+            text="➕ Свой провайдер", callback_data=OnboardingCB.custom("start")
         ),
     )
     # Row 9: Skip
     kb.row(
-        InlineKeyboardButton(text="⏭️ Пропустить", callback_data="onb:skip:llm_key"),
+        InlineKeyboardButton(
+            text="⏭️ Пропустить", callback_data=OnboardingCB.SKIP_LLM_KEY
+        ),
     )
     await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
 
 
-@router.callback_query(F.data.startswith("onb:provider:"))
+@router.callback_query(F.data.startswith(OnboardingCB.provider("")))
 async def cb_onboarding_pick_provider(call: CallbackQuery, state: FSMContext) -> None:
     """Пользователь выбрал провайдера — запрашиваем ключ."""
     provider = call.data.split(":", 2)[2]
@@ -434,8 +451,10 @@ async def _send_mimo_region_step(chat_id: int, bot) -> None:
         label = {"eu": "🇪🇺 EU", "us": "🇺🇸 US", "asia": "🌏 Asia"}.get(
             region_key, region_key.upper()
         )
-        kb.button(text=label, callback_data=f"onb:mimo_region:{region_key}")
-    kb.button(text="⏭ Пропустить (Asia)", callback_data="onb:mimo_region:skip")
+        kb.button(text=label, callback_data=OnboardingCB.mimo_region(region_key))
+    kb.button(
+        text="⏭ Пропустить (Asia)", callback_data=OnboardingCB.mimo_region("skip")
+    )
     kb.adjust(2)
     await bot.send_message(
         chat_id,
@@ -450,7 +469,7 @@ async def _send_mimo_region_step(chat_id: int, bot) -> None:
     )
 
 
-@router.callback_query(F.data.startswith("onb:mimo_region:"))
+@router.callback_query(F.data.startswith(OnboardingCB.mimo_region("")))
 async def cb_onboarding_mimo_region(call: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает выбор региона MiMo в онбординге."""
     region_raw = call.data.split(":", 2)[2]
@@ -493,8 +512,8 @@ async def cb_onboarding_mimo_region(call: CallbackQuery, state: FSMContext) -> N
 
     await state.set_state(OnboardingStates.waiting_llm_key)
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:goback")
-    kb.button(text="✅ Закончить", callback_data="onb:done:keys")
+    kb.button(text="➕ Добавить ещё ключ", callback_data=OnboardingCB.GOBACK)
+    kb.button(text="✅ Закончить", callback_data=OnboardingCB.DONE_KEYS)
     kb.adjust(2)
     if call.message:
         await call.message.edit_text(
@@ -546,8 +565,8 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
 
     await state.set_state(OnboardingStates.waiting_llm_key)  # остаёмся в этом стейте
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:goback")
-    kb.button(text="✅ Закончить", callback_data="onb:done:keys")
+    kb.button(text="➕ Добавить ещё ключ", callback_data=OnboardingCB.GOBACK)
+    kb.button(text="✅ Закончить", callback_data=OnboardingCB.DONE_KEYS)
     kb.adjust(2)
     await message.answer(
         f"✅ Ключ <b>{provider_display_name(provider)}</b> сохранён и проверен!\n\n"
@@ -556,7 +575,7 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
     )
 
 
-@router.callback_query(F.data == "onb:goback")
+@router.callback_query(F.data == OnboardingCB.GOBACK)
 async def cb_onboarding_more_keys(call: CallbackQuery, state: FSMContext) -> None:
     """Пользователь хочет добавить ещё ключей — возвращаем к выбору провайдера."""
     await call.answer()
@@ -565,7 +584,7 @@ async def cb_onboarding_more_keys(call: CallbackQuery, state: FSMContext) -> Non
     await call.message.delete()
 
 
-@router.callback_query(F.data == "onb:done:keys")
+@router.callback_query(F.data == OnboardingCB.DONE_KEYS)
 async def cb_onboarding_done_keys(call: CallbackQuery, state: FSMContext) -> None:
     """Пользователь закончил с ключами — переход к timezone."""
     await call.answer()
@@ -577,7 +596,7 @@ async def cb_onboarding_done_keys(call: CallbackQuery, state: FSMContext) -> Non
 # ─── Step 2b: TTS provider category ──────────────────────────────────
 
 
-@router.callback_query(F.data == "onb:category:tts")
+@router.callback_query(F.data == OnboardingCB.category("tts"))
 async def cb_onboarding_tts_category(call: CallbackQuery) -> None:
     """Показывает TTS провайдеров."""
     await call.answer()
@@ -588,14 +607,20 @@ async def cb_onboarding_tts_category(call: CallbackQuery) -> None:
     )
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="🎵 OpenAI TTS", callback_data="onb:tts:openai-tts"),
-        InlineKeyboardButton(text="📱 MiMo TTS", callback_data="onb:tts:mimo-tts"),
+        InlineKeyboardButton(
+            text="🎵 OpenAI TTS", callback_data=OnboardingCB.tts("openai-tts")
+        ),
+        InlineKeyboardButton(
+            text="📱 MiMo TTS", callback_data=OnboardingCB.tts("mimo-tts")
+        ),
     )
     kb.row(
-        InlineKeyboardButton(text="🌪️ Mistral TTS", callback_data="onb:tts:mistral-tts"),
+        InlineKeyboardButton(
+            text="🌪️ Mistral TTS", callback_data=OnboardingCB.tts("mistral-tts")
+        ),
     )
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=OnboardingCB.BACK),
     )
     await call.message.edit_text(text, reply_markup=kb.as_markup())
 
@@ -608,28 +633,34 @@ async def _send_stt_key_step(chat_id: int, bot: Bot) -> None:
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
-            text="🎯 Whisper (OpenAI)", callback_data="onb:stt:openai"
+            text="🎯 Whisper (OpenAI)", callback_data=OnboardingCB.stt("openai")
         ),
-        InlineKeyboardButton(text="💎 Deepgram", callback_data="onb:stt:deepgram"),
+        InlineKeyboardButton(
+            text="💎 Deepgram", callback_data=OnboardingCB.stt("deepgram")
+        ),
     )
     kb.row(
-        InlineKeyboardButton(text="🤖 Gemini STT", callback_data="onb:stt:gemini"),
-        InlineKeyboardButton(text="🎤 AssemblyAI", callback_data="onb:stt:assemblyai"),
+        InlineKeyboardButton(
+            text="🤖 Gemini STT", callback_data=OnboardingCB.stt("gemini")
+        ),
+        InlineKeyboardButton(
+            text="🎤 AssemblyAI", callback_data=OnboardingCB.stt("assemblyai")
+        ),
     )
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=OnboardingCB.BACK),
     )
     await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
 
 
-@router.callback_query(F.data == "onb:category:stt")
+@router.callback_query(F.data == OnboardingCB.category("stt"))
 async def cb_onboarding_stt_category(call: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает выбор категории STT."""
     await state.set_state(OnboardingStates.waiting_stt_provider)
     await _send_stt_key_step(call.message.chat.id, call.bot)
 
 
-@router.callback_query(F.data.startswith("onb:stt:"))
+@router.callback_query(F.data.startswith(OnboardingCB.stt("")))
 async def cb_onboarding_stt_provider(call: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает выбор конкретного STT провайдера."""
     provider = call.data.split(":")[-1]  # openai, deepgram, gemini, assemblyai
@@ -650,12 +681,14 @@ async def cb_onboarding_stt_provider(call: CallbackQuery, state: FSMContext) -> 
 
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:category:stt"),
+        InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=OnboardingCB.category("stt")
+        ),
     )
     await call.message.edit_text(text, reply_markup=kb.as_markup())
 
 
-@router.callback_query(F.data == "onb:back")
+@router.callback_query(F.data == OnboardingCB.BACK)
 async def cb_onboarding_back(call: CallbackQuery, state: FSMContext) -> None:
     """Возврат назад в onboarding."""
     await call.answer()
@@ -723,12 +756,16 @@ async def handle_stt_key_input(message: Message, state: FSMContext) -> None:
         kb = InlineKeyboardBuilder()
         kb.row(
             InlineKeyboardButton(
-                text="➕ Ещё STT ключ", callback_data="onb:category:stt"
+                text="➕ Ещё STT ключ", callback_data=OnboardingCB.category("stt")
             ),
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="go_settings"),
+            InlineKeyboardButton(
+                text="⚙️ Настройки", callback_data=OnboardingCB.GO_SETTINGS
+            ),
         )
         kb.row(
-            InlineKeyboardButton(text="✅ Завершить", callback_data="onb:finish"),
+            InlineKeyboardButton(
+                text="✅ Завершить", callback_data=OnboardingCB.FINISH
+            ),
         )
         await message.reply(text, reply_markup=kb.as_markup())
         await state.clear()
@@ -745,13 +782,13 @@ async def on_stt_key_message(message: Message, state: FSMContext) -> None:
     await handle_stt_key_input(message, state)
 
 
-@router.callback_query(F.data.startswith("onb:tts:"))
+@router.callback_query(F.data.startswith(OnboardingCB.tts("")))
 async def cb_onboarding_tts_pick(call: CallbackQuery) -> None:
     """TTS провайдеры — заглушка, будут доступны позже."""
     await call.answer("🔊 TTS будет доступен в следующем обновлении", show_alert=True)
 
 
-@router.callback_query(F.data == "onb:back:provider_select")
+@router.callback_query(F.data == OnboardingCB.back_extra("provider_select"))
 async def cb_onboarding_back_to_providers(call: CallbackQuery) -> None:
     """Возвращается к выбору провайдера."""
     await call.answer()
@@ -759,7 +796,7 @@ async def cb_onboarding_back_to_providers(call: CallbackQuery) -> None:
     await call.message.delete()
 
 
-@router.callback_query(F.data == "onb:skip:llm_key")
+@router.callback_query(F.data == OnboardingCB.SKIP_LLM_KEY)
 async def cb_onboarding_skip_llm(call: CallbackQuery, state: FSMContext) -> None:
     """Пропускает добавление LLM-ключа."""
     await call.answer()
@@ -768,7 +805,7 @@ async def cb_onboarding_skip_llm(call: CallbackQuery, state: FSMContext) -> None
     await _send_timezone_step(call.message.chat.id, call.bot)
 
 
-@router.callback_query(F.data == "onb:custom:start")
+@router.callback_query(F.data == OnboardingCB.custom("start"))
 async def cb_onboarding_custom_start(call: CallbackQuery, state: FSMContext) -> None:
     """Начинает добавление кастомного провайдера."""
     await call.answer()
@@ -878,8 +915,8 @@ async def step_custom_provider_model(message: Message, state: FSMContext) -> Non
 
     await state.set_state(OnboardingStates.waiting_llm_key)
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:goback")
-    kb.button(text="✅ Закончить", callback_data="onb:done:keys")
+    kb.button(text="➕ Добавить ещё ключ", callback_data=OnboardingCB.GOBACK)
+    kb.button(text="✅ Закончить", callback_data=OnboardingCB.DONE_KEYS)
     kb.adjust(2)
     await message.answer(
         f"✅ Кастомный провайдер <b>{provider_name}</b> добавлен!\n"
@@ -1002,7 +1039,11 @@ async def _send_timezone_step(chat_id: int, bot) -> None:
     for tz_name in TZ_PRESETS:
         label = _tz_button_label(tz_name)
         rows.append(
-            [InlineKeyboardButton(text=label, callback_data=f"onboarding:tz:{tz_name}")]
+            [
+                InlineKeyboardButton(
+                    text=label, callback_data=OnboardingCB.timezone(tz_name)
+                )
+            ]
         )
 
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1024,7 +1065,7 @@ def _tz_button_label(tz_name: str) -> str:
         return tz_name
 
 
-@router.callback_query(F.data.startswith("onboarding:tz:"))
+@router.callback_query(F.data.startswith(OnboardingCB.timezone("")))
 async def cb_onboarding_tz(callback: CallbackQuery, state: FSMContext) -> None:
     """Пользователь выбрал часовой пояс из списка."""
     tz_value = callback.data[len("onboarding:tz:") :]
@@ -1093,19 +1134,19 @@ async def _send_sync_step(chat_id: int, bot) -> None:
             [
                 InlineKeyboardButton(
                     text="📱 Все личные чаты",
-                    callback_data="onboarding:sync:all",
+                    callback_data=OnboardingCB.sync("all"),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="📂 Выбрать папки",
-                    callback_data="onboarding:sync:folders",
+                    callback_data=OnboardingCB.sync("folders"),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="⏭ Пропустить",
-                    callback_data="onboarding:sync:skip",
+                    callback_data=OnboardingCB.sync("skip"),
                 ),
             ],
         ]
@@ -1119,7 +1160,7 @@ async def _send_sync_step(chat_id: int, bot) -> None:
     )
 
 
-@router.callback_query(F.data == "onboarding:sync:all")
+@router.callback_query(F.data == OnboardingCB.sync("all"))
 async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> None:
     """Пользователь выбрал синхронизацию всех личных чатов."""
     async with get_session() as session:
@@ -1165,7 +1206,7 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
             pass
 
 
-@router.callback_query(F.data == "onboarding:sync:folders")
+@router.callback_query(F.data == OnboardingCB.sync("folders"))
 async def cb_onboarding_sync_folders(
     callback: CallbackQuery, state: FSMContext
 ) -> None:
@@ -1235,7 +1276,7 @@ async def step_onboarding_sync_folders_text(
     )
 
 
-@router.callback_query(F.data == "onboarding:sync:skip")
+@router.callback_query(F.data == OnboardingCB.sync("skip"))
 async def cb_onboarding_sync_skip(callback: CallbackQuery, state: FSMContext) -> None:
     """Пользователь пропустил синхронизацию."""
     await callback.answer("Ок, можно настроить позже в /settings → Синхронизация")
@@ -1253,6 +1294,33 @@ async def cb_onboarding_sync_skip(callback: CallbackQuery, state: FSMContext) ->
     await _finish_onboarding(
         callback.message.chat.id, callback.bot, tg_id=callback.from_user.id
     )
+
+
+# ─── STT post-save callbacks ────────────────────────────────────────
+
+
+@router.callback_query(F.data == OnboardingCB.FINISH)
+async def cb_onboarding_finish(call: CallbackQuery) -> None:
+    """Завершает онбординг с кнопки «✅ Завершить» после сохранения STT-ключа."""
+    await call.answer()
+    if call.message is None:
+        return
+    await _finish_onboarding(call.message.chat.id, call.bot, tg_id=call.from_user.id)
+
+
+@router.callback_query(F.data == OnboardingCB.GO_SETTINGS)
+async def cb_onboarding_go_settings(call: CallbackQuery, state: FSMContext) -> None:
+    """Открывает настройки с кнопки «⚙️ Настройки» после сохранения STT-ключа."""
+    await call.answer()
+    await state.clear()
+    from src.bot.handlers.settings_menu import _render_menu
+
+    text, kb = await _render_menu(call.from_user.id)
+    if call.message:
+        try:
+            await call.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
 
 
 # ─── Finish ────────────────────────────────────────────────────────────

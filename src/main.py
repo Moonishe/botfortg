@@ -158,7 +158,20 @@ async def main() -> None:
     start_voice_worker()
     notification_queue.start()
 
-    # Уведомить владельца об обновлении (фоном, ждёт 10с чтобы бот стартовал)
+    from src.bot.handlers.free_text import _singalong_search_cache
+    from src.bot.handlers.free_text_pipeline import _last_intent_ctx
+
+    async def _cleanup_global_state():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await _singalong_search_cache.cleanup_stale()
+                await _last_intent_ctx.cleanup_stale()
+            except Exception:
+                logger.debug("cleanup_stale failed", exc_info=True)
+
+    asyncio.create_task(_cleanup_global_state())
+
     asyncio.create_task(check_and_notify_update())
 
     from src.core.actions.vector_store import get_vector_store

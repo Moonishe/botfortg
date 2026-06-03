@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, distinct, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.db.models import (
     Commitment,
@@ -410,7 +411,7 @@ async def add_memory(
                     )
                 )
                 contact_name = contact_result.scalar_one_or_none()
-            except Exception:
+            except SQLAlchemyError:
                 contact_name = None
 
         await hooks.emit(
@@ -422,7 +423,7 @@ async def add_memory(
             contact_name=contact_name,
             confidence=confidence,
         )
-    except Exception:
+    except Exception:  # TODO: specify exceptions (hooks.emit too broad)
         pass  # hooks are optional, never break core flow
 
     # Индексируем эмбеддинг в Qdrant для будущей дедупликации
@@ -435,7 +436,7 @@ async def add_memory(
                 fact=fact,
                 embedding=embedding,
             )
-        except Exception:
+        except Exception:  # TODO: specify exceptions (vector_store.upsert_memory — Qdrant network call)
             logger.exception("Failed to index memory embedding in Qdrant")
 
     await invalidate("mem_")
@@ -637,7 +638,7 @@ async def _auto_link_memory(
                     relation_type = "related"  # weak
 
                 pending_links.append((memory.id, hit_id, cosine_score, relation_type))
-        except Exception:
+        except Exception:  # TODO: specify exceptions (vector_store call — Qdrant network errors)
             logger.debug(
                 "Semantic linking failed, falling back to keyword overlap",
                 exc_info=True,
@@ -986,7 +987,7 @@ async def find_similar_memories(
             results = list(result.scalars().all())
             if results:
                 return results
-    except Exception:
+    except SQLAlchemyError:
         pass  # FTS5 table may not exist or query invalid, fall through to ILIKE
 
     # ILIKE fallback

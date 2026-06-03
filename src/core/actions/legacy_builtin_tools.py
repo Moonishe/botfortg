@@ -7,6 +7,8 @@ import logging
 from typing import Any
 
 from src.core.actions.tool_registry import tool
+from httpx import HTTPStatusError, RequestError
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +81,7 @@ async def _tool_search_messages(
             candidates = await resolve_contact(client, user, contact, limit=1)
             if candidates:
                 peer_id = candidates[0].peer_id
-        except Exception:
+        except Exception:  # TODO: specify exceptions
             logger.exception(
                 "search_messages: contact resolution failed for %r", contact
             )
@@ -96,7 +98,7 @@ async def _tool_search_messages(
             peer_id=peer_id,
         )
         return {"ok": True, "results": results, "query": query}
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("search_messages: FTS search failed for %r", query)
         return {"ok": False, "error": f"Search failed for '{query}'"}
 
@@ -146,7 +148,7 @@ async def _tool_summarize_chat(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("summarize_chat: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -160,7 +162,7 @@ async def _tool_summarize_chat(
         from src.db.repo import fetch_chat_messages
 
         messages = await fetch_chat_messages(session, user, peer_id, limit=limit)
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("summarize_chat: fetch failed for peer_id=%s", peer_id)
         return {"ok": False, "error": "Failed to fetch messages"}
 
@@ -177,7 +179,7 @@ async def _tool_summarize_chat(
         from src.core.contacts.chat_service import messages_to_transcript
 
         text = messages_to_transcript(messages)
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("summarize_chat: transcript conversion failed")
         return {"ok": False, "error": "Failed to convert messages to transcript"}
 
@@ -192,7 +194,7 @@ async def _tool_summarize_chat(
             "contact": display_name,
             "message_count": len(messages),
         }
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("summarize_chat: LLM summarization failed")
         return {"ok": False, "error": "LLM summarization failed"}
 
@@ -244,7 +246,7 @@ async def _tool_ask_chat(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("ask_chat: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -258,7 +260,7 @@ async def _tool_ask_chat(
         from src.db.repo import fetch_chat_messages
 
         messages = await fetch_chat_messages(session, user, peer_id, limit=limit)
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("ask_chat: fetch failed for peer_id=%s", peer_id)
         return {"ok": False, "error": "Failed to fetch messages"}
 
@@ -275,7 +277,7 @@ async def _tool_ask_chat(
         from src.db.repo import get_contact as _get_contact
 
         contact_obj = await _get_contact(session, user, peer_id)
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("ask_chat: failed to load contact for peer_id=%s", peer_id)
         return {"ok": False, "error": "Failed to load contact"}
 
@@ -306,7 +308,7 @@ async def _tool_ask_chat(
                     lines.append(f"• {_sh2(p.get('text', ''))}")
             lines.append("</recall_context>")
             memory_context = "\n".join(lines)
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.debug("ask_chat tool: failed to load memory context", exc_info=True)
 
     # Analyse via LLM
@@ -335,7 +337,7 @@ async def _tool_ask_chat(
             "contact": display_name,
             "message_count": len(messages),
         }
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("ask_chat: LLM analysis failed")
         return {"ok": False, "error": "LLM analysis failed"}
 
@@ -386,7 +388,7 @@ async def _tool_draft_reply(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("draft_reply: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -404,7 +406,7 @@ async def _tool_draft_reply(
         history = await fetch_chat_messages(session, user, peer_id, limit=20)
         if history:
             history_text = messages_to_transcript(history)
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("draft_reply: history fetch failed for peer_id=%s", peer_id)
         # Non-fatal: proceed without history
 
@@ -425,7 +427,7 @@ async def _tool_draft_reply(
             "tone": result.get("tone", ""),
             "contact": sender_name,
         }
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("draft_reply: LLM drafting failed")
         return {"ok": False, "error": "LLM draft generation failed"}
 
@@ -476,7 +478,7 @@ async def _tool_set_reminder(
                 from datetime import timezone
 
                 deadline = deadline.replace(tzinfo=timezone.utc)
-        except Exception:
+        except (ValueError, TypeError):
             logger.exception("set_reminder: cannot parse date %r", when)
             return {"ok": False, "error": f"Cannot parse date/time: {when}"}
 
@@ -500,7 +502,7 @@ async def _tool_set_reminder(
             "text": text,
             "deadline": deadline.isoformat() if deadline else None,
         }
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("set_reminder: failed to persist commitment")
         return {"ok": False, "error": "Failed to save reminder"}
 
@@ -569,7 +571,7 @@ async def _tool_list_contacts(
                 for c in contacts[:limit]
             ]
         return {"ok": True, "contacts": results, "count": len(results)}
-    except Exception:
+    except Exception:  # TODO: specify exceptions
         logger.exception("list_contacts: failed for query=%r", query)
         return {"ok": False, "error": "Failed to list contacts"}
 
@@ -650,7 +652,7 @@ async def _tool_delegate_task(
                     user_prompt += (
                         f"\n\nПоследние сообщения из чата с {contact}:\n{transcript}"
                     )
-        except Exception:
+        except Exception:  # TODO: specify exceptions
             logger.debug(
                 "delegate_task: failed to fetch contact messages", exc_info=True
             )
@@ -674,6 +676,6 @@ async def _tool_delegate_task(
             "analysis": raw.strip(),
             "task": task,
         }
-    except Exception:
+    except (RequestError, HTTPStatusError, asyncio.TimeoutError):
         logger.exception("delegate_task: sub-agent LLM call failed")
         return {"ok": False, "error": "Sub-agent analysis failed"}

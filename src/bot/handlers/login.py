@@ -11,8 +11,10 @@ from telethon.errors import (
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
+    RPCError,
     SessionPasswordNeededError,
 )
+from aiogram.exceptions import AiogramError
 
 from src.config import settings
 from src.bot.filters import OwnerOnly
@@ -145,7 +147,7 @@ async def step_phone(
             f"❌ FloodWait: подожди {e.seconds} секунд и попробуй /login снова."
         )
         return
-    except Exception:
+    except RPCError:
         logger.exception("send_code_request failed")
         await userbot_manager.cancel_pending(message.from_user.id)
         await state.clear()
@@ -197,7 +199,7 @@ async def step_code(
         await state.clear()
         await message.answer("❌ Код истёк. Запусти /login заново.")
         return
-    except Exception:
+    except RPCError:
         logger.exception("sign_in failed")
         await userbot_manager.cancel_pending(message.from_user.id)
         await state.clear()
@@ -227,7 +229,7 @@ async def step_2fa(
     except PasswordHashInvalidError:
         await message.answer("❌ Неверный пароль 2FA. Попробуй ещё раз.")
         return
-    except Exception:
+    except RPCError:
         logger.exception("2FA sign_in failed")
         await userbot_manager.cancel_pending(message.from_user.id)
         await state.clear()
@@ -237,7 +239,7 @@ async def step_2fa(
         # Удалим сообщение с паролем — гигиена.
         try:
             await message.delete()
-        except Exception:
+        except AiogramError:
             logger.debug("login: could not delete password message")
 
         await _finalize_login(message, state, userbot_manager)

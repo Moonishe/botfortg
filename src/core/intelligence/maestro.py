@@ -40,6 +40,8 @@ from src.core.intelligence.context_gatherer import (
     _set_contact_rules,
 )
 from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
+from httpx import HTTPStatusError, RequestError
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +258,7 @@ async def process(
 
         # ── Phase 5: Terminal assemble ──
         system = prompt_assembler.assemble(ctx)
-    except Exception:
+    except Exception:  # TODO: specify exceptions — assembly involves many subsystems
         # Fallback: старая сборка (обратная совместимость)
         logger.debug("Prompt assembler failed, using legacy assembly", exc_info=True)
         system = MAESTRO_SYSTEM
@@ -277,7 +279,7 @@ async def process(
                 rules_hint = await format_rules_for_prompt(owner_id)
                 if rules_hint:
                     system += rules_hint
-            except Exception:
+            except (SQLAlchemyError, RequestError, HTTPStatusError):
                 logger.debug(
                     "Failed to format rules for prompt (fallback)", exc_info=True
                 )
@@ -290,7 +292,7 @@ async def process(
                 persona_hint = await format_persona_for_prompt(owner_id)
                 if persona_hint:
                     system += persona_hint
-            except Exception:
+            except (SQLAlchemyError, RequestError, HTTPStatusError):
                 logger.debug(
                     "Failed to format persona for prompt (fallback)", exc_info=True
                 )
@@ -379,7 +381,7 @@ async def process(
                 "agents_to_call": [],
                 "final_response": "⏱️ Ответ занял слишком много времени. Попробуй короче.",
             }
-        except Exception as e:
+        except (RequestError, HTTPStatusError) as e:
             if (
                 "context_length" in safe_str(e).lower()
                 or "token" in safe_str(e).lower()
@@ -511,7 +513,9 @@ async def process(
                             **gr.sanitized_params,
                             **runtime_kwargs,
                         )
-                    except Exception as e:
+                    except (
+                        Exception
+                    ) as e:  # TODO: specify exceptions — tools raise arbitrary errors
                         tool_result = {"error": str(e)}
             if tool_result is None:
                 # ── Tool execution with fallback chains (Plan B) ──
@@ -522,7 +526,9 @@ async def process(
                         **gr.sanitized_params,
                         **runtime_kwargs,
                     )
-                except Exception as e:
+                except (
+                    Exception
+                ) as e:  # TODO: specify exceptions — tools raise arbitrary errors
                     tool_result = {"error": str(e)}
 
             # Fallback chains — если инструмент вернул ошибку, пробуем альтернативы
@@ -560,7 +566,9 @@ async def process(
                             "Fallback '%s' succeeded for '%s'", fb, parsed["tool"]
                         )
                         break
-                    except Exception:
+                    except (
+                        Exception
+                    ):  # TODO: specify exceptions — tool execution can raise anything
                         continue
                 else:
                     # Все fallback'и исчерпаны — последний рубеж: admit_ignorance
@@ -660,7 +668,7 @@ async def process(
                             "used_skills": _used_skills_meta,
                             "trace": trace,
                         }
-                except Exception:
+                except (RequestError, HTTPStatusError):
                     pass  # fall through к обычному admit_ignorance
 
             # B1: если user сказал «не гугли» — fall through к обычному admit_ignorance
@@ -677,7 +685,7 @@ async def process(
                     from src.core.memory.pending_questions import save_pending
 
                     await save_pending(owner_id, user_text[:500], "")
-                except Exception:
+                except SQLAlchemyError:
                     pass
             return {
                 "understood": "признаю незнание",
@@ -718,7 +726,7 @@ async def process(
                     "used_skills": _used_skills_meta,
                     "trace": trace,
                 }
-            except Exception:
+            except (RequestError, HTTPStatusError):
                 pass  # fallback к обычному admit_ignorance
 
         # ── Final response? ──
@@ -750,7 +758,7 @@ async def process(
                     final_response, modified = apply_guard(
                         final_response, verify_result, confidence
                     )
-            except Exception:
+            except Exception:  # TODO: specify exceptions — verify_claims/apply_guard involve complex AI logic
                 pass  # best-effort
 
             return {
@@ -821,7 +829,7 @@ async def run_pipeline(
             )
 
             self_profile = await assemble_self_profile_prompt(owner_id)
-        except Exception:
+        except (SQLAlchemyError, RequestError, HTTPStatusError):
             logger.debug("Failed to load self_profile, continuing without")
 
     # --- Шаг 1: Maestro планирует ---
@@ -960,7 +968,7 @@ async def run_pipeline(
                 "used_agents": [],
                 "agent_errors": agent_errors,
             }
-        except Exception as e:
+        except (RequestError, HTTPStatusError) as e:
             if (
                 "context_length" in safe_str(e).lower()
                 or "token" in safe_str(e).lower()
@@ -1045,7 +1053,7 @@ async def run_pipeline(
                 "used_agents": used_agents,
                 "agent_errors": agent_errors,
             }
-        except Exception:
+        except (RequestError, HTTPStatusError):
             logger.exception("maestro agent synthesis failed")
             # Если LLM не может сформулировать — возвращаем сырые данные агентов
             summary = "\n\n".join(agent_texts)

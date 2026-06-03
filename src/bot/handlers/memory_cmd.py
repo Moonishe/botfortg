@@ -24,6 +24,7 @@ from src.llm.provider_catalog import (
     get_providers_by_category,
 )
 
+from src.bot.callbacks import KeysCB
 from src.bot.filters import OwnerOnly
 from src.core.contacts.contact_resolver import resolve
 from src.core.infra.text_sanitizer import sanitize_html
@@ -267,10 +268,10 @@ async def _do_import_keys(
 def _build_category_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура выбора категории ключа (LLM / STT / TTS)."""
     kb = InlineKeyboardBuilder()
-    kb.button(text="🧠 LLM (чат, память)", callback_data="keys:cata:llm")
-    kb.button(text="🎤 STT (голос→текст)", callback_data="keys:cata:stt")
-    kb.button(text="🔊 TTS (текст→голос)", callback_data="keys:cata:tts")
-    kb.button(text="🔙 Закрыть", callback_data="keys:back:close")
+    kb.button(text="🧠 LLM (чат, память)", callback_data=KeysCB.category("llm"))
+    kb.button(text="🎤 STT (голос→текст)", callback_data=KeysCB.category("stt"))
+    kb.button(text="🔊 TTS (текст→голос)", callback_data=KeysCB.category("tts"))
+    kb.button(text="🔙 Закрыть", callback_data=KeysCB.BACK_CLOSE)
     kb.adjust(1)
     return kb.as_markup()
 
@@ -283,9 +284,9 @@ def _build_provider_keyboard(category: str) -> InlineKeyboardMarkup:
     for p in providers:
         kb.button(
             text=f"{tier_icon.get(p.tier, '')} {p.display}",
-            callback_data=f"keys:cat:{category}:{p.name}",
+            callback_data=KeysCB.provider(category, p.name),
         )
-    kb.button(text="🔙 Назад", callback_data="keys:back:cat")
+    kb.button(text="🔙 Назад", callback_data=KeysCB.BACK_CAT)
     kb.adjust(1)
     return kb.as_markup()
 
@@ -298,7 +299,7 @@ def _build_model_keyboard(provider_name: str) -> InlineKeyboardMarkup | None:
     kb = InlineKeyboardBuilder()
     if p.models:
         for m in p.models:
-            kb.button(text=f"📦 {m}", callback_data=f"keys:model:{p.name}:{m}")
+            kb.button(text=f"📦 {m}", callback_data=KeysCB.model(p.name, m))
     elif p.category in ("stt", "tts"):
         # STT/TTS провайдеры без предопределённых моделей — пропускаем выбор модели
         kb.button(
@@ -311,7 +312,7 @@ def _build_model_keyboard(provider_name: str) -> InlineKeyboardMarkup | None:
             text="✏️ Ввести модель вручную",
             callback_data=f"keys:model:{p.name}:__custom__",
         )
-    kb.button(text="🔙 Назад", callback_data=f"keys:back:provider:{p.category}")
+    kb.button(text="🔙 Назад", callback_data=KeysCB.back_provider(p.category))
     kb.adjust(1)
     return kb.as_markup()
 
@@ -463,7 +464,7 @@ async def cmd_keys(message: Message) -> None:
                     [
                         InlineKeyboardButton(
                             text=f"{'✅' if s.enabled else '🚫'} #{s.id} {s.provider}/{s.purpose}",
-                            callback_data=f"keys:remove:{s.id}",
+                            callback_data=KeysCB.remove(s.id),
                         )
                     ]
                     for s in slots
@@ -609,7 +610,7 @@ async def cmd_keys(message: Message) -> None:
         await message.answer("\n".join(lines))
 
 
-@router.callback_query(F.data.startswith("keys:remove:"))
+@router.callback_query(F.data.startswith(KeysCB.remove("")))
 async def cb_keys_remove(callback: CallbackQuery) -> None:
     """Удалить слот ключа по inline-кнопке."""
     parts = callback.data.split(":")
@@ -640,7 +641,7 @@ async def cb_keys_remove(callback: CallbackQuery) -> None:
 # ─── /keys add: inline keyboard callbacks (Phase 2) ────────────────────
 
 
-@router.callback_query(F.data.startswith("keys:cata:"))
+@router.callback_query(F.data.startswith(KeysCB.category("")))
 async def cb_keys_cata(callback: CallbackQuery) -> None:
     """User picked a category → show providers."""
     parts = callback.data.split(":")
@@ -742,14 +743,14 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
 # ─── /keys add: back navigation callbacks ───────────────────────────────
 
 
-@router.callback_query(F.data == "keys:back:close")
+@router.callback_query(F.data == KeysCB.BACK_CLOSE)
 async def cb_keys_back_close(callback: CallbackQuery) -> None:
     """Close the key addition dialog."""
     await callback.message.edit_text("🔑 Добавление ключа отменено.")
     await callback.answer()
 
 
-@router.callback_query(F.data == "keys:back:cat")
+@router.callback_query(F.data == KeysCB.BACK_CAT)
 async def cb_keys_back_cat(callback: CallbackQuery) -> None:
     """Back to category selection."""
     await callback.message.edit_text(
@@ -758,7 +759,7 @@ async def cb_keys_back_cat(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("keys:back:provider:"))
+@router.callback_query(F.data.startswith(KeysCB.back_provider("")))
 async def cb_keys_back_provider(callback: CallbackQuery) -> None:
     """Back to provider list for category."""
     parts = callback.data.split(":")

@@ -12,7 +12,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from aiogram import F, Router
@@ -65,6 +65,9 @@ from .free_text_pipeline import (
 from src.core.humanizer import record_humanizer_feedback, _pop_last_humanized
 from .rate_limiter import check_rate_limit
 from src.core.security.prompt_injection_scanner import scan_content
+from httpx import RequestError, HTTPStatusError
+from aiogram.exceptions import TelegramError
+from sqlalchemy.exc import SQLAlchemyError
 
 
 logger = logging.getLogger(__name__)
@@ -133,7 +136,7 @@ async def _fetch_url_content(url: str) -> str | None:
             title_m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE)
             title = title_m.group(1).strip()[:200] if title_m else url
             return f"Заголовок: {title}\n\n{text[:3000]}"
-    except Exception:
+    except (RequestError, HTTPStatusError):
         return None
 
 
@@ -162,8 +165,51 @@ def _extract_correction_pattern(original: str, edited: str) -> tuple[str, str] |
     return None
 
 
-# Singalong search cache: user_id → list of search result dicts
-_singalong_search_cache: dict = {}
+class _SearchCache:
+    def __init__(self, max_size: int = 100, ttl_sec: int = 300):
+        self._cache: dict[Any, tuple[Any, float]] = {}
+        self._max_size = max_size
+        self._ttl = ttl_sec
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: Any) -> Any | None:
+        async with self._lock:
+            if key not in self._cache:
+                return None
+            value, ts = self._cache[key]
+            if time.monotonic() - ts > self._ttl:
+                del self._cache[key]
+                return None
+            return value
+
+    async def set(self, key: Any, value: Any) -> None:
+        async with self._lock:
+            if len(self._cache) >= self._max_size:
+                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
+                del self._cache[oldest_key]
+            self._cache[key] = (value, time.monotonic())
+
+    async def pop(self, key: Any) -> Any | None:
+        async with self._lock:
+            if key not in self._cache:
+                return None
+            value, ts = self._cache[key]
+            del self._cache[key]
+            if time.monotonic() - ts > self._ttl:
+                return None
+            return value
+
+    async def cleanup_stale(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            stale_keys = [
+                k for k, (v, ts) in self._cache.items() if now - ts > self._ttl
+            ]
+            for k in stale_keys:
+                del self._cache[k]
+
+
+_singalong_search_cache = _SearchCache(max_size=100, ttl_sec=300)
 
 
 class VoiceJob(NamedTuple):
@@ -296,11 +342,11 @@ async def _voice_worker() -> None:
                             custom_stt_model=custom_stt_model,
                             custom_stt_endpoint=custom_stt_endpoint,
                         )
-                    except Exception:
+                    except (RequestError, HTTPStatusError):
                         logger.exception("voice transcription failed in worker")
                         try:
                             await message.answer("❌ Не удалось распознать голосовое.")
-                        except Exception:
+                        except TelegramError:
                             logger.exception("failed to send error message from worker")
                         finally:
                             _cleanup_voice_file(voice_path)
@@ -312,7 +358,7 @@ async def _voice_worker() -> None:
                             await message.answer(
                                 "🎙 Не услышал текста в этом сообщении."
                             )
-                        except Exception:
+                        except TelegramError:
                             logger.exception(
                                 "failed to send empty transcription message"
                             )
@@ -321,7 +367,7 @@ async def _voice_worker() -> None:
 
                     try:
                         await message.answer(sanitize_html(f"🎙 <i>Услышал:</i> {text}"))
-                    except Exception:
+                    except TelegramError:
                         logger.exception("failed to send transcription result")
 
                     # ── Сохраняем метаданные транскрипции для контекста ──
@@ -358,7 +404,7 @@ async def _voice_worker() -> None:
                                 await record_turn(
                                     rec_session, uid, "assistant", "(ответ отправлен)"
                                 )
-                    except Exception:
+                    except SQLAlchemyError:
                         logger.warning(
                             "Failed to record voice transcription turn for user %s",
                             message.from_user.id if message.from_user else "unknown",
@@ -405,7 +451,7 @@ def _cleanup_voice_file(voice_path: Path) -> None:
     """Безопасно удалить временный файл голосового сообщения."""
     try:
         voice_path.unlink(missing_ok=True)
-    except Exception:
+    except (OSError, PermissionError):
         logger.debug("cleanup voice file failed: %s", voice_path, exc_info=True)
 
 
@@ -470,7 +516,7 @@ async def _process_text_fallback(
     else:
         await _dispatch(intent, message, state, userbot_manager, tz_name=tz_name)
 
-    _save_intent_context(owner_telegram_id, intent)
+    await _save_intent_context(owner_telegram_id, intent)
 
     _fire_record_trajectory(
         owner_telegram_id,
@@ -805,7 +851,7 @@ async def _process_text(
                 # Новая песня при существующем pending — заменяем
                 if _looks_like_lyrics(raw):
                     await consume_pending_singalong(owner_telegram_id)
-                    _singalong_search_cache.pop(owner_telegram_id, None)
+                    await _singalong_search_cache.pop(owner_telegram_id)
                     identified = await _singalong_identify(
                         raw, owner_telegram_id, use_heavy
                     )
@@ -886,7 +932,9 @@ async def _process_text(
                             song_title=search_items[0].get("title", ""),
                             next_line=None,
                         )
-                        _singalong_search_cache[owner_telegram_id] = search_items[:3]
+                        await _singalong_search_cache.set(
+                            owner_telegram_id, search_items[:3]
+                        )
                         _fire_record_trajectory(
                             owner_telegram_id,
                             request_text=raw,
@@ -912,11 +960,10 @@ async def _process_text(
 
                 # ── Numeric selection (1/2/3) после поиска ──────────
                 stripped_num = raw.strip()
-                if (
-                    stripped_num in ("1", "2", "3")
-                    and owner_telegram_id in _singalong_search_cache
-                ):
-                    cache = _singalong_search_cache.pop(owner_telegram_id)
+                if stripped_num in ("1", "2", "3"):
+                    cache = await _singalong_search_cache.pop(owner_telegram_id)
+                    if cache is None:
+                        return False
                     idx = int(stripped_num) - 1
                     if 0 <= idx < len(cache):
                         chosen = cache[idx]
@@ -949,20 +996,20 @@ async def _process_text(
                             return True
                         # LLM не смог — спрашиваем уточнение
                         await consume_pending_singalong(owner_telegram_id)
-                        _singalong_search_cache.pop(owner_telegram_id, None)
+                        await _singalong_search_cache.pop(owner_telegram_id)
                         await message.answer(
                             f"Не могу найти текст «{sanitize_html(title)}». Напиши название песни?"
                         )
                         return True
                     # Неверный номер — очищаем кеш
-                    _singalong_search_cache.pop(owner_telegram_id, None)
+                    await _singalong_search_cache.pop(owner_telegram_id)
 
                 # decision is None + не numeric — другое сообщение, идём дальше
                 return False
 
             # ── Нет pending — новое сообщение ───────────────────────
             # Clean stale search cache from previous sessions
-            _singalong_search_cache.pop(owner_telegram_id, None)
+            await _singalong_search_cache.pop(owner_telegram_id)
 
             if _looks_like_lyrics(raw):
                 identified = await _singalong_identify(
@@ -1263,7 +1310,7 @@ async def free_text(
     try:
         ctx_sched = await _get_owner_context(message.from_user.id)
         sched_tz = str(ctx_sched["tz_name"])
-    except Exception:
+    except SQLAlchemyError:
         sched_tz = None
     scheduled = parse_schedule_message(raw, sched_tz)
     if scheduled:
@@ -1280,7 +1327,7 @@ async def free_text(
                     scheduled["send_at"],
                 )
                 await session.commit()
-        except Exception as e:
+        except SQLAlchemyError:
             await message.answer("❌ Произошла ошибка. Попробуй ещё раз.")
             return
 
@@ -1322,7 +1369,7 @@ async def free_text(
                         provider = await build_provider(
                             session, owner_db, task_type=TaskType.SUMMARIZE
                         )
-                except Exception:
+                except SQLAlchemyError:
                     provider = None
 
                 if provider:
@@ -1389,7 +1436,7 @@ async def free_text(
         async with get_session() as rec_session:
             await record_turn(rec_session, uid, "user", raw[:4000])
             await record_turn(rec_session, uid, "assistant", "(ответ отправлен)")
-    except Exception:
+    except SQLAlchemyError:
         logger.warning(
             "Failed to record conversation turn for user %s", uid, exc_info=True
         )
@@ -1444,7 +1491,7 @@ async def free_voice(
 
     try:
         await message.bot.download(media.file_id, destination=str(target))
-    except Exception:
+    except (TelegramError, OSError):
         logger.exception("voice download failed")
         await message.answer("❌ Не удалось скачать голосовое.")
         return
@@ -1631,7 +1678,7 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
                     "assistant",
                     "(фото проанализировано)",
                 )
-        except Exception:
+        except SQLAlchemyError:
             pass
 
     except Exception as e:
@@ -1682,5 +1729,5 @@ async def handle_edited_message(message: Message, state: FSMContext = None) -> N
                             pattern[0][:50],
                             pattern[1][:50],
                         )
-    except Exception:
+    except SQLAlchemyError:
         pass  # best-effort

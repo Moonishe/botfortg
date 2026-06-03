@@ -55,7 +55,8 @@ def make_key_handler(
     async def handler(message: Message, fsm_context: FSMContext) -> None:
         # Ленивые импорты — избегаем циклических зависимостей,
         # т.к. settings.py импортирует этот модуль.
-        from src.bot.handlers.settings import _count_slots_for_provider, _render_menu
+        from src.bot.handlers.settings_service import _count_slots_for_provider
+        from src.bot.handlers.settings_menu import _render_menu
         from src.db.repo import add_key_slot, get_or_create_user, upsert_api_key
         from src.db.session import get_session
 

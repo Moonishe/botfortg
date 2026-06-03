@@ -423,7 +423,7 @@ async def evolve_from_feedback(
             and value
             and value
             in __import__(
-                "src.core.intelligence.adaptive_persona",
+                "src.core.intelligence.persona_prompts",
                 fromlist=["BASE_TONE_PROMPTS"],
             ).BASE_TONE_PROMPTS
         ):
