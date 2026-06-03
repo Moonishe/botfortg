@@ -511,6 +511,10 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
     if not raw:
         await message.answer("Пустой ключ. Пришли API-ключ или /cancel.")
         return
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        await message.answer("❌ Ввод ключа отменён.")
+        return
 
     data = await state.get_data()
     provider = data.get("onboarding_provider", "openai")
