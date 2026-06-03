@@ -22,7 +22,7 @@ from src.db.repos.key_repo import (
     get_api_key,
     list_key_slots,
 )
-from .exceptions import NotFoundError, ProviderError, ValidationError
+from .exceptions import NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
 

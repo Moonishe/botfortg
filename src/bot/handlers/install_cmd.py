@@ -84,7 +84,8 @@ async def cmd_install(message: Message) -> None:
             "❌ <b>Таймаут</b>. Попробуй вручную: <code>pip install {pkgs_str}</code>"
         )
     except Exception as e:
-        await message.answer(f"❌ <b>Ошибка:</b> {e}")
+        logger.warning("install_pip failed: %s", e)
+        await message.answer("❌ Ошибка установки. Попробуй вручную")
 
 
 @router.message(Command("install_playwright"))
@@ -114,4 +115,5 @@ async def cmd_install_playwright(message: Message) -> None:
             "❌ <b>Таймаут</b>. Попробуй вручную: <code>playwright install chromium</code>"
         )
     except Exception as e:
-        await message.answer(f"❌ <b>Ошибка:</b> {e}")
+        logger.warning("install_playwright failed: %s", e)
+        await message.answer("❌ Ошибка установки. Попробуй вручную")

@@ -181,7 +181,7 @@ async def _do_import_keys(
     try:
         await message.delete()
     except Exception:
-        logger.exception("failed to delete message with keys")
+        logger.warning("failed to delete message with keys")
 
     results: list[str] = []
     by_provider: dict[str, int] = {}
@@ -352,7 +352,7 @@ async def cmd_keys(message: Message) -> None:
         try:
             await message.delete()
         except Exception:
-            logger.exception("failed to delete message with key")
+            logger.warning("failed to delete message with key")
 
         from src.llm.router import _provider_class_for
         from src.crypto import decrypt

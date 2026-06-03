@@ -565,6 +565,10 @@ async def proactive_briefing_loop(owner_id: int) -> None:
                     owner.settings.proactive_last_sent = slot_start_utc
                     await session.commit()
 
+                from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+                await invalidate_settings_cache(owner_id)
+
                 text = await _collect_morning_digest(owner_id)
                 await notification_queue.enqueue(
                     topic="briefing",

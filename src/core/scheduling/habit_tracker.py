@@ -206,6 +206,12 @@ async def habit_tracker_loop(owner_id: int) -> None:
                         owner.settings.habit_last_run_date = now.date()
                         await session.commit()
 
+                        from src.bot.handlers.free_text_common import (
+                            invalidate_settings_cache,
+                        )
+
+                        await invalidate_settings_cache(owner_id)
+
                         memories = await list_memories(session, owner)
                         active = [m for m in memories if m.is_active and m.created_at]
                         habits = find_habit_candidates(active)

@@ -325,11 +325,11 @@ async def _cb_tool_confirm(
                 )
         await callback.answer("✅ Выполнено")
     except Exception as e:
-        logger.exception("Tool %s confirmation execution failed", tool_name)
-        await callback.answer(f"❌ Ошибка: {safe_str(e)[:80]}", show_alert=True)
+        logger.warning("tool_confirm_execution failed: %s", e)
+        await callback.answer("❌ Произошла ошибка. Попробуй ещё раз", show_alert=True)
         if callback.message:
             await callback.message.edit_text(
-                sanitize_html(f"❌ Ошибка при выполнении: {e}")
+                sanitize_html("❌ Произошла ошибка. Попробуй ещё раз")
             )
 
 

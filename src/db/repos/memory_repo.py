@@ -512,19 +512,10 @@ async def _batch_link_memories(
 
     # Build links to create/update
     count = 0
+    updates_to_apply: list[tuple[int, int, float, str | None]] = []
     for src, tgt, w, rt in valid_links:
         if (src, tgt) in existing_pairs:
-            # Batch update existing — direct UPDATE, no SELECT needed
-            stmt = update(MemoryLink).where(
-                MemoryLink.user_id == user.id,
-                MemoryLink.source_id == src,
-                MemoryLink.target_id == tgt,
-            )
-            if rt:
-                stmt = stmt.values(weight=w, relation_type=rt)
-            else:
-                stmt = stmt.values(weight=w)
-            await session.execute(stmt)
+            updates_to_apply.append((src, tgt, w, rt))
         else:
             # Create new forward link
             link = MemoryLink(
@@ -546,9 +537,49 @@ async def _batch_link_memories(
                     relation_type=rt,
                 )
                 session.add(rev)
+                existing_pairs.add(
+                    (tgt, src)
+                )  # prevent duplicate if (B,A) in pending_links
                 count += 1
 
-    if count or any((src, tgt) in existing_pairs for src, tgt, _, _ in valid_links):
+    if updates_to_apply:
+        weight_cases = case(
+            *[
+                (
+                    (MemoryLink.source_id == src) & (MemoryLink.target_id == tgt),
+                    w,
+                )
+                for src, tgt, w, rt in updates_to_apply
+            ],
+            else_=MemoryLink.weight,
+        )
+
+        rt_cases = case(
+            *[
+                (
+                    (MemoryLink.source_id == src) & (MemoryLink.target_id == tgt),
+                    rt if rt else MemoryLink.relation_type,
+                )
+                for src, tgt, w, rt in updates_to_apply
+            ],
+            else_=MemoryLink.relation_type,
+        )
+
+        await session.execute(
+            update(MemoryLink)
+            .where(
+                MemoryLink.user_id == user.id,
+                or_(
+                    *[
+                        (MemoryLink.source_id == src) & (MemoryLink.target_id == tgt)
+                        for src, tgt, w, rt in updates_to_apply
+                    ]
+                ),
+            )
+            .values(weight=weight_cases, relation_type=rt_cases)
+        )
+
+    if count or updates_to_apply:
         await session.flush()
 
     return count

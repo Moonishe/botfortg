@@ -734,10 +734,8 @@ async def handle_stt_key_input(message: Message, state: FSMContext) -> None:
         await state.clear()
 
     except Exception as e:
-        logger.exception("Failed to save STT key")
-        await message.reply(
-            f"❌ Ошибка сохранения ключа: {e}\n\nПопробуй ещё раз или /cancel"
-        )
+        logger.warning("save_stt_key failed: %s", e)
+        await message.reply("❌ Ошибка сохранения ключа. Попробуй ещё раз или /cancel")
 
 
 # Регистрируем обработчик STT ключа
@@ -1038,6 +1036,10 @@ async def cb_onboarding_tz(callback: CallbackQuery, state: FSMContext) -> None:
         owner = await get_or_create_user(session, callback.from_user.id)
         owner.settings.timezone = tz_value
 
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
+
     await callback.answer(f"✅ Часовой пояс: {tz_short(tz_value)}")
     await state.set_state(OnboardingStates.waiting_sync_choice)
     if callback.message is None:
@@ -1071,6 +1073,10 @@ async def step_onboarding_timezone(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.timezone = tz_value
+
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
 
     await state.set_state(OnboardingStates.waiting_sync_choice)
     await message.answer(f"✅ Часовой пояс: <b>{tz_short(tz_value)}</b>")
@@ -1120,6 +1126,10 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
         owner = await get_or_create_user(session, callback.from_user.id)
         owner.settings.monitor_only_selected_folders = False
 
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
+
     await callback.answer("📱 Начинаю синхронизацию...")
 
     # Запускаем синхронизацию
@@ -1137,8 +1147,8 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
         await sync_dialogs(client, owner)
         status = "✅ Список чатов обновлён!"
     except Exception as exc:
-        logger.exception("sync_dialogs during onboarding failed")
-        status = f"⚠️ Синхронизация не удалась: {exc}"
+        logger.warning("sync_dialogs during onboarding failed: %s", exc)
+        status = "⚠️ Синхронизация не удалась. Попробуй позже"
 
     await state.clear()
     await _finish_onboarding(
@@ -1197,6 +1207,10 @@ async def step_onboarding_sync_folders_text(
         owner.settings.monitored_folders = json.dumps(folder_names)
         owner.settings.monitor_only_selected_folders = True
 
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
+
     # Запускаем синхронизацию
     from src.userbot import get_active_telethon_client
     from src.userbot.dialogs import sync_dialogs
@@ -1209,8 +1223,8 @@ async def step_onboarding_sync_folders_text(
             await sync_dialogs(client, owner)
             status = "✅ Чаты из выбранных папок синхронизированы!"
         except Exception as exc:
-            logger.exception("sync_dialogs during onboarding (folders) failed")
-            status = f"⚠️ Синхронизация не удалась: {exc}"
+            logger.warning("sync_dialogs during onboarding (folders) failed: %s", exc)
+            status = "⚠️ Синхронизация не удалась. Попробуй позже"
 
     await state.clear()
     await _finish_onboarding(

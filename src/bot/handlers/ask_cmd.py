@@ -100,8 +100,8 @@ async def ask_cmd(
             owner = await get_or_create_user(session, message.from_user.id)
             candidates = await resolve(client, owner, name)
     except Exception as e:
-        logger.error("resolve error for %s: %s", name, e)
-        await status_msg.edit_text(f"❌ Ошибка поиска чата: {e}")
+        logger.warning("ask_resolve failed: %s", e)
+        await status_msg.edit_text("❌ Ошибка поиска чата. Попробуй позже")
         return
 
     if not candidates:
@@ -130,8 +130,8 @@ async def ask_cmd(
             limit=limit,
         )
     except Exception as e:
-        logger.error("ask_chat_action error for %s: %s", display_name, e)
-        await status_msg.edit_text(f"❌ Ошибка анализа: {e}")
+        logger.warning("ask_chat_action failed: %s", e)
+        await status_msg.edit_text("❌ Ошибка анализа. Попробуй позже")
         return
 
     if action_result is None:

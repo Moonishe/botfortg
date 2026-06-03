@@ -361,11 +361,11 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         entity = await client.get_entity(peer_id)
         sent_msg = await client.send_message(entity, text)
     except Exception as e:
-        logger.exception("send_message failed")
+        logger.warning("send_message failed: %s", e)
         await callback.answer("Ошибка при отправке", show_alert=True)
         if callback.message:
             await callback.message.edit_text(
-                sanitize_html(f"❌ Не удалось отправить 😞: <code>{e}</code>")
+                sanitize_html("❌ Не удалось отправить сообщение. Попробуй ещё раз")
             )
         return
 
@@ -429,7 +429,8 @@ async def cb_undo(
             await callback.message.edit_text("↩ Сообщение отменено.")
         await callback.answer("Отменено")
     except Exception as e:
-        await callback.answer(f"Не удалось отменить: {e}", show_alert=True)
+        logger.warning("send_undo failed: %s", e)
+        await callback.answer("Не удалось отменить. Попробуй ещё раз", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("send:again:"))

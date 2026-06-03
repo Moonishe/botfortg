@@ -12,7 +12,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
-    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -543,7 +542,8 @@ async def step_import_config(message: Message, state: FSMContext) -> None:
     except json.JSONDecodeError:
         await message.answer("❌ Файл повреждён — невалидный JSON.")
     except Exception as e:
-        await message.answer(f"❌ Ошибка импорта: {e}")
+        logger.warning("import_config failed: %s", e)
+        await message.answer("❌ Ошибка импорта конфигурации. Проверь файл")
     finally:
         await state.clear()
 
@@ -2136,6 +2136,9 @@ async def cb_model_reset_all(callback: CallbackQuery) -> None:
         owner = await get_or_create_user(session, callback.from_user.id)
         owner.settings.model_overrides = None
         await session.flush()
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
     await callback.answer("🗑 Все переопределения моделей сброшены")
     await _refresh_section(callback, "models_brain")
 
@@ -2168,6 +2171,9 @@ async def cb_model_set(callback: CallbackQuery) -> None:
             json.dumps(overrides, ensure_ascii=False) if overrides else None
         )
         await session.flush()
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
 
     display = model_name if model_name != "__default__" else "по умолчанию"
     await callback.answer(f"✅ {task_type} → {display}")
@@ -2190,6 +2196,9 @@ async def cb_model_del(callback: CallbackQuery) -> None:
             json.dumps(overrides, ensure_ascii=False) if overrides else None
         )
         await session.flush()
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
     await callback.answer(f"🗑 Переопределение для {task_type} удалено")
     await _refresh_section(callback, "models_brain")
 
@@ -2273,6 +2282,9 @@ async def step_custom_model_name(message: Message, state: FSMContext) -> None:
         overrides[task_type] = model_name
         s.model_overrides = json.dumps(overrides, ensure_ascii=False)
         await session.flush()
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(
         f"✅ Модель для <b>{task_type}</b>: <code>{model_name}</code>{catalog_warning}"
@@ -2297,6 +2309,9 @@ async def cb_pick_tz(callback: CallbackQuery) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         owner.settings.timezone = tz_value
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
     await callback.answer(f"TZ: {tz_value}")
     await _refresh_section(callback, "tz")
 
@@ -2385,7 +2400,7 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
     try:
         await message.delete()
     except Exception:
-        logger.exception("failed to delete message with mimo key")
+        logger.warning("failed to delete message with mimo key")
     if not await MiMoProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
         return
@@ -2569,7 +2584,7 @@ async def step_custom_key(message: Message, state: FSMContext) -> None:
     try:
         await message.delete()
     except Exception:
-        logger.exception("failed to delete message with custom key")
+        logger.warning("failed to delete message with custom key")
     try:
         valid = await CustomProvider(parts[0], endpoint=endpoint).validate_key()
     except Exception:
@@ -2656,6 +2671,9 @@ async def step_digest_time(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.digest_time = hm
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(f"✅ Время дайджеста: <b>{hm} UTC</b>.")
 
@@ -2672,6 +2690,9 @@ async def step_news_time(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.news_digest_time = hm
         tz = owner.settings.timezone
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(f"✅ Время авто-новостей: <b>{hm}</b> · {tz_short(tz)}.")
 
@@ -2690,6 +2711,9 @@ async def step_auto_reply_text(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.auto_reply_text = text
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(
         sanitize_html(f"✅ Текст автоответа сохранён:\n<i>«{text}»</i>")
@@ -2709,6 +2733,9 @@ async def step_timezone(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.timezone = tz_value
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(f"✅ Часовой пояс: <b>{tz_short(tz_value)}</b>")
 
@@ -2723,6 +2750,9 @@ async def step_sync_interval(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.auto_sync_interval_sec = secs
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(f"✅ Интервал авто-синка: <b>{secs} сек</b>")
 
@@ -2760,6 +2790,9 @@ async def step_quiet_hours_start(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.quiet_hours_start = text
         await session.flush()
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(f"✅ Тихие часы начало: <b>{text}</b>")
 
@@ -2774,6 +2807,9 @@ async def step_quiet_hours_end(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.quiet_hours_end = text
         await session.flush()
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await state.clear()
     await message.answer(f"✅ Тихие часы конец: <b>{text}</b>")
 

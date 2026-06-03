@@ -225,6 +225,11 @@ async def update_setting(
 
     setattr(settings, key, validated)
     await session.flush()
+    await session.commit()
+
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(user_id)
 
     logger.info("Updated setting %s=%r for user=%d", key, validated, user_id)
     return validated
@@ -249,6 +254,11 @@ async def reset_settings(
     session.add(new_settings)
     user.settings = new_settings
     await session.flush()
+    await session.commit()
+
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(user_id)
 
     data = _settings_to_dict(new_settings)
     logger.info("Reset all settings to defaults for user=%d", user_id)

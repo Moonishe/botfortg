@@ -131,10 +131,13 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
             after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
             await callback.message.edit_text("✅ Отправлено! 🚀", reply_markup=after_kb)
     except ValueError as e:
+        logger.warning("draft_send value_error: %s", e)
         if callback.message:
-            await callback.message.edit_text(f"❌ Ошибка 😞: {e}")
+            await callback.message.edit_text("❌ Ошибка отправки. Проверь получателя")
         else:
-            await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+            await callback.answer(
+                "❌ Ошибка отправки. Проверь получателя", show_alert=True
+            )
     except Exception as e:
         from telethon.errors import FloodWaitError
 
@@ -144,7 +147,10 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
             else:
                 await callback.answer(f"❌ Flood wait: {e.seconds}с", show_alert=True)
         else:
-            await callback.answer(f"❌ Ошибка отправки: {e}", show_alert=True)
+            logger.warning("draft_send failed: %s", e)
+            await callback.answer(
+                "❌ Ошибка отправки. Попробуй ещё раз", show_alert=True
+            )
     await callback.answer()
 
 

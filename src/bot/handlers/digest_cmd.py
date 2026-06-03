@@ -37,6 +37,9 @@ async def cmd_digest(message: Message, command: CommandObject) -> None:
             owner.settings.digest_enabled = True
             tz = owner.settings.timezone
             digest_time = owner.settings.digest_time
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(message.from_user.id)
         await message.answer(
             f"☀ Дайджест включён. Время: {digest_time} · {tz_short(tz)}.\n"
             "Изменить: /digest at HH:MM или /settings → Дайджест."
@@ -47,6 +50,9 @@ async def cmd_digest(message: Message, command: CommandObject) -> None:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
             owner.settings.digest_enabled = False
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(message.from_user.id)
         await message.answer("Дайджест выключен.")
         return
 
@@ -62,6 +68,9 @@ async def cmd_digest(message: Message, command: CommandObject) -> None:
             owner.settings.digest_time = hm
             owner.settings.digest_enabled = True
             tz = owner.settings.timezone
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(message.from_user.id)
         await message.answer(f"☀ Дайджест будет в {hm} ежедневно · {tz_short(tz)}.")
         return
 
@@ -138,6 +147,9 @@ async def cmd_smart_digest(message: Message) -> None:
         owner.settings.smart_digest_last_sent = datetime.now(timezone.utc).replace(
             tzinfo=None
         )
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(message.from_user.id)
     await message.answer(text)
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -11,6 +13,8 @@ from src.core.memory.memory_wiki import generate_memory_wiki, WIKI_DIR
 
 router = Router()
 router.message.filter(OwnerOnly())
+
+logger = logging.getLogger(__name__)
 
 
 @router.message(Command("wiki"))
@@ -30,4 +34,5 @@ async def cmd_wiki(message: Message) -> None:
         else:
             await message.answer("❌ Не удалось создать wiki.")
     except Exception as e:
-        await message.answer(f"❌ Ошибка генерации wiki: {e}")
+        logger.warning("wiki_generation failed: %s", e)
+        await message.answer("❌ Ошибка генерации wiki. Попробуй позже")

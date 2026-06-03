@@ -251,6 +251,9 @@ async def cb_watch(callback: CallbackQuery) -> None:
         await add_watched_peer(session, owner, peer_id)
         name = contact.display_name if contact else str(peer_id)
 
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
     await callback.answer(f"Теперь слежу за чатом «{name}» 👁", show_alert=True)
 
 
@@ -270,6 +273,9 @@ async def cb_unwatch(callback: CallbackQuery) -> None:
         await remove_watched_peer(session, owner, peer_id)
         name = contact.display_name if contact else str(peer_id)
 
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
     await callback.answer(f"Больше не слежу за чатом «{name}»", show_alert=True)
 
 

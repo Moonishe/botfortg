@@ -240,7 +240,6 @@ async def main() -> None:
 
 def run() -> None:
     import sys
-    import traceback
 
     sys.stderr.write("=== run() START ===\n")
     sys.stderr.flush()

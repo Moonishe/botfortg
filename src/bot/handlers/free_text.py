@@ -10,7 +10,7 @@ import random
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlparse
@@ -41,7 +41,7 @@ from src.db.session import get_session
 from sqlalchemy import and_, select
 from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
-from src.llm.vision_provider import OpenAIVisionProvider, VisionResult
+from src.llm.vision_provider import OpenAIVisionProvider
 from src.userbot.manager import UserbotManager
 
 from .free_text_common import (
@@ -1212,8 +1212,6 @@ async def free_text(
         return
 
     # 🎭 Onboarding: первый контакт → предложить настроить личность
-    from src.db.repo import get_persona
-
     is_new = False
     async with get_session() as session:
         owner = await get_or_create_user(session, uid)
@@ -1283,7 +1281,7 @@ async def free_text(
                 )
                 await session.commit()
         except Exception as e:
-            await message.answer(sanitize_html(f"❌ Ошибка: {safe_str(e)}"))
+            await message.answer("❌ Произошла ошибка. Попробуй ещё раз.")
             return
 
         send_at_str = scheduled["send_at"].strftime("%d.%m в %H:%M")

@@ -238,7 +238,7 @@ async def step_2fa(
         try:
             await message.delete()
         except Exception:
-            logger.debug("login: could not delete password message", exc_info=True)
+            logger.debug("login: could not delete password message")
 
         await _finalize_login(message, state, userbot_manager)
     finally:

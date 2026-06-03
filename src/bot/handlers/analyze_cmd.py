@@ -161,5 +161,5 @@ async def cmd_analyze(message: Message, userbot_manager=None):
         await status_msg.edit_text(report)
 
     except Exception as e:
-        logger.exception("Full analysis failed")
-        await status_msg.edit_text(f"❌ Ошибка анализа: {e}")
+        logger.warning("full_analysis failed: %s", e)
+        await status_msg.edit_text("❌ Ошибка анализа. Попробуй позже")

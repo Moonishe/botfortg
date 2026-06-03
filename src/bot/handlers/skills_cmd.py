@@ -61,7 +61,8 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
                         yaml_description
                     )
                 except Exception as e:
-                    await message.answer(f"⚠️ Ошибка парсинга YAML: {e}")
+                    logger.warning("skill_yaml_parse failed: %s", e)
+                    await message.answer("⚠️ Ошибка парсинга YAML. Проверь формат")
                     return
 
                 if not yaml_meta:
@@ -90,7 +91,8 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
                         f"Статус: proposed (включите через /skills enable {skill.name})"
                     )
                 except Exception as e:
-                    await message.answer(f"⚠️ Ошибка создания навыка: {e}")
+                    logger.warning("skill_create failed: %s", e)
+                    await message.answer("⚠️ Ошибка создания навыка. Попробуй позже")
                 return
 
         if parts and parts[0] == "show" and len(parts) > 1:
@@ -171,8 +173,8 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
                     f"✅ Skill <b>{skill.name}</b> откачен к стабильной версии v{new_version}."
                 )
             except Exception as e:
-                logger.exception("Rollback failed for skill %r", parts[1])
-                await message.answer(f"⚠️ Ошибка отката: {e}")
+                logger.warning("skill_rollback failed: %s", e)
+                await message.answer("⚠️ Ошибка отката. Попробуй позже")
             return
 
         skills = await list_skills(session, owner, limit=30)
