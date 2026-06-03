@@ -358,6 +358,8 @@ async def exec_show_inbox(intent, message, userbot_manager) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         from src.db.repo import list_active_conversations
+        from sqlalchemy import select
+        from src.db.models import Contact
 
         conversations = await list_active_conversations(session, owner, status="active")
         waiting = await list_active_conversations(
@@ -368,11 +370,28 @@ async def exec_show_inbox(intent, message, userbot_manager) -> None:
             await message.answer("📭 Нет активных переписок.")
             return
 
+        # Batch-fetch contacts for all peer_ids
+        all_peer_ids = set()
+        for c in conversations[:10]:
+            all_peer_ids.add(c.peer_id)
+        for c in waiting[:10]:
+            all_peer_ids.add(c.peer_id)
+        if all_peer_ids:
+            result = await session.execute(
+                select(Contact).where(
+                    Contact.user_id == owner.id,
+                    Contact.peer_id.in_(all_peer_ids),
+                )
+            )
+            contact_map = {ct.peer_id: ct for ct in result.scalars().all()}
+        else:
+            contact_map = {}
+
         lines = ["📬 <b>Входящие:</b>", ""]
         if conversations:
             lines.append(f"🟢 Активные ({len(conversations)}):")
             for c in conversations[:10]:
-                contact = await get_contact(session, owner, c.peer_id)
+                contact = contact_map.get(c.peer_id)
                 name = contact.display_name if contact else str(c.peer_id)
                 unread = f" ({c.unread_count})" if c.unread_count > 1 else ""
                 lines.append(f"  • {name}{unread}")
@@ -380,7 +399,7 @@ async def exec_show_inbox(intent, message, userbot_manager) -> None:
         if waiting:
             lines.append(f"🟡 Ждут ответа ({len(waiting)}):")
             for c in waiting[:10]:
-                contact = await get_contact(session, owner, c.peer_id)
+                contact = contact_map.get(c.peer_id)
                 name = contact.display_name if contact else str(c.peer_id)
                 lines.append(f"  • {name}")
 
@@ -667,13 +686,25 @@ async def exec_show_threads(intent: dict, message: Message) -> None:
 
         convs = await list_active_conversations(session, owner)
     if convs:
-        lines = []
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            for c in convs[:10]:
-                from src.db.repo import get_contact
+            from sqlalchemy import select
+            from src.db.models import Contact
 
-                contact = await get_contact(session, owner, c.peer_id)
+            peer_ids = [c.peer_id for c in convs[:10]]
+            if peer_ids:
+                result = await session.execute(
+                    select(Contact).where(
+                        Contact.user_id == owner.id,
+                        Contact.peer_id.in_(peer_ids),
+                    )
+                )
+                contact_map = {ct.peer_id: ct for ct in result.scalars().all()}
+            else:
+                contact_map = {}
+            lines = []
+            for c in convs[:10]:
+                contact = contact_map.get(c.peer_id)
                 name = contact.display_name if contact else str(c.peer_id)
                 unread = c.unread_count or 0
                 lines.append(f"• {name} (непрочитано: {unread})")

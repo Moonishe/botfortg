@@ -92,10 +92,17 @@ def make_key_handler(
                     return
 
             for i, part in enumerate(parts):
+                provider = provider_class(part)
                 try:
-                    valid = await provider_class(part).validate_key()
+                    valid = await provider.validate_key()
                 except Exception:
                     valid = False
+                finally:
+                    if hasattr(provider, "close"):
+                        try:
+                            await provider.close()
+                        except Exception:
+                            pass
                 if not valid:
                     msg = (
                         f"❌ Ключ #{i + 1} не работает. Повтори или /cancel."

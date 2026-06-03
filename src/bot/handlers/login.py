@@ -100,37 +100,8 @@ async def cmd_login(
     await message.answer("📞 Введи номер телефона Telegram")
 
 
-@router.message(LoginStates.api_id)
-async def step_api_id(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("api_id — это число. Попробуй ещё раз или /cancel.")
-        return
-    await state.update_data(api_id=int(text))
-    await state.set_state(LoginStates.api_hash)
-    await message.answer(
-        "Отлично. Теперь введи <b>api_hash</b> (32 hex-символа).\nВведи свой api_hash."
-    )
-
-
-@router.message(LoginStates.api_hash)
-async def step_api_hash(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer(
-            "api_hash не может быть пустым. Попробуй ещё раз или /cancel."
-        )
-        return
-    if len(text) != 32 or not all(c in "0123456789abcdefABCDEF" for c in text):
-        await message.answer(
-            "api_hash должен быть строкой из 32 hex-символов. Попробуй ещё раз или /cancel."
-        )
-        return
-    await state.update_data(api_hash=text)
-    await state.set_state(LoginStates.phone)
-    await message.answer(
-        "Введи номер телефона в международном формате, например <code>+79991234567</code>."
-    )
+# DEPRECATED: step_api_id / step_api_hash handlers removed — unreachable after
+# credentials refactor. cmd_login now sets api_id/api_hash from settings directly.
 
 
 @router.message(LoginStates.phone)

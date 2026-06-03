@@ -90,6 +90,31 @@ def _is_safe_url(url: str) -> bool:
         return True  # невалидный IP — вероятно домен, разрешаем
 
 
+# ── URL summary cache (LRU with TTL) ──────────────────────────────────
+
+_url_cache: dict[str, tuple[str, float]] = {}
+_URL_CACHE_MAX = 100
+_URL_CACHE_TTL = 3600  # 1 hour
+
+
+async def _get_cached_url_summary(url: str) -> str | None:
+    """Return cached summary if valid, else None."""
+    if url in _url_cache:
+        summary, ts = _url_cache[url]
+        if time.time() - ts < _URL_CACHE_TTL:
+            return summary
+        del _url_cache[url]
+    return None
+
+
+def _set_url_cache(url: str, summary: str) -> None:
+    """Store summary in LRU cache, evict oldest if full."""
+    if len(_url_cache) >= _URL_CACHE_MAX:
+        oldest = min(_url_cache, key=lambda k: _url_cache[k][1])
+        del _url_cache[oldest]
+    _url_cache[url] = (summary, time.time())
+
+
 async def _fetch_url_content(url: str) -> str | None:
     """Фетчит содержимое URL через httpx."""
     if not _is_safe_url(url):
@@ -139,6 +164,22 @@ def _extract_correction_pattern(original: str, edited: str) -> tuple[str, str] |
 
 # Singalong search cache: user_id → list of search result dicts
 _singalong_search_cache: dict = {}
+
+
+class VoiceJob(NamedTuple):
+    voice_path: Path
+    message: object  # aiogram Message
+    state_str: str | None
+    userbot_manager: object
+    file_unique_id: str
+    mode: str
+    api_provider: str
+    openai_key: str | None
+    gemini_key: str | None
+    mistral_key: str | None
+    custom_stt_key: str | None = None
+    custom_stt_model: str | None = None
+    custom_stt_endpoint: str | None = None
 
 
 # Voice transcription queue (non-blocking background processing)
@@ -226,21 +267,21 @@ async def _voice_worker() -> None:
                 try:
                     job = await _voice_queue.get()
                     got_job = True
-                    (
-                        voice_path,
-                        message,
-                        _state_str,  # string | None — FSMContext value, NOT the FSMContext object
-                        userbot_manager,
-                        file_unique_id,
-                        mode,
-                        api_provider,
-                        openai_key,
-                        gemini_key,
-                        mistral_key,
-                        custom_stt_key,
-                        custom_stt_model,
-                        custom_stt_endpoint,
-                    ) = job
+                    voice_path = job.voice_path
+                    message = job.message
+                    _state_str = (
+                        job.state_str
+                    )  # string | None — FSMContext value, NOT the FSMContext object
+                    userbot_manager = job.userbot_manager
+                    file_unique_id = job.file_unique_id
+                    mode = job.mode
+                    api_provider = job.api_provider
+                    openai_key = job.openai_key
+                    gemini_key = job.gemini_key
+                    mistral_key = job.mistral_key
+                    custom_stt_key = job.custom_stt_key
+                    custom_stt_model = job.custom_stt_model
+                    custom_stt_endpoint = job.custom_stt_endpoint
 
                     try:
                         text = await transcription_service.transcribe(
@@ -1237,6 +1278,12 @@ async def free_text(
         is_pure_url = raw.strip() == url.strip()
 
         if is_pure_url:
+            # Check URL summary cache first (skip HTTP + LLM if cached)
+            cached = await _get_cached_url_summary(url)
+            if cached:
+                await message.answer(sanitize_html(f"📄 {cached}\n\n🔗 {url}"))
+                return
+
             try:
                 await message.answer(f"🔍 Читаю {url[:50]}...")
             except Exception:
@@ -1257,6 +1304,7 @@ async def free_text(
                 if provider:
                     try:
                         summary = await _summarize_url(url, content, provider)
+                        _set_url_cache(url, summary)
                         await message.answer(sanitize_html(f"📄 {summary}\n\n🔗 {url}"))
                     except Exception:
                         await message.answer(
@@ -1386,20 +1434,20 @@ async def free_voice(
     try:
         await asyncio.wait_for(
             _voice_queue.put(
-                (
-                    target,
-                    message,
-                    current_state,
-                    userbot_manager,
-                    media.file_unique_id,
-                    mode,
-                    api_provider,
-                    openai_key,
-                    gemini_key,
-                    mistral_key,
-                    custom_stt_key,
-                    custom_stt_model,
-                    custom_stt_endpoint,
+                VoiceJob(
+                    voice_path=target,
+                    message=message,
+                    state_str=current_state,
+                    userbot_manager=userbot_manager,
+                    file_unique_id=media.file_unique_id,
+                    mode=mode,
+                    api_provider=api_provider,
+                    openai_key=openai_key,
+                    gemini_key=gemini_key,
+                    mistral_key=mistral_key,
+                    custom_stt_key=custom_stt_key,
+                    custom_stt_model=custom_stt_model,
+                    custom_stt_endpoint=custom_stt_endpoint,
                 )
             ),
             timeout=settings.voice_queue_timeout,

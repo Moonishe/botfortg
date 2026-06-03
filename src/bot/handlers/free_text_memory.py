@@ -123,9 +123,9 @@ async def _exec_forget_memory(intent, message) -> None:
         return
 
     async with get_session() as session:
+        # один запрос на всю сессию (N+1 → 1)
+        owner2 = await get_or_create_user(session, message.from_user.id)
         for m in found:
-            # переоткрываем owner в текущей сессии (detach-safe)
-            owner2 = await get_or_create_user(session, message.from_user.id)
             await delete_memory(session, owner2, m.id)
 
     names = ", ".join(
