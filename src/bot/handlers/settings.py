@@ -526,6 +526,11 @@ async def step_import_config(message: Message, state: FSMContext) -> None:
 
             await session.commit()
 
+        # Invalidate settings cache after mutation
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(message.from_user.id)
+
         count = len(imported_keys)
         await message.answer(
             f"✅ Конфиг импортирован!\n"

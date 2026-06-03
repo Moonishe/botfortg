@@ -138,6 +138,11 @@ def make_key_handler(
         await invalidate(f"provider:{message.from_user.id}:main:default")
         await invalidate(f"provider:{message.from_user.id}:main:search")
 
+        # Invalidate settings cache after mutation
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(message.from_user.id)
+
         await fsm_context.clear()
         count = len(parts)
         kb = InlineKeyboardBuilder()

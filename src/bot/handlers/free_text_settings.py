@@ -221,7 +221,7 @@ async def _exec_change_auto_mode(intent, message) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.auto_mode = mode
         await session.commit()
-        await invalidate_settings_cache()
+        await invalidate_settings_cache(message.from_user.id)
     labels = {"offline_only": "только оффлайн", "always": "всегда", "smart": "умный"}
     await message.answer(f"✅ Режим авто-ответа: <b>{labels[mode]}</b>")
 
@@ -237,4 +237,6 @@ async def _exec_set_quiet_hours(intent, message) -> None:
         owner.settings.quiet_hours_start = start
         owner.settings.quiet_hours_end = end
         await session.commit()
+        # Invalidate settings cache after mutation
+        await invalidate_settings_cache(message.from_user.id)
     await message.answer(f"✅ Тихие часы: <b>{start} – {end}</b>")

@@ -133,8 +133,24 @@ _SETTINGS_CACHE_TTL: float = 60.0
 _settings_lock = asyncio.Lock()
 
 
-async def _get_owner_context(telegram_id: int) -> dict[str, object]:
-    """Возвращает {owner_telegram_id, tz_name, use_heavy, global_style_profile} с TTL-кэшем (per-user)."""
+async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object]:
+    """Возвращает {owner_telegram_id, tz_name, use_heavy, global_style_profile} с TTL-кэшем (per-user).
+
+    Args:
+        telegram_id: Telegram user ID
+        session: Optional database session (if provided, skips lock/cache for single-session optimization)
+    """
+    # Single-session optimization: use provided session directly
+    if session is not None:
+        owner = await get_or_create_user(session, telegram_id)
+        return {
+            "owner_telegram_id": owner.telegram_id,
+            "tz_name": get_user_tz(owner),
+            "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
+            "global_style_profile": owner.global_style_profile,
+        }
+
+    # Original path: lock + cache
     now = time.monotonic()
     cached_ts = _settings_cache_ts.get(telegram_id, 0.0)
     if telegram_id in _settings_cache and (now - cached_ts) < _SETTINGS_CACHE_TTL:

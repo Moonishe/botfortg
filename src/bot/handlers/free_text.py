@@ -499,6 +499,7 @@ async def _process_text(
     message: Message,
     state: FSMContext,
     userbot_manager: UserbotManager,
+    session=None,
 ) -> None:
 
     turn_started = time.monotonic()
@@ -508,7 +509,7 @@ async def _process_text(
         await message.answer("⏳ Подожди пару секунд, обрабатываю предыдущий запрос…")
         return
 
-    ctx = await _get_owner_context(message.from_user.id)
+    ctx = await _get_owner_context(message.from_user.id, session)
     tz_name = str(ctx["tz_name"])
     owner_telegram_id = int(ctx["owner_telegram_id"])  # type: ignore[arg-type]
     use_heavy = bool(ctx["use_heavy"])
@@ -732,9 +733,16 @@ async def _process_text(
         use_heavy: bool,
         *,
         search_hint: str | None = None,
+        session=None,
     ) -> dict | None:
         """Определить песню через LLM. Возвращает {song, artist, next_line} или None."""
-        async with get_session() as session:
+        if session is None:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, telegram_id)
+                provider = await build_provider(
+                    session, owner, purpose="main", task_type=TaskType.DEFAULT
+                )
+        else:
             owner = await get_or_create_user(session, telegram_id)
             provider = await build_provider(
                 session, owner, purpose="main", task_type=TaskType.DEFAULT
@@ -749,9 +757,16 @@ async def _process_text(
         text: str,
         telegram_id: int,
         use_heavy: bool,
+        session=None,
     ) -> str | None:
         """Получить следующую строчку через LLM."""
-        async with get_session() as session:
+        if session is None:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, telegram_id)
+                provider = await build_provider(
+                    session, owner, purpose="main", task_type=TaskType.DEFAULT
+                )
+        else:
             owner = await get_or_create_user(session, telegram_id)
             provider = await build_provider(
                 session, owner, purpose="main", task_type=TaskType.DEFAULT
@@ -1024,9 +1039,20 @@ async def _process_text(
         )
         return
 
-    # Stage 6: Build provider
+    # Stage 6: Build provider (Single session per request optimization)
     purpose = plan.tasks[0].purpose.value if plan.tasks else "main"
-    async with get_session() as session:
+    if session is None:
+        async with get_session() as session:
+            owner_db = await get_or_create_user(session, owner_telegram_id)
+            provider = await build_provider(
+                session, owner_db, purpose=purpose, task_type=TaskType.DEFAULT
+            )
+            if provider is None and purpose != "main":
+                logger.debug("No key for purpose '%s', falling back to main", purpose)
+                provider = await build_provider(
+                    session, owner_db, purpose="main", task_type=TaskType.DEFAULT
+                )
+    else:
         owner_db = await get_or_create_user(session, owner_telegram_id)
         provider = await build_provider(
             session, owner_db, purpose=purpose, task_type=TaskType.DEFAULT

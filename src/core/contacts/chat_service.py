@@ -6,6 +6,7 @@ from telethon import TelegramClient
 from telethon.tl.custom import Message as TgMessage
 
 from sqlalchemy import select, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.core.infra.documents import extract_text, is_supported
@@ -75,7 +76,12 @@ async def _process_one(
     mistral_key: str | None,
     transcription_mode: str,
     api_provider: str = "openai",
+    session: AsyncSession | None = None,
 ) -> None:
+    """Process single message: download media, transcribe/parse, upsert to DB.
+
+    # Batch query optimization — accepts optional session for batch operations.
+    """
     kind = _classify(msg)
     peer_id = _peer_id_from_message(msg)
     sender_name = await _sender_label(msg)
@@ -127,7 +133,8 @@ async def _process_one(
             except Exception:
                 logger.exception("doc parse failed for msg %s", msg.id)
 
-    async with get_session() as session:
+    # Batch query optimization — use provided session or open new one
+    if session is not None:
         await upsert_message(
             session,
             user_id=owner.id,
@@ -145,6 +152,25 @@ async def _process_one(
             media_path=media_path,
             extracted_text=extracted,
         )
+    else:
+        async with get_session() as new_session:
+            await upsert_message(
+                new_session,
+                user_id=owner.id,
+                peer_id=peer_id,
+                message_id=msg.id,
+                sender_id=msg.sender_id,
+                sender_name=sender_name,
+                is_outgoing=bool(msg.out),
+                date=msg.date.replace(tzinfo=None)
+                if msg.date
+                else datetime.now(timezone.utc).replace(tzinfo=None),
+                kind=kind,
+                text=text,
+                transcript=transcript,
+                media_path=media_path,
+                extracted_text=extracted,
+            )
 
 
 async def _last_cached_message_id(owner_id: int, peer_id: int) -> int:
@@ -222,20 +248,23 @@ async def load_chat(
             prefix="💬 Загрузка сообщений",
         )
 
-    async for msg in msg_iter:
-        await _process_one(
-            client,
-            owner,
-            msg,
-            media_root=media_root,
-            transcribe=transcribe,
-            parse_docs=parse_docs,
-            openai_key=openai_key,
-            gemini_key=gemini_key,
-            mistral_key=mistral_key,
-            transcription_mode=transcription_mode,
-            api_provider=api_provider,
-        )
+    # Batch query optimization — single session for all message upserts
+    async with get_session() as batch_session:
+        async for msg in msg_iter:
+            await _process_one(
+                client,
+                owner,
+                msg,
+                media_root=media_root,
+                transcribe=transcribe,
+                parse_docs=parse_docs,
+                openai_key=openai_key,
+                gemini_key=gemini_key,
+                mistral_key=mistral_key,
+                transcription_mode=transcription_mode,
+                api_provider=api_provider,
+                session=batch_session,
+            )
 
     if transcribe:
         await _backfill_transcripts(
@@ -287,6 +316,9 @@ async def _backfill_transcripts(
     if not pending:
         return
 
+    # Batch query optimization — collect transcripts first, then batch upsert
+    transcript_updates: list[dict] = []
+
     for m in pending:
         try:
             tg_msg = await client.get_messages(peer_id, ids=m.message_id)
@@ -321,22 +353,32 @@ async def _backfill_transcripts(
 
         if not transcript:
             continue
+
+        transcript_updates.append(
+            {
+                "message_id": m.message_id,
+                "sender_id": m.sender_id,
+                "sender_name": m.sender_name,
+                "is_outgoing": m.is_outgoing,
+                "date": m.date,
+                "kind": m.kind,
+                "text": m.text,
+                "transcript": transcript,
+                "media_path": None,
+                "extracted_text": m.extracted_text,
+            }
+        )
+
+    # Batch upsert all transcripts in a single session
+    if transcript_updates:
         async with get_session() as session:
-            await upsert_message(
-                session,
-                user_id=owner_id,
-                peer_id=peer_id,
-                message_id=m.message_id,
-                sender_id=m.sender_id,
-                sender_name=m.sender_name,
-                is_outgoing=m.is_outgoing,
-                date=m.date,
-                kind=m.kind,
-                text=m.text,
-                transcript=transcript,
-                media_path=None,
-                extracted_text=m.extracted_text,
-            )
+            for upd in transcript_updates:
+                await upsert_message(
+                    session,
+                    user_id=owner_id,
+                    peer_id=peer_id,
+                    **upd,
+                )
 
 
 def message_to_text(m: Message) -> str:

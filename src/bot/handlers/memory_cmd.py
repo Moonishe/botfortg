@@ -440,11 +440,15 @@ async def cmd_keys(message: Message) -> None:
                 purpose = slot.purpose
                 await session.delete(slot)
                 await session.commit()
+                # Invalidate settings cache after mutation
+                from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+                await invalidate_settings_cache(message.from_user.id)
                 await message.answer(
                     f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
                 )
             else:
-                await message.answer("❌ Слот не найден или не твой.")
+                await message.answer("❌ Слот не найден или не твои.")
         return
 
     if len(args) >= 2 and args[1] == "remove":
@@ -476,6 +480,10 @@ async def cmd_keys(message: Message) -> None:
             if slot and slot.user_id == owner.id:
                 slot.enabled = not slot.enabled
                 await session.commit()
+                # Invalidate settings cache after mutation
+                from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+                await invalidate_settings_cache(message.from_user.id)
                 status = "включён" if slot.enabled else "выключен"
                 await message.answer(
                     f"✅ Слот #{slot_id} ({slot.provider}/{slot.purpose}) {status}."
@@ -617,6 +625,10 @@ async def cb_keys_remove(callback: CallbackQuery) -> None:
             purpose = slot.purpose
             await session.delete(slot)
             await session.commit()
+            # Invalidate settings cache after mutation
+            from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+            await invalidate_settings_cache(callback.from_user.id)
             text = f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
         else:
             text = "❌ Слот не найден или не твой."

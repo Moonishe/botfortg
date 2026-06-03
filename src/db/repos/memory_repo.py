@@ -442,6 +442,120 @@ async def add_memory(
     return mem
 
 
+async def _batch_link_memories(
+    session: AsyncSession,
+    user,
+    pending_links: list[tuple[int, int, float, str | None]],
+) -> int:
+    """Batch-create/update MemoryLinks. Returns count of links created/updated.
+
+    # Batch query optimization — replaces N individual link_memories() calls
+    # with 3 queries: ownership check, existing check, batch insert.
+    """
+    if not pending_links:
+        return 0
+
+    # De-duplicate by (source, target) pairs
+    seen: set[tuple[int, int]] = set()
+    unique_links: list[tuple[int, int, float, str | None]] = []
+    for src, tgt, w, rt in pending_links:
+        key = (src, tgt)
+        if key not in seen:
+            seen.add(key)
+            unique_links.append((src, tgt, w, rt))
+
+    if not unique_links:
+        return 0
+
+    # Collect all memory IDs involved
+    all_ids: set[int] = set()
+    for src, tgt, _, _ in unique_links:
+        all_ids.add(src)
+        all_ids.add(tgt)
+
+    # Batch verify ownership — 1 query instead of N
+    valid_ids = set(
+        (
+            await session.execute(
+                select(Memory.id).where(
+                    Memory.id.in_(list(all_ids)), Memory.user_id == user.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    if not valid_ids:
+        return 0
+
+    # Filter to only valid pairs (both source and target must belong to user)
+    valid_links = [
+        (src, tgt, w, rt)
+        for src, tgt, w, rt in unique_links
+        if src in valid_ids and tgt in valid_ids
+    ]
+    if not valid_links:
+        return 0
+
+    # Batch check existing links — 1 query instead of 2*N
+    src_ids = [l[0] for l in valid_links]
+    tgt_ids = [l[1] for l in valid_links]
+    existing_result = await session.execute(
+        select(MemoryLink.source_id, MemoryLink.target_id).where(
+            MemoryLink.user_id == user.id,
+            MemoryLink.source_id.in_(src_ids),
+            MemoryLink.target_id.in_(tgt_ids),
+        )
+    )
+    existing_pairs: set[tuple[int, int]] = {(r[0], r[1]) for r in existing_result.all()}
+
+    # Build links to create/update
+    count = 0
+    for src, tgt, w, rt in valid_links:
+        if (src, tgt) in existing_pairs:
+            # Update existing — use individual update for simplicity
+            update_result = await session.execute(
+                select(MemoryLink).where(
+                    MemoryLink.user_id == user.id,
+                    MemoryLink.source_id == src,
+                    MemoryLink.target_id == tgt,
+                )
+            )
+            existing = update_result.scalar_one_or_none()
+            if existing:
+                existing.weight = w
+                if rt:
+                    existing.relation_type = rt
+        else:
+            # Create new forward link
+            link = MemoryLink(
+                user_id=user.id,
+                source_id=src,
+                target_id=tgt,
+                weight=w,
+                relation_type=rt,
+            )
+            session.add(link)
+
+            # Create reverse link if not exists
+            if (tgt, src) not in existing_pairs:
+                rev = MemoryLink(
+                    user_id=user.id,
+                    source_id=tgt,
+                    target_id=src,
+                    weight=w,
+                    relation_type=rt,
+                )
+                session.add(rev)
+                count += 1
+
+    if count or any((src, tgt) in existing_pairs for src, tgt, _, _ in valid_links):
+        await session.flush()
+
+    return count
+
+
 async def _auto_link_memory(
     session: AsyncSession, user, memory, embedding: list[float] | None = None
 ) -> None:
@@ -455,11 +569,14 @@ async def _auto_link_memory(
       - Cause-effect hint (positive→negative same contact) → "preceded"
 
     All supplementary passes add links on top of the existing ones.
+
+    # Batch query optimization — collects all links and flushes in batch.
     """
     if not memory.fact or not memory.is_active:
         return
 
-    links_added = 0
+    # Collect all pending links, flush once at the end
+    pending_links: list[tuple[int, int, float, str | None]] = []
 
     # ── Pass 1: Semantic linking via Qdrant ──────────────────────────────
     if embedding:
@@ -490,15 +607,7 @@ async def _auto_link_memory(
                 else:
                     relation_type = "related"  # weak
 
-                await link_memories(
-                    session,
-                    user,
-                    source_id=memory.id,
-                    target_id=hit_id,
-                    relation_type=relation_type,
-                    weight=cosine_score,
-                )
-                links_added += 1
+                pending_links.append((memory.id, hit_id, cosine_score, relation_type))
         except Exception:
             logger.debug(
                 "Semantic linking failed, falling back to keyword overlap",
@@ -506,7 +615,7 @@ async def _auto_link_memory(
             )
 
     # ── Pass 2: Keyword overlap fallback (only if no semantic links) ─────
-    if links_added == 0:
+    if len(pending_links) == 0:
         words = {w.lower() for w in memory.fact.split() if len(w) >= 4}
         if len(words) >= 2:
             candidates_q = (
@@ -528,15 +637,8 @@ async def _auto_link_memory(
                 c_words = {w.lower() for w in c.fact.split() if len(w) >= 4}
                 overlap = len(words & c_words)
                 if overlap >= 2:
-                    await link_memories(
-                        session,
-                        user,
-                        source_id=memory.id,
-                        target_id=c.id,
-                        relation_type="related",
-                        weight=0.3 + overlap * 0.1,
-                    )
-                    links_added += 1
+                    weight = 0.3 + overlap * 0.1
+                    pending_links.append((memory.id, c.id, weight, "related"))
 
     # ── Pass 3: Temporal co-occurrence ───────────────────────────────────
     # Same contact, created_at within 1 hour
@@ -557,15 +659,7 @@ async def _auto_link_memory(
         for c in result.scalars().all():
             if not c.fact:
                 continue
-            await link_memories(
-                session,
-                user,
-                source_id=memory.id,
-                target_id=c.id,
-                relation_type="co_temporal",
-                weight=0.5,
-            )
-            links_added += 1
+            pending_links.append((memory.id, c.id, 0.5, "co_temporal"))
 
     # ── Pass 4: Entity co-occurrence (shared proper nouns) ───────────────
     # Simple: capitalized word >= 3 chars
@@ -598,15 +692,7 @@ async def _auto_link_memory(
                 and w.strip(".,!?;:'\"()[]{}").isalpha()
             }
             if proper_nouns & c_upper:
-                await link_memories(
-                    session,
-                    user,
-                    source_id=memory.id,
-                    target_id=c.id,
-                    relation_type="co_entity",
-                    weight=0.4,
-                )
-                links_added += 1
+                pending_links.append((memory.id, c.id, 0.4, "co_entity"))
 
     # ── Pass 5: Cause-effect hint ────────────────────────────────────────
     # If new fact is negative, link from older positive facts of same contact
@@ -630,22 +716,17 @@ async def _auto_link_memory(
         for c in result.scalars().all():
             if not c.fact:
                 continue
-            await link_memories(
-                session,
-                user,
-                source_id=c.id,  # earlier positive → new negative
-                target_id=memory.id,
-                relation_type="preceded",
-                weight=0.3,
-            )
-            links_added += 1
+            pending_links.append((c.id, memory.id, 0.3, "preceded"))
 
-    if links_added:
-        logger.debug(
-            "Auto-linked %d facts to memory %d",
-            links_added,
-            memory.id,
-        )
+    # ── Batch flush all links ────────────────────────────────────────────
+    if pending_links:
+        links_added = await _batch_link_memories(session, user, pending_links)
+        if links_added:
+            logger.debug(
+                "Auto-linked %d facts to memory %d",
+                links_added,
+                memory.id,
+            )
 
 
 async def list_memories(
