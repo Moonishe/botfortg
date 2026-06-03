@@ -13,7 +13,11 @@ from src.db.models import Base
 
 logger = logging.getLogger(__name__)
 
-engine = create_async_engine(settings.database_url, future=True)
+engine = create_async_engine(
+    settings.database_url,
+    future=True,
+    connect_args={"check_same_thread": False},
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

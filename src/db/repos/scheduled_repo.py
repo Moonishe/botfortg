@@ -44,6 +44,7 @@ async def mark_sent(session: AsyncSession, msg_id: int) -> None:
         .where(ScheduledMessage.id == msg_id)
         .values(status="sent", sent_at=datetime.now(timezone.utc))
     )
+    await session.flush()
 
 
 async def mark_failed(session: AsyncSession, msg_id: int, error: str) -> None:
@@ -52,6 +53,7 @@ async def mark_failed(session: AsyncSession, msg_id: int, error: str) -> None:
         .where(ScheduledMessage.id == msg_id)
         .values(status="failed", error=error[:500])
     )
+    await session.flush()
 
 
 async def get_user_pending(

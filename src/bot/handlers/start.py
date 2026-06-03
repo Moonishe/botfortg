@@ -575,6 +575,13 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
     )
 
 
+@router.message(OnboardingStates.waiting_provider_choice, OwnerOnly())
+async def step_onboarding_provider_choice_text(
+    message: Message, state: FSMContext
+) -> None:
+    await message.answer("☝️ Нажми на кнопку провайдера выше, чтобы выбрать.")
+
+
 @router.callback_query(F.data == OnboardingCB.GOBACK)
 async def cb_onboarding_more_keys(call: CallbackQuery, state: FSMContext) -> None:
     """Пользователь хочет добавить ещё ключей — возвращаем к выбору провайдера."""
@@ -939,9 +946,9 @@ def _detect_provider(key: str) -> str | None:
         return "gemini"
     if key.startswith("Nb"):
         return "mistral"
-    # Cloudflare — Workers AI tokens (long base64, no standard prefix)
+    # Long unknown key — can't reliably guess provider, return None
     if len(key) > 64 and not key.startswith("sk-") and not key.startswith("AIzaSy"):
-        return "cloudflare"
+        return None
     return None
 
 

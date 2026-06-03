@@ -474,7 +474,11 @@ async def cmd_keys(message: Message) -> None:
         return
 
     if len(args) >= 3 and args[1] == "toggle":
-        slot_id = int(args[2])
+        try:
+            slot_id = int(args[2])
+        except (ValueError, IndexError):
+            await message.answer("❌ Usage: /keys toggle <number>")
+            return
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
             slot = await session.get(LlmKeySlot, slot_id)

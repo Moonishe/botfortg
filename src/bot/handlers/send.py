@@ -283,7 +283,14 @@ async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(SendStates.waiting_edit)
 async def step_edit(message: Message, state: FSMContext) -> None:
-    new_text = (message.text or "").strip()
+    raw = (message.text or "").strip()
+    if raw in ("/cancel", "/back", "/menu"):
+        await state.clear()
+        await message.answer("🚫 Редактирование отменено.")
+        return
+    if raw.startswith("/"):
+        return  # let command handlers process
+    new_text = raw
     if not new_text:
         await message.answer("Пустой текст. Повтори или /cancel.")
         return

@@ -105,16 +105,30 @@ _ALLOWED_NODES: set[type[ast.AST]] = {
 # Attribute targets).
 _BLACKLIST: set[str] = {
     "__import__",
+    "__class__",
+    "__bases__",
+    "__subclasses__",
+    "__mro__",
+    "__init__",
+    "__globals__",
+    "__code__",
+    "__builtins__",
+    "__getattribute__",
+    "__getattr__",
+    "__setattr__",
+    "__delattr__",
+    "__dir__",
     "eval",
     "exec",
     "compile",
     "open",
+    "input",
+    "breakpoint",
     "getattr",
     "setattr",
     "delattr",
-    "__builtins__",
-    "__subclasses__",
-    "__class__",
+    "type",
+    "object",
 }
 
 

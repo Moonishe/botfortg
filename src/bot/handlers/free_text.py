@@ -342,7 +342,7 @@ async def _voice_worker() -> None:
                             custom_stt_model=custom_stt_model,
                             custom_stt_endpoint=custom_stt_endpoint,
                         )
-                    except (RequestError, HTTPStatusError):
+                    except (RequestError, HTTPStatusError, ValueError):
                         logger.exception("voice transcription failed in worker")
                         try:
                             await message.answer("❌ Не удалось распознать голосовое.")

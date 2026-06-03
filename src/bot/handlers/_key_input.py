@@ -136,8 +136,7 @@ def make_key_handler(
         # Инвалидируем кэш провайдера
         from src.core.context_cache import invalidate
 
-        await invalidate(f"provider:{message.from_user.id}:main:default")
-        await invalidate(f"provider:{message.from_user.id}:main:search")
+        await invalidate(f"provider:{message.from_user.id}:")
 
         # Invalidate settings cache after mutation
         from src.bot.handlers.free_text_common import invalidate_settings_cache

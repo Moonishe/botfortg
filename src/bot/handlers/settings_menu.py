@@ -10,7 +10,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.bot.callbacks import SettingsCB
-from src.crypto import decrypt
 from src.db.models._auth import ApiKey
 from src.db.repo import get_or_create_user, list_key_slots
 from src.db.session import get_session
@@ -37,18 +36,16 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
             .scalars()
             .all()
         )
-        _keys_map: dict[str, str | None] = {
-            r.provider: decrypt(r.key_enc) for r in _api_key_rows
-        }
-        openai_key = _keys_map.get("openai")
-        gemini_key = _keys_map.get("gemini")
-        mistral_key = _keys_map.get("mistral")
-        cloudflare_key = _keys_map.get("cloudflare")
-        deepseek_key = _keys_map.get("deepseek")
-        grok_key = _keys_map.get("grok")
-        mimo_key = _keys_map.get("mimo")
-        groq_key = _keys_map.get("groq")
-        custom_key = _keys_map.get("custom")
+        _keys_map: dict[str, bool] = {r.provider: True for r in _api_key_rows}
+        openai_key = _keys_map.get("openai", False)
+        gemini_key = _keys_map.get("gemini", False)
+        mistral_key = _keys_map.get("mistral", False)
+        cloudflare_key = _keys_map.get("cloudflare", False)
+        deepseek_key = _keys_map.get("deepseek", False)
+        grok_key = _keys_map.get("grok", False)
+        mimo_key = _keys_map.get("mimo", False)
+        groq_key = _keys_map.get("groq", False)
+        custom_key = _keys_map.get("custom", False)
 
         # Also check LlmKeySlot for custom/stt providers
         try:
