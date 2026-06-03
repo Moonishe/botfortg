@@ -5,6 +5,7 @@
 
 import asyncio
 import base64
+import httpx
 import logging
 from dataclasses import dataclass
 
@@ -39,6 +40,7 @@ class OpenAIVisionProvider:
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            timeout=httpx.Timeout(120.0, connect=15.0),
         )
         self._model = model
 

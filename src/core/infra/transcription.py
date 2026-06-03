@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -76,14 +77,20 @@ class TranscriptionService:
     ) -> str:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=openai_key)
-        file_bytes = await _read_file_bytes(path)
-        resp = await client.audio.transcriptions.create(
-            model="whisper-1",
-            file=BytesIO(file_bytes),
-            language=language,
+        client = AsyncOpenAI(
+            api_key=openai_key,
+            timeout=httpx.Timeout(120.0, connect=15.0),
         )
-        return resp.text
+        try:
+            file_bytes = await _read_file_bytes(path)
+            resp = await client.audio.transcriptions.create(
+                model="whisper-1",
+                file=BytesIO(file_bytes),
+                language=language,
+            )
+            return resp.text
+        finally:
+            await client.close()
 
     async def _transcribe_gemini(
         self, path: Path, gemini_key: str, language: str | None
@@ -103,7 +110,10 @@ class TranscriptionService:
             )
             return resp.text or ""
 
-        return await asyncio.to_thread(_run)
+        return await asyncio.wait_for(
+            asyncio.to_thread(_run),
+            timeout=120.0,
+        )
 
     async def _transcribe_mistral(
         self, path: Path, mistral_key: str, language: str | None
@@ -142,6 +152,43 @@ class TranscriptionService:
         endpoint: str | None,
     ) -> str:
         """Transcribe via any STT provider using LlmKeySlot config."""
+        from urllib.parse import urlparse
+        import ipaddress as _ipaddress
+        import socket as _socket
+
+        def _check_stt_url(url: str) -> None:
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            if parsed.scheme != "https":
+                raise ValueError(f"STT endpoint must use HTTPS, got: {parsed.scheme}")
+            try:
+                ip = _ipaddress.ip_address(host)
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_reserved
+                    or ip.is_link_local
+                ):
+                    raise ValueError(f"STT endpoint resolves to internal IP: {ip}")
+            except ValueError as e:
+                if "STT endpoint" in str(e):
+                    raise
+                # Not an IP — it's a domain, check DNS
+                try:
+                    addrinfo = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC)
+                    for family, _, _, _, sockaddr in addrinfo:
+                        resolved = _ipaddress.ip_address(sockaddr[0])
+                        if (
+                            resolved.is_private
+                            or resolved.is_loopback
+                            or resolved.is_reserved
+                        ):
+                            raise ValueError(
+                                f"STT endpoint DNS resolves to internal IP"
+                            )
+                except (_socket.gaierror, OSError):
+                    pass
+
         import httpx
 
         url = (endpoint or "").rstrip("/")
@@ -152,6 +199,8 @@ class TranscriptionService:
                 url = "https://api.assemblyai.com/v2/transcript"
             else:
                 raise ValueError(f"No endpoint for {provider_name}")
+
+        _check_stt_url(url)
 
         params: dict[str, str] = {}
         if model:

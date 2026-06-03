@@ -218,6 +218,12 @@ class SoulSnapshot(Base):
     __tablename__ = "soul_snapshots"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+        default=0,  # Safe default for ORM inserts; migration backfills real value
+    )
     version: Mapped[str] = mapped_column(String(32), nullable=False)  # semver "1.0.0"
     snapshot_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="auto"

@@ -39,14 +39,7 @@ _ALLOWED_NODES: set[type[ast.AST]] = {
     ast.Dict,
     ast.Tuple,
     ast.Set,
-    ast.ListComp,
-    ast.DictComp,
-    ast.SetComp,
-    ast.GeneratorExp,
-    ast.comprehension,  # generator inside comprehensions (Python 3.12+)
     ast.IfExp,  # ternary: a if cond else b
-    ast.JoinedStr,  # f-strings: f"...{x}..."
-    ast.FormattedValue,  # {expr} inside f-strings
     ast.Starred,  # *args unpacking
     ast.Slice,  # slicing: x[1:2]
     # Calls
@@ -118,6 +111,10 @@ _BLACKLIST: set[str] = {
     "__setattr__",
     "__delattr__",
     "__dir__",
+    "__format__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__sizeof__",
     "eval",
     "exec",
     "compile",
@@ -129,6 +126,8 @@ _BLACKLIST: set[str] = {
     "delattr",
     "type",
     "object",
+    "memoryview",
+    "bytearray",
 }
 
 

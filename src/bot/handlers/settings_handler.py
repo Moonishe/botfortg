@@ -223,6 +223,12 @@ async def step_import_config(message: Message, state: FSMContext) -> None:
         await state.clear()
 
 
+@router.message(SettingsStates.waiting_config_import)
+async def step_import_config_text(message: Message) -> None:
+    """Text input when file upload expected."""
+    await message.answer("📥 Пришли JSON-файл (документом). /cancel — отмена.")
+
+
 # =====================================================================
 #  ANALYZE
 # =====================================================================

@@ -587,7 +587,12 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
                 continue
         # Validate key (только для новых слотов)
         try:
-            raw_key = decrypt(slot.key_enc)
+            try:
+                raw_key = decrypt(slot.key_enc)
+            except ValueError:
+                logger.warning("Key decryption failed for slot %d", slot.id)
+                results.append(f"  #{slot.id} — ❌ ключ повреждён")
+                continue
             prov_class = _provider_class_for(provider)
             prov = prov_class(raw_key)
             valid = await prov.validate_key()
@@ -811,6 +816,9 @@ async def exec_remove_api_key(intent: dict, message: Message) -> None:
                 await session.delete(s)
                 count += 1
             await session.commit()
+            from src.core.context_cache import invalidate
+
+            await invalidate(f"provider:{message.from_user.id}:")
             await message.answer(f"✅ Удалено {count} ключей.")
             return
 
@@ -830,6 +838,9 @@ async def exec_remove_api_key(intent: dict, message: Message) -> None:
             purp = slot.purpose
             await session.delete(slot)
             await session.commit()
+            from src.core.context_cache import invalidate
+
+            await invalidate(f"provider:{message.from_user.id}:")
             await message.answer(f"✅ Слот #{slot_id} ({prov}/{purp}) удалён.")
         else:
             await message.answer("❌ Слот не найден или не твой.")
@@ -861,6 +872,9 @@ async def exec_toggle_api_key(intent: dict, message: Message) -> None:
             else:  # toggle
                 slot.enabled = not slot.enabled
             await session.commit()
+            from src.core.context_cache import invalidate
+
+            await invalidate(f"provider:{message.from_user.id}:")
             status = "включён" if slot.enabled else "выключен"
             await message.answer(
                 f"✅ Слот #{slot_id} ({slot.provider}/{slot.purpose}) {status}."

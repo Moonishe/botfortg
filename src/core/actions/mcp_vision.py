@@ -100,6 +100,10 @@ async def _try_gemini_vision(
         pass
     except Exception as e:
         logger.debug("Gemini vision failed: %s", e)
+    finally:
+        close_method = getattr(client, "close", None)
+        if close_method is not None:
+            await close_method()
 
     return None
 

@@ -37,6 +37,49 @@ class Settings(BaseSettings):
             return None
         return v
 
+    @field_validator("encryption_key", mode="after")
+    @classmethod
+    def _validate_encryption_key(cls, v: str) -> str:
+        """Validate Fernet key format at config load time."""
+        if not v or len(v) != 44:
+            raise ValueError(
+                "ENCRYPTION_KEY must be exactly 44 characters (32-byte key encoded as urlsafe-base64). "
+                "Generate with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+            )
+        try:
+            from cryptography.fernet import Fernet
+
+            Fernet(v.encode())
+        except Exception as e:
+            raise ValueError(f"ENCRYPTION_KEY is not a valid Fernet key: {e}") from e
+        return v
+
+    @field_validator("owner_telegram_id", mode="after")
+    @classmethod
+    def _validate_owner_id(cls, v: int) -> int:
+        """Telegram user IDs are always positive."""
+        if v <= 0:
+            raise ValueError(
+                f"OWNER_TELEGRAM_ID must be positive, got {v}. "
+                "Get your ID from @userinfobot"
+            )
+        return v
+
+    @field_validator("bot_token", mode="after")
+    @classmethod
+    def _validate_bot_token(cls, v: str) -> str:
+        """Validate Telegram bot token format."""
+        import re
+
+        if not v:
+            raise ValueError("BOT_TOKEN cannot be empty")
+        if not re.match(r"^\d{8,13}:[A-Za-z0-9_-]{30,50}$", v):
+            raise ValueError(
+                "BOT_TOKEN format invalid. Expected: {bot_id}:{token}. "
+                "Get token from @BotFather"
+            )
+        return v
+
     bot_token: str = Field(..., description="Токен control-бота из @BotFather")
     owner_telegram_id: int = Field(
         ..., description="Telegram user_id единственного владельца"

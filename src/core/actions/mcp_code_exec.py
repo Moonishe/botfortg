@@ -29,6 +29,10 @@ _SANDBOX_BLACKLIST = frozenset(
         "__setattr__",
         "__delattr__",
         "__dir__",
+        "__format__",
+        "__reduce__",
+        "__reduce_ex__",
+        "__sizeof__",
         "exec",
         "eval",
         "compile",
@@ -87,8 +91,6 @@ _SANDBOX_ALLOWED_NODES = frozenset(
         ast.GeneratorExp,
         ast.comprehension,
         ast.IfExp,
-        ast.JoinedStr,
-        ast.FormattedValue,
     }
 )
 

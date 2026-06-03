@@ -313,6 +313,12 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(SettingsStates.waiting_mimo_region)
+async def step_mimo_region_text(message: Message) -> None:
+    """Text input when MiMo region button expected."""
+    await message.answer("🌍 Выбери регион кнопкой выше. /cancel — отмена.")
+
+
 @router.callback_query(F.data.startswith("set:mimo_region:"))
 async def cb_mimo_region(callback: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает выбор региона MiMo — сохраняет ключ с endpoint."""

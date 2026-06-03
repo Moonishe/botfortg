@@ -228,7 +228,12 @@ async def _do_import_keys(
 
         # Валидируем (только для новых слотов)
         try:
-            key = decrypt(slot.key_enc)
+            try:
+                key = decrypt(slot.key_enc)
+            except ValueError:
+                logger.warning("Key decryption failed for slot %d", slot.id)
+                results.append(f"  #{slot.id} — ❌ ключ повреждён")
+                continue
             prov_class = _provider_class_for(detected)
             prov = prov_class(key, base_url=endpoint) if endpoint else prov_class(key)
             valid = await prov.validate_key()
@@ -383,7 +388,12 @@ async def cmd_keys(message: Message) -> None:
                 continue
             # Валидируем ключ (только для новых слотов)
             try:
-                key = decrypt(slot.key_enc)
+                try:
+                    key = decrypt(slot.key_enc)
+                except ValueError:
+                    logger.warning("Key decryption failed for slot %d", slot.id)
+                    results.append(f"  #{slot.id} — ❌ ключ повреждён")
+                    continue
                 prov_class = _provider_class_for(provider)
                 prov = prov_class(key)
                 valid = await prov.validate_key()
@@ -883,7 +893,12 @@ async def _pending_key_entry_handler(message: Message) -> None:
 
     # Validate key
     try:
-        key_dec = decrypt(slot.key_enc)
+        try:
+            key_dec = decrypt(slot.key_enc)
+        except ValueError:
+            logger.warning("Key decryption failed for slot %d", slot.id)
+            await message.answer(f"  #{slot.id} — ❌ ключ повреждён")
+            return
         prov_class = _provider_class_for(provider_name)
         prov = (
             prov_class(key_dec, base_url=endpoint) if endpoint else prov_class(key_dec)
@@ -1704,6 +1719,7 @@ async def cb_mem_neighbors(callback: CallbackQuery) -> None:
     text = format_neighbors(neighbors)
     if text:
         await callback.message.answer(text)  # type: ignore[union-attr]
+        await callback.answer()
     else:
         await callback.answer("Соседей не найдено")
 
@@ -1878,6 +1894,7 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
         await callback.message.edit_text(  # type: ignore[union-attr]
             callback.message.text + "\n\n✅ Конфликт разрешён."
         )
+        await callback.answer()
     else:
         await callback.answer("Ошибка при разрешении конфликта")
 

@@ -157,5 +157,6 @@ async def _update_setting(telegram_id: int, key: str, value) -> None:
         owner = await get_or_create_user(session, telegram_id)
         if hasattr(owner.settings, key):
             setattr(owner.settings, key, value)
+        await session.commit()
 
     await invalidate_settings_cache(telegram_id)

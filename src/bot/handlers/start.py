@@ -663,6 +663,7 @@ async def _send_stt_key_step(chat_id: int, bot: Bot) -> None:
 @router.callback_query(F.data == OnboardingCB.category("stt"))
 async def cb_onboarding_stt_category(call: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает выбор категории STT."""
+    await call.answer()
     await state.set_state(OnboardingStates.waiting_stt_provider)
     await _send_stt_key_step(call.message.chat.id, call.bot)
 
@@ -672,6 +673,7 @@ async def cb_onboarding_stt_provider(call: CallbackQuery, state: FSMContext) -> 
     """Обрабатывает выбор конкретного STT провайдера."""
     provider = call.data.split(":")[-1]  # openai, deepgram, gemini, assemblyai
     await state.update_data(stt_provider=provider)
+    await call.answer()
     await state.set_state(OnboardingStates.waiting_stt_key)
 
     provider_names = {
@@ -693,6 +695,14 @@ async def cb_onboarding_stt_provider(call: CallbackQuery, state: FSMContext) -> 
         ),
     )
     await call.message.edit_text(text, reply_markup=kb.as_markup())
+
+
+@router.message(OnboardingStates.waiting_stt_provider)
+async def step_onboarding_stt_provider_text(message: Message) -> None:
+    """Text input when STT provider button expected."""
+    await message.answer(
+        "☝️ Нажми на кнопку STT-провайдера выше, чтобы выбрать. /cancel — отмена."
+    )
 
 
 @router.callback_query(F.data == OnboardingCB.BACK)

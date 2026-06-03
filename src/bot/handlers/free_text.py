@@ -90,7 +90,21 @@ def _is_safe_url(url: str) -> bool:
             return False
         return True
     except ValueError:
-        return True  # невалидный IP — вероятно домен, разрешаем
+        pass  # невалидный IP — вероятно домен, разрешаем, но ниже проверим DNS
+
+    # DNS-проверка для доменов: не резолвится ли домен в приватный IP
+    import socket as _socket
+
+    try:
+        addrinfo = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC)
+        for family, _, _, _, sockaddr in addrinfo:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                return False  # DNS resolves to internal IP — SSRF
+    except (_socket.gaierror, OSError):
+        pass  # DNS failure — let httpx handle it
+
+    return True
 
 
 # ── URL summary cache (LRU with TTL) ──────────────────────────────────
@@ -118,6 +132,14 @@ def _set_url_cache(url: str, summary: str) -> None:
     _url_cache[url] = (summary, time.time())
 
 
+def invalidate_url_cache(url: str | None = None) -> None:
+    """Invalidate URL cache. If url=None, clear all."""
+    if url is None:
+        _url_cache.clear()
+    else:
+        _url_cache.pop(url, None)
+
+
 async def _fetch_url_content(url: str) -> str | None:
     """Фетчит содержимое URL через httpx."""
     if not _is_safe_url(url):
@@ -126,7 +148,7 @@ async def _fetch_url_content(url: str) -> str | None:
     try:
         import httpx
 
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
             resp = await client.get(url, headers={"User-Agent": "TelegramHelper/1.0"})
             if resp.status_code != 200:
                 return None
@@ -330,87 +352,100 @@ async def _voice_worker() -> None:
                     custom_stt_endpoint = job.custom_stt_endpoint
 
                     try:
-                        text = await transcription_service.transcribe(
-                            voice_path,
-                            file_id=file_unique_id,
-                            mode=mode,
-                            openai_key=openai_key,
-                            gemini_key=gemini_key,
-                            mistral_key=mistral_key,
-                            api_provider=api_provider,
-                            custom_stt_key=custom_stt_key,
-                            custom_stt_model=custom_stt_model,
-                            custom_stt_endpoint=custom_stt_endpoint,
-                        )
-                    except (RequestError, HTTPStatusError, ValueError):
-                        logger.exception("voice transcription failed in worker")
                         try:
-                            await message.answer("❌ Не удалось распознать голосовое.")
-                        except TelegramError:
-                            logger.exception("failed to send error message from worker")
-                        finally:
-                            _cleanup_voice_file(voice_path)
-                        continue
+                            text = await transcription_service.transcribe(
+                                voice_path,
+                                file_id=file_unique_id,
+                                mode=mode,
+                                openai_key=openai_key,
+                                gemini_key=gemini_key,
+                                mistral_key=mistral_key,
+                                api_provider=api_provider,
+                                custom_stt_key=custom_stt_key,
+                                custom_stt_model=custom_stt_model,
+                                custom_stt_endpoint=custom_stt_endpoint,
+                            )
+                        except (RequestError, HTTPStatusError, ValueError):
+                            logger.exception("voice transcription failed in worker")
+                            try:
+                                await message.answer(
+                                    "❌ Не удалось распознать голосовое."
+                                )
+                            except TelegramError:
+                                logger.exception(
+                                    "failed to send error message from worker"
+                                )
+                            continue
 
-                    text = (text or "").strip()
-                    if not text:
+                        text = (text or "").strip()
+                        if not text:
+                            try:
+                                await message.answer(
+                                    "🎙 Не услышал текста в этом сообщении."
+                                )
+                            except TelegramError:
+                                logger.exception(
+                                    "failed to send empty transcription message"
+                                )
+                            continue
+
                         try:
                             await message.answer(
-                                "🎙 Не услышал текста в этом сообщении."
+                                sanitize_html(f"🎙 <i>Услышал:</i> {text}")
                             )
                         except TelegramError:
-                            logger.exception(
-                                "failed to send empty transcription message"
+                            logger.exception("failed to send transcription result")
+
+                        # ── Сохраняем метаданные транскрипции для контекста ──
+                        transcription_meta = {
+                            "is_transcription": True,
+                            "provider": api_provider,
+                            "language": "ru",
+                            "length": len(text),
+                        }
+                        try:
+                            from src.core.memory import conversation_context as _cc
+
+                            await _cc.set_transcription_meta(
+                                message.from_user.id, transcription_meta
                             )
+                        except Exception:
+                            logger.debug(
+                                "Failed to save transcription_meta", exc_info=True
+                            )
+
+                        try:
+                            # State is stale in background worker — pass None.
+                            # Any code needing FSMContext methods will log a warning and skip.
+                            await _process_text(text, message, None, userbot_manager)
+                        except Exception:
+                            logger.exception(
+                                "Failed to process transcribed text in worker"
+                            )
+
+                        # ── Сохраняем транскрибированный текст в память ──
+                        try:
+                            from src.core.memory.session_recorder import record_turn
+
+                            uid = message.from_user.id if message.from_user else None
+                            if uid is not None:
+                                async with get_session() as rec_session:
+                                    await record_turn(rec_session, uid, "user", text)
+                                    await record_turn(
+                                        rec_session,
+                                        uid,
+                                        "assistant",
+                                        "(ответ отправлен)",
+                                    )
+                        except SQLAlchemyError:
+                            logger.warning(
+                                "Failed to record voice transcription turn for user %s",
+                                message.from_user.id
+                                if message.from_user
+                                else "unknown",
+                            )
+                    finally:
                         _cleanup_voice_file(voice_path)
-                        continue
-
-                    try:
-                        await message.answer(sanitize_html(f"🎙 <i>Услышал:</i> {text}"))
-                    except TelegramError:
-                        logger.exception("failed to send transcription result")
-
-                    # ── Сохраняем метаданные транскрипции для контекста ──
-                    transcription_meta = {
-                        "is_transcription": True,
-                        "provider": api_provider,
-                        "language": "ru",
-                        "length": len(text),
-                    }
-                    try:
-                        from src.core.memory import conversation_context as _cc
-
-                        await _cc.set_transcription_meta(
-                            message.from_user.id, transcription_meta
-                        )
-                    except Exception:
-                        logger.debug("Failed to save transcription_meta", exc_info=True)
-
-                    try:
-                        # State is stale in background worker — pass None.
-                        # Any code needing FSMContext methods will log a warning and skip.
-                        await _process_text(text, message, None, userbot_manager)
-                    except Exception:
-                        logger.exception("Failed to process transcribed text in worker")
-
-                    # ── Сохраняем транскрибированный текст в память ──
-                    try:
-                        from src.core.memory.session_recorder import record_turn
-
-                        uid = message.from_user.id if message.from_user else None
-                        if uid is not None:
-                            async with get_session() as rec_session:
-                                await record_turn(rec_session, uid, "user", text)
-                                await record_turn(
-                                    rec_session, uid, "assistant", "(ответ отправлен)"
-                                )
-                    except SQLAlchemyError:
-                        logger.warning(
-                            "Failed to record voice transcription turn for user %s",
-                            message.from_user.id if message.from_user else "unknown",
-                        )
-
-                    _cleanup_voice_file(voice_path)
 
                 except asyncio.CancelledError:
                     raise  # propagate to outer handler for clean shutdown
@@ -1480,7 +1515,13 @@ async def free_voice(
             )
             slot = slots.scalar_one_or_none()
             if slot:
-                custom_stt_key = decrypt(slot.key_enc)
+                try:
+                    custom_stt_key = decrypt(slot.key_enc)
+                except ValueError:
+                    logger.warning(
+                        "STT key decryption failed for provider=%s", api_provider
+                    )
+                    custom_stt_key = None
                 custom_stt_model = slot.model
                 custom_stt_endpoint = slot.endpoint
 
