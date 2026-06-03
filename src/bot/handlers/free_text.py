@@ -87,7 +87,7 @@ def _is_safe_url(url: str) -> bool:
             return False
         return True
     except ValueError:
-        return False  # невалидный IP — вероятно домен, разрешаем
+        return True  # невалидный IP — вероятно домен, разрешаем
 
 
 async def _fetch_url_content(url: str) -> str | None:
@@ -204,10 +204,9 @@ async def stop_voice_worker() -> None:
     for r in results:
         if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
             logger.warning("Voice worker stopped with error: %s", r)
+    count = len(_voice_worker_tasks)
     _voice_worker_tasks.clear()
-    logger.info(
-        "Voice transcription workers stopped (%d tasks)", len(_voice_worker_tasks)
-    )
+    logger.info("Voice transcription workers stopped (%d tasks)", count)
 
 
 async def _voice_worker() -> None:

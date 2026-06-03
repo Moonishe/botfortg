@@ -674,6 +674,10 @@ async def cb_toggle(callback: CallbackQuery) -> None:
     except AttributeError:
         await callback.answer("Ошибка: настройка не найдена", show_alert=True)
         return
+    # Инвалидируем кэш настроек
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
     await callback.answer("Готово")
     await _refresh_section(callback, _section_for_key(key))
 
@@ -735,6 +739,10 @@ async def cb_choose(callback: CallbackQuery) -> None:
     else:
         await callback.answer("Неизвестное поле", show_alert=True)
         return
+    # Инвалидируем кэш настроек
+    from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+    await invalidate_settings_cache(callback.from_user.id)
     await callback.answer("Готово")
     await _refresh_section(callback, _section_for_key(key))
 

@@ -81,20 +81,29 @@ def make_key_handler(
         except Exception:
             logger.exception("failed to delete message with %s key", provider_name)
 
-        # Валидация первого ключа
+        # Валидация всех ключей + sanity length check
         if provider_class is not None:
-            try:
-                valid = await provider_class(parts[0]).validate_key()
-            except Exception:
-                valid = False
-            if not valid:
-                msg = (
-                    validation_error_msg
-                    if validation_error_msg
-                    else "❌ Ключ не работает. Повтори или /cancel."
-                )
-                await message.answer(msg)
-                return
+            MAX_KEY_LENGTH = 256
+            for part in parts:
+                if len(part) > MAX_KEY_LENGTH:
+                    await message.answer(
+                        f"❌ Ключ слишком длинный (>{MAX_KEY_LENGTH} символов). /cancel"
+                    )
+                    return
+
+            for i, part in enumerate(parts):
+                try:
+                    valid = await provider_class(part).validate_key()
+                except Exception:
+                    valid = False
+                if not valid:
+                    msg = (
+                        f"❌ Ключ #{i + 1} не работает. Повтори или /cancel."
+                        if not validation_error_msg
+                        else validation_error_msg
+                    )
+                    await message.answer(msg)
+                    return
 
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
@@ -115,6 +124,12 @@ def make_key_handler(
                 await upsert_api_key(session, owner, provider_name, ",".join(parts))
 
             total = await _count_slots_for_provider(session, owner, provider_name)
+
+        # Инвалидируем кэш провайдера
+        from src.core.context_cache import invalidate
+
+        await invalidate(f"provider:{message.from_user.id}:main:default")
+        await invalidate(f"provider:{message.from_user.id}:main:search")
 
         await fsm_context.clear()
         count = len(parts)

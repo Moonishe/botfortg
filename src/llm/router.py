@@ -285,9 +285,8 @@ async def ensure_locks_initialized() -> None:
 
 async def acquire_purpose_slot(purpose: str) -> asyncio.Semaphore:
     """Захватывает слот для purpose. Возвращает семафор."""
-    assert _PURPOSE_SEMAPHORES is not None, (
-        "ensure_locks_initialized() must be called at startup"
-    )
+    if _PURPOSE_SEMAPHORES is None:
+        raise RuntimeError("ensure_locks_initialized() must be called at startup")
     sem = _PURPOSE_SEMAPHORES.get(purpose)
     if sem is None:
         sem = _PURPOSE_SEMAPHORES.get("fallback", asyncio.Semaphore(1))

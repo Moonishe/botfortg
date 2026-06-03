@@ -129,7 +129,7 @@ _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9@/_.:-]{1,128}$")
 # ---------------------------------------------------------------------------
 _settings_cache: dict[int, dict] = {}  # telegram_id → cached context
 _settings_cache_ts: dict[int, float] = {}  # telegram_id → last cache time
-_SETTINGS_CACHE_TTL: float = 300.0
+_SETTINGS_CACHE_TTL: float = 60.0
 _settings_lock = asyncio.Lock()
 
 
