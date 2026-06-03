@@ -6,10 +6,13 @@ SRP: pure presentation — no DB write logic, no handlers.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from src.bot.callbacks import SettingsCB
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.db.repo import get_api_key, get_or_create_user, list_key_slots
+from src.bot.callbacks import SettingsCB
+from src.crypto import decrypt
+from src.db.models._auth import ApiKey
+from src.db.repo import get_or_create_user, list_key_slots
 from src.db.session import get_session
 from src.core.infra.timeutil import tz_short
 
@@ -28,15 +31,24 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         s = owner.settings
-        openai_key = await get_api_key(session, owner, "openai")
-        gemini_key = await get_api_key(session, owner, "gemini")
-        mistral_key = await get_api_key(session, owner, "mistral")
-        cloudflare_key = await get_api_key(session, owner, "cloudflare")
-        deepseek_key = await get_api_key(session, owner, "deepseek")
-        grok_key = await get_api_key(session, owner, "grok")
-        mimo_key = await get_api_key(session, owner, "mimo")
-        groq_key = await get_api_key(session, owner, "groq")
-        custom_key = await get_api_key(session, owner, "custom")
+        # Single batch query for all API keys (was 9 individual queries)
+        _api_key_rows = (
+            (await session.execute(select(ApiKey).where(ApiKey.user_id == owner.id)))
+            .scalars()
+            .all()
+        )
+        _keys_map: dict[str, str | None] = {
+            r.provider: decrypt(r.key_enc) for r in _api_key_rows
+        }
+        openai_key = _keys_map.get("openai")
+        gemini_key = _keys_map.get("gemini")
+        mistral_key = _keys_map.get("mistral")
+        cloudflare_key = _keys_map.get("cloudflare")
+        deepseek_key = _keys_map.get("deepseek")
+        grok_key = _keys_map.get("grok")
+        mimo_key = _keys_map.get("mimo")
+        groq_key = _keys_map.get("groq")
+        custom_key = _keys_map.get("custom")
 
         # Also check LlmKeySlot for custom/stt providers
         try:

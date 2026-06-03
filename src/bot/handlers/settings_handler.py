@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 
 from src.bot.callbacks import SettingsCB
-from src.bot.handlers.settings import router
+from src.bot.handlers.settings_router import router
 from src.bot.handlers.settings_menu import _render_menu
 from src.bot.handlers.settings_sections import _render_section
 from src.bot.handlers.settings_service import (
@@ -101,7 +101,8 @@ async def cmd_settings(message: Message, command: CommandObject) -> None:
 
         if results:
             await message.answer(
-                f"🔍 Результаты по «{query}»:\n\n" + "\n".join(results[:15])
+                f"🔍 Результаты по «{sanitize_html(query)}»:\n\n"
+                + "\n".join(results[:15])
             )
         else:
             await message.answer(f"❌ Ничего не найдено по «{sanitize_html(query)}».")
@@ -374,6 +375,8 @@ async def cb_folder_toggle(callback: CallbackQuery) -> None:
             monitored = json.loads(s.monitored_folders) if s.monitored_folders else []
         except json.JSONDecodeError:
             monitored = []
+        if not isinstance(monitored, list):
+            monitored = []
 
         if folder_name in monitored:
             monitored.remove(folder_name)
@@ -645,5 +648,4 @@ async def cb_persona_reset(callback: CallbackQuery) -> None:
 async def cancel_settings_state(message: Message, state: FSMContext) -> None:
     await state.clear()
     text, kb = await _render_menu(message.from_user.id)
-    await message.answer("🚫 Отменено.", reply_markup=kb)
-    await message.answer(text, reply_markup=kb)
+    await message.answer(f"🚫 Отменено.\n\n{text}", reply_markup=kb)

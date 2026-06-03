@@ -2,27 +2,25 @@
 
 Callback constants: :class:`src.bot.callbacks.SettingsCB`.
 
-SRP: thin facade — only router creation + imports. All logic is in sub-modules.
+SRP: thin facade — only imports from sub-modules. Router lives in settings_router.
 """
 
-import logging
+# ── Core router (exported from settings_router to avoid circular deps) ──
+from src.bot.handlers.settings_router import router  # noqa: F401
 
-from aiogram import Router
+# ── Import handler modules to register callbacks on router ──
+# Handlers are registered via `@router.callback_query()` which imports
+# router from settings_router. The side-effects here just ensure all
+# handler modules are loaded so their decorators execute.
 
-from src.bot.filters import OwnerOnly
+from src.bot.handlers import settings_handler  # noqa: F401
+from src.bot.handlers import settings_sections  # noqa: F401
+from src.bot.handlers import settings_inputs  # noqa: F401
+from src.bot.handlers import settings_menu  # noqa: F401
+from src.bot.handlers import settings_service  # noqa: F401
+from src.bot.handlers import settings_validator  # noqa: F401
 
-logger = logging.getLogger(__name__)
-
-# ── Core router ──────────────────────────────────────────────────────
-router = Router(name="settings")
-router.message.filter(OwnerOnly())
-router.callback_query.filter(OwnerOnly())
-
-# ── Import handler modules to register callbacks on router ───────────
-# Each sub-module imports `router` from this module and decorates its handlers.
-# This works because Python's circular import handling sees `router` already
-# defined in the partially-loaded module.
-
+# Re-export public symbols for backward compat
 from src.bot.handlers.settings_handler import (  # noqa: F401, E402
     cmd_settings,
     cb_menu,
@@ -50,8 +48,9 @@ from src.bot.handlers.settings_handler import (  # noqa: F401, E402
     cancel_settings_state,
 )
 
-from src.bot.handlers.settings_sections import (  # noqa: F401, E402
-    _render_section,
+from src.bot.handlers.settings_sections import _render_section  # noqa: F401, E402
+
+from src.bot.handlers.settings_inputs import (  # noqa: F401, E402
     cb_input_openai,
     cb_input_gemini,
     cb_input_mistral,
