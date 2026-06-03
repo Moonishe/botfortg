@@ -38,6 +38,7 @@ from src.bot.handlers import (
     news_cmd,
     news_topics,
     profile_cmd,
+    pubmed_cmd,
     search,
     send,
     sessions_cmd,
@@ -203,6 +204,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(catchup_cmd.router)
     dp.include_router(send.router)
     dp.include_router(search.router)
+    dp.include_router(pubmed_cmd.router)
     dp.include_router(todos.router)
     dp.include_router(digest_cmd.router)
     dp.include_router(style_cmd.router)
