@@ -248,22 +248,101 @@ async def load_chat(
             prefix="💬 Загрузка сообщений",
         )
 
-    # Batch query optimization — single session for all message upserts
-    async with get_session() as batch_session:
-        async for msg in msg_iter:
-            await _process_one(
-                client,
-                owner,
-                msg,
-                media_root=media_root,
-                transcribe=transcribe,
-                parse_docs=parse_docs,
-                openai_key=openai_key,
-                gemini_key=gemini_key,
-                mistral_key=mistral_key,
-                transcription_mode=transcription_mode,
-                api_provider=api_provider,
-                session=batch_session,
+    # Phase 1: Read-only — collect messages from Telegram (no DB transaction)
+    collected: list[dict] = []
+    async for msg in msg_iter:
+        kind = _classify(msg)
+        pid = _peer_id_from_message(msg)
+        sender_name = await _sender_label(msg)
+        text = msg.text or msg.message or None
+        collected.append(
+            {
+                "msg": msg,
+                "kind": kind,
+                "peer_id": pid,
+                "sender_name": sender_name,
+                "text": text,
+            }
+        )
+
+    # Phase 2: Slow I/O (download, transcribe, parse) — outside DB transaction
+    for item in collected:
+        msg: TgMessage = item["msg"]
+        kind: str = item["kind"]
+        pid: int = item["peer_id"]
+        transcript: str | None = None
+        extracted: str | None = None
+        media_path: str | None = None
+
+        if kind in {"voice", "audio"} and transcribe:
+            try:
+                target = media_root / f"{pid}_{msg.id}.ogg"
+                await msg.download_media(file=str(target))
+                media_path = str(target)
+                file_id = str(getattr(msg.file, "id", None) or f"{pid}:{msg.id}")
+                transcript = await transcription_service.transcribe(
+                    target,
+                    file_id=file_id,
+                    mode=transcription_mode,
+                    openai_key=openai_key,
+                    gemini_key=gemini_key,
+                    mistral_key=mistral_key,
+                    api_provider=api_provider,
+                )
+                # Транскрипция готова — файл больше не нужен
+                try:
+                    target.unlink(missing_ok=True)
+                    media_path = None
+                except Exception:
+                    logger.debug("cleanup voice file failed: %s", target, exc_info=True)
+            except Exception:
+                logger.exception("transcription failed for msg %s", msg.id)
+
+        elif kind == "document" and parse_docs:
+            raw_name = getattr(msg.file, "name", None) or f"{msg.id}.bin"
+            # Sanitize: strip directory components, dangerous chars, limit length
+            filename = Path(raw_name).name[:128].replace("\\", "_").replace("\0", "_")
+            if is_supported(filename):
+                try:
+                    target = media_root / f"{pid}_{msg.id}_{filename}"
+                    await msg.download_media(file=str(target))
+                    media_path = str(target)
+                    extracted = await extract_text(target)
+                    # Текст извлечён — документ больше не нужен
+                    try:
+                        target.unlink(missing_ok=True)
+                        media_path = None
+                    except Exception:
+                        logger.debug(
+                            "cleanup doc file failed: %s", target, exc_info=True
+                        )
+                except Exception:
+                    logger.exception("doc parse failed for msg %s", msg.id)
+
+        item["transcript"] = transcript
+        item["extracted"] = extracted
+        item["media_path"] = media_path
+
+    # Phase 3: Short write-transaction — batch upsert all messages
+    async with get_session() as session:
+        for item in collected:
+            msg: TgMessage = item["msg"]
+            await upsert_message(
+                session,
+                user_id=owner.id,
+                peer_id=item["peer_id"],
+                message_id=msg.id,
+                sender_id=msg.sender_id,
+                sender_name=item["sender_name"],
+                is_outgoing=bool(msg.out),
+                date=msg.date.replace(tzinfo=None)
+                if msg.date
+                else datetime.now(timezone.utc).replace(tzinfo=None),
+                kind=item["kind"],
+                text=item["text"],
+                transcript=item["transcript"],
+                media_path=item["media_path"],
+                extracted_text=item["extracted"],
             )
 
     if transcribe:

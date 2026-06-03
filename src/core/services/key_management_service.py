@@ -283,15 +283,24 @@ async def validate_key(provider: str, key: str) -> bool:
                         "messages": [{"role": "user", "content": "ping"}],
                     },
                 )
-                # 200 = key works; 401/403 = invalid key
-                return resp.status_code not in (401, 403)
+                if resp.status_code == 200:
+                    return True
+                if resp.status_code in (401, 403):
+                    return False
+                if resp.status_code == 429:
+                    logger.warning("Anthropic rate limit during key validation")
+                    return True  # Ключ валиден, но rate limit
+                return False  # 400, 500 и другие — невалидный ключ
 
             if provider == "gemini":
-                resp = await client.get(
-                    "https://generativelanguage.googleapis.com/v1/models",
-                    params={"key": key},
-                )
-                return resp.status_code == 200
+                try:
+                    resp = await client.get(
+                        "https://generativelanguage.googleapis.com/v1/models",
+                        headers={"X-Goog-Api-Key": key},
+                    )
+                    return resp.status_code == 200
+                except Exception:
+                    return False
 
             if provider == "mistral":
                 resp = await client.get(

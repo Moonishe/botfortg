@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, distinct, func, or_, select, text as sql_text
+from sqlalchemy import case, distinct, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import (
@@ -514,19 +514,17 @@ async def _batch_link_memories(
     count = 0
     for src, tgt, w, rt in valid_links:
         if (src, tgt) in existing_pairs:
-            # Update existing — use individual update for simplicity
-            update_result = await session.execute(
-                select(MemoryLink).where(
-                    MemoryLink.user_id == user.id,
-                    MemoryLink.source_id == src,
-                    MemoryLink.target_id == tgt,
-                )
+            # Batch update existing — direct UPDATE, no SELECT needed
+            stmt = update(MemoryLink).where(
+                MemoryLink.user_id == user.id,
+                MemoryLink.source_id == src,
+                MemoryLink.target_id == tgt,
             )
-            existing = update_result.scalar_one_or_none()
-            if existing:
-                existing.weight = w
-                if rt:
-                    existing.relation_type = rt
+            if rt:
+                stmt = stmt.values(weight=w, relation_type=rt)
+            else:
+                stmt = stmt.values(weight=w)
+            await session.execute(stmt)
         else:
             # Create new forward link
             link = MemoryLink(
@@ -1303,6 +1301,9 @@ async def get_memory_graph(
             )
             .where(MemoryLink.user_id == user.id)
             .order_by(MemoryLink.weight.desc())
+            .limit(
+                5000
+            )  # HIGH: не загружать все 100K+ связей; BFS использует ≤20 узлов
         )
     ).all()
 

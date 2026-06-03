@@ -1,8 +1,10 @@
 """Settings service layer.
 
 Provides a handler-friendly interface for reading and updating
-:class:`UserSettings`, with a short-lived in-process cache and
-strict validation of setting values.
+:class:`UserSettings`, with strict validation of setting values.
+
+No caching — callers (e.g. ``free_text_common._get_owner_context``)
+own their own cache layer.
 
 Delegates to:
   ``src.db.repos.session_repo`` — get_or_create_user (user lookup/creation)
@@ -12,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,36 +24,6 @@ from src.db.repo import get_or_create_user
 from .exceptions import NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
-
-
-# ── Settings cache (module-level TTL dict) ──────────────────────────────
-_SETTINGS_CACHE: dict[int, tuple[dict[str, Any], float]] = {}
-_CACHE_TTL_SEC: float = 15.0
-
-
-def _cache_get(user_id: int) -> dict[str, Any] | None:
-    """Return cached settings dict or ``None`` if stale or missing."""
-    entry = _SETTINGS_CACHE.get(user_id)
-    if entry is None:
-        return None
-    data, expire_at = entry
-    if time.monotonic() > expire_at:
-        _SETTINGS_CACHE.pop(user_id, None)
-        return None
-    return data
-
-
-def _cache_put(user_id: int, data: dict[str, Any]) -> None:
-    """Store settings dict in cache with TTL."""
-    _SETTINGS_CACHE[user_id] = (data, time.monotonic() + _CACHE_TTL_SEC)
-
-
-def _cache_invalidate(user_id: int | None = None) -> None:
-    """Invalidate cached settings for a user (or all users if ``None``)."""
-    if user_id is None:
-        _SETTINGS_CACHE.clear()
-    else:
-        _SETTINGS_CACHE.pop(user_id, None)
 
 
 # ── Validator helpers ───────────────────────────────────────────────────
@@ -215,23 +186,14 @@ async def get_user_settings(
     session: AsyncSession,
     user_id: int,
 ) -> dict[str, Any]:
-    """Get all user settings as a dictionary, with in-memory caching.
-
-    The cache is process-local (TTL 15 s) and automatically invalidated
-    on write operations.
+    """Get all user settings as a dictionary, directly from the database.
 
     Raises:
         NotFoundError: If the user does not exist.
     """
-    cached = _cache_get(user_id)
-    if cached is not None:
-        return cached
-
     user = await _load_user_with_settings(session, user_id)
     settings = await _ensure_settings(user)
-    data = _settings_to_dict(settings)
-    _cache_put(user_id, data)
-    return data
+    return _settings_to_dict(settings)
 
 
 async def update_setting(
@@ -264,7 +226,6 @@ async def update_setting(
     setattr(settings, key, validated)
     await session.flush()
 
-    _cache_invalidate(user_id)
     logger.info("Updated setting %s=%r for user=%d", key, validated, user_id)
     return validated
 
@@ -288,8 +249,6 @@ async def reset_settings(
     session.add(new_settings)
     user.settings = new_settings
     await session.flush()
-
-    _cache_invalidate(user_id)
 
     data = _settings_to_dict(new_settings)
     logger.info("Reset all settings to defaults for user=%d", user_id)
