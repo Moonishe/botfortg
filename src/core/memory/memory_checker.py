@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from src.core.scheduling.notification_queue import notification_queue
+from src.core.memory.memory_recall import bump_recall_version
 from src.core.memory.temporal_layers import (
     classify_layer,
     get_layer_config,
@@ -163,6 +164,9 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                 await session.flush()
 
             await session.commit()
+            await bump_recall_version(
+                owner.telegram_id if hasattr(owner, "telegram_id") else owner.id
+            )
             total_processed += len(chunk)
 
         if closed_count > 0:

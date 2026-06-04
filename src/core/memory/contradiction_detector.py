@@ -368,6 +368,7 @@ async def check_contradiction_response(
                 from src.db.models import Memory
                 from src.db.repo import get_or_create_user, link_memories
                 from src.db.session import get_session
+                from src.core.memory.memory_recall import bump_recall_version
 
                 async with get_session() as link_session:
                     link_owner = await get_or_create_user(link_session, telegram_id)
@@ -435,6 +436,7 @@ async def check_contradiction_response(
                             )
 
                         await link_session.commit()
+                        await bump_recall_version(link_owner.telegram_id)
             except Exception:
                 logger.debug("Failed to mark contradicted fact", exc_info=True)
 

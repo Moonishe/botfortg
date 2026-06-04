@@ -22,6 +22,7 @@ from src.db.repo import (
 from src.db.session import get_session
 from src.llm.base import ChatMessage, TaskType
 from src.config import settings
+from src.core.memory.memory_recall import bump_recall_version
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -362,6 +363,7 @@ async def consolidate_tier(
 
         if consolidated > 0:
             await session.commit()
+            await bump_recall_version(owner.telegram_id)
             logger.info(
                 "Consolidated %d facts from tier %d to tier %d",
                 consolidated,

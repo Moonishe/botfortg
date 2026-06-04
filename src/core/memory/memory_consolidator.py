@@ -8,6 +8,7 @@ import logging
 from src.db.repo import list_memories, get_or_create_user
 from src.db.session import get_session
 from src.config import settings
+from src.core.memory.memory_recall import bump_recall_version
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ async def consolidate_memories(telegram_id: int) -> int:
                 break
 
         await session.flush()
+        await bump_recall_version(telegram_id)
     return merged
 
 
