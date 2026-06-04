@@ -1,173 +1,182 @@
-"""AdaptiveTTLCache — frequency-aware TTL growth.
+"""AdaptiveTTLCache — динамически увеличивающийся TTL для часто используемых данных.
 
-Cache entries that are accessed frequently get progressively longer TTLs
-(exponential growth), capped at max_ttl. This gives hot keys a natural
-"stickiness" while cold keys expire quickly.
+При каждом успешном get() увеличивает TTL на этот ключ (экспоненциально, до max_ttl).
+Это позволяет "горячим" ключам оставаться в кэше дольше, а "холодным" — быстро
+истекает по base_ttl.
 
-Uses ManagedCache as backend for thread-safety, LRU eviction, and metrics.
-
-Usage:
-    cache = AdaptiveTTLCache(
-        name="contact_digest",
-        base_ttl=3600.0,      # 1 hour for first access
-        max_ttl=86400.0,      # 24 hours for hot keys
-        growth_factor=2.0,
-        max_size=500,
-    )
-    await cache.set("key", {"data": "value"})
-    result = await cache.get("key")  # access count incremented
+Используется для:
+- contact_digest (1час → 24час для частых контактов)
+- pattern_cache (1час → 48час для частых паттернов)
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-from typing import Any, TypeVar
+import math
+import time
+from typing import Any, Callable
 
 from src.core.cache.manager import ManagedCache, cache_manager
 
-logger = logging.getLogger(__name__)
-
-K = TypeVar("K")
-V = TypeVar("V")
-
 
 class AdaptiveTTLCache:
-    """Cache with adaptive TTL based on access frequency.
-
-    TTL formula: min(base_ttl * growth_factor ^ access_count, max_ttl)
-
-    Hot keys survive longer in cache automatically. Cold keys expire
-    at the base TTL and are evicted normally.
-
-    Access counts are reset on explicit invalidation to prevent stale
-    keys from growing TTL indefinitely.
-    """
+    """Кэш с адаптивным TTL, растущим при каждом успешном чтении."""
 
     def __init__(
         self,
         name: str,
-        base_ttl: float = 30.0,
-        max_ttl: float = 240.0,
-        growth_factor: float = 2.0,
+        base_ttl: float,
+        max_ttl: float,
         max_size: int = 1000,
-        on_evict: Any | None = None,
+        growth_factor: float = 2.0,
+        on_evict: Callable[[Any, Any], None] | None = None,
     ):
-        self.base_ttl = base_ttl
-        self.max_ttl = max_ttl
-        self.growth_factor = growth_factor
-        self._backend: ManagedCache = ManagedCache(
+        """Инициализация адаптивного кэша.
+
+        Args:
+            name: Имя кэша для мониторинга
+            base_ttl: Базовое время жизни в секундах (минимальное)
+            max_ttl: Максимальное время жизни в секундах (потолок)
+            max_size: Максимальное количество ключей
+            growth_factor: Множитель роста TTL (например, 2.0 = doubling)
+            on_evict: Опциональный callback при eviction (key, value)
+        """
+        self._base_ttl = base_ttl
+        self._max_ttl = max_ttl
+        self._growth_factor = growth_factor
+        self._ttl_map: dict[Any, float] = {}  # key → current_ttl
+        self._access_counts: dict[Any, int] = {}  # key → access_count
+        self._lock = asyncio.Lock()
+
+        # Backend cache с оберткой для on_evict
+        self._backend = ManagedCache(
             name=name,
             max_size=max_size,
             default_ttl=base_ttl,
-            on_evict=lambda k, v: (
-                self._evict_cleanup(k, v) or (on_evict(k, v) if on_evict else None)
-            ),
+            on_evict=lambda k, v: self._evict_wrapper(k, v, on_evict),
         )
-        self._access_counts: dict[Any, int] = {}
-        self._lock = asyncio.Lock()
 
-        # Register with global cache manager for background cleanup
+        # Register for periodic cleanup
         cache_manager.register(self._backend)
 
     def _evict_cleanup(self, key: Any, value: Any) -> None:
-        """Remove evicted key from access counts to prevent memory leak.
-
-        Called via ManagedCache.on_evict whenever a key is evicted
-        (LRU eviction, TTL expiration, explicit invalidation, or clear).
-        """
+        """Очистка metadata при eviction из backend."""
+        self._ttl_map.pop(key, None)
+        # Убираем из access_counts чтобы не было memory leak
         self._access_counts.pop(key, None)
 
-    async def get(self, key: Any) -> Any | None:
-        """Get value from cache.
+    def _evict_wrapper(
+        self, key: Any, value: Any, on_evict_callback: Callable | None = None
+    ) -> None:
+        """Wrapper для обеспечения вызова обоих: cleanup и external callback.
 
-        On cache hit: increments the access count for this key,
-        extending its future TTL.
-        Returns None on miss or expired entry.
+        Гарантирует что _evict_cleanup всегда вызывается, и external callback
+        тоже вызывается если он передан, без short-circuit проблем.
         """
+        self._evict_cleanup(key, value)
+        if on_evict_callback:
+            on_evict_callback(key, value)
+
+    def _calculate_ttl(self, key: Any) -> float:
+        """Рассчитать TTL для ключа на основе количества доступов."""
+        accesses = self._access_counts.get(key, 0)
+        if accesses == 0:
+            return self._base_ttl
+
+        # TTL = base * growth^(accesses / 10)
+        # Делим на 10 чтобы рост был плавным (каждые 10 access => удвоение)
+        multiplier = self._growth_factor ** (accesses / 10.0)
+        ttl = self._base_ttl * multiplier
+        return min(ttl, self._max_ttl)
+
+    async def get(self, key: Any) -> Any:
+        """Получить значение и увеличить TTL если ключ найден."""
         value = await self._backend.get(key)
+
         if value is not None:
+            # Key found - increment access count and update TTL
             async with self._lock:
                 self._access_counts[key] = self._access_counts.get(key, 0) + 1
+                new_ttl = self._calculate_ttl(key)
+                if new_ttl != self._ttl_map.get(key):
+                    self._ttl_map[key] = new_ttl
+
+                # Update TTL in backend if it changed significantly (>1sec difference)
+                current_metadata = await self._backend.get_metadata(key)
+                if current_metadata:
+                    old_ttl = current_metadata.get("ttl", 0)
+                    if abs(new_ttl - old_ttl) > 1.0:
+                        await self._backend.update_ttl(key, new_ttl)
+
         return value
 
-    async def set(
-        self, key: Any, value: Any, ttl_override: float | None = None
-    ) -> None:
-        """Store value with adaptive TTL.
-
-        TTL is calculated from access count:
-            min(base_ttl * growth_factor ^ access_count, max_ttl)
-
-        Use ttl_override to bypass adaptive logic (e.g. for DB-refreshed entries).
-        """
+    async def set(self, key: Any, value: Any) -> None:
+        """Установить значение с базовым TTL."""
         async with self._lock:
-            count = self._access_counts.get(key, 0)
+            # Reset access count for new/updated keys
+            was_present = key in self._ttl_map
+            if not was_present:
+                self._access_counts[key] = 0
+            self._ttl_map[key] = self._base_ttl
 
-        if ttl_override is not None:
-            ttl = ttl_override
-        else:
-            ttl = min(
-                self.base_ttl * (self.growth_factor**count),
-                self.max_ttl,
-            )
-            # Sanity: never go below base_ttl
-            ttl = max(ttl, self.base_ttl)
-
-        await self._backend.set(key, value, ttl=ttl)
-
-        logger.debug(
-            "AdaptiveTTLCache[%s] set key=%s count=%d ttl=%.1fs",
-            self._backend.name,
-            key,
-            count,
-            ttl,
-        )
+        await self._backend.set(key, value, ttl=self._base_ttl)
 
     async def invalidate(self, key: Any) -> bool:
-        """Remove key and reset its access count.
-
-        Returns True if the key existed and was removed.
-        """
-        result = await self._backend.invalidate(key)
+        """Удалить ключ из кэша."""
         async with self._lock:
+            self._ttl_map.pop(key, None)
             self._access_counts.pop(key, None)
-        return result
 
-    async def clear(self) -> int:
-        """Clear all entries and reset all access counts."""
-        count = await self._backend.clear()
+        return await self._backend.invalidate(key)
+
+    async def clear(self) -> None:
+        """Очистить весь кэш."""
         async with self._lock:
+            self._ttl_map.clear()
             self._access_counts.clear()
-        return count
 
-    def get_access_count(self, key: Any) -> int:
-        """Return current access count for a key (non-blocking)."""
-        return self._access_counts.get(key, 0)
+        await self._backend.clear()
 
-    def get_all_keys(self) -> list[Any]:
-        """Return all currently tracked keys (snapshot, non-blocking)."""
-        return list(self._access_counts.keys())
-
-    @property
-    def size(self) -> int:
-        """Current number of cached items."""
-        return self._backend.size
-
-    @property
     def stats(self) -> dict[str, Any]:
-        """Cache statistics including adaptive TTL info."""
-        return {
-            **self._backend.stats,
-            "base_ttl": self.base_ttl,
-            "max_ttl": self.max_ttl,
-            "growth_factor": self.growth_factor,
-            "tracked_keys": len(self._access_counts),
+        """Статистика кэша с информацией об адаптивных TTL."""
+        backend_stats = self._backend.stats()
+
+        # Calculate distribution of TTLs
+        ttl_values = list(self._ttl_map.values())
+        ttl_distribution = {
+            "min": min(ttl_values) if ttl_values else 0,
+            "max": max(ttl_values) if ttl_values else 0,
+            "avg": sum(ttl_values) / len(ttl_values) if ttl_values else 0,
         }
 
-    def __repr__(self) -> str:
-        return (
-            f"AdaptiveTTLCache(name={self._backend.name!r}, "
-            f"base_ttl={self.base_ttl}, max_ttl={self.max_ttl}, "
-            f"growth={self.growth_factor}, size={self.size})"
-        )
+        # Access frequency distribution
+        access_values = list(self._access_counts.values())
+        access_distribution = {
+            "keys_with_0_access": sum(1 for v in access_values if v == 0),
+            "keys_with_1_10_access": sum(1 for v in access_values if 1 <= v <= 10),
+            "keys_with_10_plus_access": sum(1 for v in access_values if v > 10),
+        }
+
+        return {
+            **backend_stats,
+            "base_ttl": self._base_ttl,
+            "max_ttl": self._max_ttl,
+            "growth_factor": self._growth_factor,
+            "ttl_distribution": ttl_distribution,
+            "access_distribution": access_distribution,
+            "adaptive": True,
+        }
+
+    async def get_access_count(self, key: Any) -> int:
+        """Получить количество доступов к ключу."""
+        async with self._lock:
+            return self._access_counts.get(key, 0)
+
+    async def reset_access(self, key: Any) -> None:
+        """Сбросить счетчик доступов для ключа (TTL вернется к базовому)."""
+        async with self._lock:
+            self._access_counts[key] = 0
+            if key in self._ttl_map:
+                self._ttl_map[key] = self._base_ttl
+                # Update backend TTL
+                await self._backend.update_ttl(key, self._base_ttl)
