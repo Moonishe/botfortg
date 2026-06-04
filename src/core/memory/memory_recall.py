@@ -28,6 +28,7 @@ from src.core.memory.temporal_layers import compute_retention
 logger = logging.getLogger(__name__)
 
 from src.core.memory.ttl_cache import TTLCache
+from src.core.cache.prefetch import prefetch_tracker
 
 _RECALL_CACHE_RESULT_TTL = settings.recall_cache_result_ttl
 _RECALL_CACHE_EMPTY_TTL = settings.recall_cache_empty_ttl
@@ -36,6 +37,46 @@ _recall_cache: "TTLCache[str, RecallResult]" = TTLCache(
     default_ttl=_RECALL_CACHE_RESULT_TTL,
     name="recall",
 )
+
+
+# ── Version-based cache invalidation ──────────────────────────────────
+# Per-user monotonic counter.  Included in every cache key so a mutation
+# automatically makes all cached entries for that user stale — no key-by-key
+# invalidation needed.  Old entries expire via the normal TTL path.
+#
+# bump_recall_version() MUST be called from every memory mutation point:
+#   add_memory(), delete_memory(), _exec_update_memory()  (see repo/handlers).
+# ─────────────────────────────────────────────────────────────────────────────
+_rec_version: dict[int, int] = {}
+_rec_version_lock: asyncio.Lock | None = None
+
+
+def _get_version_lock() -> asyncio.Lock:
+    """Lazy-init the asyncio lock (safe to call outside an event loop)."""
+    global _rec_version_lock
+    if _rec_version_lock is None:
+        _rec_version_lock = asyncio.Lock()
+    return _rec_version_lock
+
+
+def get_recall_version(telegram_id: int) -> int:
+    """Read the current version for *telegram_id* (sync, lock-free — dict reads
+    are atomic in CPython and the value is only ever incremented)."""
+    return _rec_version.get(telegram_id, 0)
+
+
+async def bump_recall_version(telegram_id: int) -> None:
+    """Increment the per-user recall cache version after a memory mutation.
+
+    Safe to call from any async context; uses its own asyncio.Lock to protect
+    the dict write.  Non-blocking: a missed bump is far worse than a deadlock,
+    so any exception is swallowed and logged at DEBUG level.
+    """
+    try:
+        async with _get_version_lock():
+            _rec_version[telegram_id] = _rec_version.get(telegram_id, 0) + 1
+    except Exception:
+        logger.debug("bump_recall_version(%s) failed", telegram_id, exc_info=True)
 
 
 def _utc_now() -> datetime:
@@ -54,11 +95,16 @@ def _make_recall_cache_key(
     include_tasks: bool,
     include_deep: bool,
     semantic_threshold: float,
+    version: int = 0,
 ) -> str:
-    """Build a cache key from every option that can change recall output."""
+    """Build a cache key from every option that can change recall output.
+
+    *version* is the per-user mutation counter; bumping it invalidates all
+    prior cached recall results for that user without explicit key deletion.
+    """
     return "|".join(
         (
-            str(telegram_id),
+            f"{telegram_id}:v{version}",
             query or "",
             str(contact_id),
             mode,
@@ -239,9 +285,12 @@ async def recall(
         include_tasks=include_tasks,
         include_deep=include_deep,
         semantic_threshold=semantic_threshold,
+        version=get_recall_version(telegram_id),
     )
     cached = await _recall_cache.get(_cache_key)
     if cached is not None:
+        # Record access for predictive prefetch analysis
+        prefetch_tracker.record_access("recall", _cache_key)
         # Async increment use_count — don't block the return
         if cached.facts:
             cached_ids = [f.memory_id for f in cached.facts if f.memory_id]
@@ -678,6 +727,9 @@ async def recall(
         # Different TTL: results with facts live longer than empty results.
         ttl = _RECALL_CACHE_RESULT_TTL if result.facts else _RECALL_CACHE_EMPTY_TTL
         await _recall_cache.set(_cache_key, result, ttl=ttl)
+
+        # Record access for predictive prefetch (misses too — they define patterns)
+        prefetch_tracker.record_access("recall", _cache_key)
 
         # Инкрементируем use_count для возвращённых фактов — в отдельной сессии,
         # чтобы не мутировать внешнюю сессию вызывающего кода.

@@ -160,8 +160,10 @@ async def main() -> None:
 
     from src.bot.handlers.free_text import _singalong_search_cache
     from src.bot.handlers.free_text_pipeline import _last_intent_ctx
+    from src.core.cache.manager import cache_manager
 
     async def _cleanup_global_state():
+        _tick = 0
         while True:
             await asyncio.sleep(60)
             try:
@@ -169,6 +171,35 @@ async def main() -> None:
                 await _last_intent_ctx.cleanup_stale()
             except Exception:
                 logger.debug("cleanup_stale failed", exc_info=True)
+            # ManagedCache background cleanup (settings, stats, patterns, url_summary)
+            try:
+                cleanup_results = await cache_manager.cleanup_all()
+                total_cleaned = sum(cleanup_results.values())
+                if total_cleaned > 0:
+                    logger.info(
+                        "ManagedCache cleanup: %d expired entries removed (%s)",
+                        total_cleaned,
+                        ", ".join(
+                            f"{k}={v}" for k, v in cleanup_results.items() if v > 0
+                        ),
+                    )
+            except Exception:
+                logger.debug("ManagedCache cleanup failed", exc_info=True)
+            # Cleanup stale circuit breakers every 300s (5 min)
+            _tick += 1
+            if _tick >= 5:
+                _tick = 0
+                try:
+                    from src.llm.router import cleanup_circuit_breakers
+
+                    removed = await cleanup_circuit_breakers()
+                    if removed:
+                        logger.info(
+                            "Circuit breaker cleanup: removed %d stale entries",
+                            removed,
+                        )
+                except Exception:
+                    logger.debug("circuit_breaker cleanup failed", exc_info=True)
 
     asyncio.create_task(_cleanup_global_state())
 
@@ -188,6 +219,126 @@ async def main() -> None:
     from src.core.actions import register_builtin_tools
 
     register_builtin_tools()
+
+    # --- Predictive Prefetch: warm caches for frequently accessed data ---
+    # Runs in background (non-blocking) after DB init + workers are ready.
+    # On first start (no history), queries DB for top contacts directly.
+    from src.core.cache.prefetch import prefetch_tracker
+
+    async def _startup_prefetch() -> None:
+        """Pre-warm caches for top contacts and recent memories."""
+        try:
+            from sqlalchemy import desc, select
+
+            from src.config import settings
+            from src.core.contacts.contact_memory_digest import get_contact_digest
+            from src.db.models._contacts import Contact
+            from src.db.repo import get_or_create_user
+            from src.db.session import get_session
+
+            # Register warmup callback for contact digests
+            async def _warmup_contact_digest(peer_id: int) -> None:
+                await get_contact_digest(settings.owner_telegram_id, int(peer_id))
+
+            prefetch_tracker.register_warmup("contact_digest", _warmup_contact_digest)
+
+            # Check if we have prior access history
+            top_contacts = prefetch_tracker.get_top_keys("contact_digest", top_n=5)
+
+            if not top_contacts:
+                # Cold start: query DB for most active contacts
+                async with get_session() as session:
+                    owner = await get_or_create_user(
+                        session, settings.owner_telegram_id
+                    )
+                    if owner is not None:
+                        result = await session.execute(
+                            select(Contact.peer_id)
+                            .where(Contact.user_id == owner.id)
+                            .order_by(desc(Contact.id))
+                            .limit(5)
+                        )
+                        top_contacts = [row[0] for row in result.fetchall()]
+                        logger.info(
+                            "Cold-start prefetch: found %d active contacts",
+                            len(top_contacts),
+                        )
+
+            # Prefetch contact digests (top-5)
+            if top_contacts:
+                prefetched = await prefetch_tracker.prefetch_predictions(
+                    "contact_digest", top_n=5
+                )
+                logger.info("Startup prefetch: %d contact digests warmed", prefetched)
+
+            # Register warmup callback for recall (uses recent memory queries)
+            async def _warmup_recall(cache_key: str) -> None:
+                """Lightweight warmup: load recent pinned memories."""
+                import asyncio
+
+                from src.core.infra.task_manager import track_ff
+
+                async def _do_warmup() -> None:
+                    try:
+                        from src.core.memory.memory_recall import (
+                            _make_recall_cache_key,
+                            _recall_cache,
+                            recall,
+                        )
+
+                        # Only warm up if not already cached
+                        existing = await _recall_cache.get(cache_key)
+                        if existing is None:
+                            # Run a lightweight recall to warm the cache
+                            # We can't easily reconstruct params from cache_key,
+                            # so just run a default "recent pinned" query
+                            await recall(
+                                settings.owner_telegram_id,
+                                query="",
+                                limit=10,
+                                include_self=False,
+                                include_pinned=True,
+                                include_tasks=False,
+                                include_deep=False,
+                                mode="light",
+                            )
+                    except Exception:
+                        pass  # warmup best-effort
+
+                track_ff(asyncio.create_task(_do_warmup()))
+
+            prefetch_tracker.register_warmup("recall", _warmup_recall)
+
+            # Prefetch recent memory patterns (top-3)
+            recent_recalls = prefetch_tracker.get_top_keys("recall", top_n=3)
+            if recent_recalls:
+                prefetched = await prefetch_tracker.prefetch_predictions(
+                    "recall", top_n=3
+                )
+                logger.info("Startup prefetch: %d recall patterns warmed", prefetched)
+            else:
+                # Cold start: trigger one baseline recall to warm the pipeline
+                try:
+                    from src.core.memory.memory_recall import recall
+
+                    await recall(
+                        settings.owner_telegram_id,
+                        query="",
+                        limit=5,
+                        include_self=False,
+                        include_pinned=True,
+                        include_tasks=False,
+                        include_deep=False,
+                        mode="light",
+                    )
+                    logger.info("Cold-start prefetch: baseline recall warmed")
+                except Exception:
+                    logger.debug("Cold-start recall prefetch failed", exc_info=True)
+        except Exception:
+            # Prefetch is best-effort — never break startup
+            logger.warning("Startup prefetch failed (non-critical)", exc_info=True)
+
+    asyncio.create_task(_startup_prefetch())
 
     try:
         await run_bot(userbot_manager)

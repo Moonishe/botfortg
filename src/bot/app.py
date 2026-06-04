@@ -45,6 +45,7 @@ from src.bot.handlers import (
     settings as settings_handlers,
     skills_cmd,
     start,
+    stats_cmd,
     style_cmd,
     threads_cmd,
     timeline_cmd,
@@ -190,6 +191,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(ask_cmd.router)
     dp.include_router(gates_cmd.router)
     dp.include_router(health_cmd.router)
+    dp.include_router(stats_cmd.router)
     dp.include_router(help_cmd.router)
     dp.include_router(docs_cmd.router)
     dp.include_router(inbox_cmd.router)

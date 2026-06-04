@@ -54,6 +54,7 @@ class ManagedCache(Generic[K, V]):
         self.default_ttl = default_ttl
         self.on_evict = on_evict
         self._cache: OrderedDict[K, tuple[float, V]] = OrderedDict()
+        self._expires: dict[K, float] = {}  # expiration timestamps per key
         self._lock = asyncio.Lock()
         self.metrics = CacheMetrics()
 
@@ -84,12 +85,14 @@ class ManagedCache(Generic[K, V]):
             # Update existing
             if key in self._cache:
                 self._cache[key] = (expires_at, value)
+                self._expires[key] = expires_at
                 self._cache.move_to_end(key)
                 return
 
             # Evict if at capacity
             while len(self._cache) >= self.max_size:
                 oldest_key, (_, oldest_value) = self._cache.popitem(last=False)
+                self._expires.pop(oldest_key, None)
                 self.metrics.evictions += 1
                 if self.on_evict:
                     try:
@@ -98,6 +101,7 @@ class ManagedCache(Generic[K, V]):
                         pass
 
             self._cache[key] = (expires_at, value)
+            self._expires[key] = expires_at
 
     async def invalidate(self, key: K) -> bool:
         """Manually remove key from cache. Returns True if key existed."""
@@ -115,6 +119,7 @@ class ManagedCache(Generic[K, V]):
                     except Exception:
                         pass
             self._cache.clear()
+            self._expires.clear()
             return count
 
     async def cleanup_expired(self) -> int:
@@ -128,11 +133,47 @@ class ManagedCache(Generic[K, V]):
                 self._evict(key, expired=True)
             return len(expired_keys)
 
+    async def get_metadata(self, key: K) -> dict | None:
+        """Get metadata for a key.
+
+        Returns:
+            Dict with 'expires_at' timestamp and 'ttl' remaining seconds,
+            or None if key doesn't exist or is expired.
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return None
+            expires_at = self._expires.get(key, 0)
+            if expires_at > 0 and expires_at <= time.monotonic():
+                return None  # Key expired
+            remaining_ttl = max(0.0, expires_at - time.monotonic())
+            return {"expires_at": expires_at, "ttl": remaining_ttl}
+
+    async def update_ttl(self, key: K, new_ttl: float) -> bool:
+        """Update TTL for a specific key.
+
+        Args:
+            key: Key to update
+            new_ttl: New TTL in seconds (from now)
+
+        Returns:
+            True if key exists and was updated, False otherwise.
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return False
+            new_expires = time.monotonic() + new_ttl
+            _, value = self._cache[key]
+            self._cache[key] = (new_expires, value)
+            self._expires[key] = new_expires
+            return True
+
     def _evict(self, key: K, expired: bool) -> bool:
         """Internal eviction (must be called with lock held)."""
         if key not in self._cache:
             return False
         _, value = self._cache.pop(key)
+        self._expires.pop(key, None)
         if expired:
             self.metrics.expirations += 1
         if self.on_evict:

@@ -4,28 +4,34 @@ Replaces expensive full recall() calls in auto_reply, /chat, and catchup
 with a lightweight cached JSON blob.
 
 Lifetime:
-    - Built on first access, cached in-memory (10 min TTL) + DB.
+    - Built on first access, cached in-memory (adaptive TTL) + DB.
+    - Hot contacts grow TTL from 1 hour → 24 hours (exponential growth).
     - Invalidated when new memories are saved for the contact.
     - Falls back to normal recall if the digest is stale or missing.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from src.core.cache import AdaptiveTTLCache
+from src.core.cache.prefetch import prefetch_tracker
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache: {peer_id: (monotonic_ts, digest_dict)}
-_DIGEST_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
-_DIGEST_CACHE_TTL: float = 3600.0  # 1 hour
-_DIGEST_CACHE_MAX: int = 500  # LRU eviction threshold
-_DIGEST_LOCK = asyncio.Lock()
+# Adaptive in-memory cache: hot contacts grow TTL from 1h → 24h.
+# ManagedCache backend handles LRU eviction + async locking internally.
+_DIGEST_CACHE: AdaptiveTTLCache = AdaptiveTTLCache(
+    name="contact_digest",
+    base_ttl=3600.0,  # 1 hour for cold entries
+    max_ttl=86400.0,  # 24 hours for frequently accessed contacts
+    growth_factor=2.0,
+    max_size=500,
+)
 
 
 async def get_contact_digest(owner_telegram_id: int, peer_id: int) -> dict[str, Any]:
@@ -37,14 +43,11 @@ async def get_contact_digest(owner_telegram_id: int, peer_id: int) -> dict[str, 
     On cache miss: queries DB → if DB cache is fresh → returns it.
     Otherwise builds a new digest from live data and persists it.
     """
-    now_mono = asyncio.get_event_loop().time()
-
-    # 1. In-memory cache
-    async with _DIGEST_LOCK:
-        if peer_id in _DIGEST_CACHE:
-            ts, digest = _DIGEST_CACHE[peer_id]
-            if now_mono - ts < _DIGEST_CACHE_TTL:
-                return digest
+    # 1. In-memory adaptive cache (hot keys grow TTL up to 24h)
+    cached = await _DIGEST_CACHE.get(peer_id)
+    if cached is not None:
+        prefetch_tracker.record_access("contact_digest", peer_id)
+        return cached
 
     # 2. DB cache → build fresh if needed
     async with get_session() as session:
@@ -79,11 +82,9 @@ async def get_contact_digest(owner_telegram_id: int, peer_id: int) -> dict[str, 
             if age < 600:
                 try:
                     digest = json.loads(profile.memory_digest)
-                    async with _DIGEST_LOCK:
-                        if len(_DIGEST_CACHE) >= _DIGEST_CACHE_MAX:
-                            oldest = min(_DIGEST_CACHE.items(), key=lambda x: x[1][0])
-                            del _DIGEST_CACHE[oldest[0]]
-                        _DIGEST_CACHE[peer_id] = (now_mono, digest)
+                    # Re-populate in-memory cache (base TTL starts fresh)
+                    await _DIGEST_CACHE.set(peer_id, digest)
+                    prefetch_tracker.record_access("contact_digest", peer_id)
                     return digest
                 except json.JSONDecodeError:
                     logger.debug(
@@ -109,12 +110,9 @@ async def get_contact_digest(owner_telegram_id: int, peer_id: int) -> dict[str, 
             )
         await session.flush()
 
-        # 2d. Update in-memory cache
-        async with _DIGEST_LOCK:
-            if len(_DIGEST_CACHE) >= _DIGEST_CACHE_MAX:
-                oldest = min(_DIGEST_CACHE.items(), key=lambda x: x[1][0])
-                del _DIGEST_CACHE[oldest[0]]
-            _DIGEST_CACHE[peer_id] = (now_mono, digest)
+        # 2d. Update in-memory cache (adaptive TTL: grows with repeated access)
+        await _DIGEST_CACHE.set(peer_id, digest)
+        prefetch_tracker.record_access("contact_digest", peer_id)
 
         return digest
 
@@ -277,6 +275,5 @@ async def invalidate_contact_digest(peer_id: int) -> None:
     Called after new memories are saved so the next access rebuilds
     the digest with fresh data.
     """
-    async with _DIGEST_LOCK:
-        _DIGEST_CACHE.pop(peer_id, None)
+    await _DIGEST_CACHE.invalidate(peer_id)
     logger.debug("Invalidated memory digest cache for peer %d", peer_id)

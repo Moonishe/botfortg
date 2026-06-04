@@ -1,47 +1,29 @@
 """Кэш memory-статистики. TTL = 5 минут, инвалидация при изменении."""
 
-import asyncio
-import time
-from dataclasses import dataclass, field
 from typing import Any
 
+from src.core.cache.manager import ManagedCache, cache_manager
 
-@dataclass
-class CacheEntry:
-    data: Any
-    timestamp: float = field(default_factory=time.monotonic)
-    ttl: float = 300.0  # 5 минут
-
-    def is_valid(self) -> bool:
-        return (time.monotonic() - self.timestamp) < self.ttl
-
-
-_stats: dict[str, CacheEntry] = {}
-_lock = asyncio.Lock()
+_stats: ManagedCache[str, Any] = cache_manager.register(
+    ManagedCache(name="stats", max_size=5000, default_ttl=300.0)
+)
 
 
 async def get_cached(key: str) -> Any | None:
-    async with _lock:
-        entry = _stats.get(key)
-        if entry:
-            if entry.is_valid():
-                return entry.data
-            # Evict expired entry
-            del _stats[key]
-        return None
+    return await _stats.get(key)
 
 
 async def set_cache(key: str, data: Any, ttl: float = 300.0) -> None:
-    async with _lock:
-        _stats[key] = CacheEntry(data=data, timestamp=time.monotonic(), ttl=ttl)
+    await _stats.set(key, data, ttl=ttl)
 
 
 async def invalidate(prefix: str = "") -> None:
     """Инвалидировать кэш. Если prefix пустой — всё. Иначе по префиксу."""
-    async with _lock:
-        if not prefix:
-            _stats.clear()
-        else:
-            keys_to_del = [k for k in _stats if k.startswith(prefix)]
-            for k in keys_to_del:
-                del _stats[k]
+    if not prefix:
+        await _stats.clear()
+    else:
+        # Snapshot keys, then invalidate matching ones
+        keys = list(_stats._cache.keys())
+        for k in keys:
+            if k.startswith(prefix):
+                await _stats.invalidate(k)

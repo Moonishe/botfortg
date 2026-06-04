@@ -22,6 +22,7 @@ from aiogram.types import Message
 from src.bot.filters import OwnerOnly
 from src.config import settings
 from src.core.actions.trajectory import actions_from_intent
+from src.core.cache import AdaptiveTTLCache
 from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.task_manager import track_ff
@@ -107,37 +108,35 @@ def _is_safe_url(url: str) -> bool:
     return True
 
 
-# ── URL summary cache (LRU with TTL) ──────────────────────────────────
+# ── URL summary cache (Adaptive TTL — hot URLs grow to 1h) ───────────
 
-_url_cache: dict[str, tuple[str, float]] = {}
-_URL_CACHE_MAX = 100
-_URL_CACHE_TTL = 3600  # 1 hour
+from src.core.cache import AdaptiveTTLCache
+
+_url_cache = AdaptiveTTLCache(
+    name="url_summary",
+    base_ttl=600.0,  # 10 min for cold entries
+    max_ttl=3600.0,  # 1 hour for frequently accessed URLs
+    growth_factor=2.0,
+    max_size=100,
+)
 
 
 async def _get_cached_url_summary(url: str) -> str | None:
     """Return cached summary if valid, else None."""
-    if url in _url_cache:
-        summary, ts = _url_cache[url]
-        if time.time() - ts < _URL_CACHE_TTL:
-            return summary
-        del _url_cache[url]
-    return None
+    return await _url_cache.get(url)
 
 
-def _set_url_cache(url: str, summary: str) -> None:
-    """Store summary in LRU cache, evict oldest if full."""
-    if len(_url_cache) >= _URL_CACHE_MAX:
-        oldest = min(_url_cache, key=lambda k: _url_cache[k][1])
-        del _url_cache[oldest]
-    _url_cache[url] = (summary, time.time())
+async def _set_url_cache(url: str, summary: str) -> None:
+    """Store summary in bounded LRU cache."""
+    await _url_cache.set(url, summary)
 
 
-def invalidate_url_cache(url: str | None = None) -> None:
+async def invalidate_url_cache(url: str | None = None) -> None:
     """Invalidate URL cache. If url=None, clear all."""
     if url is None:
-        _url_cache.clear()
+        await _url_cache.clear()
     else:
-        _url_cache.pop(url, None)
+        await _url_cache.invalidate(url)
 
 
 async def _fetch_url_content(url: str) -> str | None:
@@ -1410,7 +1409,7 @@ async def free_text(
                 if provider:
                     try:
                         summary = await _summarize_url(url, content, provider)
-                        _set_url_cache(url, summary)
+                        await _set_url_cache(url, summary)
                         await message.answer(sanitize_html(f"📄 {summary}\n\n🔗 {url}"))
                     except Exception:
                         await message.answer(

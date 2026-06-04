@@ -125,12 +125,13 @@ _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9@/_.:-]{1,128}$")
 
 
 # ---------------------------------------------------------------------------
-# Settings cache — per-user, TTL 30 сек, инвалидируется при /settings
+# Settings cache — per-user, TTL 60s, managed by ManagedCache (bounded LRU)
 # ---------------------------------------------------------------------------
-_settings_cache: dict[int, dict] = {}  # telegram_id → cached context
-_settings_cache_ts: dict[int, float] = {}  # telegram_id → last cache time
-_SETTINGS_CACHE_TTL: float = 60.0
-_settings_lock = asyncio.Lock()
+from src.core.cache.manager import ManagedCache, cache_manager
+
+_settings_cache: ManagedCache[int, dict] = cache_manager.register(
+    ManagedCache(name="settings", max_size=1000, default_ttl=60.0)
+)
 
 
 async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object]:
@@ -150,40 +151,30 @@ async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object
             "global_style_profile": owner.global_style_profile,
         }
 
-    # Original path: lock + cache
-    now = time.monotonic()
-    cached_ts = _settings_cache_ts.get(telegram_id, 0.0)
-    if telegram_id in _settings_cache and (now - cached_ts) < _SETTINGS_CACHE_TTL:
-        return _settings_cache[telegram_id]  # type: ignore[return-value]
-    async with _settings_lock:
-        # Double-check after acquiring lock (TOCTOU guard)
-        now = time.monotonic()
-        cached_ts = _settings_cache_ts.get(telegram_id, 0.0)
-        if telegram_id in _settings_cache and (now - cached_ts) < _SETTINGS_CACHE_TTL:
-            return _settings_cache[telegram_id]  # type: ignore[return-value]
-        async with get_session() as session:
-            owner = await get_or_create_user(session, telegram_id)
-            ctx = {
-                "owner_telegram_id": owner.telegram_id,
-                "tz_name": get_user_tz(owner),
-                "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
-                "global_style_profile": owner.global_style_profile,
-            }
-            _settings_cache[telegram_id] = ctx
-            _settings_cache_ts[telegram_id] = now
-        return ctx  # type: ignore[return-value]
+    # ManagedCache path: LRU-bounded, auto-TTL, thread-safe
+    cached = await _settings_cache.get(telegram_id)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
+        ctx = {
+            "owner_telegram_id": owner.telegram_id,
+            "tz_name": get_user_tz(owner),
+            "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
+            "global_style_profile": owner.global_style_profile,
+        }
+        await _settings_cache.set(telegram_id, ctx)
+    return ctx  # type: ignore[return-value]
 
 
 async def invalidate_settings_cache(telegram_id: int | None = None) -> None:
     """Сбросить кэш настроек (вызывается при изменении /settings).
     Если telegram_id=None — сбрасывает весь кэш."""
-    async with _settings_lock:
-        if telegram_id is not None:
-            _settings_cache.pop(telegram_id, None)
-            _settings_cache_ts.pop(telegram_id, None)
-        else:
-            _settings_cache.clear()
-            _settings_cache_ts.clear()
+    if telegram_id is not None:
+        await _settings_cache.invalidate(telegram_id)
+    else:
+        await _settings_cache.clear()
 
 
 def _fire_record_trajectory(*args: object, **kwargs: object) -> None:

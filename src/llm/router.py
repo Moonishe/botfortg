@@ -60,6 +60,7 @@ class _KeyCircuitBreaker:
         self._last_failure_time = 0.0
         self._base_timeout = base_timeout
         self._failure_threshold = failure_threshold
+        self._last_touched = asyncio.get_running_loop().time()
 
     @property
     def state(self) -> _CircuitState:
@@ -85,10 +86,12 @@ class _KeyCircuitBreaker:
         self._failure_count = 0
         self._tripped_count = 0
         self._state = _CircuitState.CLOSED
+        self._last_touched = asyncio.get_running_loop().time()
 
     def record_failure(self, now: float) -> None:
         self._failure_count += 1
         self._last_failure_time = now
+        self._last_touched = now
         if self._state == _CircuitState.HALF_OPEN:
             self._state = _CircuitState.OPEN
             self._tripped_count += 1
@@ -249,6 +252,48 @@ _CIRCUIT_BREAKERS: dict[tuple[str, str], _KeyCircuitBreaker] = {}
 _CIRCUIT_BREAKERS_LOCK: asyncio.Lock | None = (
     None  # initialized via ensure_locks_initialized() at startup
 )
+
+
+async def cleanup_circuit_breakers(stale_threshold: float = 3600.0) -> int:
+    """Remove circuit breakers that are CLOSED and haven't been touched recently.
+
+    Called periodically (every ~5 min) from the global cleanup loop to prevent
+    unbounded growth of ``_CIRCUIT_BREAKERS`` when keys are rotated or removed
+    from the database.
+
+    Args:
+        stale_threshold: seconds since last activity after which a CLOSED
+            breaker is considered eligible for cleanup. Default: 3600 (1 hour).
+
+    Returns:
+        Number of circuit breakers removed.
+    """
+    if _CIRCUIT_BREAKERS_LOCK is None:
+        return 0
+
+    now = asyncio.get_running_loop().time()
+    removed = 0
+
+    async with _CIRCUIT_BREAKERS_LOCK:
+        stale_keys = [
+            key
+            for key, cb in _CIRCUIT_BREAKERS.items()
+            if cb.state == _CircuitState.CLOSED
+            and (now - cb._last_touched) > stale_threshold
+        ]
+        for key in stale_keys:
+            del _CIRCUIT_BREAKERS[key]
+            removed += 1
+
+    if removed:
+        logger.debug(
+            "cleanup_circuit_breakers: removed %d stale entries (%d remain)",
+            removed,
+            len(_CIRCUIT_BREAKERS),
+        )
+
+    return removed
+
 
 # Per-purpose лимиты параллельных запросов
 _PURPOSE_SEMAPHORES: dict[str, asyncio.Semaphore] | None = (
