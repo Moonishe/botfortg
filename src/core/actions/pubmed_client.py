@@ -216,7 +216,7 @@ async def fetch_abstract(pmid: str) -> str | None:
     # Ищем <AbstractText> внутри <PubmedArticle>
     # Пространство имён может отсутствовать, используем полный поиск
     abstract_texts: list[str] = []
-    for abstract_text in root.iter("AbstractText"):
+    for abstract_text in root.findall(".//AbstractText"):
         # Текст может быть как в атрибуте, так и в .text
         text = abstract_text.text or ""
         # Собираем текст из дочерних элементов (<i>, <b>, <sup>, <sub>) и их tail
