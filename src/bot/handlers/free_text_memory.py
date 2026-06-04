@@ -24,6 +24,7 @@ from src.db.repo import (
     search_memories,
 )
 from src.db.session import get_session
+from src.core.memory.memory_recall import bump_recall_version
 from src.userbot import get_active_telethon_client
 
 from .free_text_common import safe_answer
@@ -289,6 +290,12 @@ async def _exec_update_memory(intent, message) -> None:
                 pass
         await session.flush()
 
+        # Invalidate recall cache for this user — mutation happened.
+        # Lazy import avoids circular dep with memory_recall -> db.repo.
+        from src.core.memory.memory_recall import bump_recall_version
+
+        await bump_recall_version(message.from_user.id)
+
     await safe_answer(
         message,
         sanitize_html(f"✏️ Факт #{target.id} обновлён:\n<i>{new_fact}</i>"),
@@ -472,6 +479,7 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
         for m in memories:
             if m.id == mid:
                 m.sentiment = "neutral"
+    await bump_recall_version(callback.from_user.id)
     if callback.message:
         await callback.message.edit_text(
             f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>"

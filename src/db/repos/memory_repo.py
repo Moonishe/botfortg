@@ -24,6 +24,8 @@ from src.db.models import (
 )
 from typing import TYPE_CHECKING
 
+from src.core.contacts.contact_memory_digest import invalidate_contact_digest
+
 if TYPE_CHECKING:
     from src.core.actions.vector_store import VectorStore
 
@@ -324,6 +326,9 @@ async def add_memory(
                     existing.sentiment = "contradictory"  # маркируем противоречие
                 await session.flush()
                 await invalidate("mem_")
+                from src.core.memory.memory_recall import bump_recall_version
+
+                await bump_recall_version(user.telegram_id)
                 return existing
 
             # --- Уровень 2: семантическая дедупликация через Qdrant ---
@@ -368,6 +373,11 @@ async def add_memory(
                                 existing.sentiment = "contradictory"
                             await session.flush()
                             await invalidate("mem_")
+                            from src.core.memory.memory_recall import (
+                                bump_recall_version,
+                            )
+
+                            await bump_recall_version(user.telegram_id)
                             return existing
 
         # Create new memory inside the lock — atomic with the dedup check
@@ -440,6 +450,11 @@ async def add_memory(
             logger.exception("Failed to index memory embedding in Qdrant")
 
     await invalidate("mem_")
+    from src.core.memory.memory_recall import bump_recall_version
+
+    await bump_recall_version(user.telegram_id)
+    if contact_id is not None:
+        await invalidate_contact_digest(contact_id)
     return mem
 
 
@@ -638,7 +653,9 @@ async def _auto_link_memory(
                     relation_type = "related"  # weak
 
                 pending_links.append((memory.id, hit_id, cosine_score, relation_type))
-        except Exception:  # TODO: specify exceptions (vector_store call — Qdrant network errors)
+        except (
+            Exception
+        ):  # TODO: specify exceptions (vector_store call — Qdrant network errors)
             logger.debug(
                 "Semantic linking failed, falling back to keyword overlap",
                 exc_info=True,
@@ -799,6 +816,11 @@ async def delete_memory(session: AsyncSession, user, memory_id: int) -> bool:
     await session.delete(m)
     await invalidate("mem_")
     await session.flush()
+    from src.core.memory.memory_recall import bump_recall_version
+
+    await bump_recall_version(user.telegram_id)
+    if m.contact_id is not None:
+        await invalidate_contact_digest(m.contact_id)
     return True
 
 
