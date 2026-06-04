@@ -64,7 +64,9 @@ async def search_pubmed(query: str, max_results: int = 5) -> list[dict[str, str]
 
             [{"pmid": "12345678"}, {"pmid": "23456789"}, ...]
 
-        При ошибке возвращает пустой список.
+    Raises:
+        httpx.HTTPStatusError: При HTTP ошибке от NCBI API.
+        httpx.RequestError: При сетевой ошибке / таймауте.
     """
     client = await _get_client()
     params: dict[str, str] = {
@@ -76,13 +78,9 @@ async def search_pubmed(query: str, max_results: int = 5) -> list[dict[str, str]
     if api_key := _api_key():
         params["api_key"] = api_key
 
-    try:
-        response = await client.get("esearch.fcgi", params=params)
-        response.raise_for_status()
-        data = response.json()
-    except Exception:
-        logger.warning("PubMed search failed for query=%r", query)
-        return []
+    response = await client.get("esearch.fcgi", params=params)
+    response.raise_for_status()
+    data = response.json()
 
     id_list: list[str] = data.get("esearchresult", {}).get("idlist", [])
     return [{"pmid": pmid} for pmid in id_list]
@@ -106,7 +104,9 @@ async def fetch_summaries(pmids: list[str]) -> list[dict[str, Any]]:
         - ``doi`` — DOI (или ``None``)
         - ``url`` — ссылка на PubMed
 
-        При ошибке возвращает пустой список.
+    Raises:
+        httpx.HTTPStatusError: При HTTP ошибке от NCBI API.
+        httpx.RequestError: При сетевой ошибке / таймауте.
     """
     if not pmids:
         return []
@@ -120,13 +120,9 @@ async def fetch_summaries(pmids: list[str]) -> list[dict[str, Any]]:
     if api_key := _api_key():
         params["api_key"] = api_key
 
-    try:
-        response = await client.get("esummary.fcgi", params=params)
-        response.raise_for_status()
-        data = response.json()
-    except Exception:
-        logger.warning("PubMed summary fetch failed for %d PMID(s)", len(pmids))
-        return []
+    response = await client.get("esummary.fcgi", params=params)
+    response.raise_for_status()
+    data = response.json()
 
     result_map: dict[str, Any] = data.get("result", {})
     # Поле uids содержит список PMID в том же порядке
@@ -184,7 +180,11 @@ async def fetch_abstract(pmid: str) -> str | None:
         pmid: Идентификатор статьи PubMed.
 
     Returns:
-        Текст аннотации или ``None``, если аннотация отсутствует / произошла ошибка.
+        Текст аннотации или ``None``, если аннотация отсутствует / произошла ошибка парсинга.
+
+    Raises:
+        httpx.HTTPStatusError: При HTTP ошибке от NCBI API.
+        httpx.RequestError: При сетевой ошибке / таймауте.
     """
     client = await _get_client()
     params: dict[str, str] = {
@@ -196,13 +196,9 @@ async def fetch_abstract(pmid: str) -> str | None:
     if api_key := _api_key():
         params["api_key"] = api_key
 
-    try:
-        response = await client.get("efetch.fcgi", params=params)
-        response.raise_for_status()
-        xml_bytes = response.content
-    except Exception:
-        logger.warning("PubMed abstract fetch failed for PMID=%s", pmid)
-        return None
+    response = await client.get("efetch.fcgi", params=params)
+    response.raise_for_status()
+    xml_bytes = response.content
 
     # Парсинг XML — CPU-bound, выполняем в потоке
     try:

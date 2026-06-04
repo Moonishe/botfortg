@@ -1,7 +1,10 @@
 """MCP Tool: PubMed научный поиск через NCBI API."""
 
+import asyncio
 import logging
 from typing import Any
+
+import httpx
 
 from src.core.actions.tool_registry import tool
 
@@ -39,71 +42,63 @@ async def pubmed_search(
     try:
         # Late import чтобы не блокировать bootstrap
         from src.core.actions import pubmed_client
+    except ImportError:
+        return {"error": "pubmed_client не установлен или недоступен"}
 
-        try:
-            # Поиск статей (возвращает список dict с метаинформацией)
-            articles = await pubmed_client.search_pubmed(
-                query=query,
-                max_results=max_results,
-            )
+    try:
+        # Поиск PMIDs
+        pmid_dicts = await pubmed_client.search_pubmed(
+            query=query,
+            max_results=max_results,
+        )
 
-            if not articles:
-                return {
-                    "ok": True,
-                    "query": query,
-                    "count": 0,
-                    "articles": [],
-                    "message": "Статьи не найдены",
-                }
-
-            # Если есть PMIDs, получаем детальные summaries
-            pmids = [art.get("pmid", "") for art in articles if art.get("pmid")]
-            summaries = []
-            if pmids:
-                try:
-                    summaries = await pubmed_client.fetch_summaries(pmids)
-                except Exception as e:
-                    logger.warning("fetch_summaries failed: %s", str(e))
-
-            # Форматирование результатов
-            items = []
-            for article in articles:
-                item = {
-                    "title": article.get("title", ""),
-                    "authors": article.get("authors", []),
-                    "journal": article.get("journal", ""),
-                    "year": article.get("year", ""),
-                    "pmid": article.get("pmid", ""),
-                    "url": article.get("url", ""),
-                }
-
-                # Добавляем абстракт если доступен
-                pmid = article.get("pmid", "")
-                if pmid:
-                    try:
-                        abstract = await pubmed_client.fetch_abstract(pmid)
-                        if abstract:
-                            item["abstract"] = abstract
-                    except Exception as e:
-                        logger.debug(
-                            "fetch_abstract failed for PMID %s: %s", pmid, str(e)
-                        )
-
-                items.append(item)
-
+        if not pmid_dicts:
             return {
                 "ok": True,
                 "query": query,
-                "count": len(items),
-                "articles": items,
+                "count": 0,
+                "articles": [],
+                "message": "Статьи не найдены",
             }
 
-        except Exception as e:
-            logger.warning("PubMed search failed: %s", str(e))
-            return {"error": f"Ошибка поиска в PubMed: {str(e)[:200]}"}
+        # Получаем детальные summaries (метаданные статей)
+        pmids = [art["pmid"] for art in pmid_dicts]
+        articles = await pubmed_client.fetch_summaries(pmids)
 
-    except ImportError:
-        return {"error": "pubmed_client не установлен или недоступен"}
+        # Параллельная загрузка abstract-ов с индивидуальным таймаутом
+        async def _fetch_abstract_with_timeout(pmid: str) -> str | None:
+            try:
+                return await asyncio.wait_for(
+                    pubmed_client.fetch_abstract(pmid), timeout=10.0
+                )
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning("Failed to fetch abstract for PMID %s: %s", pmid, e)
+                return None
+
+        abstracts = await asyncio.gather(
+            *[_fetch_abstract_with_timeout(art["pmid"]) for art in articles]
+        )
+
+        for article, abstract in zip(articles, abstracts):
+            if abstract:
+                article["abstract"] = abstract
+
+        return {
+            "ok": True,
+            "query": query,
+            "count": len(articles),
+            "articles": articles,
+        }
+
+    except httpx.HTTPStatusError as e:
+        logger.error("PubMed API error: %s - %s", e.response.status_code, e)
+        return {"error": f"PubMed API error: {e.response.status_code}"}
+    except httpx.RequestError as e:
+        logger.error("PubMed request failed: %s", e)
+        return {"error": "PubMed service temporarily unavailable"}
+    except asyncio.TimeoutError:
+        logger.error("PubMed request timeout")
+        return {"error": "PubMed request timeout"}
     except Exception as e:
-        logger.error("Unexpected error in pubmed_search: %s", e)
+        logger.exception("Unexpected error in pubmed_search: %s", e)
         return {"error": f"Непредвиденная ошибка: {str(e)[:200]}"}

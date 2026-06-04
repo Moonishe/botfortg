@@ -113,10 +113,8 @@ class AdaptiveTTLCache:
     async def set(self, key: Any, value: Any) -> None:
         """Установить значение с базовым TTL."""
         async with self._lock:
-            # Reset access count for new/updated keys
-            was_present = key in self._ttl_map
-            if not was_present:
-                self._access_counts[key] = 0
+            # Reset access count for fresh TTL calculation on overwrite or new key
+            self._access_counts[key] = 0
             self._ttl_map[key] = self._base_ttl
 
         await self._backend.set(key, value, ttl=self._base_ttl)

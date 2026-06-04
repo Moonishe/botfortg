@@ -61,7 +61,7 @@ async def cmd_pubmed_search(message: types.Message) -> None:
         for i, art in enumerate(articles, 1):
             title = sanitize_html(art.get("title") or "Без названия")
             pmid = art["pmid"]
-            url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            url = f"https://pubmed.ncbi.nlm.nih.gov/{sanitize_html(pmid)}/"
 
             authors = art.get("authors", [])
             if len(authors) > 3:
@@ -134,7 +134,7 @@ async def cmd_pubmed_abstract(message: types.Message) -> None:
 
         art = articles[0]
         title = sanitize_html(art.get("title") or "Без названия")
-        url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        url = f"https://pubmed.ncbi.nlm.nih.gov/{sanitize_html(pmid)}/"
 
         authors = art.get("authors", [])
         author_str = ", ".join(authors) if authors else "Неизвестно"
