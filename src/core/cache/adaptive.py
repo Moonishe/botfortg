@@ -92,22 +92,27 @@ class AdaptiveTTLCache:
     async def get(self, key: Any) -> Any:
         """Получить значение и увеличить TTL если ключ найден."""
         value = await self._backend.get(key)
+        if value is None:
+            return None
 
-        if value is not None:
-            # Key found - increment access count and update TTL
+        # Calculate new TTL under lock
+        async with self._lock:
+            self._access_counts[key] = self._access_counts.get(key, 0) + 1
+            new_ttl = self._calculate_ttl(key)
+            if new_ttl != self._ttl_map.get(key):
+                self._ttl_map[key] = new_ttl
+
+        # Backend calls OUTSIDE self._lock
+        current_metadata = await self._backend.get_metadata(key)
+        if not current_metadata:
             async with self._lock:
-                self._access_counts[key] = self._access_counts.get(key, 0) + 1
-                new_ttl = self._calculate_ttl(key)
-                if new_ttl != self._ttl_map.get(key):
-                    self._ttl_map[key] = new_ttl
+                self._ttl_map.pop(key, None)
+                self._access_counts.pop(key, None)
+            return value
 
-                # Update TTL in backend if it changed significantly (>1sec difference)
-                current_metadata = await self._backend.get_metadata(key)
-                if current_metadata:
-                    old_ttl = current_metadata.get("ttl", 0)
-                    if abs(new_ttl - old_ttl) > 1.0:
-                        await self._backend.update_ttl(key, new_ttl)
-
+        old_ttl = current_metadata.get("ttl", 0)
+        if abs(new_ttl - old_ttl) > 1.0:
+            await self._backend.update_ttl(key, new_ttl)
         return value
 
     async def set(self, key: Any, value: Any) -> None:
@@ -137,7 +142,7 @@ class AdaptiveTTLCache:
 
     def stats(self) -> dict[str, Any]:
         """Статистика кэша с информацией об адаптивных TTL."""
-        backend_stats = self._backend.stats()
+        backend_stats = self._backend.stats
 
         # Calculate distribution of TTLs
         ttl_values = list(self._ttl_map.values())

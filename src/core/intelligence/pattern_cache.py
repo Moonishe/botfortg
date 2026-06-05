@@ -32,6 +32,7 @@ class PatternCache:
                 name="patterns",
                 max_size=2000,
                 default_ttl=float(default_ttl),
+                on_evict=lambda k, v: self._stats_meta.pop(k, None),
             )
         )
         # Sidecar tracking: count + ttl per key (needed for record/invalidate logic)

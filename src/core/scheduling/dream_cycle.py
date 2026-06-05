@@ -96,6 +96,9 @@ async def dream_cycle(owner_telegram_id: int) -> None:
             logger.info(
                 "Dream cycle: phase 3 (contradictions) — %d found", contradictions
             )
+            from src.core.memory.memory_recall import bump_recall_version
+
+            await bump_recall_version(owner.telegram_id)
         except Exception:
             logger.exception("Dream cycle: phase 3 (contradictions) failed")
             summary["contradictions"] = 0
@@ -168,6 +171,9 @@ async def dream_cycle(owner_telegram_id: int) -> None:
             forgotten = await auto_forget_sweep(session, owner.id)
             if forgotten:
                 await session.commit()
+                from src.core.memory.memory_recall import bump_recall_version
+
+                await bump_recall_version(owner.telegram_id)
             summary["auto_forgotten"] = forgotten
             if forgotten:
                 logger.info(

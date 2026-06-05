@@ -7,7 +7,9 @@ from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.core.memory.memory_recall import bump_recall_version
 from src.core.memory.temporal_layers import compute_retention
+from src.db.models._base import User
 from src.db.models._memory import Memory
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,11 @@ async def auto_forget_sweep(session: AsyncSession, user_id: int) -> int:
             validity_end=now,
         )
     )
+
+    # Invalidate recall cache for this user
+    user_row = await session.execute(select(User.telegram_id).where(User.id == user_id))
+    if uid := user_row.scalar_one_or_none():
+        await bump_recall_version(uid)
 
     logger.info(
         "Auto-forget: deactivated %d facts for user %d (threshold=%.2f)",

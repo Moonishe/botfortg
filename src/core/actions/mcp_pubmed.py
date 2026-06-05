@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from src.core.actions.tool_registry import tool
+from src.core.infra.key_guard import safe_str
 
 logger = logging.getLogger(__name__)
 
@@ -101,4 +102,4 @@ async def pubmed_search(
         return {"error": "PubMed request timeout"}
     except Exception as e:
         logger.exception("Unexpected error in pubmed_search: %s", e)
-        return {"error": f"Непредвиденная ошибка: {str(e)[:200]}"}
+        return {"error": f"Непредвиденная ошибка: {safe_str(e)[:200]}"}

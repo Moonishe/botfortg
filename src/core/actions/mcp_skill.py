@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from src.core.actions.tool_registry import tool
+from src.core.infra.key_guard import safe_str
 
 logger = logging.getLogger(__name__)
 
@@ -54,4 +55,4 @@ async def use_skill(
             "note": "Скилл загружен. Примени его инструкции к текущей задаче.",
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": safe_str(e)}

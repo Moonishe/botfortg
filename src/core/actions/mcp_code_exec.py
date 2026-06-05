@@ -6,6 +6,7 @@ from typing import Any
 import ast
 
 from src.core.actions.tool_registry import tool
+from src.core.infra.key_guard import safe_str
 
 logger = logging.getLogger(__name__)
 
@@ -283,4 +284,4 @@ async def code_exec(
     except FileNotFoundError:
         return {"error": "Python не найден. Убедись что python в PATH."}
     except Exception as e:
-        return {"error": str(e)[:300]}
+        return {"error": safe_str(e)[:300]}

@@ -8,6 +8,7 @@ from collections import OrderedDict
 from typing import Any
 
 from src.core.actions.tool_registry import tool
+from src.core.infra.key_guard import safe_str
 from src.core.security.web_sanitizer import sanitize_search_result
 
 logger = logging.getLogger(__name__)
@@ -123,4 +124,4 @@ async def web_search(
             "error": "duckduckgo-search не установлен. pip install duckduckgo-search"
         }
     except Exception as e:
-        return {"error": str(e)[:_QUERY_TRUNCATE_CHARS]}
+        return {"error": safe_str(e)[:_QUERY_TRUNCATE_CHARS]}

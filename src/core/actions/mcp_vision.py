@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.core.actions.tool_registry import tool
+from src.core.infra.key_guard import safe_str
 
 logger = logging.getLogger(__name__)
 
@@ -220,4 +221,4 @@ async def analyze_image(
         return {"error": f"Все vision-провайдеры отказали: {'; '.join(errors)}"}
 
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": safe_str(e)}

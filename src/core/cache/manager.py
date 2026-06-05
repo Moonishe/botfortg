@@ -49,6 +49,8 @@ class ManagedCache(Generic[K, V]):
         default_ttl: float = 300.0,
         on_evict: Callable[[K, V], None] | None = None,
     ):
+        if max_size < 1:
+            raise ValueError(f"max_size must be >= 1, got {max_size}")
         self.name = name
         self.max_size = max_size
         self.default_ttl = default_ttl

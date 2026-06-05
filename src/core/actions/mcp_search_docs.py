@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.core.infra.key_guard import safe_str
+
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -103,4 +105,4 @@ async def search_docs(
 
     except Exception as e:
         logger.debug("search_docs failed: %s", e)
-        return {"error": str(e)[:300]}
+        return {"error": safe_str(e)[:300]}

@@ -5,6 +5,7 @@ from collections import Counter
 from typing import Any
 
 from src.core.actions.tool_registry import tool
+from src.core.infra.key_guard import safe_str
 
 logger = logging.getLogger(__name__)
 
@@ -108,4 +109,4 @@ async def self_audit(
         }
 
     except Exception as e:
-        return {"error": str(e)[:300]}
+        return {"error": safe_str(e)[:300]}
