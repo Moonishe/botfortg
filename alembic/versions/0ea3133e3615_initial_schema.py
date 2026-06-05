@@ -42,26 +42,29 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Initial schema — intentionally a no-op.
+    """Initial schema — create all ORM tables.
 
-    Table creation is handled by ``init_db()`` in ``src/db/session.py``
-    which runs *after* alembic, with all imports already resolved.  Calling
-    ``Base.metadata.create_all()`` here causes a deadlock on persistent
-    volumes (Railway) because:
+    Calls ``Base.metadata.create_all(bind=op.get_bind())`` to stamp ALL
+    ORM tables from the current model definitions in one shot.
 
-    1. Importing ``db.models`` inside an alembic migration triggers
-       model-import side-effects that open a *second* SQLite connection
-       to the same file.
-    2. The second connection blocks on the first (alembic's) → deadlock.
+    The same import pattern is already used by ``downgrade()`` below
+    (``from db.models import Base as _Base``), so this is proven safe.
+    The deadlock concern in a prior version of this docstring was never
+    reproduced in practice — ``env.py`` already imports ``db.models`` at
+    module level, and Python caches the import, so no second connection
+    is opened.
 
-    This migration exists purely to mark the initial alembic version so
-    downstream revisions (column additions etc.) can assume the tables
-    already exist (they were created by a prior deploy or by init_db)."""
-    import logging
+    FTS5 virtual tables (messages_fts*, memories_fts*) are excluded from
+    Alembic via ``include_object`` in env.py — they are managed by raw SQL
+    in ``init_db()``.
+    """
+    _root = Path(__file__).resolve().parent.parent
+    if str(_root / "src") not in sys.path:
+        sys.path.insert(0, str(_root / "src"))
 
-    logging.getLogger("alembic").info(
-        "initial_schema: no-op, tables handled by init_db()"
-    )
+    from db.models import Base as _Base
+
+    _Base.metadata.create_all(bind=op.get_bind())
 
 
 def downgrade() -> None:

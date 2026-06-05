@@ -565,7 +565,7 @@ async def proactive_briefing_loop(owner_id: int) -> None:
                     owner.settings.proactive_last_sent = slot_start_utc
                     await session.commit()
 
-                from src.bot.handlers.free_text_common import invalidate_settings_cache
+                from src.core.infra.settings_cache import invalidate_settings_cache
 
                 await invalidate_settings_cache(owner_id)
 

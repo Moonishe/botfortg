@@ -124,14 +124,7 @@ logger = logging.getLogger(__name__)
 _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9@/_.:-]{1,128}$")
 
 
-# ---------------------------------------------------------------------------
-# Settings cache — per-user, TTL 60s, managed by ManagedCache (bounded LRU)
-# ---------------------------------------------------------------------------
-from src.core.cache.manager import ManagedCache, cache_manager
-
-_settings_cache: ManagedCache[int, dict] = cache_manager.register(
-    ManagedCache(name="settings", max_size=1000, default_ttl=60.0)
-)
+from src.core.infra.settings_cache import _settings_cache, invalidate_settings_cache
 
 
 async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object]:
@@ -166,15 +159,6 @@ async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object
         }
         await _settings_cache.set(telegram_id, ctx)
     return ctx  # type: ignore[return-value]
-
-
-async def invalidate_settings_cache(telegram_id: int | None = None) -> None:
-    """Сбросить кэш настроек (вызывается при изменении /settings).
-    Если telegram_id=None — сбрасывает весь кэш."""
-    if telegram_id is not None:
-        await _settings_cache.invalidate(telegram_id)
-    else:
-        await _settings_cache.clear()
 
 
 def _fire_record_trajectory(*args: object, **kwargs: object) -> None:

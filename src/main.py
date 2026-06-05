@@ -158,20 +158,14 @@ async def main() -> None:
     start_voice_worker()
     notification_queue.start()
 
-    from src.bot.handlers.free_text import _singalong_search_cache
-    from src.bot.handlers.free_text_pipeline import _last_intent_ctx
     from src.core.cache.manager import cache_manager
 
     async def _cleanup_global_state():
         _tick = 0
         while True:
             await asyncio.sleep(60)
-            try:
-                await _singalong_search_cache.cleanup_stale()
-                await _last_intent_ctx.cleanup_stale()
-            except Exception:
-                logger.debug("cleanup_stale failed", exc_info=True)
-            # ManagedCache background cleanup (settings, stats, patterns, url_summary)
+            # ManagedCache background cleanup (settings, stats, patterns, url_summary,
+            # singalong_search, last_intent_ctx, recall, smart_cache)
             try:
                 cleanup_results = await cache_manager.cleanup_all()
                 total_cleaned = sum(cleanup_results.values())

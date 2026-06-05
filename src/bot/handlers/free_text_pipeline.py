@@ -121,37 +121,11 @@ logger = logging.getLogger(__name__)
 
 # ── Follow-up context ────────────────────────────────────────────────
 
+from src.core.cache import ManagedCache, cache_manager
 
-class _IntentContextCache:
-    def __init__(self, ttl_sec: float = 900.0):
-        self._cache: dict[int, dict] = {}
-        self._ttl = ttl_sec
-        self._lock = asyncio.Lock()
-
-    async def get(self, key: int) -> dict | None:
-        async with self._lock:
-            entry = self._cache.get(key)
-            if not entry or time.monotonic() > entry["expires_at"]:
-                self._cache.pop(key, None)
-                return None
-            return entry
-
-    async def set(self, key: int, value: dict) -> None:
-        async with self._lock:
-            self._cache[key] = {
-                **value,
-                "expires_at": time.monotonic() + self._ttl,
-            }
-
-    async def cleanup_stale(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            stale_keys = [k for k, v in self._cache.items() if now > v["expires_at"]]
-            for k in stale_keys:
-                self._cache.pop(k, None)
-
-
-_last_intent_ctx = _IntentContextCache(ttl_sec=900.0)
+_last_intent_ctx: ManagedCache[int, dict] = cache_manager.register(
+    ManagedCache(name="last_intent_ctx", max_size=1000, default_ttl=900.0)
+)
 _LAST_INTENT_TTL = 900.0
 
 # ── Pending tool confirmations ────────────────────────────────────────

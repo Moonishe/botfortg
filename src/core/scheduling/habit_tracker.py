@@ -206,7 +206,7 @@ async def habit_tracker_loop(owner_id: int) -> None:
                         owner.settings.habit_last_run_date = now.date()
                         await session.commit()
 
-                        from src.bot.handlers.free_text_common import (
+                        from src.core.infra.settings_cache import (
                             invalidate_settings_cache,
                         )
 

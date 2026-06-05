@@ -22,7 +22,7 @@ from aiogram.types import Message
 from src.bot.filters import OwnerOnly
 from src.config import settings
 from src.core.actions.trajectory import actions_from_intent
-from src.core.cache import AdaptiveTTLCache
+from src.core.cache import AdaptiveTTLCache, ManagedCache, cache_manager
 from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.task_manager import track_ff
@@ -110,8 +110,6 @@ def _is_safe_url(url: str) -> bool:
 
 # ── URL summary cache (Adaptive TTL — hot URLs grow to 1h) ───────────
 
-from src.core.cache import AdaptiveTTLCache
-
 _url_cache = AdaptiveTTLCache(
     name="url_summary",
     base_ttl=600.0,  # 10 min for cold entries
@@ -186,51 +184,17 @@ def _extract_correction_pattern(original: str, edited: str) -> tuple[str, str] |
     return None
 
 
-class _SearchCache:
-    def __init__(self, max_size: int = 100, ttl_sec: int = 300):
-        self._cache: dict[Any, tuple[Any, float]] = {}
-        self._max_size = max_size
-        self._ttl = ttl_sec
-        self._lock = asyncio.Lock()
-
-    async def get(self, key: Any) -> Any | None:
-        async with self._lock:
-            if key not in self._cache:
-                return None
-            value, ts = self._cache[key]
-            if time.monotonic() - ts > self._ttl:
-                del self._cache[key]
-                return None
-            return value
-
-    async def set(self, key: Any, value: Any) -> None:
-        async with self._lock:
-            if len(self._cache) >= self._max_size:
-                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
-                del self._cache[oldest_key]
-            self._cache[key] = (value, time.monotonic())
-
-    async def pop(self, key: Any) -> Any | None:
-        async with self._lock:
-            if key not in self._cache:
-                return None
-            value, ts = self._cache[key]
-            del self._cache[key]
-            if time.monotonic() - ts > self._ttl:
-                return None
-            return value
-
-    async def cleanup_stale(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            stale_keys = [
-                k for k, (v, ts) in self._cache.items() if now - ts > self._ttl
-            ]
-            for k in stale_keys:
-                del self._cache[k]
+_singalong_search_cache: ManagedCache[int, list | None] = cache_manager.register(
+    ManagedCache(name="singalong_search", max_size=100, default_ttl=300)
+)
 
 
-_singalong_search_cache = _SearchCache(max_size=100, ttl_sec=300)
+async def _pop_singalong_search(key: int) -> list | None:
+    """Atomically get and remove from singalong search cache."""
+    val = await _singalong_search_cache.get(key)
+    if val is not None:
+        await _singalong_search_cache.invalidate(key)
+    return val
 
 
 class VoiceJob(NamedTuple):
@@ -885,7 +849,7 @@ async def _process_text(
                 # Новая песня при существующем pending — заменяем
                 if _looks_like_lyrics(raw):
                     await consume_pending_singalong(owner_telegram_id)
-                    await _singalong_search_cache.pop(owner_telegram_id)
+                    await _singalong_search_cache.invalidate(owner_telegram_id)
                     identified = await _singalong_identify(
                         raw, owner_telegram_id, use_heavy
                     )
@@ -995,7 +959,7 @@ async def _process_text(
                 # ── Numeric selection (1/2/3) после поиска ──────────
                 stripped_num = raw.strip()
                 if stripped_num in ("1", "2", "3"):
-                    cache = await _singalong_search_cache.pop(owner_telegram_id)
+                    cache = await _pop_singalong_search(owner_telegram_id)
                     if cache is None:
                         return False
                     idx = int(stripped_num) - 1
@@ -1030,20 +994,20 @@ async def _process_text(
                             return True
                         # LLM не смог — спрашиваем уточнение
                         await consume_pending_singalong(owner_telegram_id)
-                        await _singalong_search_cache.pop(owner_telegram_id)
+                        await _singalong_search_cache.invalidate(owner_telegram_id)
                         await message.answer(
                             f"Не могу найти текст «{sanitize_html(title)}». Напиши название песни?"
                         )
                         return True
                     # Неверный номер — очищаем кеш
-                    await _singalong_search_cache.pop(owner_telegram_id)
+                    await _singalong_search_cache.invalidate(owner_telegram_id)
 
                 # decision is None + не numeric — другое сообщение, идём дальше
                 return False
 
             # ── Нет pending — новое сообщение ───────────────────────
             # Clean stale search cache from previous sessions
-            await _singalong_search_cache.pop(owner_telegram_id)
+            await _singalong_search_cache.invalidate(owner_telegram_id)
 
             if _looks_like_lyrics(raw):
                 identified = await _singalong_identify(

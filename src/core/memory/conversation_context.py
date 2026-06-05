@@ -6,7 +6,7 @@ survives restarts."""
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from time import time
 
@@ -37,6 +37,8 @@ class _Ctx:
 
 _STORE: dict[int, _Ctx] = {}
 _ctx_lock = asyncio.Lock()
+_user_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_ctx_cleanup_ts: float = 0.0
 
 
 def _cleanup_stale_contexts() -> None:
@@ -52,8 +54,8 @@ def _cleanup_stale_contexts() -> None:
 
 
 async def _get(user_id: int) -> _Ctx:
-    async with _ctx_lock:
-        _cleanup_stale_contexts()
+    async with _user_locks[user_id]:
+        _throttled_cleanup_contexts()
         ctx = _STORE.get(user_id)
         if ctx is None:
             ctx = _Ctx()
@@ -63,6 +65,14 @@ async def _get(user_id: int) -> _Ctx:
             if compressed:
                 ctx.compressed = "[Предыдущий диалог]\n" + compressed
         return ctx
+
+
+def _throttled_cleanup_contexts() -> None:
+    global _ctx_cleanup_ts
+    now = time()
+    if now - _ctx_cleanup_ts > 60.0:
+        _ctx_cleanup_ts = now
+        _cleanup_stale_contexts()
 
 
 def _quick_summarize(

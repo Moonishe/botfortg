@@ -546,6 +546,49 @@ class SmartCache:
             await session.flush()
 
 
-# ── Module-level singleton ────────────────────────────────────────────
+# ── Cache management interface ───────────────────────────────────────
+# SmartCache has unique 3-level logic (L0/L1/L2) and is not a simple
+# dict wrapper, so we keep it as-is and add lightweight compatibility
+# with cache_manager for stats introspection and unified cleanup.
+
+from src.core.cache.manager import cache_manager
+
+
+@property  # type: ignore[misc]
+def _smart_cache_name(self) -> str:
+    return "smart_cache"
+
+
+SmartCache.name = _smart_cache_name  # type: ignore[assignment]
+
+
+async def _smart_cache_cleanup_expired(self) -> int:
+    """Run internal stale-entry cleanup (compatible with ManagedCache interface)."""
+    from src.db.session import get_session
+
+    async with get_session() as session:
+        await self._cleanup_stale_entries(session)
+    return 0
+
+
+SmartCache.cleanup_expired = _smart_cache_cleanup_expired  # type: ignore[assignment]
+
+
+@property  # type: ignore[misc]
+def _smart_cache_stats(self) -> dict:
+    """Return basic stats for cache_manager introspection."""
+    return {
+        "name": "smart_cache",
+        "type": "3-level (L0/L1/L2)",
+        "l0_size": len(self._l0),
+        "l0_max": L0_MAX_SIZE,
+    }
+
+
+SmartCache.stats = _smart_cache_stats  # type: ignore[assignment]
+
+
+# ─── Module-level singleton ────────────────────────────────────────────
 
 smart_cache = SmartCache()
+cache_manager.register(smart_cache)  # type: ignore[arg-type]

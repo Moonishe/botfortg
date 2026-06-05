@@ -27,15 +27,17 @@ from src.core.memory.temporal_layers import compute_retention
 
 logger = logging.getLogger(__name__)
 
-from src.core.memory.ttl_cache import TTLCache
+from src.core.cache.manager import ManagedCache, cache_manager
 from src.core.cache.prefetch import prefetch_tracker
 
 _RECALL_CACHE_RESULT_TTL = settings.recall_cache_result_ttl
 _RECALL_CACHE_EMPTY_TTL = settings.recall_cache_empty_ttl
-_recall_cache: "TTLCache[str, RecallResult]" = TTLCache(
-    max_size=settings.recall_cache_max_size,
-    default_ttl=_RECALL_CACHE_RESULT_TTL,
-    name="recall",
+_recall_cache: "ManagedCache[str, RecallResult]" = cache_manager.register(
+    ManagedCache(
+        name="recall",
+        max_size=settings.recall_cache_max_size,
+        default_ttl=_RECALL_CACHE_RESULT_TTL,
+    )
 )
 
 
