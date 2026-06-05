@@ -2260,6 +2260,16 @@ async def handle_pending_correction(message: Message) -> None:
         return
 
     memory_id = pending["memory_id"]
+
+    # Scan user-supplied correction text for prompt injection
+    from src.core.security.prompt_injection_scanner import scan_content
+
+    scan_result = scan_content(new_text, "memory_correction")
+    if scan_result.blocked:
+        _PENDING_CORRECTIONS.pop(user_id, None)
+        await message.answer("⛔ Контент не прошёл проверку безопасности.")
+        return
+
     from src.core.memory.dreaming_reval import update_memory_text
 
     async with get_session() as session:

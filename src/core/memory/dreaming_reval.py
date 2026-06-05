@@ -619,6 +619,9 @@ async def _reval_run_impl(
         # concurrent; harmless in sequential mode — documents intent).
         sem = asyncio.Semaphore(3)
 
+        # Track results in the current uncommitted batch for rollback recovery
+        batch_results: list[RevalResult] = []
+
         for i, fact in enumerate(facts):
             try:
                 async with sem:
@@ -634,11 +637,14 @@ async def _reval_run_impl(
                     action="skip",
                     error=safe_str(exc),
                 )
-                summary.errors += 1
+                summary.errors += 1  # counted here only (see below)
 
             summary.results.append(result)
+            batch_results.append(result)
+            # Error already counted in the except block above; this guard
+            # only exists to skip the action-counter elif chain below.
             if result.error:
-                summary.errors += 1
+                pass
             elif result.action == "past":
                 summary.past += 1
                 if result.new_memory_id:
@@ -660,6 +666,7 @@ async def _reval_run_impl(
             if (i + 1) % 10 == 0:
                 try:
                     await session.commit()
+                    batch_results.clear()
                 except Exception:
                     logger.exception(
                         "Dreaming reval: incremental commit failed at fact %d/%d",
@@ -668,6 +675,22 @@ async def _reval_run_impl(
                     )
                     await session.rollback()
                     summary.errors += 1
+                    # Revert counters for this batch's results (they were rolled back)
+                    for rr in batch_results:
+                        if rr.error:
+                            summary.errors -= 1
+                        elif rr.action == "past":
+                            summary.past -= 1
+                            if rr.new_memory_id:
+                                summary.new_facts_created -= 1
+                        elif rr.action == "permanent":
+                            summary.permanent -= 1
+                            if rr.new_memory_id:
+                                summary.new_facts_created -= 1
+                        elif rr.action == "invalid":
+                            summary.invalid -= 1
+                        else:
+                            summary.skip -= 1
                     break  # stop — state is inconsistent, don't continue
 
         # Final commit at the end of the batch
