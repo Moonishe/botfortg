@@ -26,6 +26,7 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 from src.core.memory.memory_recall import bump_recall_version
+from src.core.security.prompt_injection_scanner import scan_content
 from src.userbot import get_active_telethon_client
 
 from .free_text_common import safe_answer
@@ -64,6 +65,15 @@ async def _exec_store_memory(intent, message) -> None:
             candidates = await resolve(client, owner, contact_name)
             if candidates:
                 contact_id = candidates[0].peer_id
+
+    # Prompt-injection scan
+    try:
+        scan_result = scan_content(fact, "memory_intake")
+        if scan_result.blocked:
+            await message.answer("⛔ Контент не прошёл проверку безопасности.")
+            return
+    except Exception:
+        logger.warning("scan_content failed, passing through: %.50s", fact)
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)

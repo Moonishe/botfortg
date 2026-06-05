@@ -30,6 +30,7 @@ from src.bot.filters import OwnerOnly
 from src.config import settings
 from src.core.contacts.contact_resolver import resolve
 from src.core.infra.text_sanitizer import sanitize_html
+from src.core.security.prompt_injection_scanner import scan_content
 from src.core.memory.memory_fuel import (
     format_depleted_contacts,
     format_fuel_line,
@@ -1862,6 +1863,19 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
         if candidate is None or candidate.user_id != owner.id:
             await callback.answer("Факт не найден", show_alert=True)
             return
+
+        # Prompt-injection scan (защита для confirm / temporary / permanent)
+        try:
+            scan_result = scan_content(candidate.fact, "memory_intake")
+            if scan_result.blocked:
+                await callback.answer(
+                    "⛔ Контент не прошёл проверку безопасности.", show_alert=True
+                )
+                return
+        except Exception:
+            logger.warning(
+                "scan_content failed, passing through: %.50s", candidate.fact
+            )
 
         if action == "confirm":
             # Перенести в Memory как есть
