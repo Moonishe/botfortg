@@ -2216,7 +2216,8 @@ class _PendingCorrectionFilter(BaseFilter):
         pending = _PENDING_CORRECTIONS.get(uid)
         if pending is None:
             return False
-        # Check TTL
+        # Check TTL — cleanup is opportunistic (on next message).
+        # TTL is 300s, bounded by user count — no separate sweep needed.
         deadline = pending.get("deadline", 0)
         if time.monotonic() > deadline:
             _PENDING_CORRECTIONS.pop(uid, None)

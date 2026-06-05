@@ -637,7 +637,9 @@ async def _reval_run_impl(
                 summary.errors += 1
 
             summary.results.append(result)
-            if result.action == "past":
+            if result.error:
+                summary.errors += 1
+            elif result.action == "past":
                 summary.past += 1
                 if result.new_memory_id:
                     summary.new_facts_created += 1
@@ -665,6 +667,8 @@ async def _reval_run_impl(
                         len(facts),
                     )
                     await session.rollback()
+                    summary.errors += 1
+                    break  # stop — state is inconsistent, don't continue
 
         # Final commit at the end of the batch
         try:

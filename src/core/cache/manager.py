@@ -213,8 +213,11 @@ class ManagedCache(Generic[K, V]):
                     self._cache.move_to_end(key)
                     self.metrics.hits += 1
                     return value, False
-                self._evict(key, expired=True)
+                # H1: Don't evict yet — factory might fail.  Just note it.
+                existing_expired = True
                 self.metrics.misses += 1
+            else:
+                existing_expired = False
 
         # ── Compute value OUTSIDE the lock ──
         result = factory()
@@ -223,11 +226,16 @@ class ManagedCache(Generic[K, V]):
 
         # ── Write-back under lock (with re-check) ──
         async with self._lock:
+            # H1: Factory succeeded — safe to evict the old entry now.
+            if existing_expired:
+                self._evict(key, expired=True)
+
             if key in self._cache:
                 expires_at, value = self._cache[key]
                 if time.monotonic() < expires_at:
                     # Someone else got there first — return their result
                     self._cache.move_to_end(key)
+                    self.metrics.hits += 1  # M3: count hit for returned value
                     return value, False
 
             actual_ttl = ttl if ttl is not None else self.default_ttl
@@ -321,6 +329,11 @@ class CacheManager:
 
     async def start_background_cleanup(self, interval: float = 60.0) -> None:
         """Start periodic cleanup task. Call once at app startup."""
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            logger.warning(
+                "Background cleanup already running, skipping duplicate call"
+            )
+            return
 
         async def _cleanup_loop():
             while True:

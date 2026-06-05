@@ -332,6 +332,7 @@ async def main() -> None:
             ("memory worker", stop_worker()),
             ("voice worker", stop_voice_worker()),
             ("notification queue", notification_queue.stop()),
+            ("cache manager", cache_manager.stop_background_cleanup()),
         ]:
             try:
                 logger.debug("Stopping %s…", step)
