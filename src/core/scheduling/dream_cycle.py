@@ -39,6 +39,12 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         "closed": 0,
         "consolidated": 0,
         "contradictions": 0,
+        "reval_examined": 0,
+        "reval_past": 0,
+        "reval_permanent": 0,
+        "reval_invalid": 0,
+        "reval_skip": 0,
+        "reval_errors": 0,
         "digests": 0,
         "dsm": 0,
         "auto_forgotten": 0,
@@ -102,6 +108,34 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         except Exception:
             logger.exception("Dream cycle: phase 3 (contradictions) failed")
             summary["contradictions"] = 0
+
+        # ── Phase 3.5: Dreaming V3 — LLM semantic re-evaluation ──────
+        # Re-evaluates temporary/expired facts via LLM and supersedes them
+        # with past-tense versions when the event has happened.
+        # See src/core/memory/dreaming_reval.py for details.
+        try:
+            from src.core.memory.dreaming_reval import revaluation_run
+
+            reval_summary = await revaluation_run(owner_telegram_id)
+            summary["reval_examined"] = reval_summary.examined
+            summary["reval_past"] = reval_summary.past
+            summary["reval_permanent"] = reval_summary.permanent
+            summary["reval_invalid"] = reval_summary.invalid
+            summary["reval_skip"] = reval_summary.skip
+            summary["reval_errors"] = reval_summary.errors
+            if reval_summary.examined > 0:
+                logger.info(
+                    "Dream cycle: phase 3.5 (Dreaming V3 reval) — "
+                    "examined=%d past=%d permanent=%d invalid=%d skip=%d errors=%d",
+                    reval_summary.examined,
+                    reval_summary.past,
+                    reval_summary.permanent,
+                    reval_summary.invalid,
+                    reval_summary.skip,
+                    reval_summary.errors,
+                )
+        except Exception:
+            logger.exception("Dream cycle: phase 3.5 (Dreaming V3 reval) failed")
 
         # ── Phase 4: Digest rebuild for top 20 active contacts ────────
         try:
@@ -264,6 +298,28 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 summary_lines.append(
                     f"• авто-забывание: {auto_forgotten} фактов деактивировано"
                 )
+
+            # Dreaming V3 re-evaluation
+            reval_past = summary.get("reval_past", 0)
+            reval_permanent = summary.get("reval_permanent", 0)
+            reval_invalid = summary.get("reval_invalid", 0)
+            reval_examined = summary.get("reval_examined", 0)
+            if reval_examined > 0:
+                parts = []
+                if reval_past:
+                    parts.append(f"обновлено {reval_past}")
+                if reval_permanent:
+                    parts.append(f"сделано постоянными {reval_permanent}")
+                if reval_invalid:
+                    parts.append(f"деактивировано {reval_invalid}")
+                if parts:
+                    summary_lines.append(
+                        f"• 🧠 Dreaming V3: {', '.join(parts)} (из {reval_examined})"
+                    )
+                else:
+                    summary_lines.append(
+                        f"• 🧠 Dreaming V3: проверено {reval_examined}, без изменений"
+                    )
 
             # Retention stats
             if retention_buckets:

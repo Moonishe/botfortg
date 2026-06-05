@@ -160,25 +160,13 @@ async def main() -> None:
 
     from src.core.cache.manager import cache_manager
 
+    # Start proactive TTL cleanup for all registered ManagedCache instances
+    await cache_manager.start_background_cleanup(interval=60.0)
+
     async def _cleanup_global_state():
         _tick = 0
         while True:
             await asyncio.sleep(60)
-            # ManagedCache background cleanup (settings, stats, patterns, url_summary,
-            # singalong_search, last_intent_ctx, recall, smart_cache)
-            try:
-                cleanup_results = await cache_manager.cleanup_all()
-                total_cleaned = sum(cleanup_results.values())
-                if total_cleaned > 0:
-                    logger.info(
-                        "ManagedCache cleanup: %d expired entries removed (%s)",
-                        total_cleaned,
-                        ", ".join(
-                            f"{k}={v}" for k, v in cleanup_results.items() if v > 0
-                        ),
-                    )
-            except Exception:
-                logger.debug("ManagedCache cleanup failed", exc_info=True)
             # Cleanup stale circuit breakers every 300s (5 min)
             _tick += 1
             if _tick >= 5:

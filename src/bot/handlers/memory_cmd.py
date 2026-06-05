@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -26,6 +27,7 @@ from src.llm.provider_catalog import (
 
 from src.bot.callbacks import KeysCB
 from src.bot.filters import OwnerOnly
+from src.config import settings
 from src.core.contacts.contact_resolver import resolve
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_fuel import (
@@ -69,6 +71,12 @@ _PENDING_IMPORTS: dict[int, str] = {}  # user_id → purpose
 _PENDING_KEY_ENTRIES: dict[
     int, dict
 ] = {}  # user_id → {provider, model, model_pending, category}
+
+# ─── /memory --correct: очередь ручного исправления факта (без FSM) ───
+
+_PENDING_CORRECTIONS: dict[
+    int, dict
+] = {}  # user_id → {"memory_id": int, "original_fact": str, "mode": "edit_text"|"edit_type"|"edit_decay"}
 
 # ─── /keys import helpers ─────────────────────────────────────────────
 
@@ -1060,6 +1068,95 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
         )
         return
 
+    # ── --reval: запуск LLM-переоценки (Dreaming V3) ─────────────────
+    reval_mode = "--reval" in args
+    if reval_mode:
+        from src.core.memory.dreaming_reval import (
+            revaluation_run,
+            revaluation_summary_text,
+        )
+
+        await message.answer("🧠 Dreaming V3: запускаю LLM-переоценку…")
+        summary = await revaluation_run(
+            message.from_user.id,
+            limit=getattr(settings, "dreaming_reval_max_per_run", 50),
+        )
+        text = revaluation_summary_text(summary)
+        # Если были изменения — показываем кнопки для подтверждения
+        if summary.past + summary.permanent + summary.invalid > 0:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="📋 Подробнее",
+                            callback_data="memreval:detail",
+                        ),
+                        InlineKeyboardButton(
+                            text="↩️ Откатить все",
+                            callback_data="memreval:rollback_all",
+                        ),
+                    ]
+                ]
+            )
+            await message.answer(text, reply_markup=kb)
+        else:
+            await message.answer(text)
+        return
+
+    # ── --correct <id>: ручное исправление факта (FSM-lite через dict) ─
+    correct_mode = "--correct" in args
+    if correct_mode:
+        parts = args.replace("--correct", "").strip().split()
+        if not parts or not parts[0].isdigit():
+            await message.answer(
+                "Использование: <code>/memory --correct &lt;id&gt;</code>\n"
+                "Пример: <code>/memory --correct 1234</code>"
+            )
+            return
+        memory_id = int(parts[0])
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            fact = await session.get(Memory, memory_id)
+            if not fact or fact.user_id != owner.id:
+                await message.answer(f"❌ Факт #{memory_id} не найден.")
+                return
+            original = fact.fact
+            await session.commit()
+        # Set pending state
+        _PENDING_CORRECTIONS[message.from_user.id] = {
+            "memory_id": memory_id,
+            "original_fact": original,
+            "mode": "edit_text",
+            "deadline": time.monotonic() + 300,
+        }
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="♾ Сделать постоянным",
+                        callback_data=f"memreval:permanent:{memory_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑 Деактивировать",
+                        callback_data=f"memreval:reject:{memory_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отмена",
+                        callback_data="memreval:cancel",
+                    ),
+                ],
+            ]
+        )
+        await message.answer(
+            f"✏️ <b>Исправление факта #{memory_id}</b>\n\n"
+            f"<i>{sanitize_html(original)}</i>\n\n"
+            f"Напиши новый текст одним сообщением, или нажми кнопку:",
+            reply_markup=kb,
+        )
+        return
+
     graph_export_mode = "--graph:export" in args
     if graph_export_mode:
         async with get_session() as session:
@@ -2000,6 +2097,173 @@ async def cmd_persona(message: Message) -> None:
         "/persona reset — сбросить всё.</i>"
     )
     await message.answer("\n".join(lines))
+
+
+# ── Dreaming V3 UI: /memory --reval and /memory --correct handlers ──
+
+
+@router.callback_query(F.data.startswith("memreval:"))
+async def cb_memreval(callback: CallbackQuery) -> None:
+    """Обрабатывает кнопки Dreaming V3: confirm/reject/permanent/cancel/rollback."""
+    if callback.data is None or callback.message is None:
+        await callback.answer("Ошибка")
+        return
+    parts = callback.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    user_id = callback.from_user.id
+
+    if action == "cancel":
+        _PENDING_CORRECTIONS.pop(user_id, None)
+        await callback.message.edit_text("❌ Отменено.")
+        await callback.answer()
+        return
+
+    # detail / rollback_all — оба обрабатываются в show_last_revals (ниже)
+    if action == "detail":
+        from src.core.memory.dreaming_reval import _recent_reval_results
+
+        text = await _recent_reval_results(user_id, limit=10)
+        await callback.message.answer(text)
+        await callback.answer()
+        return
+
+    if action == "rollback_all":
+        from src.core.memory.dreaming_reval import rollback_recent_revals
+
+        undone = await rollback_recent_revals(user_id, limit=20)
+        await callback.message.edit_text(
+            f"↩️ Откатил {undone} фактов, созданных dreaming_reval."
+        )
+        await callback.answer()
+        return
+
+    # confirm / reject / permanent — все требуют memory_id
+    if len(parts) < 3 or not parts[2].isdigit():
+        await callback.answer("Неизвестное действие", show_alert=True)
+        return
+    memory_id = int(parts[2])
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, user_id)
+        mem = await session.get(Memory, memory_id)
+        if not mem or mem.user_id != owner.id:
+            await callback.answer("Факт не найден", show_alert=True)
+            return
+
+        if action == "reject":
+            from src.core.memory.dreaming_reval import deactivate_memory
+
+            await deactivate_memory(session, memory_id, reason="manual_reject")
+            await session.commit()
+            fact_text = sanitize_html(mem.fact)
+            await callback.message.edit_text(f"🗑 Деактивирован: <i>{fact_text}</i>")
+            await callback.answer("Факт деактивирован")
+
+        elif action == "permanent":
+            from src.core.memory.dreaming_reval import update_memory_text
+
+            await update_memory_text(
+                session,
+                memory_id,
+                mem.fact,
+                new_memory_type=(
+                    "personal" if mem.contact_id is None else "contact_fact"
+                ),
+                new_decay_rate=0.01,
+            )
+            mem.pinned = True
+            await session.commit()
+            fact_text = sanitize_html(mem.fact)
+            await callback.message.edit_text(
+                f"♾ Сделано постоянным: <i>{fact_text}</i>"
+            )
+            await callback.answer("Факт сохранён навсегда")
+
+        else:
+            await callback.answer("Неизвестное действие", show_alert=True)
+
+
+# ─── /cancel: command to abort pending correction ──────────────────────
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel_pending(message: Message) -> None:
+    """Отменяет активное ожидание исправления факта."""
+    uid = message.from_user.id if message.from_user else None
+    if uid is None:
+        return
+    if uid in _PENDING_CORRECTIONS:
+        _PENDING_CORRECTIONS.pop(uid, None)
+        await message.answer("❌ Исправление факта отменено.")
+    else:
+        await message.answer("Нет активных операций для отмены.")
+
+
+# ─── /memory --correct: filter + handler (FSM-lite via _PENDING_CORRECTIONS) ──
+
+
+class _PendingCorrectionFilter(BaseFilter):
+    """Фильтр: сообщение от юзера с активным ожиданием исправления факта.
+    Возвращает True только если у юзера есть незавершённая и не протухшая запись
+    в _PENDING_CORRECTIONS, и нет активного FSM-состояния.
+    """
+
+    async def __call__(self, message: Message, state: FSMContext | None = None) -> bool:
+        if message.from_user is None:
+            return False
+        uid = message.from_user.id
+        pending = _PENDING_CORRECTIONS.get(uid)
+        if pending is None:
+            return False
+        # Check TTL
+        deadline = pending.get("deadline", 0)
+        if time.monotonic() > deadline:
+            _PENDING_CORRECTIONS.pop(uid, None)
+            return False
+        if state is not None and await state.get_state() is not None:
+            return False
+        return True
+
+
+# ВАЖНО: memory_cmd.router зарегистрирован ВЫШЕ free_text.router в app.py,
+# поэтому этот handler перехватывает текст раньше free_text.
+@router.message(_PendingCorrectionFilter())
+async def handle_pending_correction(message: Message) -> None:
+    """Обрабатывает текст, если у пользователя есть pending /memory --correct."""
+    user_id = message.from_user.id
+    pending = _PENDING_CORRECTIONS.get(user_id)
+
+    new_text = (message.text or "").strip()
+    if not new_text or len(new_text) < 3:
+        await message.answer("Текст слишком короткий. Напиши заново или /cancel.")
+        return
+    if len(new_text) > 500:
+        await message.answer(
+            f"Слишком длинный текст ({len(new_text)} > 500). Сократи и пришли заново."
+        )
+        return
+
+    memory_id = pending["memory_id"]
+    from src.core.memory.dreaming_reval import update_memory_text
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, user_id)
+        mem = await session.get(Memory, memory_id)
+        if not mem or mem.user_id != owner.id:
+            _PENDING_CORRECTIONS.pop(user_id, None)
+            await message.answer("❌ Факт не найден, отменяю.")
+            return
+        old_fact = mem.fact
+        await update_memory_text(session, memory_id, new_text)
+        await session.commit()
+
+    _PENDING_CORRECTIONS.pop(user_id, None)
+    await message.answer(
+        f"✅ Факт #{memory_id} обновлён:\n\n"
+        f"<s>{sanitize_html(old_fact)}</s>\n"
+        f"→ <i>{sanitize_html(new_text)}</i>"
+    )
 
 
 # ── Timeline format ───────────────────────────────────────────────────

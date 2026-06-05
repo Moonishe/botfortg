@@ -257,6 +257,24 @@ class Settings(BaseSettings):
         True, description="Enable automatic forgetting of low-retention facts"
     )
 
+    # ── Dreaming V3 — LLM semantic re-evaluation of stale facts ──
+    dreaming_reval_enabled: bool = Field(
+        True,
+        description="Enable LLM-driven semantic re-evaluation in dream cycle",
+    )
+    dreaming_reval_max_per_run: int = Field(
+        50,
+        description="Max facts to re-evaluate per nightly dream cycle run",
+    )
+    dreaming_reval_confidence_threshold: float = Field(
+        0.5,
+        description="Min confidence to consider a fact for re-evaluation",
+    )
+    dreaming_reval_lookback_days: int = Field(
+        365,
+        description="Skip facts older than this; auto-forget handles them",
+    )
+
     # ── Limits & timeouts ──
     max_message_length: int = Field(4096, description="Telegram max message length")
     safe_message_length: int = Field(4000, description="Buffer before Telegram limit")

@@ -189,6 +189,11 @@ class ManagedCache(Generic[K, V]):
     ) -> tuple[Any, bool]:
         """Atomic read-modify-write. Calls factory() only if key is missing or expired.
 
+        Uses **double-checked locking** to avoid holding the lock during slow
+        factory calls (DB I/O, LLM, embedding).  The lock is released before
+        calling *factory* and re-acquired for write-back, keeping all other
+        cache operations unblocked during computation.
+
         Args:
             key: Cache key.
             ttl: TTL in seconds. Falls back to default_ttl if None.
@@ -200,6 +205,7 @@ class ManagedCache(Generic[K, V]):
             was_created=True  → factory was called, value is fresh.
             was_created=False → cached value returned, no factory call.
         """
+        # ── Fast path under lock: check existing ──
         async with self._lock:
             if key in self._cache:
                 expires_at, value = self._cache[key]
@@ -210,13 +216,24 @@ class ManagedCache(Generic[K, V]):
                 self._evict(key, expired=True)
                 self.metrics.misses += 1
 
-            result = factory()
-            if asyncio.iscoroutine(result):
-                result = await result
+        # ── Compute value OUTSIDE the lock ──
+        result = factory()
+        if asyncio.iscoroutine(result):
+            result = await result
 
-            ttl_value = ttl if ttl is not None else self.default_ttl
-            expires_at = time.monotonic() + ttl_value
+        # ── Write-back under lock (with re-check) ──
+        async with self._lock:
+            if key in self._cache:
+                expires_at, value = self._cache[key]
+                if time.monotonic() < expires_at:
+                    # Someone else got there first — return their result
+                    self._cache.move_to_end(key)
+                    return value, False
 
+            actual_ttl = ttl if ttl is not None else self.default_ttl
+            expires_at = time.monotonic() + actual_ttl
+
+            # LRU eviction if needed
             while len(self._cache) >= self.max_size:
                 oldest_key, (_, oldest_value) = self._cache.popitem(last=False)
                 self._expires.pop(oldest_key, None)
