@@ -1072,16 +1072,16 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     reval_mode = "--reval" in args
     if reval_mode:
         from src.core.memory.dreaming_reval import (
-            revaluation_run,
-            revaluation_summary_text,
+            reval_run,
+            reval_summary_text,
         )
 
         await message.answer("🧠 Dreaming V3: запускаю LLM-переоценку…")
-        summary = await revaluation_run(
+        summary = await reval_run(
             message.from_user.id,
             limit=getattr(settings, "dreaming_reval_max_per_run", 50),
         )
-        text = revaluation_summary_text(summary)
+        text = reval_summary_text(summary)
         # Если были изменения — показываем кнопки для подтверждения
         if summary.past + summary.permanent + summary.invalid > 0:
             kb = InlineKeyboardMarkup(
@@ -2121,9 +2121,9 @@ async def cb_memreval(callback: CallbackQuery) -> None:
 
     # detail / rollback_all — оба обрабатываются в show_last_revals (ниже)
     if action == "detail":
-        from src.core.memory.dreaming_reval import _recent_reval_results
+        from src.core.memory.dreaming_reval import recent_reval_results
 
-        text = await _recent_reval_results(user_id, limit=10)
+        text = await recent_reval_results(user_id, limit=10)
         await callback.message.answer(text)
         await callback.answer()
         return

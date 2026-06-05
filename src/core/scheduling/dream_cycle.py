@@ -114,9 +114,9 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         # with past-tense versions when the event has happened.
         # See src/core/memory/dreaming_reval.py for details.
         try:
-            from src.core.memory.dreaming_reval import revaluation_run
+            from src.core.memory.dreaming_reval import reval_run
 
-            reval_summary = await revaluation_run(owner_telegram_id)
+            reval_summary = await reval_run(owner_telegram_id)
             summary["reval_examined"] = reval_summary.examined
             summary["reval_past"] = reval_summary.past
             summary["reval_permanent"] = reval_summary.permanent

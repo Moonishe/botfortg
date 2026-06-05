@@ -12,7 +12,7 @@ This module is the LLM-driven equivalent of TelegramHelper's math-only decay
 in `memory_checker.py`.  It runs nightly inside the Dream Cycle (phase 3.5)
 and selectively updates only:
   - memory_type='temporary' facts
-  - confidence > settings.dreaming_reval_confidence_threshold
+  - confidence >= settings.dreaming_reval_confidence_threshold
   - NOT pinned
   - up to settings.dreaming_reval_max_per_run per run
 
@@ -31,6 +31,7 @@ Safety nets:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -43,6 +44,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.core.infra.key_guard import safe_str
+from src.core.infra.text_sanitizer import sanitize_html
+from src.core.security.prompt_injection_scanner import scan_content
 from src.db.models._memory import Memory, MemoryLink
 
 if TYPE_CHECKING:
@@ -86,6 +89,12 @@ _ALLOWED_MEMORY_TYPES: frozenset[str] = frozenset(
 )
 _MAX_FACT_LEN = 500
 _MIN_FACT_LEN = 3
+
+# Module-level inflight-guard: prevents dream_cycle (cron) and
+# /memory --reval (manual) from processing the same facts concurrently.
+# Set is mutated only under the asyncio event loop's single-thread guarantee
+# (no `await` between read-and-add in revaluation_run()).
+_REVAL_INFLIGHT: set[int] = set()
 
 
 @dataclass
@@ -179,7 +188,7 @@ async def select_stale_facts_for_reval(
     *,
     limit: int = 50,
     confidence_threshold: float = 0.5,
-    lookback_days: int = 365,
+    lookback_days: int | None = None,
 ) -> list[Memory]:
     """Select active temporary facts older than 7 days with high confidence.
 
@@ -197,7 +206,9 @@ async def select_stale_facts_for_reval(
 
     now = datetime.now(timezone.utc)
     cutoff_old = now - timedelta(days=7)
-    cutoff_recent = now - timedelta(days=lookback_days)
+    cutoff_recent = now - timedelta(
+        days=lookback_days if lookback_days is not None else 365
+    )
 
     result = await session.execute(
         select(Memory)
@@ -275,7 +286,6 @@ async def add_supersedes_link(
     *,
     old_id: int,
     new_id: int,
-    source: str = "dreaming_reval",
     confidence: float = 1.0,
 ) -> MemoryLink | None:
     """Create a MemoryLink(old → new) of type 'supersedes'.
@@ -297,8 +307,7 @@ async def add_supersedes_link(
         return None
     # NOTE: MemoryLink has no `source` column (introspection found only
     # id, user_id, source_id, target_id, weight, relation_type, created_at).
-    # The "source" is a logical marker carried only in logs / by checking the
-    # Memory.source of the target row.
+    # The logical source marker is carried in Memory.source of the target row.
     link = MemoryLink(
         user_id=user_id,
         source_id=old_id,
@@ -308,15 +317,30 @@ async def add_supersedes_link(
     )
     session.add(link)
     await session.flush()
-    logger.info("Created supersedes link: %d → %d (source=%s)", old_id, new_id, source)
+    logger.info(
+        "Created supersedes link: %d → %d (source=dreaming_reval)", old_id, new_id
+    )
     return link
 
 
 # ── LLM call (one fact) ────────────────────────────────────────────
 
 
-def _build_user_prompt(fact: Memory, today: datetime) -> str:
-    """Build the per-fact LLM prompt with rich context."""
+def _build_user_prompt(fact: Memory, today: datetime) -> str | None:
+    """Build the per-fact LLM prompt with rich context.
+
+    Returns None if the fact content is blocked by the content scanner
+    (prompt injection detected) — caller should treat as skip.
+    """
+    # Scan fact content for prompt injection before passing to LLM
+    scan_result = scan_content(fact.fact, "memory_fact")
+    if scan_result.blocked:
+        logger.warning(
+            "Dreaming reval: fact %d blocked by content scanner, skipping",
+            fact.id,
+        )
+        return None
+
     today_str = today.strftime("%Y-%m-%d")
     created_str = fact.created_at.strftime("%Y-%m-%d") if fact.created_at else "unknown"
     validity_end_str = (
@@ -342,7 +366,7 @@ def _build_user_prompt(fact: Memory, today: datetime) -> str:
     return "\n".join(line for line in lines if line is not None)
 
 
-async def revaluate_fact(
+async def reval_fact(
     provider: "LLMProvider",
     fact: Memory,
     today: datetime | None = None,
@@ -353,6 +377,9 @@ async def revaluate_fact(
     """
     today = today or datetime.now(timezone.utc)
     user_prompt = _build_user_prompt(fact, today)
+    if user_prompt is None:
+        # Content scanner blocked the fact — treat as skip
+        return None
     try:
         from src.llm.base import ChatMessage, TaskType
 
@@ -430,6 +457,18 @@ async def apply_reval_result(
         if (isinstance(updated_raw, str) and updated_raw.strip())
         else fact.fact
     )
+
+    # Scan updated fact content for prompt injection before persisting
+    scan_result = scan_content(updated, "memory_fact")
+    if scan_result.blocked:
+        logger.warning(
+            "Dreaming reval: updated fact blocked by content scanner "
+            "for fact %d, treating as skip",
+            fact.id,
+        )
+        base.error = "updated fact blocked by content scanner"
+        return base
+
     new_type_raw = parsed.get("new_memory_type")
     if new_type_raw is not None:
         new_type = new_type_raw
@@ -461,7 +500,6 @@ async def apply_reval_result(
                 user.id,
                 old_id=fact.id,
                 new_id=new_mem.id,
-                source="dreaming_reval",
             )
             base.new_memory_id = new_mem.id
             # Deactivate old fact to keep recall clean
@@ -480,7 +518,7 @@ async def apply_reval_result(
 # ── Public entry point ─────────────────────────────────────────────
 
 
-async def revaluation_run(
+async def reval_run(
     owner_telegram_id: int,
     *,
     limit: int | None = None,
@@ -496,6 +534,40 @@ async def revaluation_run(
     if not getattr(settings, "dreaming_reval_enabled", True):
         logger.info("Dreaming reval: disabled in settings, skipping")
         return summary
+
+    # Inflight-guard: dream_cycle (cron) and /memory --reval (manual) can both
+    # call revaluation_run. Without coordination, the same facts would be
+    # processed twice → duplicate supersedes links + wasted LLM budget.
+    # Module-level set ensures only one reval per owner at a time.
+    global _REVAL_INFLIGHT
+    if owner_telegram_id in _REVAL_INFLIGHT:
+        logger.info(
+            "Dreaming reval: already in progress for owner %d, skipping",
+            owner_telegram_id,
+        )
+        # Caller (cmd_memory / dream_cycle) surfaces this via summary.errors path;
+        # no dedicated field needed — the warning line is enough signal.
+        return summary
+    _REVAL_INFLIGHT.add(owner_telegram_id)
+    try:
+        return await _reval_run_impl(
+            owner_telegram_id,
+            limit,
+            confidence_threshold,
+            vector_store_obj=vector_store_obj,
+        )
+    finally:
+        _REVAL_INFLIGHT.discard(owner_telegram_id)
+
+
+async def _reval_run_impl(
+    owner_telegram_id: int,
+    limit: int | None = None,
+    confidence_threshold: float | None = None,
+    vector_store_obj: Any = None,
+) -> RevalBatchSummary:
+    """Inner implementation of reval_run, called under inflight-guard."""
+    summary = RevalBatchSummary()
 
     limit = limit if limit is not None else settings.dreaming_reval_max_per_run
     threshold = (
@@ -530,6 +602,7 @@ async def revaluation_run(
             owner.id,
             limit=limit,
             confidence_threshold=threshold,
+            lookback_days=getattr(settings, "dreaming_reval_lookback_days", None),
         )
         if not facts:
             logger.info("Dreaming reval: no stale facts to re-evaluate")
@@ -542,9 +615,14 @@ async def revaluation_run(
         summary.examined = len(facts)
         today = datetime.now(timezone.utc)
 
-        for fact in facts:
+        # Semaphore limits concurrent LLM calls (future-proof if loop becomes
+        # concurrent; harmless in sequential mode — documents intent).
+        sem = asyncio.Semaphore(3)
+
+        for i, fact in enumerate(facts):
             try:
-                parsed = await revaluate_fact(provider, fact, today=today)
+                async with sem:
+                    parsed = await reval_fact(provider, fact, today=today)
                 result = await apply_reval_result(
                     session, owner, fact, parsed, vector_store_obj=vector_store_obj
                 )
@@ -572,7 +650,23 @@ async def revaluation_run(
             else:
                 summary.skip += 1
 
-        # Commit at the end of the batch
+            # Gentle rate limiting between LLM calls
+            await asyncio.sleep(0.1)
+
+            # Incremental commit every 10 facts — avoids losing all progress
+            # if the session fails mid-batch.
+            if (i + 1) % 10 == 0:
+                try:
+                    await session.commit()
+                except Exception:
+                    logger.exception(
+                        "Dreaming reval: incremental commit failed at fact %d/%d",
+                        i + 1,
+                        len(facts),
+                    )
+                    await session.rollback()
+
+        # Final commit at the end of the batch
         try:
             await session.commit()
         except Exception:
@@ -606,7 +700,7 @@ async def revaluation_run(
     return summary
 
 
-def revaluation_summary_text(summary: RevalBatchSummary) -> str:
+def reval_summary_text(summary: RevalBatchSummary) -> str:
     """Format summary for /memory --reval and notifications."""
     if summary.examined == 0:
         return "🧠✨ Dreaming V3: нет устаревших фактов для переоценки."
@@ -630,7 +724,7 @@ def revaluation_summary_text(summary: RevalBatchSummary) -> str:
 # ── History / rollback for UI (--reval, rollback_all) ──────────────
 
 
-async def _recent_reval_results(owner_telegram_id: int, *, limit: int = 10) -> str:
+async def recent_reval_results(owner_telegram_id: int, *, limit: int = 10) -> str:
     """Show recent memories created by Dreaming V3 (source='dreaming_reval').
 
     Used by /memory --reval "Подробнее" button.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any
@@ -64,61 +63,45 @@ class PatternCache:
         entry_ttl = ttl if ttl is not None else self._default_ttl
         now = time.monotonic()
 
-        # Atomic read-modify-write under ManagedCache's internal lock
-        async with self._cache._lock:
-            raw = self._cache._cache.get(key)
-            if raw is not None:
-                expires_at, entry = raw
-                if expires_at <= now:
-                    # Expired — remove and re-create
-                    self._cache._cache.pop(key, None)
-                    self._cache.metrics.expirations += 1
-                    raw = None
+        async def _factory() -> dict[str, Any]:
+            return {
+                "action": action,
+                "count": 1,
+                "last_success": now,
+                "ttl": entry_ttl,
+            }
 
-            if raw is not None:
-                _, entry = raw
-                if entry["action"] == action:
-                    entry["count"] += 1
-                    entry["last_success"] = now
-                    entry["ttl"] = entry_ttl
-                    logger.debug(
-                        "Pattern cache: incremented %s [%s] (count=%d)",
-                        key,
-                        action,
-                        entry["count"],
-                    )
-                else:
-                    # Действие изменилось — сбрасываем
-                    entry["action"] = action
-                    entry["count"] = 1
-                    entry["last_success"] = now
-                    entry["ttl"] = entry_ttl
-                    logger.debug(
-                        "Pattern cache: reset %s [%s] (action changed)",
-                        key,
-                        action,
-                    )
-                # Refresh TTL in OrderedDict
-                self._cache._cache[key] = (now + entry_ttl, entry)
-                self._cache._cache.move_to_end(key)
+        value, was_created = await self._cache.upsert(key, entry_ttl, _factory)
+
+        if not was_created:
+            # Entry already existed — check if action changed
+            if value["action"] == action:
+                value["count"] += 1
+                value["last_success"] = now
+                value["ttl"] = entry_ttl
+                logger.debug(
+                    "Pattern cache: incremented %s [%s] (count=%d)",
+                    key,
+                    action,
+                    value["count"],
+                )
             else:
-                # New entry
-                entry = {
-                    "action": action,
-                    "count": 1,
-                    "last_success": now,
-                    "ttl": entry_ttl,
-                }
-                # LRU eviction under lock
-                while len(self._cache._cache) >= self._cache.max_size:
-                    oldest_key, _ = self._cache._cache.popitem(last=False)
-                    self._cache.metrics.evictions += 1
-                    self._stats_meta.pop(oldest_key, None)
-                self._cache._cache[key] = (now + entry_ttl, entry)
-                logger.debug("Pattern cache: new entry %s [%s]", key, action)
+                value["action"] = action
+                value["count"] = 1
+                value["last_success"] = now
+                value["ttl"] = entry_ttl
+                logger.debug(
+                    "Pattern cache: reset %s [%s] (action changed)",
+                    key,
+                    action,
+                )
+            # Write back modified value through public API
+            await self._cache.set(key, value, entry_ttl)
+        else:
+            logger.debug("Pattern cache: new entry %s [%s]", key, action)
 
-            # Update sidecar meta
-            self._stats_meta[key] = {"count": entry["count"], "action": entry["action"]}
+        # Update sidecar meta
+        self._stats_meta[key] = {"count": value["count"], "action": value["action"]}
 
     async def get_cached_action(
         self,
@@ -191,8 +174,9 @@ class PatternCache:
 
     def top_patterns(self, n: int = 10) -> list[dict[str, Any]]:
         """Возвращает top-N паттернов по количеству использований."""
+        meta_snapshot = dict(self._stats_meta)
         items = sorted(
-            self._stats_meta.items(),
+            meta_snapshot.items(),
             key=lambda kv: kv[1]["count"],
             reverse=True,
         )

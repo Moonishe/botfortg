@@ -39,12 +39,12 @@ from src.core.memory.dreaming_reval import (
     apply_reval_result,
     deactivate_memory,
     add_supersedes_link,
-    revaluate_fact,
-    revaluation_run,
+    reval_fact,
+    reval_run,
     rollback_recent_revals,
     RevalResult,
     RevalBatchSummary,
-    revaluation_summary_text,
+    reval_summary_text,
 )
 from src.db.session import get_session, init_db
 from src.db.repo import add_memory, get_or_create_user
@@ -969,7 +969,7 @@ async def test_revaluate_fact_with_mock_provider():
         ]
     )
 
-    result = await revaluate_fact(mock, mem)
+    result = await reval_fact(mock, mem)
     assert result is not None
     assert result["action"] == "past"
     assert result["updated_fact"] == "Съездил в июле 2026"
@@ -997,7 +997,7 @@ async def test_revaluate_fact_error_returns_none():
         async def close(self):
             pass
 
-    result = await revaluate_fact(ErrorProvider(), mem)
+    result = await reval_fact(ErrorProvider(), mem)
     assert result is None
 
 
@@ -1009,7 +1009,7 @@ async def test_revaluate_fact_error_returns_none():
 def test_revaluation_summary_text_empty():
     """Summary with examined=0 returns 'нет устаревших фактов'."""
     summary = RevalBatchSummary(examined=0)
-    text = revaluation_summary_text(summary)
+    text = reval_summary_text(summary)
     assert "нет устаревших фактов" in text
 
 
@@ -1023,7 +1023,7 @@ def test_revaluation_summary_text_with_results():
         skip=4,
         errors=0,
     )
-    text = revaluation_summary_text(summary)
+    text = reval_summary_text(summary)
     assert "Проверено: 10" in text
     assert "Произошло" in text
     assert "Сделано постоянным" in text
@@ -1034,7 +1034,7 @@ def test_revaluation_summary_text_with_results():
 def test_revaluation_summary_text_with_errors():
     """Summary shows error count when present."""
     summary = RevalBatchSummary(examined=5, errors=2)
-    text = revaluation_summary_text(summary)
+    text = reval_summary_text(summary)
     assert "Ошибок: 2" in text
 
 
@@ -1044,8 +1044,8 @@ def test_revaluation_summary_text_with_errors():
 
 
 @pytest.mark.asyncio
-async def test_revaluation_run_disabled_in_settings():
-    """revaluation_run returns empty summary when dreaming_reval_enabled=False."""
+async def test_reval_run_disabled_in_settings():
+    """reval_run returns empty summary when dreaming_reval_enabled=False."""
     from src.config import settings
 
     owner = await _make_owner()
@@ -1060,7 +1060,7 @@ async def test_revaluation_run_disabled_in_settings():
     original = settings.dreaming_reval_enabled
     try:
         settings.dreaming_reval_enabled = False
-        result = await revaluation_run(owner.telegram_id, limit=5)
+        result = await reval_run(owner.telegram_id, limit=5)
     finally:
         settings.dreaming_reval_enabled = original
 
@@ -1068,7 +1068,7 @@ async def test_revaluation_run_disabled_in_settings():
 
 
 @pytest.mark.asyncio
-async def test_revaluation_run_with_mock_provider():
+async def test_reval_run_with_mock_provider():
     """End-to-end run with MockLLMProvider processes facts and creates results."""
     from src.config import settings
 
@@ -1114,7 +1114,7 @@ async def test_revaluation_run_with_mock_provider():
         "src.llm.router.build_provider",
         new=AsyncMock(return_value=mock_provider),
     ):
-        summary = await revaluation_run(owner.telegram_id, limit=5)
+        summary = await reval_run(owner.telegram_id, limit=5)
 
     assert summary.examined == 2
     assert summary.past >= 1
