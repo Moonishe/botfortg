@@ -43,7 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.core.infra.key_guard import safe_str
+from src.core.infra.key_guard import mask_keys, safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.security.prompt_injection_scanner import scan_content
 from src.db.models._memory import Memory, MemoryLink
@@ -146,7 +146,7 @@ def _parse_reval_response(text: str | None) -> dict[str, Any] | None:
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        logger.warning("Dreaming reval: JSON parse failed: %r", text[:120])
+        logger.warning("Dreaming reval: JSON parse failed: %r", mask_keys(text[:120]))
         return None
     if not isinstance(parsed, dict):
         return None
@@ -589,8 +589,8 @@ async def _reval_run_impl(
         # open across a network call
         try:
             provider = await build_provider(session, owner, task_type=TaskType.MEMORY)
-        except Exception:
-            logger.exception("Dreaming reval: build_provider failed")
+        except Exception as exc:
+            logger.exception("Dreaming reval: build_provider failed: %s", safe_str(exc))
             return summary
         if provider is None:
             logger.warning("Dreaming reval: no LLM provider available, skipping")
