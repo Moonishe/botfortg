@@ -171,9 +171,6 @@ async def dream_cycle(owner_telegram_id: int) -> None:
             forgotten = await auto_forget_sweep(session, owner.id)
             if forgotten:
                 await session.commit()
-                from src.core.memory.memory_recall import bump_recall_version
-
-                await bump_recall_version(owner.telegram_id)
             summary["auto_forgotten"] = forgotten
             if forgotten:
                 logger.info(

@@ -337,6 +337,9 @@ async def _exec_link_memories(intent, message) -> None:
         await message.answer("🙅 Один из фактов не найден или не принадлежит тебе.")
         return
 
+    # Invalidate recall cache — MemoryLinks affect deep recall BFS traversal.
+    await bump_recall_version(message.from_user.id)
+
     rel = f" ({relation_type})" if relation_type else ""
     await safe_answer(
         message,

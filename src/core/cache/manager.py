@@ -147,6 +147,7 @@ class ManagedCache(Generic[K, V]):
                 return None
             expires_at = self._expires.get(key, 0)
             if expires_at > 0 and expires_at <= time.monotonic():
+                self._evict(key, expired=True)
                 return None  # Key expired
             remaining_ttl = max(0.0, expires_at - time.monotonic())
             return {"expires_at": expires_at, "ttl": remaining_ttl}
@@ -168,6 +169,7 @@ class ManagedCache(Generic[K, V]):
             _, value = self._cache[key]
             self._cache[key] = (new_expires, value)
             self._expires[key] = new_expires
+            self._cache.move_to_end(key)
             return True
 
     def _evict(self, key: K, expired: bool) -> bool:
