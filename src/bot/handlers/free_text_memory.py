@@ -7,6 +7,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -483,7 +484,7 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
             if m.id == mid:
                 m.sentiment = "neutral"
     await bump_recall_version(callback.from_user.id)
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.edit_text(
             f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>"
         )
@@ -498,7 +499,7 @@ async def cb_mem_del(callback: CallbackQuery) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         await delete_memory(session, owner, mid)
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.edit_text(
             f"🗑 {callback.message.text}\n\n<i>Удалил из памяти.</i>"
         )
@@ -521,7 +522,7 @@ async def cb_memq_list(callback: CallbackQuery) -> None:
         lines = ["<b>🧠 Последние факты:</b>", ""]
         for m in active[:10]:
             emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
-                m.sentiment, "⚪"
+                m.sentiment or "", "⚪"
             )
             lines.append(f"{emoji} {sanitize_html(m.fact[:100])}")
         lines.append(f"\n<i>Всего: {len(memories)} фактов. /memory — подробнее</i>")
@@ -576,7 +577,8 @@ async def cb_memq_delete(callback: CallbackQuery) -> None:
         owner = await get_or_create_user(session, callback.from_user.id)
         success = await delete_memory(session, owner, mem_id)
         if success:
-            await callback.message.edit_text("✅ Забыто!")
+            if isinstance(callback.message, Message):
+                await callback.message.edit_text("✅ Забыто!")
         else:
             await callback.answer("Не удалось удалить", show_alert=True)
     await callback.answer()
@@ -585,6 +587,7 @@ async def cb_memq_delete(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("memq:explain:"))
 async def cb_memq_explain(callback: CallbackQuery) -> None:
     """Показать объяснение (почему бот так думает)."""
+    assert callback.data is not None  # narrowed by F.data.startswith filter above
     contact_name = callback.data.split(":", 2)[2] if ":" in callback.data else ""
 
     contact_id = None

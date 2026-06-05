@@ -1,10 +1,14 @@
 """Unified cache manager with metrics, auto-cleanup, and smart eviction."""
 
 import asyncio
+import inspect
+import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar
+
+logger = logging.getLogger(__name__)
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -100,7 +104,9 @@ class ManagedCache(Generic[K, V]):
                     try:
                         self.on_evict(oldest_key, oldest_value)
                     except Exception:
-                        pass
+                        logger.debug(
+                            "on_evict failed for %s", oldest_key, exc_info=True
+                        )
 
             self._cache[key] = (expires_at, value)
             self._expires[key] = expires_at
@@ -113,16 +119,19 @@ class ManagedCache(Generic[K, V]):
     async def clear(self) -> int:
         """Clear all entries. Returns count of removed items."""
         async with self._lock:
+            items = list(self._cache.items())
             count = len(self._cache)
-            for key, (_, value) in self._cache.items():
-                if self.on_evict:
-                    try:
-                        self.on_evict(key, value)
-                    except Exception:
-                        pass
             self._cache.clear()
             self._expires.clear()
-            return count
+        for key, (_, value) in items:
+            if self.on_evict:
+                try:
+                    result = self.on_evict(key, value)
+                    if inspect.iscoroutine(result):
+                        await result  # type: ignore[unreachable]
+                except Exception:
+                    logger.debug("on_evict failed for %s", key, exc_info=True)
+        return count
 
     async def cleanup_expired(self) -> int:
         """Remove all expired entries. Call periodically."""
@@ -172,6 +181,56 @@ class ManagedCache(Generic[K, V]):
             self._cache.move_to_end(key)
             return True
 
+    async def upsert(
+        self,
+        key: K,
+        ttl: float | None,
+        factory: Callable[[], Any],
+    ) -> tuple[Any, bool]:
+        """Atomic read-modify-write. Calls factory() only if key is missing or expired.
+
+        Args:
+            key: Cache key.
+            ttl: TTL in seconds. Falls back to default_ttl if None.
+            factory: Callable that returns (or awaits) the value to store.
+                     Called only when a new value must be created.
+
+        Returns:
+            Tuple of (value, was_created).
+            was_created=True  → factory was called, value is fresh.
+            was_created=False → cached value returned, no factory call.
+        """
+        async with self._lock:
+            if key in self._cache:
+                expires_at, value = self._cache[key]
+                if time.monotonic() < expires_at:
+                    self._cache.move_to_end(key)
+                    self.metrics.hits += 1
+                    return value, False
+                self._evict(key, expired=True)
+                self.metrics.misses += 1
+
+            result = factory()
+            if asyncio.iscoroutine(result):
+                result = await result
+
+            ttl_value = ttl if ttl is not None else self.default_ttl
+            expires_at = time.monotonic() + ttl_value
+
+            while len(self._cache) >= self.max_size:
+                oldest_key, (_, oldest_value) = self._cache.popitem(last=False)
+                self._expires.pop(oldest_key, None)
+                self.metrics.evictions += 1
+                if self.on_evict:
+                    try:
+                        self.on_evict(oldest_key, oldest_value)
+                    except Exception:
+                        pass
+
+            self._cache[key] = (expires_at, result)
+            self._expires[key] = expires_at
+            return result, True
+
     def _evict(self, key: K, expired: bool) -> bool:
         """Internal eviction (must be called with lock held)."""
         if key not in self._cache:
@@ -184,27 +243,27 @@ class ManagedCache(Generic[K, V]):
             try:
                 self.on_evict(key, value)
             except Exception:
-                pass
+                logger.debug("on_evict failed for %s", key, exc_info=True)
         return True
 
-    @property
-    def size(self) -> int:
+    async def size(self) -> int:
         """Current number of cached items."""
-        return len(self._cache)
+        async with self._lock:
+            return len(self._cache)
 
-    @property
-    def stats(self) -> dict:
+    async def stats(self) -> dict:
         """Get cache statistics."""
-        return {
-            "name": self.name,
-            "size": self.size,
-            "max_size": self.max_size,
-            "hit_rate": f"{self.metrics.hit_rate:.2%}",
-            "hits": self.metrics.hits,
-            "misses": self.metrics.misses,
-            "evictions": self.metrics.evictions,
-            "expirations": self.metrics.expirations,
-        }
+        async with self._lock:
+            return {
+                "name": self.name,
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "hit_rate": f"{self.metrics.hit_rate:.2%}",
+                "hits": self.metrics.hits,
+                "misses": self.metrics.misses,
+                "evictions": self.metrics.evictions,
+                "expirations": self.metrics.expirations,
+            }
 
 
 class CacheManager:
@@ -220,7 +279,7 @@ class CacheManager:
         await cache_manager.start_background_cleanup(interval=60.0)
 
         // Get stats for monitoring
-        stats = cache_manager.all_stats()
+        stats = await cache_manager.all_stats()
     """
 
     def __init__(self):
@@ -248,8 +307,13 @@ class CacheManager:
 
         async def _cleanup_loop():
             while True:
-                await asyncio.sleep(interval)
-                await self.cleanup_all()
+                try:
+                    await asyncio.sleep(interval)
+                    await self.cleanup_all()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("cache_manager.cleanup_all() failed")
 
         self._cleanup_task = asyncio.create_task(_cleanup_loop())
 
@@ -262,9 +326,12 @@ class CacheManager:
             except asyncio.CancelledError:
                 pass
 
-    def all_stats(self) -> dict[str, dict]:
+    async def all_stats(self) -> dict[str, dict]:
         """Get statistics for all caches."""
-        return {name: cache.stats for name, cache in self._caches.items()}
+        result = {}
+        for name, cache in self._caches.items():
+            result[name] = await cache.stats()
+        return result
 
 
 # Global instance

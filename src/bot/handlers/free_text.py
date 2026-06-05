@@ -67,7 +67,7 @@ from src.core.humanizer import record_humanizer_feedback, _pop_last_humanized
 from .rate_limiter import check_rate_limit
 from src.core.security.prompt_injection_scanner import scan_content
 from httpx import RequestError, HTTPStatusError
-from aiogram.exceptions import TelegramError
+from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -334,7 +334,7 @@ async def _voice_worker() -> None:
                                 await message.answer(
                                     "❌ Не удалось распознать голосовое."
                                 )
-                            except TelegramError:
+                            except TelegramAPIError:
                                 logger.exception(
                                     "failed to send error message from worker"
                                 )
@@ -346,7 +346,7 @@ async def _voice_worker() -> None:
                                 await message.answer(
                                     "🎙 Не услышал текста в этом сообщении."
                                 )
-                            except TelegramError:
+                            except TelegramAPIError:
                                 logger.exception(
                                     "failed to send empty transcription message"
                                 )
@@ -356,7 +356,7 @@ async def _voice_worker() -> None:
                             await message.answer(
                                 sanitize_html(f"🎙 <i>Услышал:</i> {text}")
                             )
-                        except TelegramError:
+                        except TelegramAPIError:
                             logger.exception("failed to send transcription result")
 
                         # ── Сохраняем метаданные транскрипции для контекста ──
@@ -457,7 +457,7 @@ async def _process_text_fallback(
     raw: str,
     provider,
     message: Message,
-    state: FSMContext,
+    state: FSMContext | None,
     userbot_manager: UserbotManager,
     tz_name: str,
     owner_telegram_id: int,
@@ -541,7 +541,7 @@ async def _process_text_fallback(
 async def _process_text(
     raw: str,
     message: Message,
-    state: FSMContext,
+    state: FSMContext | None,
     userbot_manager: UserbotManager,
     session=None,
 ) -> None:
@@ -608,7 +608,6 @@ async def _process_text(
         # Сохраняем в историю диалога
         try:
             from src.core.memory.session_recorder import record_turn
-            from src.db.session import get_session
 
             async with get_session() as rec_session:
                 await record_turn(rec_session, message.from_user.id, "user", raw[:100])
@@ -1048,7 +1047,13 @@ async def _process_text(
 
     # Stage 3: Follow-up context
     if await check_followup(
-        raw, owner_telegram_id, message, state, userbot_manager, tz_name, turn_started
+        raw,
+        owner_telegram_id,
+        message,
+        state,  # type: ignore[arg-type]
+        userbot_manager,
+        tz_name,
+        turn_started,
     ):
         return
 
@@ -1121,7 +1126,7 @@ async def _process_text(
             plan,
             provider,
             message,
-            state,
+            state,  # type: ignore[arg-type]
             userbot_manager,
             tz_name,
             owner_telegram_id,
@@ -1149,7 +1154,7 @@ async def _process_text(
                     plan,
                     provider,
                     message,
-                    state,
+                    state,  # type: ignore[arg-type]
                     userbot_manager,
                     tz_name,
                     owner_telegram_id,
@@ -1272,7 +1277,7 @@ async def free_text(
             .where(AdaptivePersona.total_interactions == 0)
             .values(total_interactions=1)
         )
-        is_new = result.rowcount > 0
+        is_new = result.rowcount > 0  # type: ignore[attr-defined]
 
     if is_new:
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -1495,7 +1500,7 @@ async def free_voice(
 
     try:
         await message.bot.download(media.file_id, destination=str(target))
-    except (TelegramError, OSError):
+    except (TelegramAPIError, OSError):
         logger.exception("voice download failed")
         await message.answer("❌ Не удалось скачать голосовое.")
         return
@@ -1699,7 +1704,9 @@ async def handle_video(message: Message) -> None:
 
 
 @router.edited_message(OwnerOnly())
-async def handle_edited_message(message: Message, state: FSMContext = None) -> None:  # type: ignore[assignment]
+async def handle_edited_message(
+    message: Message, state: FSMContext | None = None
+) -> None:
     """Ловит правку ответа бота — сохраняет как фидбек."""
     if not message.text:
         return

@@ -177,11 +177,10 @@ class PatternCache:
     # Stats
     # ------------------------------------------------------------------
 
-    @property
-    def stats(self) -> dict[str, Any]:
+    async def stats(self) -> dict[str, Any]:
         total = self._hits + self._misses
         return {
-            "entries": self._cache.size,
+            "entries": await self._cache.size(),
             "hits": self._hits,
             "misses": self._misses,
             "bypasses": self._bypasses,

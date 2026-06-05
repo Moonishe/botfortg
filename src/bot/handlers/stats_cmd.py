@@ -19,7 +19,7 @@ async def cmd_stats(message: Message) -> None:
     lines = ["📊 <b>Статистика системы</b>\n"]
 
     # Cache stats
-    cache_stats = cache_manager.all_stats()
+    cache_stats = await cache_manager.all_stats()
     if cache_stats:
         lines.append("💾 <b>Кэши:</b>")
         for name, stats in sorted(cache_stats.items()):

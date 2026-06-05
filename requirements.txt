@@ -39,7 +39,7 @@ PyYAML==6.0.2
 
 # MCP tools
 duckduckgo-search>=6.0,<7.0
-requests==2.32.5
+requests>=2.32.5
 beautifulsoup4==4.13.5
 yt-dlp>=2024.0.0
 
@@ -52,3 +52,13 @@ alembic>=1.13
 
 # Парсинг естественных дат (set_reminder)
 python-dateutil>=2.8.2,<3.0
+
+# Дополнительные MCP-инструменты
+qrcode[pil]>=8.0
+feedparser>=6.0
+plyer>=2.1
+google-api-python-client>=2.197.0
+google-auth-oauthlib>=1.4.0
+openpyxl>=3.1
+language-tool-python>=3.4
+python-whois>=0.9

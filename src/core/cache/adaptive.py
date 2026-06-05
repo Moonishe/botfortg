@@ -140,9 +140,9 @@ class AdaptiveTTLCache:
 
         await self._backend.clear()
 
-    def stats(self) -> dict[str, Any]:
+    async def stats(self) -> dict[str, Any]:
         """Статистика кэша с информацией об адаптивных TTL."""
-        backend_stats = self._backend.stats
+        backend_stats = await self._backend.stats()
 
         # Calculate distribution of TTLs
         ttl_values = list(self._ttl_map.values())
@@ -177,9 +177,11 @@ class AdaptiveTTLCache:
 
     async def reset_access(self, key: Any) -> None:
         """Сбросить счетчик доступов для ключа (TTL вернется к базовому)."""
+        needs_update = False
         async with self._lock:
             self._access_counts[key] = 0
             if key in self._ttl_map:
                 self._ttl_map[key] = self._base_ttl
-                # Update backend TTL
-                await self._backend.update_ttl(key, self._base_ttl)
+                needs_update = True
+        if needs_update:
+            await self._backend.update_ttl(key, self._base_ttl)
