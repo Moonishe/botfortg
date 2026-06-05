@@ -183,9 +183,8 @@ async def main() -> None:
                 except Exception:
                     logger.debug("circuit_breaker cleanup failed", exc_info=True)
 
-    asyncio.create_task(_cleanup_global_state())
-
-    asyncio.create_task(check_and_notify_update())
+    _cleanup_task = asyncio.create_task(_cleanup_global_state())
+    _update_check_task = asyncio.create_task(check_and_notify_update())
 
     from src.core.actions.vector_store import get_vector_store
 
@@ -320,12 +319,27 @@ async def main() -> None:
             # Prefetch is best-effort — never break startup
             logger.warning("Startup prefetch failed (non-critical)", exc_info=True)
 
-    asyncio.create_task(_startup_prefetch())
+    _prefetch_task = asyncio.create_task(_startup_prefetch())
 
     try:
         await run_bot(userbot_manager)
     finally:
         logger.info("Shutting down…")
+
+        # Cancel background tasks first
+        for _t, _name in [
+            (_cleanup_task, "cleanup"),
+            (_update_check_task, "update_check"),
+            (_prefetch_task, "startup_prefetch"),
+        ]:
+            _t.cancel()
+            try:
+                await asyncio.wait_for(_t, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:
+                logger.exception("%s task cancellation failed", _name)
+
         for step, coro in [
             ("userbot", userbot_manager.shutdown()),
             ("background tasks", task_manager.stop_all()),
