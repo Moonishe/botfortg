@@ -19,6 +19,7 @@ DEEPSEEK_CHAT_LIGHT = "deepseek-chat"
 DEEPSEEK_CHAT_HEAVY = "deepseek-reasoner"
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat, chat_stream
 class DeepSeekProvider(OpenAICompatEmbedMixin):
     """Провайдер для DeepSeek API (OpenAI-совместимый).
 

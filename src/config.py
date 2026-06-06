@@ -248,6 +248,12 @@ class Settings(BaseSettings):
     # ── Recall defaults ──
     recall_default_limit: int = Field(8, description="Default recall limit")
     recall_max_limit: int = Field(20, description="Max recall limit")
+    recall_max_prefetch: int = Field(
+        500,
+        description="Hard ceiling on pre-fetch query rows "
+        "(был безлимитный ×40 → до 2000, теперь capped для масштабирования; "
+        "по умолчанию 500 = обратная совместимость с floor deep-режима)",
+    )
     recall_semantic_threshold: float = Field(
         0.55, description="Min cosine similarity for semantic search"
     )

@@ -22,6 +22,7 @@ GROQ_CHAT_LIGHT = "llama-3.3-70b-versatile"
 GROQ_CHAT_HEAVY = "mixtral-8x7b-32768"
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat, chat_stream
 class GroqProvider(OpenAICompatBaseMixin):
     """Провайдер для Groq — OpenAI-совместимый API. Без embeddings."""
 

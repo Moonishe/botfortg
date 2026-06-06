@@ -104,6 +104,7 @@ def _make_recall_cache_key(
     contact_id: int | None,
     mode: str,
     limit: int,
+    offset: int,
     include_self: bool,
     include_pinned: bool,
     include_tasks: bool,
@@ -123,6 +124,7 @@ def _make_recall_cache_key(
             str(contact_id),
             mode,
             str(limit),
+            str(offset),
             str(bool(include_self)),
             str(bool(include_pinned)),
             str(bool(include_tasks)),
@@ -261,6 +263,9 @@ async def recall(
     contact_id: int | None = None,
     query: str | None = None,
     limit: int = settings.recall_default_limit,
+    # NOTE: был безлимитный префетч (до 2000), теперь offset + capped для масштабирования
+    offset: int = 0,
+    max_prefetch: int | None = None,
     include_self: bool = True,
     include_pinned: bool = True,
     include_tasks: bool = True,
@@ -284,6 +289,9 @@ async def recall(
     mode: MemoryMode enum (Phase 2) или строка ("light"/"normal"/"deep").
            None / неизвестное значение → MemoryMode.DEEP.
 
+    offset: смещение для пагинации (0 — первая страница).
+            limit=None для получения всех результатов (deprecated, legacy).
+
     Возвращает список RecalledFact с причинами.
     """
     mode = MemoryMode.from_string(mode) if isinstance(mode, str) else mode
@@ -294,6 +302,7 @@ async def recall(
         contact_id=contact_id,
         mode=mode.value,
         limit=limit,
+        offset=offset,
         include_self=include_self,
         include_pinned=include_pinned,
         include_tasks=include_tasks,
@@ -346,12 +355,19 @@ async def recall(
                 Memory.confidence.desc(),
             )
         )
+        # NOTE: был безлимитный префетч (limit×40 → до 2000 ORM-объектов),
+        # теперь capped через recall_max_prefetch для масштабирования.
+        # По умолчанию 500 = обратная совместимость с floor старого deep-режима.
+        _pf_cap = (
+            max_prefetch if max_prefetch is not None else settings.recall_max_prefetch
+        )
         if mode == "light":
-            q_all = q_all.limit(max(limit * 8, 40))
+            _pf_raw = max(limit * 8, 40)
         elif mode == "normal":
-            q_all = q_all.limit(max(limit * 20, 160))
+            _pf_raw = max(limit * 20, 160)
         else:  # deep
-            q_all = q_all.limit(max(limit * 40, 500))
+            _pf_raw = max(limit * 40, 500)
+        q_all = q_all.limit(min(_pf_raw, _pf_cap))
         all_facts_result = await session.execute(q_all)
         all_facts: list[Memory] = list(all_facts_result.scalars().all())
         facts_by_id: dict[int, Memory] = {m.id: m for m in all_facts}
@@ -727,8 +743,8 @@ async def recall(
                     "related": related,
                 }
 
-        # Limit
-        result.facts = ranked[:limit]
+        # Limit + offset: пагинация на выходе (все стадии отрабатывают на полном кандидатном наборе)
+        result.facts = ranked[offset : offset + limit]
         result.meta |= {
             "mode": mode,
             "total_active": len(all_facts),

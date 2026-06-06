@@ -25,6 +25,7 @@ MIMO_CHAT_LIGHT = "mimo-v2-flash"
 MIMO_CHAT_HEAVY = "mimo-v2.5-pro"
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat, chat_stream
 class MiMoProvider(OpenAICompatEmbedMixin):
     """Провайдер для MiMo (Xiaomi) — OpenAI-совместимый API."""
 

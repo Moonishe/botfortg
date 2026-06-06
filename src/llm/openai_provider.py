@@ -10,6 +10,7 @@ OPENAI_CHAT_LIGHT = "gpt-5-mini"
 OPENAI_CHAT_HEAVY = "gpt-5.5"
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__
 class OpenAIProvider(OpenAICompatEmbedMixin):
     name = "openai"
 

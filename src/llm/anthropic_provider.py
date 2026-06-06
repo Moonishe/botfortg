@@ -11,6 +11,7 @@ from src.llm.base import ChatMessage
 logger = logging.getLogger(__name__)
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, validate_key, close
 class AnthropicProvider:
     """Anthropic Claude provider via Messages API.
 

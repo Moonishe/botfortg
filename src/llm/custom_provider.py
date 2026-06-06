@@ -14,6 +14,7 @@ from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat, chat_stream
 class CustomProvider(OpenAICompatEmbedMixin):
     """Провайдер для кастомного OpenAI-совместимого endpoint.
 

@@ -22,6 +22,7 @@ GROK_CHAT_LIGHT = "grok-4.3"
 GROK_CHAT_HEAVY = "grok-4.20-0309-reasoning"
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat, chat_stream
 class GrokProvider(OpenAICompatBaseMixin):
     """Провайдер для Grok (xAI) — OpenAI-совместимый API. Без embeddings."""
 

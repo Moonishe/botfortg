@@ -80,15 +80,25 @@ async def _proactive_scan(telegram_id: int) -> None:
             reverse=True,
         )[:MAX_CONTACTS]
 
-        for msg_count, contact in active:
-            try:
-                await _analyze_contact(
-                    contact, msg_count, client, provider, owner, telegram_id
-                )
-            except Exception:
-                logger.warning(
-                    "proactive scan skip %s", contact.display_name, exc_info=True
-                )
+        # ── Параллельный анализ контактов с семафором (макс. 2 одновременных LLM-вызова) ──
+        _proactive_analysis_sem = asyncio.Semaphore(2)
+
+        async def _analyze_one(contact, msg_count: int) -> None:
+            """Анализирует один контакт (с обработкой ошибок)."""
+            async with _proactive_analysis_sem:
+                try:
+                    await _analyze_contact(
+                        contact, msg_count, client, provider, owner, telegram_id
+                    )
+                except Exception:
+                    logger.warning(
+                        "proactive scan skip %s", contact.display_name, exc_info=True
+                    )
+
+        await asyncio.gather(
+            *[_analyze_one(contact, msg_count) for msg_count, contact in active],
+            return_exceptions=True,
+        )
 
     except Exception:
         logger.exception("proactive_chat_analyzer: scan failed")

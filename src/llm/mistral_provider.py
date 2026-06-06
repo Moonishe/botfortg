@@ -11,6 +11,7 @@ MISTRAL_CHAT_LIGHT = "mistral-small-latest"
 MISTRAL_CHAT_HEAVY = "mistral-medium-latest"
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat
 class MistralProvider(OpenAICompatEmbedMixin):
     name = "mistral"
 

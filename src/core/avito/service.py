@@ -585,7 +585,7 @@ async def _llm_analyze_listings(
     parsed: list[dict[str, Any]],
     limit: int,
 ) -> None:
-    """Анализирует top-N объявлений через LLM."""
+    """Анализирует top-N объявлений через LLM (параллельно с семафором)."""
     if not parsed or limit <= 0:
         return
 
@@ -608,22 +608,32 @@ async def _llm_analyze_listings(
 
     from src.core.avito.llm_analyzer import analyze_listing_llm
 
-    for listing in to_analyze:
-        try:
-            analysis = await analyze_listing_llm(listing)
-            listing["llm_analysis"] = analysis
-        except Exception:
-            logger.exception(
-                "_llm_analyze_listings: ошибка для %s", listing.get("avito_id")
-            )
-            listing["llm_analysis"] = {
-                "deal_quality": 0,
-                "red_flags": [],
-                "recommendation": "skip",
-                "summary": "",
-                "reasoning": "",
-                "error": "Ошибка анализа",
-            }
+    # ── Параллельный LLM-анализ с семафором (макс. 3 одновременных вызова) ──
+    _llm_analysis_sem = asyncio.Semaphore(3)
+
+    async def _analyze_one(listing: dict[str, Any]) -> None:
+        """Анализирует одно объявление через LLM (с обработкой ошибок)."""
+        async with _llm_analysis_sem:
+            try:
+                analysis = await analyze_listing_llm(listing)
+                listing["llm_analysis"] = analysis
+            except Exception:
+                logger.exception(
+                    "_llm_analyze_listings: ошибка для %s", listing.get("avito_id")
+                )
+                listing["llm_analysis"] = {
+                    "deal_quality": 0,
+                    "red_flags": [],
+                    "recommendation": "skip",
+                    "summary": "",
+                    "reasoning": "",
+                    "error": "Ошибка анализа",
+                }
+
+    await asyncio.gather(
+        *[_analyze_one(listing) for listing in to_analyze],
+        return_exceptions=True,
+    )
 
 
 async def quick_scan(url: str) -> ScanResult:

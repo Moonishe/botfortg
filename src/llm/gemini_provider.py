@@ -25,6 +25,7 @@ def _to_gemini_contents(messages: list[ChatMessage]) -> tuple[str | None, list[d
     return system, contents
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, embed_batch (partial)
 class GeminiProvider:
     name = "gemini"
 

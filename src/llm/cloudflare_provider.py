@@ -3,6 +3,7 @@ from openai import AsyncOpenAI
 
 from src.config import settings
 from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
@@ -10,14 +11,20 @@ CLOUDFLARE_CHAT_LIGHT = "@cf/qwen/qwen3-30b-a3b-fp8"
 CLOUDFLARE_CHAT_HEAVY = "@cf/moonshotai/kimi-k2.6"
 
 
-class CloudflareProvider(OpenAICompatEmbedMixin):
+class CloudflareProvider(BaseLLMProvider, OpenAICompatEmbedMixin):
     """Cloudflare Workers AI провайдер (OpenAI-совместимый API).
 
     Использует AsyncOpenAI с кастомным base_url на Cloudflare Accounts AI Gateway.
     Поддерживает chat (Kimi K2.6, Qwen3) и embeddings (BGE-M3).
+
+    Наследует:
+    - BaseLLMProvider — _resolve_model(), _fmt_messages(), name, _model, _embed_model
+    - OpenAICompatEmbedMixin — validate_key(), list_models(), close(), embed(), embed_batch()
     """
 
     name = "cloudflare"
+    _LIGHT_MODEL = CLOUDFLARE_CHAT_LIGHT
+    _HEAVY_MODEL = CLOUDFLARE_CHAT_HEAVY
 
     def __init__(
         self,
@@ -27,35 +34,38 @@ class CloudflareProvider(OpenAICompatEmbedMixin):
         model: str | None = None,
         embed_model: str | None = None,
     ) -> None:
-        base_url = _validate_base_url(base_url)
-        if not base_url:
+        url = _validate_base_url(base_url)
+        if not url:
             account_id = settings.cloudflare_account_id
             if not account_id:
                 raise ValueError(
                     "CLOUDFLARE_ACCOUNT_ID не задан в .env. "
                     "Добавь CLOUDFLARE_ACCOUNT_ID=<твой account_id> в .env"
                 )
-            base_url = (
-                f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
-            )
-        kwargs: dict = dict(
+            url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+        # Базовая инициализация: сохраняет api_key, model, embed_model
+        super().__init__(
             api_key=api_key,
-            base_url=base_url,
+            base_url=None,
+            model=model,
+            embed_model=embed_model,
+        )
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=url,
             timeout=httpx.Timeout(120.0, connect=10.0),
         )
-        self._client = AsyncOpenAI(**kwargs)
-        self._model = model
-        self._embed_model = embed_model
 
-    def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            CLOUDFLARE_CHAT_HEAVY if heavy else CLOUDFLARE_CHAT_LIGHT
-        )
-
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> str:
         model = self._resolve_model(heavy)
         resp = await self._client.chat.completions.create(
             model=model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=self._fmt_messages(messages),
         )
         return resp.choices[0].message.content or ""

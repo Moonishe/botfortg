@@ -22,6 +22,7 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"
 HEAVY_MODEL = "deepseek/deepseek-v4-flash:free"
 
 
+# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat
 class OpenRouterProvider(OpenAICompatBaseMixin):
     """Провайдер для OpenRouter free models (DeepSeek V4 Flash и другие).
 
