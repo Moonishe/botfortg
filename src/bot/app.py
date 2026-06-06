@@ -35,7 +35,9 @@ from src.bot.handlers import (
     free_text_memory,
     free_text_settings,
     login,
+    memory_admin_cmds,
     memory_cmd,
+    memory_inbox,
     news_cmd,
     news_topics,
     profile_cmd,
@@ -212,6 +214,8 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(digest_cmd.router)
     dp.include_router(style_cmd.router)
     dp.include_router(keys_cmd.router)
+    dp.include_router(memory_inbox.router)
+    dp.include_router(memory_admin_cmds.router)
     dp.include_router(memory_cmd.router)
     dp.include_router(news_cmd.router)
     dp.include_router(draft_actions.router)

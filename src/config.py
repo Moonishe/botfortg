@@ -274,6 +274,13 @@ class Settings(BaseSettings):
         365,
         description="Skip facts older than this; auto-forget handles them",
     )
+    dreaming_reval_concurrency: int = Field(
+        3,
+        description=(
+            "Max parallel LLM calls during revaluation. Matches the 'background' "
+            "purpose Semaphore in router; raise to use more keys concurrently."
+        ),
+    )
 
     # ── Limits & timeouts ──
     max_message_length: int = Field(4096, description="Telegram max message length")

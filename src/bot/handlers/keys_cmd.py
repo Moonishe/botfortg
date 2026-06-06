@@ -4,6 +4,7 @@ Handlers: /keys, interactive add/remove/import via inline keyboards.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from aiogram import F, Router
@@ -43,7 +44,7 @@ router.callback_query.filter(OwnerOnly())
 
 # ─── /keys import: очередь ожидающих импорта (без FSM) ────────────────
 
-_PENDING_IMPORTS: dict[int, str] = {}  # user_id → purpose
+_PENDING_IMPORTS: dict[int, dict] = {}  # user_id → {"purpose": str, "deadline": float}
 
 # ─── /keys add: очередь интерактивного выбора модели (inline-клавиатура) ──
 
@@ -545,7 +546,10 @@ async def cmd_keys(message: Message) -> None:
             return
 
         # Иначе — ждём следующего сообщения
-        _PENDING_IMPORTS[message.from_user.id] = purpose
+        _PENDING_IMPORTS[message.from_user.id] = {
+            "purpose": purpose,
+            "deadline": time.monotonic() + 300,
+        }
         await message.answer(
             "📥 <b>Отправь ключи:</b>\n\n"
             "Один ключ на строку. Можно несколько.\n"
@@ -690,6 +694,7 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
         _PENDING_KEY_ENTRIES[callback.from_user.id] = {
             "provider": provider_name,
             "model_pending": True,
+            "deadline": time.monotonic() + 300,
         }
         await callback.message.edit_text(
             f"🔧 Введи название модели для <b>{provider_name}</b>.\n"
@@ -704,6 +709,7 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
             "provider": provider_name,
             "model": None,
             "model_pending": False,
+            "deadline": time.monotonic() + 300,
         }
         display = p.display if p else provider_name
         await callback.message.edit_text(
@@ -722,6 +728,7 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
             "provider": provider_name,
             "model": model,
             "model_pending": False,
+            "deadline": time.monotonic() + 300,
         }
         display = p.display if p else provider_name
         key_prefix = p.key_prefix if p and p.key_prefix else "API-ключ"
@@ -785,7 +792,15 @@ class _PendingKeyEntryFilter(BaseFilter):
     ) -> bool | dict:
         if message.from_user is None:
             return False
-        if message.from_user.id not in _PENDING_KEY_ENTRIES:
+        uid = message.from_user.id
+        pending = _PENDING_KEY_ENTRIES.get(uid)
+        if pending is None:
+            return False
+        # Check TTL — cleanup is opportunistic (on next message).
+        # TTL is 300s, bounded by user count — no separate sweep needed.
+        deadline = pending.get("deadline", 0)
+        if time.monotonic() > deadline:
+            _PENDING_KEY_ENTRIES.pop(uid, None)
             return False
         if state is not None and await state.get_state() is not None:
             return False
@@ -814,6 +829,7 @@ async def _pending_key_entry_handler(message: Message) -> None:
             "provider": provider_name,
             "model": model,
             "model_pending": False,
+            "deadline": time.monotonic() + 300,
         }
         p = get_provider(provider_name)
         display = p.display if p else provider_name
@@ -917,7 +933,15 @@ class _PendingImportFilter(BaseFilter):
     ) -> bool | dict:
         if message.from_user is None:
             return False
-        if message.from_user.id not in _PENDING_IMPORTS:
+        uid = message.from_user.id
+        pending = _PENDING_IMPORTS.get(uid)
+        if pending is None:
+            return False
+        # Check TTL — cleanup is opportunistic (on next message).
+        # TTL is 300s, bounded by user count — no separate sweep needed.
+        deadline = pending.get("deadline", 0)
+        if time.monotonic() > deadline:
+            _PENDING_IMPORTS.pop(uid, None)
             return False
         if state is not None and await state.get_state() is not None:
             return False
@@ -928,7 +952,8 @@ class _PendingImportFilter(BaseFilter):
 async def _pending_import_handler(message: Message) -> None:
     """Принимает ключи после /keys import (без FSM)."""
     uid = message.from_user.id  # type: ignore[union-attr]
-    purpose = _PENDING_IMPORTS.pop(uid)
+    entry = _PENDING_IMPORTS.pop(uid)
+    purpose = entry["purpose"]
     keys_text = message.text or ""
 
     if not keys_text.strip() or keys_text.strip().lower() in ("/cancel", "отмена"):

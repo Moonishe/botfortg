@@ -107,18 +107,6 @@ _ALLOWED_ACTIONS: frozenset[str] = frozenset({"past", "skip", "invalid", "perman
 _REVAL_INFLIGHT: set[int] = set()
 
 
-# ── Re-exports for backward compatibility ───────────────────────────
-# These names were historically available from ``dreaming_reval`` and are
-# kept here so existing imports (e.g. from ``memory_cmd.py``) continue to
-# work without changes.
-# fmt: off
-from src.core.memory.memory_admin import (    # noqa: F811, F401
-    deactivate_memory as deactivate_memory,
-    update_memory_text as update_memory_text,
-)
-# fmt: on
-
-
 @dataclass
 class RevalResult:
     """One fact's revaluation outcome."""
@@ -444,7 +432,24 @@ async def _reval_run_impl(
     confidence_threshold: float | None = None,
     vector_store_obj: Any = None,
 ) -> RevalBatchSummary:
-    """Inner implementation of reval_run, called under inflight-guard."""
+    """Inner implementation of reval_run, called under inflight-guard.
+
+    Phase 1 (read-only, single short session): get owner, build provider with
+    ``purpose="background"`` (uses router's Semaphore(3) instead of main's 2),
+    fetch candidate facts.
+
+    Phase 2 (parallel): ``asyncio.gather`` over all facts with a per-fact
+    Semaphore bounding concurrent LLM calls. Each fact gets its own session
+    for the apply step because AsyncSession is NOT safe for concurrent awaits.
+
+    Per-fact session is safe: ``add_memory()`` holds a per-user lock
+    internally, so concurrent calls for the same owner serialize at insert,
+    but the LLM calls themselves run in parallel (the actual bottleneck).
+
+    Early termination: 5 consecutive errors triggers a stop event; remaining
+    tasks short-circuit as ``action="skip"`` to avoid wasting LLM budget when
+    the provider is down.
+    """
     summary = RevalBatchSummary()
 
     limit = limit if limit is not None else settings.dreaming_reval_max_per_run
@@ -453,6 +458,7 @@ async def _reval_run_impl(
         if confidence_threshold is not None
         else settings.dreaming_reval_confidence_threshold
     )
+    concurrency = max(1, getattr(settings, "dreaming_reval_concurrency", 3))
 
     from src.db.repo import get_or_create_user
     from src.llm.router import build_provider
@@ -460,13 +466,20 @@ async def _reval_run_impl(
 
     from src.db.session import get_session
 
+    # ── Phase 1: setup (owner + provider + facts) — single short session ──
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
 
-        # Build provider BEFORE selecting facts so we don't hold a session
-        # open across a network call
+        # Build provider with purpose="background" so we use the router's
+        # background Semaphore(3) — main's Semaphore(2) would cap us at 2
+        # and the previous local Semaphore(3) was effectively a no-op.
         try:
-            provider = await build_provider(session, owner, task_type=TaskType.MEMORY)
+            provider = await build_provider(
+                session,
+                owner,
+                purpose="background",
+                task_type=TaskType.MEMORY,
+            )
         except Exception as exc:
             logger.exception("Dreaming reval: build_provider failed: %s", safe_str(exc))
             return summary
@@ -474,124 +487,127 @@ async def _reval_run_impl(
             logger.warning("Dreaming reval: no LLM provider available, skipping")
             return summary
 
-        # Select candidates
-        facts = await select_old_temporary_facts(
-            session,
-            owner.id,
-            limit=limit,
-            confidence_threshold=threshold,
-            lookback_days=getattr(settings, "dreaming_reval_lookback_days", None),
-        )
-        if not facts:
-            logger.info("Dreaming reval: no stale facts to re-evaluate")
+        # Select candidates (read-only)
+        try:
+            facts = await select_old_temporary_facts(
+                session,
+                owner.id,
+                limit=limit,
+                confidence_threshold=threshold,
+                lookback_days=getattr(settings, "dreaming_reval_lookback_days", None),
+            )
+        except Exception:
+            logger.exception("Dreaming reval: select_old_temporary_facts failed")
             try:
                 await provider.close()
             except Exception:
                 pass
             return summary
 
-        summary.examined = len(facts)
-        today = datetime.now(timezone.utc)
+    # Phase 1 session closed; the LLM provider is shared and its chat()
+    # internally acquires slots from the background Semaphore.
 
-        # Semaphore limits concurrent LLM calls (future-proof if loop becomes
-        # concurrent; harmless in sequential mode — documents intent).
-        sem = asyncio.Semaphore(3)
-
-        # Track results in the current uncommitted batch for rollback recovery
-        batch_results: list[RevalResult] = []
-
-        for i, fact in enumerate(facts):
-            try:
-                async with sem:
-                    parsed = await reval_fact(provider, fact, today=today)
-                result = await apply_reval_result(
-                    session, owner, fact, parsed, vector_store_obj=vector_store_obj
-                )
-            except Exception as exc:
-                logger.exception("Dreaming reval: unhandled error for fact %d", fact.id)
-                result = RevalResult(
-                    memory_id=fact.id,
-                    original_fact=fact.fact,
-                    action="skip",
-                    error=safe_str(exc),
-                )
-                summary.errors += 1  # counted here only (see below)
-
-            summary.results.append(result)
-            batch_results.append(result)
-            # Error already counted in the except block above; this guard
-            # only exists to skip the action-counter elif chain below.
-            if result.error:
-                pass
-            elif result.action == "past":
-                summary.past += 1
-                if result.new_memory_id:
-                    summary.new_facts_created += 1
-            elif result.action == "permanent":
-                summary.permanent += 1
-                if result.new_memory_id:
-                    summary.new_facts_created += 1
-            elif result.action == "invalid":
-                summary.invalid += 1
-            else:
-                summary.skip += 1
-
-            # Gentle rate limiting between LLM calls
-            await asyncio.sleep(0.1)
-
-            # Incremental commit every 10 facts — avoids losing all progress
-            # if the session fails mid-batch.
-            if (i + 1) % 10 == 0:
-                try:
-                    await session.commit()
-                    batch_results.clear()
-                except Exception:
-                    logger.exception(
-                        "Dreaming reval: incremental commit failed at fact %d/%d",
-                        i + 1,
-                        len(facts),
-                    )
-                    await session.rollback()
-                    summary.errors += 1
-                    # Revert counters for this batch's results (they were rolled back)
-                    for rr in batch_results:
-                        if rr.error:
-                            summary.errors -= 1
-                        elif rr.action == "past":
-                            summary.past -= 1
-                            if rr.new_memory_id:
-                                summary.new_facts_created -= 1
-                        elif rr.action == "permanent":
-                            summary.permanent -= 1
-                            if rr.new_memory_id:
-                                summary.new_facts_created -= 1
-                        elif rr.action == "invalid":
-                            summary.invalid -= 1
-                        else:
-                            summary.skip -= 1
-                    break  # stop — state is inconsistent, don't continue
-
-        # Final commit at the end of the batch
-        try:
-            await session.commit()
-        except Exception:
-            logger.exception("Dreaming reval: commit failed")
-            await session.rollback()
-
-        # Invalidate recall cache so the user sees the updated facts
-        try:
-            from src.core.actions.stats_cache import invalidate
-            from src.core.memory.memory_recall import bump_recall_version
-
-            await invalidate("mem_")
-            await bump_recall_version(owner.telegram_id)
-        except Exception:
-            pass
-
+    if not facts:
+        logger.info("Dreaming reval: no stale facts to re-evaluate")
         try:
             await provider.close()
         except Exception:
             pass
+        return summary
+
+    summary.examined = len(facts)
+    today = datetime.now(timezone.utc)
+
+    # ── Phase 2: parallel processing with bounded concurrency ──
+    sem = asyncio.Semaphore(concurrency)
+    error_streak_lock = asyncio.Lock()
+    stop_event = asyncio.Event()
+    error_streak = 0  # mutated only under error_streak_lock
+
+    async def _tracked_process(fact: Memory) -> RevalResult:
+        """Run _process_one_fact and track consecutive errors for early stop."""
+        nonlocal error_streak
+        if stop_event.is_set():
+            return RevalResult(
+                memory_id=fact.id,
+                original_fact=fact.fact,
+                action="skip",
+                reason="early_termination_error_streak",
+            )
+        result = await _process_one_fact(
+            fact,
+            owner_id=owner.id,
+            owner_telegram_id=owner_telegram_id,
+            provider=provider,
+            today=today,
+            vector_store_obj=vector_store_obj,
+            sem=sem,
+        )
+        async with error_streak_lock:
+            if result.error:
+                error_streak += 1
+                if error_streak >= 5:
+                    logger.warning(
+                        "Dreaming reval: %d consecutive errors — stopping batch "
+                        "early (processed %d/%d facts)",
+                        error_streak,
+                        len(summary.results),
+                        len(facts),
+                    )
+                    stop_event.set()
+            else:
+                error_streak = 0
+        return result
+
+    # gather() with default return_exceptions=False: _process_one_fact catches
+    # all internal exceptions, so an exception here means a programming bug
+    # (e.g. asyncio.CancelledError) and should propagate.
+    try:
+        results: list[RevalResult] = await asyncio.gather(
+            *[_tracked_process(f) for f in facts]
+        )
+    except Exception:
+        logger.exception("Dreaming reval: gather failed")
+        try:
+            await provider.close()
+        except Exception:
+            pass
+        return summary
+
+    # ── Phase 3: aggregate counters ──
+    for result in results:
+        summary.results.append(result)
+        if result.error:
+            summary.errors += 1
+        elif result.action == "past":
+            summary.past += 1
+            if result.new_memory_id:
+                summary.new_facts_created += 1
+        elif result.action == "permanent":
+            summary.permanent += 1
+            if result.new_memory_id:
+                summary.new_facts_created += 1
+        elif result.action == "invalid":
+            summary.invalid += 1
+        else:
+            summary.skip += 1
+
+    # ── Phase 4: cleanup ──
+    try:
+        await provider.close()
+    except Exception:
+        pass
+
+    # Invalidate recall cache so the user sees the updated facts.
+    # Done after provider.close() because the cache is independent.
+    try:
+        from src.core.actions.stats_cache import invalidate
+        from src.core.memory.memory_recall import bump_recall_version
+
+        await invalidate("mem_")
+        await bump_recall_version(owner.telegram_id)
+    except Exception:
+        pass
 
     logger.info(
         "Dreaming reval: examined=%d past=%d permanent=%d invalid=%d skip=%d errors=%d",
@@ -603,6 +619,78 @@ async def _reval_run_impl(
         summary.errors,
     )
     return summary
+
+
+async def _process_one_fact(
+    fact: Memory,
+    *,
+    owner_id: int,
+    owner_telegram_id: int,
+    provider: "LLMProvider",
+    today: datetime,
+    vector_store_obj: Any = None,
+    sem: asyncio.Semaphore,
+) -> RevalResult:
+    """Process a single fact: LLM reval + apply result in its own session.
+
+    Two phases:
+      1. LLM call (network-bound, parallel-safe, bounded by ``sem``).
+      2. DB apply in a fresh ``get_session()`` context (auto-commits on exit).
+
+    Per-fact session is required: ``AsyncSession`` is NOT safe for concurrent
+    awaits on the same instance.  Concurrent ``add_memory()`` calls for the
+    same owner serialize internally via the per-user lock from
+    ``_get_user_lock(user.id)`` — see ``src/db/repos/memory_repo.py:307``.
+
+    Never raises: every step is wrapped in try/except and returns a
+    ``RevalResult`` with ``error`` populated on failure.
+    """
+    from src.db.repo import get_or_create_user
+    from src.db.session import get_session
+
+    # Phase 1: LLM call (bounded by semaphore)
+    try:
+        async with sem:
+            parsed = await reval_fact(provider, fact, today=today)
+    except Exception as exc:
+        logger.exception("reval_fact failed for fact %d", fact.id)
+        return RevalResult(
+            memory_id=fact.id,
+            original_fact=fact.fact,
+            action="skip",
+            error=safe_str(exc),
+        )
+
+    if parsed is None:
+        return RevalResult(
+            memory_id=fact.id,
+            original_fact=fact.fact,
+            action="skip",
+            reason="LLM returned no parseable response",
+        )
+
+    # Phase 2: apply result in a fresh session
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_telegram_id)
+            result = await apply_reval_result(
+                session,
+                owner,
+                fact,
+                parsed,
+                vector_store_obj=vector_store_obj,
+            )
+            # session auto-commits on context exit (see src/db/session.py:289)
+    except Exception as exc:
+        logger.exception("apply_reval_result failed for fact %d", fact.id)
+        return RevalResult(
+            memory_id=fact.id,
+            original_fact=fact.fact,
+            action="skip",
+            error=safe_str(exc),
+        )
+
+    return result
 
 
 def reval_summary_text(summary: RevalBatchSummary) -> str:
