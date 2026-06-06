@@ -3,6 +3,7 @@
 Handlers: /keys, interactive add/remove/import via inline keyboards.
 """
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from aiogram.types import (
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import select
 
 from src.llm.provider_catalog import (
     LLM_PROVIDERS,
@@ -51,6 +53,29 @@ _PENDING_IMPORTS: dict[int, dict] = {}  # user_id → {"purpose": str, "deadline
 _PENDING_KEY_ENTRIES: dict[
     int, dict
 ] = {}  # user_id → {provider, model, model_pending, category}
+
+# ─── /keys add: кэш обнаруженных моделей ──────────────────────────────
+
+_discovery_cache: dict[int, list[str]] = {}  # slot_id → models
+_discovery_cache_ts: dict[int, float] = {}  # slot_id → timestamp
+_DISCOVERY_CACHE_TTL: float = 3600.0  # 1 час
+
+
+def _cache_models_discovery(slot_id: int, models: list[str]) -> None:
+    """Сохранить обнаруженные модели в кэш."""
+    _discovery_cache[slot_id] = models
+    _discovery_cache_ts[slot_id] = time.monotonic()
+
+
+def _get_cached_discovery(slot_id: int) -> list[str] | None:
+    """Получить модели из кэша, если они свежие."""
+    ts = _discovery_cache_ts.get(slot_id, 0)
+    if time.monotonic() - ts < _DISCOVERY_CACHE_TTL:
+        return _discovery_cache.get(slot_id)
+    _discovery_cache.pop(slot_id, None)
+    _discovery_cache_ts.pop(slot_id, None)
+    return None
+
 
 # ─── /keys import helpers ─────────────────────────────────────────────
 
@@ -302,6 +327,143 @@ def _build_model_keyboard(provider_name: str) -> InlineKeyboardMarkup | None:
     kb.button(text="🔙 Назад", callback_data=KeysCB.back_provider(p.category))
     kb.adjust(1)
     return kb.as_markup()
+
+
+# ─── /keys add: авто-обнаружение моделей после ввода ключа ────────────
+
+
+def _build_empty_model_keyboard(slot_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура когда модели не найдены — ручной ввод или пропуск."""
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✏️ Ввести вручную",
+        callback_data=f"keys:disc_manual:{slot_id}",
+    )
+    kb.button(
+        text="🚫 Пропустить",
+        callback_data=f"keys:disc_skip:{slot_id}",
+    )
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def _build_discovered_keyboard(
+    slot_id: int, models: list[str], page: int = 0
+) -> InlineKeyboardMarkup:
+    """Клавиатура с обнаруженными моделями, 8 на страницу."""
+    kb = InlineKeyboardBuilder()
+    per_page = 8
+    total_pages = max(1, (len(models) + per_page - 1) // per_page)
+    page = min(page, total_pages - 1) if total_pages > 0 else 0
+    start = page * per_page
+    page_models = models[start : start + per_page]
+
+    for i, model in enumerate(page_models):
+        global_idx = start + i
+        display = model[:45] + "…" if len(model) > 45 else model
+        kb.button(
+            text=display,
+            callback_data=f"keys:disc_pick:{slot_id}:{global_idx}",
+        )
+    kb.adjust(1)
+
+    # Навигация
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀", callback_data=f"keys:disc_page:{slot_id}:{page - 1}"
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}", callback_data="keys:noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶", callback_data=f"keys:disc_page:{slot_id}:{page + 1}"
+                )
+            )
+        kb.row(*nav)
+
+    # Ручной ввод + пропуск
+    kb.row(
+        InlineKeyboardButton(
+            text="✏️ Ввести вручную",
+            callback_data=f"keys:disc_manual:{slot_id}",
+        ),
+        InlineKeyboardButton(
+            text="🚫 Пропустить",
+            callback_data=f"keys:disc_skip:{slot_id}",
+        ),
+    )
+
+    return kb.as_markup()
+
+
+async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
+    """Получить доступные модели через API провайдера, используя ключ из слота."""
+    from src.llm.provider_manager import _provider_class_for
+    from src.crypto import decrypt
+
+    provider_cls = _provider_class_for(slot.provider)
+    if provider_cls is None:
+        return [], f"Неизвестный провайдер: {slot.provider}"
+
+    api_key = decrypt(slot.key_enc)
+    endpoint = slot.endpoint
+
+    # Создаём провайдера: с endpoint или без
+    if endpoint:
+        provider = provider_cls(api_key=api_key, base_url=endpoint)
+    else:
+        provider = provider_cls(api_key=api_key)
+
+    try:
+        models = await asyncio.wait_for(provider.list_models(), timeout=15.0)
+        return sorted(models), None
+    except NotImplementedError:
+        return [], f"{slot.provider} не поддерживает список моделей"
+    except asyncio.TimeoutError:
+        return [], "Таймаут запроса"
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "unauthorized" in error_msg.lower():
+            return [], "Неверный API ключ"
+        return [], f"Ошибка: {error_msg[:100]}"
+    finally:
+        try:
+            await provider.close()
+        except Exception:
+            pass
+
+
+async def _show_model_discovery(message: Message, slot: LlmKeySlot) -> None:
+    """Загружает и показывает доступные модели для только что созданного слота."""
+    status_msg = await message.answer("🔄 Загружаю список доступных моделей с сервера…")
+
+    # Получаем модели через API провайдера
+    models, error = await _fetch_models_for_slot(slot)
+
+    # Кэшируем результат
+    _cache_models_discovery(slot.id, models)
+
+    if error or not models:
+        await status_msg.edit_text(
+            f"⚠️ {'Не удалось загрузить модели: ' + error if error else 'Сервер не вернул ни одной модели.'}\n\n"
+            f"Слот #{slot.id} создан. Модель можно указать позже через /models {slot.id}.",
+            reply_markup=_build_empty_model_keyboard(slot.id),
+        )
+        return
+
+    await status_msg.edit_text(
+        f"📋 Доступные модели ({len(models)}) для {slot.provider}:\n"
+        f"Выбери модель или введи свою:",
+        reply_markup=_build_discovered_keyboard(slot.id, models, page=0),
+    )
 
 
 @router.message(Command("keys"))
@@ -674,20 +836,35 @@ async def cb_keys_cata(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("keys:cat:"))
 async def cb_keys_cat(callback: CallbackQuery) -> None:
-    """User picked a provider → show models."""
+    """User picked a provider → запрос API ключа (модели — потом авто-обнаружены)."""
     parts = callback.data.split(":")
     if len(parts) < 4:
         return
-    category = parts[2]  # noqa: F841
+    category = parts[2]
     provider_name = parts[3]
     p = get_provider(provider_name)
     if not p:
         await callback.answer("Провайдер не найден", show_alert=True)
         return
 
+    # Сохраняем выбор в pending и сразу запрашиваем ключ
+    key_prefix = p.key_prefix if p and p.key_prefix else "API-ключ"
+    endpoint_hint = (
+        f"\n🔗 Endpoint: {p.default_endpoint}" if p and p.default_endpoint else ""
+    )
+    _PENDING_KEY_ENTRIES[callback.from_user.id] = {
+        "provider": provider_name,
+        "model": None,
+        "model_pending": False,
+        "category": category,
+        "deadline": time.monotonic() + 300,
+    }
     await callback.message.edit_text(
-        f"📋 <b>{p.display}</b>\n{p.description}\n\nДоступные модели:",
-        reply_markup=_build_model_keyboard(provider_name),
+        f"📦 <b>{p.display}</b>\n"
+        f"Вставь {key_prefix}\n"
+        f"Или: <code>{provider_name}:ключ</code>{endpoint_hint}\n"
+        f"С endpoint: <code>{provider_name}:ключ:https://твой-url.com/v1</code>",
+        reply_markup=None,
     )
     await callback.answer()
 
@@ -793,6 +970,131 @@ async def cb_keys_back_provider(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+# ─── /keys add: колбэки авто-обнаружения моделей ──────────────────────
+
+
+@router.callback_query(F.data == "keys:noop")
+async def cb_keys_noop(callback: CallbackQuery) -> None:
+    """No-op для индикатора страницы."""
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:disc_pick:"))
+async def cb_disc_pick(callback: CallbackQuery) -> None:
+    """Пользователь выбрал модель из списка обнаруженных."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    try:
+        slot_id = int(parts[2])
+        idx = int(parts[3])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+
+    models = _get_cached_discovery(slot_id) or []
+    model = models[idx] if idx < len(models) else "unknown"
+
+    # Сохраняем модель в слот
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        stmt = select(LlmKeySlot).where(
+            LlmKeySlot.id == slot_id, LlmKeySlot.user_id == owner.id
+        )
+        slot = (await session.execute(stmt)).scalar_one_or_none()
+        if slot:
+            slot.model = model
+            await session.commit()
+
+    await callback.message.edit_text(
+        f"✅ Модель <b>{model}</b> сохранена в слот #{slot_id}.\n"
+        f"Сменить: /models {slot_id}",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:disc_page:"))
+async def cb_disc_page(callback: CallbackQuery) -> None:
+    """Пагинация обнаруженных моделей."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    try:
+        slot_id = int(parts[2])
+        page = int(parts[3])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+
+    models = _get_cached_discovery(slot_id) or []
+    await callback.message.edit_reply_markup(
+        reply_markup=_build_discovered_keyboard(slot_id, models, page)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:disc_manual:"))
+async def cb_disc_manual(callback: CallbackQuery) -> None:
+    """Пользователь хочет ввести модель вручную."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+
+    _PENDING_KEY_ENTRIES[callback.from_user.id] = {
+        "type": "manual_model",
+        "slot_id": slot_id,
+        "deadline": time.monotonic() + 300,
+    }
+    await callback.message.edit_text(
+        "✏️ Введи название модели (например gpt-4o, claude-3-opus…)"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:disc_skip:"))
+async def cb_disc_skip(callback: CallbackQuery) -> None:
+    """Пользователь пропускает выбор модели."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+
+    # Получаем имя провайдера из слота для сообщения
+    provider_name = "провайдера"
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        stmt = select(LlmKeySlot).where(
+            LlmKeySlot.id == slot_id, LlmKeySlot.user_id == owner.id
+        )
+        slot = (await session.execute(stmt)).scalar_one_or_none()
+        if slot:
+            provider_name = slot.provider
+
+    await callback.message.edit_text(
+        f"✅ Слот #{slot_id} создан без указания модели.\n"
+        f"Будет использоваться модель по умолчанию для {provider_name}.\n"
+        f"Указать позже: /models {slot_id}",
+    )
+    await callback.answer()
+
+
 # ─── /keys add: фильтр и обработчик pending key entry ───────────────────
 
 
@@ -833,6 +1135,24 @@ async def _pending_key_entry_handler(message: Message) -> None:
         await message.answer("❌ Добавление ключа отменено.")
         return
 
+    # Ручной ввод модели (из экрана авто-обнаружения)
+    if entry.get("type") == "manual_model":
+        slot_id = entry["slot_id"]
+        model = text
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, uid)
+            stmt = select(LlmKeySlot).where(
+                LlmKeySlot.id == slot_id, LlmKeySlot.user_id == owner.id
+            )
+            slot = (await session.execute(stmt)).scalar_one_or_none()
+            if slot:
+                slot.model = model
+                await session.commit()
+
+        await message.answer(f"✅ Модель <b>{model}</b> сохранена в слот #{slot_id}.")
+        return
+
     if entry.get("model_pending"):
         # User typed a custom model name → now ask for the key
         provider_name = entry["provider"]
@@ -856,7 +1176,8 @@ async def _pending_key_entry_handler(message: Message) -> None:
     provider_name = entry["provider"]
     model = entry.get("model")
     p = get_provider(provider_name)
-    category = p.category if p else "llm"
+    # Используем категорию из pending (если есть), иначе fallback на категорию провайдера
+    category = entry.get("category") or (p.category if p else "llm")
 
     api_key = text
     endpoint = None
@@ -935,37 +1256,11 @@ async def _pending_key_entry_handler(message: Message) -> None:
                 f"не прошёл валидацию. Проверь ключ."
             )
         else:
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="📋 Посмотреть доступные модели",
-                            callback_data=f"keys:disc:{slot.id}",
-                        )
-                    ]
-                ]
-            )
-            await message.answer(
-                f"✅ Ключ {provider_name}/{model or ''} "
-                f"добавлен и проверен! (слот #{slot.id})",
-                reply_markup=kb,
-            )
+            # Авто-обнаружение моделей после успешной валидации
+            await _show_model_discovery(message, slot)
     except Exception:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📋 Посмотреть доступные модели",
-                        callback_data=f"keys:disc:{slot.id}",
-                    )
-                ]
-            ]
-        )
-        await message.answer(
-            f"✅ Ключ {provider_name}/{model or ''} "
-            f"добавлен! (слот #{slot.id}, проверка недоступна)",
-            reply_markup=kb,
-        )
+        # Авто-обнаружение моделей (проверка ключа недоступна, но ключ сохранён)
+        await _show_model_discovery(message, slot)
 
 
 class _PendingImportFilter(BaseFilter):
