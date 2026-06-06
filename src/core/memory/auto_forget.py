@@ -65,6 +65,10 @@ async def auto_forget_sweep(session: AsyncSession, user_id: int) -> int:
     user_row = await session.execute(select(User.telegram_id).where(User.id == user_id))
     if uid := user_row.scalar_one_or_none():
         await bump_recall_version(uid)
+        # B6: инвалидируем stats-кэш (mem_*), чтобы health/coverage не показывали stale
+        from src.core.actions.stats_cache import invalidate
+
+        await invalidate("mem_")
 
     logger.info(
         "Auto-forget: deactivated %d facts for user %d (threshold=%.2f)",

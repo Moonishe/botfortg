@@ -514,8 +514,10 @@ async def _voice_worker() -> None:
                             error="Voice worker error",
                             context="free_text._voice_worker",
                         )
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
-                        pass  # hooks are optional, never break core flow
+                        logger.debug("Voice worker hooks.emit failed", exc_info=True)
                 finally:
                     if got_job:
                         _voice_queue.task_done()
@@ -532,8 +534,10 @@ async def _voice_worker() -> None:
                     error="Voice worker crashed",
                     context="free_text._voice_worker",
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                pass  # hooks are optional, never break core flow
+                logger.debug("Voice worker crash hooks.emit failed", exc_info=True)
             await asyncio.sleep(5.0)
 
 
@@ -693,7 +697,7 @@ async def _process_text(
                             gate_resp[:100],
                         )
                 except Exception:
-                    pass
+                    logger.debug("Failed to record classifier gate turn", exc_info=True)
                 _fire_record_trajectory(
                     owner_telegram_id,
                     request_text=raw,
@@ -764,7 +768,7 @@ async def _process_text(
                     rec_session, message.from_user.id, "assistant", emoji_reply[:100]
                 )
         except Exception:
-            pass
+            logger.debug("Failed to record smart_reply turn", exc_info=True)
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -888,7 +892,9 @@ async def _process_text(
                     feedback_type="fact" if is_fact else "style",
                 )
         except Exception:
-            pass  # never break core flow
+            logger.debug(
+                "Correction learner failed", exc_info=True
+            )  # never break core flow
 
         _fire_record_trajectory(
             owner_telegram_id,
@@ -1223,7 +1229,9 @@ async def _process_text(
             if _pf_data:
                 _prefetched_ctx = _pf_data.get("memory_context", "") or None
         except Exception:
-            pass  # prefetch — оптимизация
+            logger.debug(
+                "Prefetched recall unavailable", exc_info=True
+            )  # prefetch — оптимизация
 
     plan = await make_plan(
         raw,
@@ -1498,7 +1506,9 @@ async def free_text(
                 # No hint found — prefetch the user's contact list anyway
                 asyncio.create_task(_do_prefetch_contact(uid, None, userbot_manager))
         except Exception:
-            pass  # never block message processing
+            logger.debug(
+                "Contact prefetch failed", exc_info=True
+            )  # never block message processing
 
     # ── S1-T1: Prefetch memory recall (fire-and-forget) ───────────────
     # Оптимистичный prefetch: запускаем recall в фоне до того,
@@ -1510,18 +1520,20 @@ async def free_text(
 
             asyncio.create_task(_pf_recall(uid, raw))
         except Exception:
-            pass  # prefetch — оптимизация, никогда не блокируем
+            logger.debug(
+                "Prefetch recall task creation failed", exc_info=True
+            )  # prefetch — оптимизация, никогда не блокируем
 
     # ── Stage -1: Scheduled message NL intent ─────────────────────────
     # "напомни Маше про встречу завтра в 10:00" → создаём ScheduledMessage
     try:
         ctx_sched = await _get_owner_context(message.from_user.id)
         sched_tz = str(ctx_sched["tz_name"])
-    except SQLAlchemyError:
+    except (SQLAlchemyError, KeyError, TypeError, AttributeError):
         sched_tz = None
-    scheduled = parse_schedule_message(raw, sched_tz)
-    if scheduled:
-        try:
+    try:
+        scheduled = parse_schedule_message(raw, sched_tz)
+        if scheduled:
             async with get_session() as session:
                 owner = await get_or_create_user(session, uid)
                 from src.db.repo import create_scheduled as _create_scheduled
@@ -1534,10 +1546,21 @@ async def free_text(
                     scheduled["send_at"],
                 )
                 await session.commit()
-        except SQLAlchemyError:
-            await message.answer("❌ Произошла ошибка. Попробуй ещё раз.")
-            return
+    except KeyError as e:
+        logger.warning(
+            "parse_schedule_message returned incomplete result: missing %s", e
+        )
+        await message.answer("❌ Не удалось разобрать сообщение. Проверь формат.")
+        return
+    except (TypeError, ValueError) as e:
+        logger.warning("parse_schedule_message error: %s", e)
+        await message.answer("❌ Ошибка формата сообщения.")
+        return
+    except SQLAlchemyError:
+        await message.answer("❌ Произошла ошибка. Попробуй ещё раз.")
+        return
 
+    if scheduled:
         send_at_str = scheduled["send_at"].strftime("%d.%m в %H:%M")
         await message.answer(
             sanitize_html(
@@ -1565,7 +1588,7 @@ async def free_text(
             try:
                 await message.answer(f"🔍 Читаю {url[:50]}...")
             except Exception:
-                pass
+                logger.debug("Failed to send URL reading notification", exc_info=True)
             content = await _fetch_url_content(url)
             if content:
                 try:
@@ -1596,7 +1619,7 @@ async def free_text(
                 try:
                     await message.answer(f"❌ Не удалось загрузить {url}")
                 except Exception:
-                    pass
+                    logger.debug("Failed to send URL error notification", exc_info=True)
             return
 
     # Priority preemption: if a heavy task is running, cancel it for the new request
@@ -1634,7 +1657,9 @@ async def free_text(
                 context="free_text.free_text",
             )
         except Exception:
-            pass  # hooks are optional, never break core flow
+            logger.debug(
+                "free_text hooks.emit failed", exc_info=True
+            )  # hooks are optional, never break core flow
         raise
 
     # ── Session recording (non-blocking, best-effort) ─────────────────
@@ -1869,7 +1894,9 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
 
             desc = humanize_response(desc)
         except Exception:
-            pass  # best-effort, не ломаем если humanizer упал
+            logger.debug(
+                "Photo humanizer failed", exc_info=True
+            )  # best-effort, не ломаем если humanizer упал
 
         await message.answer(
             sanitize_html(f"🖼 {desc[:2000]}\n\n📊 Токенов: {result.total_tokens}")

@@ -290,6 +290,12 @@ class Settings(BaseSettings):
     memory_consolidation_interval_sec: int = Field(
         21600, description="Интервал консолидации памяти (6 часов)"
     )
+    memory_queue_maxsize: int = Field(
+        200, description="Максимальный размер очереди фоновой обработки памяти"
+    )
+    memory_queue_put_timeout: float = Field(
+        30.0, description="Таймаут enqueue перед сбросом задания (секунды)"
+    )
 
     # ── Recall defaults ──
     recall_default_limit: int = Field(8, description="Default recall limit")
@@ -321,6 +327,10 @@ class Settings(BaseSettings):
     )
     auto_forget_enabled: bool = Field(
         True, description="Enable automatic forgetting of low-retention facts"
+    )
+    contradiction_supersedes_window_minutes: int = Field(
+        30,
+        description="Окно поиска supersedes-связанного факта после противоречия (минуты)",
     )
 
     # ── Dreaming V3 — LLM semantic re-evaluation of stale facts ──
@@ -456,6 +466,10 @@ class Settings(BaseSettings):
     )
     auto_save_batch_timeout: float = Field(
         10.0, description="Таймаут сброса батча авто-сохранения (секунды)"
+    )
+    auto_save_batch_max_wait: float = Field(
+        60.0,
+        description="Максимальное время жизни батча — flush независимо от активности (секунды)",
     )
 
     smart_correction_action_ttl: float = Field(

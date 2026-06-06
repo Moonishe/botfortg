@@ -18,15 +18,7 @@ from src.config import settings
 #   user_id → (expiry_timestamp, RecallResult)
 # TTL: settings.prefetch_recall_ttl (default 5 seconds)
 _prefetch_cache: dict[int, tuple[float, Any]] = {}
-_prefetch_lock: asyncio.Lock | None = None
-
-
-def _get_lock() -> asyncio.Lock:
-    """Lazy-init asyncio.Lock (без event-loop, безопасно при импорте)."""
-    global _prefetch_lock
-    if _prefetch_lock is None:
-        _prefetch_lock = asyncio.Lock()
-    return _prefetch_lock
+_prefetch_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def prefetch_recall(
@@ -83,7 +75,7 @@ async def prefetch_recall(
         ttl = settings.prefetch_recall_ttl
         expiry = time.monotonic() + ttl
 
-        async with _get_lock():
+        async with _prefetch_lock:
             _prefetch_cache[user_id] = (expiry, data)
 
         return data
@@ -105,7 +97,7 @@ async def get_prefetched_recall(user_id: int) -> dict | None:
     if not settings.prefetch_recall_enabled:
         return None
 
-    async with _get_lock():
+    async with _prefetch_lock:
         entry = _prefetch_cache.get(user_id)
         if entry is None:
             return None
@@ -120,8 +112,10 @@ async def get_prefetched_recall(user_id: int) -> dict | None:
         return dict(data)
 
 
-def clear_prefetch(user_id: int) -> None:
-    """Принудительно очистить кэш prefetch для пользователя (синхронно).
+async def clear_prefetch(user_id: int) -> None:
+    """Принудительно очистить кэш prefetch для пользователя (с локом).
 
-    Используется в тестах и при сбросе состояния."""
-    _prefetch_cache.pop(user_id, None)
+    Вызывается при мутации памяти (bump_recall_version),
+    чтобы prefetch не возвращал stale-результаты после add/delete/update."""
+    async with _prefetch_lock:
+        _prefetch_cache.pop(user_id, None)

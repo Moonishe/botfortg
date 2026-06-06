@@ -380,12 +380,20 @@ async def check_contradiction_response(
                         # ── Phase 1A: link supersedes evolution chain ────
                         # Ищем факт, который только что был извлечён из raw text
                         # пользователя (через enqueue в free_text._process_text)
-                        # в последние 5 минут. Если нашли — связываем с
+                        # в последние N минут. Если нашли — связываем с
                         # old_mem через MemoryLink(relation_type="supersedes"),
                         # чтобы follow_supersedes_chain показывал эволюцию.
                         try:
+                            # B7: окно поиска supersedes-факта теперь настраивается
+                            # (по умолчанию 30 мин вместо жёстких 5 — учёт задержек
+                            # LLM-очереди, процессинга и прочих пайплайнов).
+                            from src.config import settings
+
+                            window_min = getattr(
+                                settings, "contradiction_supersedes_window_minutes", 30
+                            )
                             threshold = datetime.now(timezone.utc) - timedelta(
-                                minutes=5
+                                minutes=window_min
                             )
                             contact_filter = (
                                 Memory.contact_id.is_(None)
@@ -437,6 +445,10 @@ async def check_contradiction_response(
 
                         await link_session.commit()
                         await bump_recall_version(link_owner.telegram_id)
+                        # B6: инвалидируем stats-кэш после деактивации противоречащего факта
+                        from src.core.actions.stats_cache import invalidate
+
+                        await invalidate("mem_")
             except Exception:
                 logger.debug("Failed to mark contradicted fact", exc_info=True)
 

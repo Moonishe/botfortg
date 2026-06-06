@@ -17,12 +17,15 @@ import asyncio
 import json as _json
 import logging
 import re
+import sys as _sys
+import time
 from typing import Any
 
 from httpx import RequestError, HTTPStatusError
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.config import settings
+from src.core.infra.task_manager import track_ff
 from src.llm.base import ChatMessage, TaskType
 
 logger = logging.getLogger(__name__)
@@ -196,13 +199,22 @@ class FactBatchBuffer:
         batch_size: int = 5,
         timeout: float = 10.0,
         enabled: bool = True,
+        max_wait: float = 60.0,
     ) -> None:
         self._buffer: list[dict[str, Any]] = []
         self._batch_size = max(1, batch_size)
         self._timeout = max(0.5, timeout)
+        # B3: защита от MagicMock в тестах — float() может упасть
+        try:
+            self._max_wait = max(1.0, float(max_wait))
+        except (TypeError, ValueError):
+            self._max_wait = 60.0
         self._enabled = enabled
         self._lock = asyncio.Lock()
         self._flush_task: asyncio.Task[Any] | None = None
+        # B3: время создания текущего батча — защита от бесконечного откладывания flush
+        self._created_at: float | None = None
+        self._is_flushing: bool = False  # защита от отмены активного flush
 
     # ── Публичный API ──────────────────────────────────────────────────
 
@@ -222,6 +234,7 @@ class FactBatchBuffer:
             return
 
         async with self._lock:
+            was_empty = len(self._buffer) == 0
             self._buffer.append(
                 {
                     "telegram_id": telegram_id,
@@ -230,20 +243,33 @@ class FactBatchBuffer:
                     "provider": provider,
                 }
             )
+            # B3: фиксируем время создания батча при первом сообщении
+            if was_empty:
+                self._created_at = time.monotonic()
 
             if len(self._buffer) >= self._batch_size:
                 # Буфер полон — сбросить немедленно
+                if self._flush_task and not self._flush_task.done():
+                    if not self._is_flushing:
+                        # Отменяем ожидающий таймер
+                        self._flush_task.cancel()
+                    else:
+                        # flush уже идёт — сообщение остаётся в буфере,
+                        # новый flush запустится после завершения текущего
+                        return
                 batch = list(self._buffer)
                 self._buffer.clear()
-                # Отменить ожидающий таймер, если есть
-                if self._flush_task and not self._flush_task.done():
-                    self._flush_task.cancel()
+                self._created_at = None
                 # Запустить фоновую обработку
                 self._flush_task = asyncio.create_task(
                     self._flush_batch(batch), name="auto-save-flush-batch"
                 )
             else:
                 # Запустить/перезапустить таймер — сброс после паузы
+                if self._is_flushing:
+                    # flush уже идёт — не трогаем _flush_task,
+                    # сообщение остаётся в буфере до следующего цикла
+                    return
                 if self._flush_task and not self._flush_task.done():
                     self._flush_task.cancel()
                 self._flush_task = asyncio.create_task(
@@ -274,7 +300,10 @@ class FactBatchBuffer:
     # ── Внутренние методы ──────────────────────────────────────────────
 
     async def _timeout_flush(self) -> None:
-        """Фоновый таймер: через self._timeout секунд сбрасывает буфер."""
+        """Фоновый таймер: через self._timeout секунд сбрасывает буфер.
+
+        B3: дополнительно проверяет max_wait — если батч живёт дольше max_wait,
+        flush происходит независимо от активности (защита от бесконечного postpone)."""
         try:
             await asyncio.sleep(self._timeout)
         except asyncio.CancelledError:
@@ -282,56 +311,124 @@ class FactBatchBuffer:
         async with self._lock:
             if not self._buffer:
                 return
+            # B3: если батч висит дольше max_wait — flush немедленно
+            if self._created_at is not None:
+                elapsed = time.monotonic() - self._created_at
+                if elapsed >= self._max_wait:
+                    logger.debug(
+                        "Batch max_wait (%.1fs) exceeded (elapsed=%.1fs), force flush",
+                        self._max_wait,
+                        elapsed,
+                    )
             batch = list(self._buffer)
             self._buffer.clear()
-            asyncio.create_task(
-                self._flush_batch(batch), name="auto-save-flush-timeout-batch"
+            self._created_at = None
+            # Используем track_ff чтобы задача не потерялась при shutdown
+            track_ff(
+                asyncio.create_task(
+                    self._flush_batch(batch), name="auto-save-flush-timeout-batch"
+                )
             )
 
     async def _flush_batch(self, batch: list[dict[str, Any]]) -> None:
-        """Обработать накопленный батч: LLM → парсинг → сохранение в БД."""
+        """Обработать накопленный батч: LLM → парсинг → сохранение в БД.
+
+        B4: retry-цикл (до 3 попыток) при LLM-ошибках (сеть, таймаут, rate-limit).
+        После 3 неудач — батч теряется, но логируется warning."""
         if not batch:
             return
 
+        self._is_flushing = True
         try:
             provider = batch[0]["provider"]
             prompt = _build_batch_prompt(batch)
 
-            raw_json = await provider.chat(
-                [ChatMessage(role="user", content=prompt)],
-                task_type=TaskType.DEFAULT,
-            )
+            # B4: retry loop — network/rate-limit errors shouldn't silently drop the batch
+            raw_json: str | None = None
+            last_error: Any = None
+            for attempt in range(3):
+                try:
+                    raw_json = await provider.chat(
+                        [ChatMessage(role="user", content=prompt)],
+                        task_type=TaskType.DEFAULT,
+                    )
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except (RequestError, HTTPStatusError):
+                    last_error = _sys.exc_info()[1]
+                    if attempt < 2:
+                        logger.debug(
+                            "Batch flush attempt %d/3 failed (retry in 5s): %s",
+                            attempt + 1,
+                            last_error,
+                        )
+                        await asyncio.sleep(5)
+                    else:
+                        logger.warning(
+                            "Batch flush failed after 3 attempts: %d facts lost — %s",
+                            len(batch),
+                            last_error,
+                        )
+                except _json.JSONDecodeError as e:
+                    # JSON parse error — not retryable (prompt/format issue)
+                    logger.debug(
+                        "Batch parse error (non-retryable): %d messages — %s",
+                        len(batch),
+                        e,
+                    )
+                    break
+                except Exception:
+                    logger.exception(
+                        "Unexpected error in batch flush: %d facts lost", len(batch)
+                    )
+                    break
 
-            parsed = _parse_batch_facts(raw_json)
+            if raw_json is None:
+                return  # все попытки исчерпаны или не-retryable ошибка
 
-            # Сопоставить результаты с сообщениями по индексу
-            facts_by_index: dict[int, list[dict[str, str]]] = {}
-            for idx, facts in parsed:
-                facts_by_index[idx] = facts
+            try:
+                parsed = _parse_batch_facts(raw_json)
 
-            total_facts = 0
-            for i, msg in enumerate(batch, 1):
-                facts = facts_by_index.get(i, [])
-                if facts:
-                    stored = await _save_facts_to_db(msg["telegram_id"], facts)
-                    total_facts += stored
+                # Сопоставить результаты с сообщениями по индексу
+                facts_by_index: dict[int, list[dict[str, str]]] = {}
+                for idx, facts in parsed:
+                    facts_by_index[idx] = facts
 
-            logger.debug(
-                "Batch auto-save: %d messages → %d facts saved",
-                len(batch),
-                total_facts,
-            )
+                total_facts = 0
+                for i, msg in enumerate(batch, 1):
+                    facts = facts_by_index.get(i, [])
+                    if facts:
+                        stored = await _save_facts_to_db(msg["telegram_id"], facts)
+                        total_facts += stored
 
-        except asyncio.CancelledError:
-            pass
-        except (RequestError, HTTPStatusError, SQLAlchemyError, _json.JSONDecodeError):
-            logger.debug(
-                "Batch auto-save failed for %d messages", len(batch), exc_info=True
-            )
-        except Exception:
-            logger.exception(
-                "Unexpected error during batch auto-save (%d messages)", len(batch)
-            )
+                logger.debug(
+                    "Batch auto-save: %d messages → %d facts saved",
+                    len(batch),
+                    total_facts,
+                )
+
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Batch flush cancelled with %d facts — данные могут быть утеряны",
+                    len(batch),
+                )
+                raise
+            except (
+                RequestError,
+                HTTPStatusError,
+                SQLAlchemyError,
+                _json.JSONDecodeError,
+            ):
+                logger.debug(
+                    "Batch auto-save failed for %d messages", len(batch), exc_info=True
+                )
+            except Exception:
+                logger.exception(
+                    "Unexpected error during batch auto-save (%d messages)", len(batch)
+                )
+        finally:
+            self._is_flushing = False
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -354,11 +451,13 @@ async def get_batch_buffer() -> FactBatchBuffer:
             batch_size=settings.auto_save_batch_size,
             timeout=settings.auto_save_batch_timeout,
             enabled=settings.auto_save_batch_enabled,
+            max_wait=settings.auto_save_batch_max_wait,
         )
         logger.info(
-            "FactBatchBuffer initialized: batch_size=%d, timeout=%.1fs, enabled=%s",
+            "FactBatchBuffer initialized: batch_size=%d, timeout=%.1fs, max_wait=%.1fs, enabled=%s",
             settings.auto_save_batch_size,
             settings.auto_save_batch_timeout,
+            settings.auto_save_batch_max_wait,
             settings.auto_save_batch_enabled,
         )
         return _batch_buffer

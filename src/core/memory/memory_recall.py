@@ -82,6 +82,9 @@ def get_recall_version(telegram_id: int) -> int:
 async def bump_recall_version(telegram_id: int) -> None:
     """Increment the per-user recall cache version after a memory mutation.
 
+    Также сбрасывает prefetch-кэш для пользователя, чтобы после add/delete/update
+    не возвращались stale-результаты (B1: prefetch не проверял версию — TTL до 5с).
+
     Safe to call from any async context; uses its own asyncio.Lock to protect
     the dict write.  Non-blocking: a missed bump is far worse than a deadlock,
     so any exception is swallowed and logged at DEBUG level.
@@ -89,6 +92,10 @@ async def bump_recall_version(telegram_id: int) -> None:
     try:
         async with _get_version_lock():
             _rec_version[telegram_id] = _rec_version.get(telegram_id, 0) + 1
+        # B1: сбросить prefetch-кэш — иначе 5с после мутации возвращается старый результат
+        from src.core.memory.prefetch_recall import clear_prefetch
+
+        await clear_prefetch(telegram_id)
     except Exception:
         logger.debug("bump_recall_version(%s) failed", telegram_id, exc_info=True)
 
@@ -359,7 +366,9 @@ async def recall(
         # теперь capped через recall_max_prefetch для масштабирования.
         # По умолчанию 500 = обратная совместимость с floor старого deep-режима.
         _pf_cap = (
-            max_prefetch if max_prefetch is not None else settings.recall_max_prefetch
+            max_prefetch
+            if (max_prefetch is not None and max_prefetch > 0)
+            else settings.recall_max_prefetch
         )
         if mode == "light":
             _pf_raw = max(limit * 8, 40)

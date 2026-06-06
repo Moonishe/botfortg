@@ -320,6 +320,7 @@ def _compare_with_db(
 
 _SCAN_CACHE: dict[str, tuple[float, ScanResult]] = {}
 _SCAN_CACHE_TTL = 300  # 5 минут
+_SCAN_CACHE_LOCK = asyncio.Lock()
 
 
 def _cache_hash(params: SearchParams) -> str:
@@ -332,17 +333,25 @@ async def scan_avito_cached(params: SearchParams) -> ScanResult:
     """scan_avito с кэшированием результата на 5 минут."""
     key = _cache_hash(params)
     now = _time_module.time()
-    if key in _SCAN_CACHE:
-        ts, result = _SCAN_CACHE[key]
-        if now - ts < _SCAN_CACHE_TTL:
-            return result
+
+    # Проверка кэша под блокировкой (защита от TOCTOU)
+    async with _SCAN_CACHE_LOCK:
+        if key in _SCAN_CACHE:
+            ts, result = _SCAN_CACHE[key]
+            if now - ts < _SCAN_CACHE_TTL:
+                return result
+
+    # Тяжёлая операция — выполняем БЕЗ блокировки
     result = await scan_avito(params)
-    _SCAN_CACHE[key] = (now, result)
-    # Очистка старых записей
-    if len(_SCAN_CACHE) > 100:
-        for k in list(_SCAN_CACHE.keys()):
-            if now - _SCAN_CACHE[k][0] > _SCAN_CACHE_TTL * 2:
-                del _SCAN_CACHE[k]
+
+    # Запись результата и очистка под блокировкой
+    async with _SCAN_CACHE_LOCK:
+        _SCAN_CACHE[key] = (now, result)
+        # Очистка старых записей
+        if len(_SCAN_CACHE) > 100:
+            for k in list(_SCAN_CACHE.keys()):
+                if now - _SCAN_CACHE[k][0] > _SCAN_CACHE_TTL * 2:
+                    del _SCAN_CACHE[k]
     return result
 
 

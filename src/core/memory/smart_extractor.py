@@ -16,6 +16,7 @@ Feature toggles (config.py):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -244,6 +245,7 @@ class ExtractionCacheEntry:
 # In-memory кэш как fallback (используется если cache_manager недоступен)
 _extraction_cache: dict[str, ExtractionCacheEntry] = {}
 _extraction_cache_max = 500
+_extraction_cache_lock = asyncio.Lock()
 
 
 async def make_extract_decision(
@@ -445,13 +447,14 @@ async def cache_extraction_result(
             "ManagedCache unavailable, using in-memory fallback", exc_info=True
         )
 
-    # Fallback: in-memory dict
-    if len(_extraction_cache) >= _extraction_cache_max:
-        # Удаляем старейшую запись
-        oldest = next(iter(_extraction_cache))
-        del _extraction_cache[oldest]
+    # Fallback: in-memory dict (под блокировкой для потокобезопасности)
+    async with _extraction_cache_lock:
+        if len(_extraction_cache) >= _extraction_cache_max:
+            # Удаляем старейшую запись
+            oldest = next(iter(_extraction_cache))
+            del _extraction_cache[oldest]
 
-    _extraction_cache[cache_key] = entry
+        _extraction_cache[cache_key] = entry
     logger.debug("Cached extraction result (in-memory) for key=%s", cache_key[:16])
 
 
@@ -481,10 +484,11 @@ async def _lookup_cache(cache_key: str) -> ExtractionCacheEntry | None:
     except Exception:
         logger.debug("ManagedCache unavailable for lookup", exc_info=True)
 
-    # Fallback: in-memory
-    if cache_key in _extraction_cache:
-        logger.debug("Cache HIT (in-memory) for key=%s", cache_key[:16])
-        return _extraction_cache[cache_key]
+    # Fallback: in-memory (под блокировкой для потокобезопасности)
+    async with _extraction_cache_lock:
+        if cache_key in _extraction_cache:
+            logger.debug("Cache HIT (in-memory) for key=%s", cache_key[:16])
+            return _extraction_cache[cache_key]
 
     logger.debug("Cache MISS (in-memory) for key=%s", cache_key[:16])
     return None

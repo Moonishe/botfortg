@@ -137,7 +137,7 @@ def _log_smart_routing(plan, raw: str) -> None:
                 raw,
             )
     except Exception:
-        pass
+        logger.debug("Smart routing log failed", exc_info=True)
 
 
 # ── Follow-up context ────────────────────────────────────────────────
@@ -1285,7 +1285,9 @@ async def execute_instant(
 
         await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
     except Exception:
-        pass  # hooks are optional, never break core flow
+        logger.debug(
+            "execute_instant hooks.emit on_message_received failed", exc_info=True
+        )  # hooks are optional, never break core flow
 
     # ── Smart Model Routing: логгирование решения ──────────────────
     _log_smart_routing(plan, raw)
@@ -1526,7 +1528,9 @@ async def execute_maestro(
 
         await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
     except Exception:
-        pass  # hooks are optional, never break core flow
+        logger.debug(
+            "execute_maestro hooks.emit on_message_received failed", exc_info=True
+        )  # hooks are optional, never break core flow
 
     # ── Smart Model Routing: логгирование решения ──────────────────
     _log_smart_routing(plan, raw)
@@ -1777,7 +1781,9 @@ async def execute_maestro(
                     humanized = await humanize_deep(
                         humanized, provider, user_style=style_block or ""
                     )
-                except (RequestError, HTTPStatusError):
+                except Exception:
+                    # humanize_deep внутренне ловит все исключения и возвращает исходный текст;
+                    # этот catch — для неожиданных ошибок самого вызова
                     logger.debug("humanize_deep failed on streamed text", exc_info=True)
 
             humanizer_changed = humanized != original_text
@@ -1856,7 +1862,7 @@ async def execute_maestro(
                     plan=pipeline_result.get("plan", []),
                 )
             except Exception:
-                pass
+                logger.debug("post_maestro hooks.emit failed (stream)", exc_info=True)
             # Log assistant response to session
             from src.core.scheduling.session_logger import log_assistant_response
 
@@ -1919,7 +1925,9 @@ async def execute_maestro(
                     humanized = await humanize_deep(
                         humanized, provider, user_style=user_style_hint
                     )
-                except (RequestError, HTTPStatusError):
+                except Exception:
+                    # humanize_deep внутренне ловит все исключения и возвращает исходный текст;
+                    # этот catch — для неожиданных ошибок самого вызова
                     logger.debug(
                         "humanize_deep failed, using light humanized", exc_info=True
                     )
@@ -2019,7 +2027,9 @@ async def execute_maestro(
                     plan=pipeline_result.get("plan", []),
                 )
             except Exception:
-                pass
+                logger.debug(
+                    "post_maestro hooks.emit failed (final_response)", exc_info=True
+                )
             # Log assistant response to session
             from src.core.scheduling.session_logger import log_assistant_response
 
@@ -2040,7 +2050,9 @@ async def execute_maestro(
                 context="free_text_pipeline.execute_maestro",
             )
         except Exception:
-            pass  # hooks are optional, never break core flow
+            logger.debug(
+                "execute_maestro hooks.emit failed", exc_info=True
+            )  # hooks are optional, never break core flow
         logger.debug("Maestro pipeline failed, falling back to route_intent")
         return False
 

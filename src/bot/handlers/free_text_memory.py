@@ -306,6 +306,10 @@ async def _exec_update_memory(intent, message) -> None:
         from src.core.memory.memory_recall import bump_recall_version
 
         await bump_recall_version(message.from_user.id)
+        # B6: инвалидируем stats-кэш после обновления факта
+        from src.core.actions.stats_cache import invalidate as _invalidate_stats
+
+        await _invalidate_stats("mem_")
 
     await safe_answer(
         message,
@@ -350,6 +354,10 @@ async def _exec_link_memories(intent, message) -> None:
 
     # Invalidate recall cache — MemoryLinks affect deep recall BFS traversal.
     await bump_recall_version(message.from_user.id)
+    # B6: инвалидируем stats-кэш после создания связи
+    from src.core.actions.stats_cache import invalidate as _invalidate_stats2
+
+    await _invalidate_stats2("mem_")
 
     rel = f" ({relation_type})" if relation_type else ""
     await safe_answer(
@@ -494,6 +502,10 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
             if m.id == mid:
                 m.sentiment = "neutral"
     await bump_recall_version(callback.from_user.id)
+    # B6: инвалидируем stats-кэш после подтверждения актуальности факта
+    from src.core.actions.stats_cache import invalidate as _invalidate_stats3
+
+    await _invalidate_stats3("mem_")
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
             f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>"

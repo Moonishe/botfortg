@@ -168,9 +168,9 @@ async def test_cache_miss_expired():
         assert 11111 in _prefetch_cache
 
         # Симулируем истечение TTL: подменяем expiry на прошлое
-        from src.core.memory.prefetch_recall import _get_lock
+        from src.core.memory.prefetch_recall import _prefetch_lock
 
-        async with _get_lock():
+        async with _prefetch_lock:
             entry = _prefetch_cache.get(11111)
             if entry:
                 # Подменяем expiry на 100 секунд назад
@@ -182,7 +182,7 @@ async def test_cache_miss_expired():
         assert cached is None, "Протухший кэш должен вернуть None"
 
         # Запись должна быть удалена из кэша
-        async with _get_lock():
+        async with _prefetch_lock:
             assert 11111 not in _prefetch_cache, "Протухшая запись должна быть удалена"
 
 

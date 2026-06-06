@@ -9,6 +9,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +34,25 @@ class MemoryJob:
     source: str = "chat"
 
 
-# Очередь заданий (maxsize=100 — защита от переполнения памяти)
-_queue: asyncio.Queue[MemoryJob] = asyncio.Queue(maxsize=100)
+# Очередь заданий (configurable maxsize — защита от переполнения памяти)
+_queue: asyncio.Queue[MemoryJob] = asyncio.Queue(maxsize=settings.memory_queue_maxsize)
 
 
 async def enqueue(job: MemoryJob) -> None:
-    """Добавить задание в очередь (с таймаутом 10с).
+    """Добавить задание в очередь (с таймаутом из settings.memory_queue_put_timeout).
 
-    Если очередь переполнена — отправитель ждёт до 10 секунд,
+    Если очередь переполнена — отправитель ждёт до таймаута,
     после чего задание отбрасывается с error-логом.
+    B5: timeout увеличен с 10с до 30с (настраивается), добавлен лог с размером очереди.
     """
+    timeout = settings.memory_queue_put_timeout
     try:
-        await asyncio.wait_for(_queue.put(job), timeout=10.0)
+        await asyncio.wait_for(_queue.put(job), timeout=timeout)
     except asyncio.TimeoutError:
-        logger.error("Memory queue stuck, dropping job: %s", job.job_type)
+        logger.error(
+            "Queue full (size=%d, max=%d), dropping job %s after %.0fs timeout",
+            _queue.qsize(),
+            _queue.maxsize,
+            job.job_type,
+            timeout,
+        )

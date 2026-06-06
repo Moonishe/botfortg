@@ -69,6 +69,10 @@ async def consolidate_memories(telegram_id: int) -> int:
 
         await session.flush()
         await bump_recall_version(telegram_id)
+        # B6: инвалидируем stats-кэш после слияния дубликатов
+        from src.core.actions.stats_cache import invalidate
+
+        await invalidate("mem_")
     return merged
 
 
