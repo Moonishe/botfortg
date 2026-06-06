@@ -112,5 +112,63 @@ def should_extract(transcript: str, *, min_score: float = _MIN_SCORE_DEFAULT) ->
 
     Возвращает True, если score_transcript(transcript) >= min_score.
     Дешёвая эвристика — не вызывает LLM, не ходит в БД, не async.
+
+    Оптимизация: при включённом smart_extract_optimized дополнительно
+    проверяет MessageClassifier для пропуска приветствий/прощаний/тривиальных
+    сообщений ещё до скоринга.
     """
+    if not transcript or not transcript.strip():
+        return False
+
+    # ── Быстрый пропуск через classifier (если оптимизации включены) ──
+    try:
+        from src.config import settings
+
+        if getattr(settings, "smart_extract_optimized", True):
+            # Длина < 5 символов — гарантированно шум
+            if len(transcript.strip()) < 5:
+                return False
+            # Однословные тривиальные ответы (ага, ок, да, нет)
+            _trivial_single = frozenset(
+                {
+                    "ага",
+                    "угу",
+                    "ок",
+                    "окей",
+                    "да",
+                    "нет",
+                    "ладно",
+                    "ясно",
+                    "понятно",
+                    "хорошо",
+                    "добро",
+                    "лады",
+                    "неа",
+                    "агась",
+                    "ну",
+                    "блин",
+                    "ого",
+                    "вау",
+                }
+            )
+            words = transcript.strip().split()
+            if len(words) == 1 and words[0].lower().rstrip("!.?,") in _trivial_single:
+                return False
+            # Classifier: приветствия, прощания, тривиальные
+            try:
+                from src.bot.classifier import classify_message
+
+                classification = classify_message(transcript)
+                if classification:
+                    if classification.get("greeting") or classification.get("farewell"):
+                        return False
+                    if classification.get("trivial") and not classification.get(
+                        "command"
+                    ):
+                        return False
+            except Exception:
+                pass  # classifier недоступен — продолжаем без него
+    except Exception:
+        pass  # настройки недоступны — продолжаем без оптимизаций
+
     return score_transcript(transcript) >= min_score

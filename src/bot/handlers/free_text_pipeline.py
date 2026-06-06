@@ -403,13 +403,112 @@ _AUTO_SAVE_PROMPT = (
 )
 
 
+async def _save_extracted_facts(
+    facts_list: list[dict],
+    telegram_id: int,
+) -> int:
+    """Сохраняет список уже извлечённых фактов в память (без LLM-вызова).
+
+    Используется для кэшированных результатов smart_extractor.
+    Возвращает количество сохранённых фактов.
+    """
+    if not facts_list:
+        return 0
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
+        stored = 0
+        for f in facts_list:
+            fact_text = f.get("fact", "").strip()
+            if not fact_text or len(fact_text) < 5:
+                continue
+            sentiment = f.get("sentiment", "neutral")
+            if sentiment not in ("positive", "negative", "neutral"):
+                sentiment = "neutral"
+            await add_memory(
+                session,
+                owner,
+                fact=fact_text,
+                contact_id=None,
+                sentiment=sentiment,
+                source="auto",
+            )
+            stored += 1
+        if stored:
+            logger.info(
+                "Auto-saved %d cached facts for user %d",
+                stored,
+                telegram_id,
+            )
+    return stored
+
+
 async def _maybe_auto_save_facts(
     user_text: str,
     response_text: str,
     telegram_id: int,
     provider,
 ) -> None:
-    """Fire-and-forget: LLM извлекает личные факты → сохраняет в память."""
+    """Fire-and-forget: LLM извлекает личные факты → сохраняет в память.
+
+    Оптимизировано через SmartExtractor:
+      - Пропуск тривиальных сообщений (classifier)
+      - Кэширование результатов извлечения
+      - Scoring приоритетности
+      - Выбор лёгкой/тяжёлой модели
+    """
+    # ── Оптимизация: SmartExtractor решает, извлекать ли ──
+    try:
+        from src.config import settings
+
+        if getattr(settings, "smart_extract_optimized", True):
+            from src.core.memory.smart_extractor import (
+                make_extract_decision,
+                cache_extraction_result,
+                ExtractPriority,
+            )
+
+            decision = await make_extract_decision(user_text, user_id=telegram_id)
+
+            # Быстрый пропуск
+            if not decision.should_extract:
+                logger.debug(
+                    "SmartExtractor SKIP: %s (score=%.2f)",
+                    decision.reason,
+                    decision.score,
+                )
+                return
+
+            # Возвращаем кэшированный результат
+            if decision.cached_result is not None:
+                logger.debug(
+                    "SmartExtractor CACHE HIT: %d facts reused",
+                    len(decision.cached_result),
+                )
+                await _save_extracted_facts(
+                    decision.cached_result,
+                    telegram_id,
+                )
+                return
+
+            # Определяем модель для извлечения
+            use_light = decision.model_mode == "light"
+            logger.debug(
+                "SmartExtractor EXTRACT: priority=%s model=%s score=%.2f",
+                decision.priority.name,
+                decision.model_mode,
+                decision.score,
+            )
+        else:
+            use_light = False
+            decision = None
+    except Exception:
+        logger.debug(
+            "SmartExtractor failed, falling back to basic check", exc_info=True
+        )
+        use_light = False
+        decision = None
+
     # Quick pre-check: skip if message is clearly not personal
     text_lower = user_text.lower()
     if not any(
@@ -439,6 +538,30 @@ async def _maybe_auto_save_facts(
         return
 
     async def _do_save():
+        # ── Батчевый режим: накопление сообщений + сброс единым LLM-запросом ──
+        try:
+            from src.core.memory.auto_save_batch import get_batch_buffer
+
+            batch_buffer = await get_batch_buffer()
+        except Exception:
+            batch_buffer = None
+
+        if batch_buffer is not None and batch_buffer.enabled:
+            # Батчевый режим: добавить в буфер (flush — внутри, fire-and-forget)
+            try:
+                await batch_buffer.add(telegram_id, user_text, response_text, provider)
+            except asyncio.CancelledError:
+                pass
+            except (
+                RequestError,
+                HTTPStatusError,
+                SQLAlchemyError,
+                json.JSONDecodeError,
+            ):
+                logger.debug("Auto-save facts skipped", exc_info=True)
+            return
+
+        # ── Одиночный режим: немедленный LLM-вызов + сохранение ──
         try:
             prompt = _AUTO_SAVE_PROMPT.format(
                 user_text=user_text[:500].replace("{", "{{").replace("}", "}}"),
@@ -489,6 +612,24 @@ async def _maybe_auto_save_facts(
                         telegram_id,
                         "; ".join(f["fact"][:50] for f in facts_list),
                     )
+                    # ── Кэшируем результат извлечения ──
+                    try:
+                        from src.config import settings
+
+                        if getattr(settings, "smart_extract_optimized", True):
+                            from src.core.memory.smart_extractor import (
+                                cache_extraction_result,
+                            )
+
+                            model_mode = "light" if use_light else "heavy"
+                            await cache_extraction_result(
+                                user_text,
+                                facts_list,
+                                model_mode=model_mode,
+                                user_id=telegram_id,
+                            )
+                    except Exception:
+                        logger.debug("Failed to cache extraction result", exc_info=True)
         except asyncio.CancelledError:
             pass
         except (RequestError, HTTPStatusError, SQLAlchemyError, json.JSONDecodeError):

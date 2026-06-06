@@ -1,0 +1,370 @@
+"""Батчевая обработка авто-сохранения фактов.
+
+Вместо одного LLM-вызова на сообщение, накапливает сообщения в буфере
+и отправляет их единым запросом, экономя токены и latency.
+
+Схема:
+  _maybe_auto_save_facts()
+    → pre-check (хватает ли ключевых слов?)
+    → FactBatchBuffer.add()   // fire-and-forget
+       ├─ batch enabled  → добавить в буфер, flush если полный / таймаут
+       └─ batch disabled → сразу _save_single()
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json as _json
+import logging
+import re
+from typing import Any
+
+from httpx import RequestError, HTTPStatusError
+from sqlalchemy.exc import SQLAlchemyError
+
+from src.config import settings
+from src.llm.base import ChatMessage, TaskType
+
+logger = logging.getLogger(__name__)
+
+# ══════════════════════════════════════════════════════════════════════════
+# Батчевый промпт
+# ══════════════════════════════════════════════════════════════════════════
+
+_BATCH_AUTO_SAVE_PROMPT = """You are a fact extractor. You will receive {N} user-assistant message pairs.
+For each message, extract ANY personal facts the user revealed about themselves.
+Only extract facts where the user explicitly states something about:
+- Personal details (name, birthday, job, location)
+- Preferences (likes, dislikes, habits)
+- Plans, commitments, goals
+- Relationships (family, friends, colleagues)
+- Experiences, events, memories
+
+Ignore general questions or requests. Return ONLY JSON:
+{{"results": [{{"msg_index": 1, "facts": [{{"fact": "...", "sentiment": "positive|negative|neutral"}}]}}]}}
+Fact must be a concise statement in third person (e.g. 'User works as a designer').
+If no personal facts — return empty facts array for that message.
+
+{messages_block}"""
+
+
+def _build_batch_prompt(messages: list[dict[str, Any]]) -> str:
+    """Собрать батчевый промпт из накопленных сообщений."""
+    msg_blocks: list[str] = []
+    for i, m in enumerate(messages, 1):
+        user_text = m["user_text"][:500].replace("{", "{{").replace("}", "}}")
+        assistant_text = m["response_text"][:300].replace("{", "{{").replace("}", "}}")
+        msg_blocks.append(
+            f"[{i}] User message: {user_text}\n[{i}] Assistant reply: {assistant_text}"
+        )
+    return _BATCH_AUTO_SAVE_PROMPT.format(
+        N=len(messages),
+        messages_block="\n\n".join(msg_blocks),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Автономное сохранение одного факта (режим без батчинга)
+# ══════════════════════════════════════════════════════════════════════════
+
+_AUTO_SAVE_PROMPT = (
+    "You are a fact extractor. Given a user message and assistant reply, "
+    "extract ANY personal facts the user revealed about themselves. "
+    "Only extract facts where the user explicitly states something about:\n"
+    "- Personal details (name, birthday, job, location)\n"
+    "- Preferences (likes, dislikes, habits)\n"
+    "- Plans, commitments, goals\n"
+    "- Relationships (family, friends, colleagues)\n"
+    "- Experiences, events, memories\n\n"
+    "Ignore general questions or requests. Return ONLY JSON:\n"
+    '{{"facts": [{{"fact": "...", "sentiment": "positive|negative|neutral"}}]}} '
+    'or {{"facts": []}} if no personal facts revealed. '
+    "Fact must be a concise statement in third person (e.g. 'User works as a designer').\n\n"
+    "User message: {user_text}\n"
+    "Assistant reply: {assistant_text}"
+)
+
+
+async def _save_single(
+    telegram_id: int,
+    user_text: str,
+    response_text: str,
+    provider: Any,
+) -> None:
+    """LLM-вызов + сохранение фактов для одного сообщения (режим без батчинга)."""
+    try:
+        prompt = _AUTO_SAVE_PROMPT.format(
+            user_text=user_text[:500].replace("{", "{{").replace("}", "}}"),
+            assistant_text=response_text[:300].replace("{", "{{").replace("}", "}}"),
+        )
+        raw_json = await provider.chat(
+            [ChatMessage(role="user", content=prompt)], task_type=TaskType.DEFAULT
+        )
+        facts = _parse_single_facts(raw_json)
+        if facts:
+            await _save_facts_to_db(telegram_id, facts)
+    except asyncio.CancelledError:
+        pass
+    except (RequestError, HTTPStatusError, SQLAlchemyError, _json.JSONDecodeError):
+        logger.debug("Auto-save facts skipped (single mode)", exc_info=True)
+
+
+def _parse_single_facts(raw_json: str) -> list[dict[str, str]]:
+    """Разобрать JSON-ответ LLM для одного сообщения → список фактов."""
+    cleaned = raw_json.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-z]*\s*|\s*```$", "", cleaned).strip()
+    facts_data = _json.loads(cleaned)
+    facts_list: list[dict[str, str]] = facts_data.get("facts", [])
+    return [
+        f
+        for f in facts_list
+        if f.get("fact", "").strip() and len(f.get("fact", "").strip()) >= 5
+    ]
+
+
+def _parse_batch_facts(raw_json: str) -> list[tuple[int, list[dict[str, str]]]]:
+    """Разобрать JSON-ответ LLM для батча → список (msg_index, [факты])."""
+    cleaned = raw_json.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-z]*\s*|\s*```$", "", cleaned).strip()
+    data = _json.loads(cleaned)
+    results: list[dict[str, Any]] = data.get("results", [])
+    parsed: list[tuple[int, list[dict[str, str]]]] = []
+    for r in results:
+        idx = r.get("msg_index")
+        if idx is None:
+            continue
+        facts = r.get("facts", [])
+        valid_facts = [
+            f
+            for f in facts
+            if f.get("fact", "").strip() and len(f.get("fact", "").strip()) >= 5
+        ]
+        if valid_facts:
+            parsed.append((idx, valid_facts))
+    return parsed
+
+
+async def _save_facts_to_db(
+    telegram_id: int,
+    facts: list[dict[str, str]],
+) -> int:
+    """Сохранить факты в БД. Возвращает количество сохранённых."""
+    from src.db.repo import add_memory, get_or_create_user
+    from src.db.session import get_session
+
+    stored = 0
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
+        for f in facts:
+            fact_text = f.get("fact", "").strip()
+            if not fact_text or len(fact_text) < 5:
+                continue
+            sentiment = f.get("sentiment", "neutral")
+            if sentiment not in ("positive", "negative", "neutral"):
+                sentiment = "neutral"
+            await add_memory(
+                session,
+                owner,
+                fact=fact_text,
+                contact_id=None,
+                sentiment=sentiment,
+                source="auto",
+            )
+            stored += 1
+    if stored:
+        logger.info(
+            "Auto-saved %d facts for user %d: %s",
+            stored,
+            telegram_id,
+            "; ".join(f["fact"][:50] for f in facts),
+        )
+    return stored
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Буфер батчевой обработки
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class FactBatchBuffer:
+    """Накапливает сообщения и отправляет их единым LLM-запросом."""
+
+    def __init__(
+        self,
+        batch_size: int = 5,
+        timeout: float = 10.0,
+        enabled: bool = True,
+    ) -> None:
+        self._buffer: list[dict[str, Any]] = []
+        self._batch_size = max(1, batch_size)
+        self._timeout = max(0.5, timeout)
+        self._enabled = enabled
+        self._lock = asyncio.Lock()
+        self._flush_task: asyncio.Task[Any] | None = None
+
+    # ── Публичный API ──────────────────────────────────────────────────
+
+    async def add(
+        self,
+        telegram_id: int,
+        user_text: str,
+        response_text: str,
+        provider: Any,
+    ) -> None:
+        """Добавить сообщение в буфер. Возвращается сразу, не ждёт LLM.
+
+        Если батчинг выключен — делает одиночный LLM-вызов здесь же.
+        """
+        if not self._enabled:
+            await _save_single(telegram_id, user_text, response_text, provider)
+            return
+
+        async with self._lock:
+            self._buffer.append(
+                {
+                    "telegram_id": telegram_id,
+                    "user_text": user_text,
+                    "response_text": response_text,
+                    "provider": provider,
+                }
+            )
+
+            if len(self._buffer) >= self._batch_size:
+                # Буфер полон — сбросить немедленно
+                batch = list(self._buffer)
+                self._buffer.clear()
+                # Отменить ожидающий таймер, если есть
+                if self._flush_task and not self._flush_task.done():
+                    self._flush_task.cancel()
+                # Запустить фоновую обработку
+                self._flush_task = asyncio.create_task(
+                    self._flush_batch(batch), name="auto-save-flush-batch"
+                )
+            else:
+                # Запустить/перезапустить таймер — сброс после паузы
+                if self._flush_task and not self._flush_task.done():
+                    self._flush_task.cancel()
+                self._flush_task = asyncio.create_task(
+                    self._timeout_flush(), name="auto-save-flush-timeout"
+                )
+
+    async def flush_now(self) -> None:
+        """Принудительный сброс буфера (для graceful shutdown)."""
+        async with self._lock:
+            if not self._buffer:
+                return
+            batch = list(self._buffer)
+            self._buffer.clear()
+            if self._flush_task and not self._flush_task.done():
+                self._flush_task.cancel()
+        await self._flush_batch(batch)
+
+    @property
+    def enabled(self) -> bool:
+        """Включён ли батчинг."""
+        return self._enabled
+
+    @property
+    def pending_count(self) -> int:
+        """Количество сообщений, ожидающих в буфере."""
+        return len(self._buffer)
+
+    # ── Внутренние методы ──────────────────────────────────────────────
+
+    async def _timeout_flush(self) -> None:
+        """Фоновый таймер: через self._timeout секунд сбрасывает буфер."""
+        try:
+            await asyncio.sleep(self._timeout)
+        except asyncio.CancelledError:
+            return
+        async with self._lock:
+            if not self._buffer:
+                return
+            batch = list(self._buffer)
+            self._buffer.clear()
+            asyncio.create_task(
+                self._flush_batch(batch), name="auto-save-flush-timeout-batch"
+            )
+
+    async def _flush_batch(self, batch: list[dict[str, Any]]) -> None:
+        """Обработать накопленный батч: LLM → парсинг → сохранение в БД."""
+        if not batch:
+            return
+
+        try:
+            provider = batch[0]["provider"]
+            prompt = _build_batch_prompt(batch)
+
+            raw_json = await provider.chat(
+                [ChatMessage(role="user", content=prompt)],
+                task_type=TaskType.DEFAULT,
+            )
+
+            parsed = _parse_batch_facts(raw_json)
+
+            # Сопоставить результаты с сообщениями по индексу
+            facts_by_index: dict[int, list[dict[str, str]]] = {}
+            for idx, facts in parsed:
+                facts_by_index[idx] = facts
+
+            total_facts = 0
+            for i, msg in enumerate(batch, 1):
+                facts = facts_by_index.get(i, [])
+                if facts:
+                    stored = await _save_facts_to_db(msg["telegram_id"], facts)
+                    total_facts += stored
+
+            logger.debug(
+                "Batch auto-save: %d messages → %d facts saved",
+                len(batch),
+                total_facts,
+            )
+
+        except asyncio.CancelledError:
+            pass
+        except (RequestError, HTTPStatusError, SQLAlchemyError, _json.JSONDecodeError):
+            logger.debug(
+                "Batch auto-save failed for %d messages", len(batch), exc_info=True
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected error during batch auto-save (%d messages)", len(batch)
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Глобальный экземпляр (ленивая инициализация)
+# ══════════════════════════════════════════════════════════════════════════
+
+_batch_buffer: FactBatchBuffer | None = None
+_buffer_lock = asyncio.Lock()
+
+
+async def get_batch_buffer() -> FactBatchBuffer:
+    """Вернуть глобальный экземпляр FactBatchBuffer (создать при первом вызове)."""
+    global _batch_buffer
+    if _batch_buffer is not None:
+        return _batch_buffer
+    async with _buffer_lock:
+        if _batch_buffer is not None:
+            return _batch_buffer
+        _batch_buffer = FactBatchBuffer(
+            batch_size=settings.auto_save_batch_size,
+            timeout=settings.auto_save_batch_timeout,
+            enabled=settings.auto_save_batch_enabled,
+        )
+        logger.info(
+            "FactBatchBuffer initialized: batch_size=%d, timeout=%.1fs, enabled=%s",
+            settings.auto_save_batch_size,
+            settings.auto_save_batch_timeout,
+            settings.auto_save_batch_enabled,
+        )
+        return _batch_buffer
+
+
+def reset_batch_buffer() -> None:
+    """Сбросить глобальный буфер (для тестов)."""
+    global _batch_buffer
+    _batch_buffer = None

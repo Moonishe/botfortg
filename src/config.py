@@ -231,6 +231,20 @@ class Settings(BaseSettings):
         description="Включить умный выбор лёгкой/тяжёлой модели по сложности запроса",
     )
 
+    # ── Smart Extract Optimization ──
+    smart_extract_optimized: bool = Field(
+        True,
+        description="Включить оптимизации smart-извлечения: пропуск тривиальных, кэш, приоритеты, лёгкая модель",
+    )
+    extract_priority_threshold: float = Field(
+        0.3,
+        description="Порог приоритетности для извлечения фактов (0.0–1.0). Сообщения с score ниже — пропускаются.",
+    )
+    extract_cache_ttl: int = Field(
+        300,
+        description="TTL кэша результатов извлечения фактов (секунды)",
+    )
+
     # ── Streaming ──
     streaming_enabled: bool = Field(True, description="Включить streaming-ответы")
     streaming_edit_interval: float = Field(
@@ -432,6 +446,18 @@ class Settings(BaseSettings):
     )
 
     # Smart correction
+    # ── Auto-save facts batching ──
+    auto_save_batch_enabled: bool = Field(
+        True,
+        description="Объединять авто-сохранение фактов в батчи (экономит LLM-вызовы)",
+    )
+    auto_save_batch_size: int = Field(
+        5, description="Размер батча для авто-сохранения фактов"
+    )
+    auto_save_batch_timeout: float = Field(
+        10.0, description="Таймаут сброса батча авто-сохранения (секунды)"
+    )
+
     smart_correction_action_ttl: float = Field(
         60.0, description="TTL хранимых действий для smart-correction (сек)"
     )
