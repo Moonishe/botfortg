@@ -5,6 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import or_, select
 
+from src.core.memory.relation_types import RelationType
 from src.db.models import Memory, MemoryLink
 from src.db.repo import (
     get_contact,
@@ -17,24 +18,24 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 
 RELATION_EMOJI = {
-    "cause": "🎯",
-    "effect": "⚡",
-    "contradicts": "⚠️",
-    "supports": "✅",
-    "continues": "➡️",
-    "example_of": "📌",
-    "supersedes": "🔄",
+    RelationType.CAUSE: "🎯",
+    RelationType.EFFECT: "⚡",
+    RelationType.CONTRADICTS: "⚠️",
+    RelationType.SUPPORTS: "✅",
+    RelationType.CONTINUES: "➡️",
+    RelationType.EXAMPLE_OF: "📌",
+    RelationType.SUPERSEDES: "🔄",
     None: "•",
 }
 
 RELATION_WORD = {
-    "cause": "потому что",
-    "effect": "из-за этого",
-    "contradicts": "но",
-    "supports": "и это подтверждает что",
-    "continues": "затем",
-    "example_of": "например",
-    "supersedes": "обновлено на",
+    RelationType.CAUSE: "потому что",
+    RelationType.EFFECT: "из-за этого",
+    RelationType.CONTRADICTS: "но",
+    RelationType.SUPPORTS: "и это подтверждает что",
+    RelationType.CONTINUES: "затем",
+    RelationType.EXAMPLE_OF: "например",
+    RelationType.SUPERSEDES: "обновлено на",
     None: "",
 }
 
@@ -196,7 +197,7 @@ async def follow_supersedes_chain(
         result = await session.execute(
             select(MemoryLink).where(
                 MemoryLink.user_id == owner.id,
-                MemoryLink.relation_type == "supersedes",
+                MemoryLink.relation_type == RelationType.SUPERSEDES,
                 or_(
                     MemoryLink.source_id == mid,
                     MemoryLink.target_id == mid,

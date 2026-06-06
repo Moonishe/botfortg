@@ -9,6 +9,7 @@ import logging
 import re
 
 from src.core.contacts.chat_service import message_to_text
+from src.core.memory.relation_types import RelationType
 from src.db.models import Contact, Message
 from src.llm.base import ChatMessage, LLMProvider, TaskType
 
@@ -47,8 +48,12 @@ MEMORIES_SYSTEM = (
     '  "preference" — предпочтения: "предпочитаю чай кофе", "люблю получать голосовые"\n'
     '  "temporary" — временное: "я сегодня устал", "сейчас нахожусь в Краснодаре"\n'
     "Для каждого факта укажи связь с ПРЕДЫДУЩИМИ фактами из того же диалога, если она есть:\n"
-    '- "relation_type": "cause" (причина), "effect" (следствие), "contradicts" (противоречие), '
-    '"supports" (подтверждение), "continues" (продолжение темы), "example_of" (пример)\n'
+    f'- "relation_type": "{RelationType.CAUSE.value}" (причина), '
+    f'"{RelationType.EFFECT.value}" (следствие), '
+    f'"{RelationType.CONTRADICTS.value}" (противоречие), '
+    f'"{RelationType.SUPPORTS.value}" (подтверждение), '
+    f'"{RelationType.CONTINUES.value}" (продолжение темы), '
+    f'"{RelationType.EXAMPLE_OF.value}" (пример)\n'
     '- "relation_to_index": индекс предыдущего факта (0-based) в этом же ответе, с которым связан\n'
     "Если значимых фактов нет — пустой массив [].\n"
     "Не выдумывай то, чего нет в переписке. Пиши на русском."

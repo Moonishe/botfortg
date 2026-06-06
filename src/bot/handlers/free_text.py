@@ -32,6 +32,7 @@ from src.core.intelligence.smart_autorouter import make_plan
 from src.core.memory import conversation_context as ctx_store
 from src.core.infra.timeutil import now_in_tz
 from src.core.infra.transcription import transcription_service
+from src.core.infra.telemetry import start_span
 from src.crypto import decrypt
 from src.db.models import LlmKeySlot
 from src.db.repo import (
@@ -380,7 +381,15 @@ async def _voice_worker() -> None:
                         try:
                             # State is stale in background worker — pass None.
                             # Any code needing FSMContext methods will log a warning and skip.
-                            await _process_text(text, message, None, userbot_manager)
+                            _vuid = (
+                                str(message.from_user.id) if message.from_user else "0"
+                            )
+                            with start_span(
+                                "message.process", user_id=_vuid, text_len=len(text)
+                            ):
+                                await _process_text(
+                                    text, message, None, userbot_manager
+                                )
                         except Exception:
                             logger.exception(
                                 "Failed to process transcribed text in worker"
@@ -1415,7 +1424,8 @@ async def free_text(
         await message.answer("⏯ Прервал предыдущую задачу. Обрабатываю новый запрос…")
 
     try:
-        await _process_text(raw, message, state, userbot_manager)
+        with start_span("message.process", user_id=str(uid), text_len=len(raw)):
+            await _process_text(raw, message, state, userbot_manager)
     except Exception:
         logger.exception("_process_text failed for user %s", uid)
         try:

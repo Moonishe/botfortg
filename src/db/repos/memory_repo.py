@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # «supersede» (без 's') или «replaces». Полный список должен совпадать с
 # RELATION_EMOJI.keys() в src/core/memory/memory_chain.py и с LLM-промптом
 # MEMORIES_SYSTEM в src/core/memory/memory_extractor.py.
+# Канонические константы: src.core.memory.relation_types.RelationType.
 _VALID_RELATION_TYPES: frozenset[str] = frozenset(
     {
         "cause",
@@ -617,6 +618,9 @@ async def _auto_link_memory(
 
     # Batch query optimization — collects all links and flushes in batch.
     """
+    # Lazy import to avoid circular: memory_repo -> relation_types -> core.memory
+    from src.core.memory.relation_types import RelationType
+
     if not memory.fact or not memory.is_active:
         return
 
@@ -646,11 +650,11 @@ async def _auto_link_memory(
                     continue
 
                 if cosine_score >= 0.90:
-                    relation_type = "supports"
+                    relation_type = RelationType.SUPPORTS
                 elif cosine_score >= 0.75:
-                    relation_type = "related"  # strong
+                    relation_type = RelationType.RELATED  # strong
                 else:
-                    relation_type = "related"  # weak
+                    relation_type = RelationType.RELATED  # weak
 
                 pending_links.append((memory.id, hit_id, cosine_score, relation_type))
         except (
@@ -685,7 +689,9 @@ async def _auto_link_memory(
                 overlap = len(words & c_words)
                 if overlap >= 2:
                     weight = 0.3 + overlap * 0.1
-                    pending_links.append((memory.id, c.id, weight, "related"))
+                    pending_links.append(
+                        (memory.id, c.id, weight, RelationType.RELATED)
+                    )
 
     # ── Pass 3: Temporal co-occurrence ───────────────────────────────────
     # Same contact, created_at within 1 hour
@@ -706,7 +712,7 @@ async def _auto_link_memory(
         for c in result.scalars().all():
             if not c.fact:
                 continue
-            pending_links.append((memory.id, c.id, 0.5, "co_temporal"))
+            pending_links.append((memory.id, c.id, 0.5, RelationType.CO_TEMPORAL))
 
     # ── Pass 4: Entity co-occurrence (shared proper nouns) ───────────────
     # Simple: capitalized word >= 3 chars
@@ -739,7 +745,7 @@ async def _auto_link_memory(
                 and w.strip(".,!?;:'\"()[]{}").isalpha()
             }
             if proper_nouns & c_upper:
-                pending_links.append((memory.id, c.id, 0.4, "co_entity"))
+                pending_links.append((memory.id, c.id, 0.4, RelationType.CO_ENTITY))
 
     # ── Pass 5: Cause-effect hint ────────────────────────────────────────
     # If new fact is negative, link from older positive facts of same contact
@@ -763,7 +769,7 @@ async def _auto_link_memory(
         for c in result.scalars().all():
             if not c.fact:
                 continue
-            pending_links.append((c.id, memory.id, 0.3, "preceded"))
+            pending_links.append((c.id, memory.id, 0.3, RelationType.PRECEDED))
 
     # ── Batch flush all links ────────────────────────────────────────────
     if pending_links:

@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 from src.bot.app import run_bot
 from src.bot.handlers.free_text import start_voice_worker, stop_voice_worker
+from src.core.infra.app_context import get_app_context
 from src.core.memory.memory_queue import start_worker, stop_worker
 from src.core.infra.task_manager import task_manager, stop_ff_tasks
 from src.core.infra.update_notifier import check_and_notify_update
@@ -48,6 +49,7 @@ def _register_background_tasks() -> None:
     import src.core.scheduling.avito  # noqa: F401
     import src.core.scheduling.message_scheduler  # noqa: F401
     import src.core.rag.ingest  # noqa: F401 — rag_watchdog
+    import src.core.crypto.rotation_task  # noqa: F401 — key_rotation_loop
 
 
 async def main() -> None:
@@ -67,6 +69,10 @@ async def main() -> None:
     from src.llm.router import ensure_locks_initialized
 
     await ensure_locks_initialized()
+
+    # --- DI container: wire up all singletons ---
+    ctx = get_app_context()
+    await ctx.initialize(settings)
 
     # --- Cold-start skill seeding ---
     if settings.skill_seed_on_startup:
@@ -192,6 +198,17 @@ async def main() -> None:
 
     userbot_manager = UserbotManager()
     await userbot_manager.restore_all()
+
+    # --- Key Rotation: инициализация KEK/DEK менеджера ---
+    if settings.key_rotation_enabled:
+        try:
+            from src.core.crypto.key_rotation import init_rotation_manager
+
+            _kek = settings.encryption_key.encode()
+            _mgr = init_rotation_manager(_kek)
+            logger.info("KeyRotationManager инициализирован (KEK/DEK)")
+        except Exception:
+            logger.exception("Ошибка инициализации KeyRotationManager")
 
     _register_background_tasks()
     task_manager.start_all()

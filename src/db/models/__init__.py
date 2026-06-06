@@ -53,6 +53,7 @@ from src.db.models._session import (
     AgentSession,
     AgentSessionMessage,
 )
+from src.db.models._encryption import EncryptionKey
 
 __all__ = [
     "AllowedContact",
@@ -99,4 +100,5 @@ __all__ = [
     "AvitoWatch",
     "AgentSession",
     "AgentSessionMessage",
+    "EncryptionKey",
 ]

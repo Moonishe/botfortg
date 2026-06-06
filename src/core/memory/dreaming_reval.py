@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.core.infra.key_guard import mask_keys, safe_str
+from src.core.infra.telemetry import start_span
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_admin import (
     ALLOWED_MEMORY_TYPES,
@@ -416,12 +417,17 @@ async def reval_run(
         return summary
     _REVAL_INFLIGHT.add(owner_telegram_id)
     try:
-        return await _reval_run_impl(
-            owner_telegram_id,
-            limit,
-            confidence_threshold,
-            vector_store_obj=vector_store_obj,
-        )
+        with start_span(
+            "dreaming.reval_run",
+            user_id=str(owner_telegram_id),
+            limit=limit or settings.dreaming_reval_max_per_run,
+        ):
+            return await _reval_run_impl(
+                owner_telegram_id,
+                limit,
+                confidence_threshold,
+                vector_store_obj=vector_store_obj,
+            )
     finally:
         _REVAL_INFLIGHT.discard(owner_telegram_id)
 

@@ -199,6 +199,14 @@ class Settings(BaseSettings):
     # ── Фото-кэш ──
     photo_cache_ttl_sec: int = Field(300, description="TTL кэша фотографий (секунды)")
 
+    # ── Key Rotation (KEK/DEK) ──
+    key_rotation_enabled: bool = Field(
+        False, description="Включить KEK/DEK ротацию ключей шифрования"
+    )
+    key_rotation_interval_days: int = Field(
+        30, description="Интервал ротации DEK (дни)"
+    )
+
     # ── Streaming ──
     streaming_enabled: bool = Field(True, description="Включить streaming-ответы")
     streaming_edit_interval: float = Field(
@@ -300,6 +308,12 @@ class Settings(BaseSettings):
             "Max parallel LLM calls during revaluation. Matches the 'background' "
             "purpose Semaphore in router; raise to use more keys concurrently."
         ),
+    )
+
+    # ── OpenTelemetry ──
+    otel_enabled: bool = Field(False, description="Enable OpenTelemetry tracing")
+    otel_exporter_endpoint: str = Field(
+        "", description="OTLP exporter endpoint (e.g. http://localhost:4318/v1/traces)"
     )
 
     # ── Limits & timeouts ──
