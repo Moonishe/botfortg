@@ -8,9 +8,11 @@ DeepSeek V4 Flash (free): 1M контекст, reasoning, coding — топ бе
 """
 
 import httpx
+from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
 from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
+from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
@@ -22,17 +24,23 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"
 HEAVY_MODEL = "deepseek/deepseek-v4-flash:free"
 
 
-# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat
-class OpenRouterProvider(OpenAICompatBaseMixin):
+class OpenRouterProvider(OpenAICompatBaseMixin, BaseLLMProvider):
     """Провайдер для OpenRouter free models (DeepSeek V4 Flash и другие).
 
     OpenAI-совместимый API. Не поддерживает embeddings (free tier без эмбеддингов).
     """
 
     name = "openrouter"
+    _LIGHT_MODEL = DEFAULT_MODEL
+    _HEAVY_MODEL = HEAVY_MODEL
 
     def __init__(
-        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        embed_model: str | None = None,
     ) -> None:
         base_url = _validate_base_url(base_url)
         kwargs: dict = dict(
@@ -45,16 +53,19 @@ class OpenRouterProvider(OpenAICompatBaseMixin):
             },
         )
         self._client = AsyncOpenAI(**kwargs)
-        self._model = model
+        super().__init__(api_key=api_key, model=model, embed_model=embed_model)
 
-    def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (HEAVY_MODEL if heavy else DEFAULT_MODEL)
-
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> str:
         model = self._resolve_model(heavy)
         resp = await self._client.chat.completions.create(
             model=model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=self._fmt_messages(messages),
             extra_headers={
                 "X-Title": "TelegramHelper",
             },

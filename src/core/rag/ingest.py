@@ -119,8 +119,8 @@ async def _read_html(path: Path) -> str:
 
 async def _get_embeddings(texts: list[str]) -> list[list[float]]:
     """Get embeddings for text chunks using the primary provider."""
-    from src.core.actions.embedding_cache import get as cache_get
-    from src.core.actions.embedding_cache import set as cache_set
+    from src.core.actions.embedding_cache import aget as cache_get
+    from src.core.actions.embedding_cache import aset as cache_set
     from src.llm.router import build_provider
     from src.llm.base import TaskType
     from src.db.session import get_session
@@ -145,14 +145,14 @@ async def _get_embeddings(texts: list[str]) -> list[list[float]]:
 
     for text in texts:
         # Check cache
-        cached = cache_get(text, model)
+        cached = await cache_get(text, model)
         if cached is not None:
             embeddings.append(cached)
             continue
 
         try:
             emb = await provider.embed(text)
-            cache_set(text, emb, model)
+            await cache_set(text, emb, model)
             embeddings.append(emb)
         except Exception as e:
             logger.debug("Embedding failed for chunk: %s", e)

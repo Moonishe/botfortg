@@ -141,7 +141,7 @@ async def main() -> None:
 
     init_owner_context()
     try:
-        count = index_contexts_to_fts()
+        count = await index_contexts_to_fts()
         if count:
             logger.info("FTS5 context index: %d files", count)
     except Exception:

@@ -16,11 +16,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import sqlite3
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+
+import aiosqlite
 
 from src.config import PROJECT_ROOT, settings
 from src.core.infra.task_manager import track_ff
@@ -260,50 +261,46 @@ def list_context_files() -> list[str]:
     )
 
 
-def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
-    """Sync FTS5/substring search — body of the original ``search_in_contexts``.
+async def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
+    """FTS5/substring search — body of ``search_in_contexts``.
 
-    Runs SQLite I/O in a worker thread via ``asyncio.to_thread`` from the
-    async wrapper below. Kept private; callers should use the async version.
+    Uses aiosqlite for FTS5 queries; falls back to substring scan
+    via ``asyncio.to_thread`` when the FTS5 table is unavailable.
     """
     if not CONTEXTS_DIR.exists():
         return []
 
     db_path = _get_db_path()
 
-    # ── Try FTS5 first ──────────────────────────────────────────────
+    # ── Try FTS5 first (aiosqlite) ───────────────────────────────────
     if db_path.exists():
-        conn: sqlite3.Connection | None = None
-        try:
-            conn = sqlite3.connect(str(db_path))
-            fts_q = _fts5_simple_query(query)
-            if fts_q:
-                rows = conn.execute(
-                    "SELECT key, snippet(contexts_fts, 1, '<b>', '</b>', '…', 64) AS snippet, "
-                    "       rank "
-                    "FROM contexts_fts WHERE contexts_fts MATCH ? "
-                    "ORDER BY rank LIMIT ?",
-                    (fts_q, limit),
-                ).fetchall()
-                if rows:
-                    return [
-                        {
-                            "key": r[0],
-                            "snippet": r[1] or "",
-                            "rank": float(r[2]) if r[2] is not None else 0.0,
-                        }
-                        for r in rows
-                    ]
-        except sqlite3.OperationalError:
-            pass  # FTS5 table doesn't exist → fall back to substring
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+        fts_q = _fts5_simple_query(query)
+        if fts_q:
+            try:
+                async with aiosqlite.connect(str(db_path)) as db:
+                    # Ensure FTS5 table exists (connect is read-only by default)
+                    await db.execute("PRAGMA journal_mode=WAL")
+                    async with db.execute(
+                        "SELECT key, snippet(contexts_fts, 1, '<b>', '</b>', '…', 64) AS snippet, "
+                        "       rank "
+                        "FROM contexts_fts WHERE contexts_fts MATCH ? "
+                        "ORDER BY rank LIMIT ?",
+                        (fts_q, limit),
+                    ) as cursor:
+                        rows = await cursor.fetchall()
+                    if rows:
+                        return [
+                            {
+                                "key": r[0],
+                                "snippet": r[1] or "",
+                                "rank": float(r[2]) if r[2] is not None else 0.0,
+                            }
+                            for r in rows
+                        ]
+            except Exception:
+                pass  # FTS5 table doesn't exist → fall back to substring
 
-    # ── Fallback: substring search (with injection scanning) ───────
+    # ── Fallback: substring search (with injection scanning) ─────────
     results: list[dict] = []
     ql = query.lower()
     for md_file in CONTEXTS_DIR.iterdir():
@@ -324,12 +321,13 @@ def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
 
 
 async def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
-    """Async wrapper around ``_sync_search_in_contexts`` — runs SQLite I/O in a worker thread.
+    """Async FTS5/substring search for context files.
 
-    Falls back to substring search if the FTS5 table doesn't exist.
+    Uses aiosqlite for FTS5 queries; falls back to substring scan
+    when the FTS5 table is unavailable.
     Returns [{"key": "оля", "snippet": "...<b>контекст</b>...", "rank": 0.5}, ...]
     """
-    return await asyncio.to_thread(_sync_search_in_contexts, query, limit=limit)
+    return await _sync_search_in_contexts(query, limit=limit)
 
 
 def init_owner_context() -> None:
@@ -353,8 +351,8 @@ def init_owner_context() -> None:
 # ============================================================================
 
 
-def index_contexts_to_fts() -> int:
-    """Index all context .md files into the FTS5 virtual table.
+async def index_contexts_to_fts() -> int:
+    """Index all context .md files into the FTS5 virtual table (aiosqlite).
 
     Creates ``contexts_fts(key, content)`` if it doesn't exist,
     then INSERT OR REPLACE every .md file's content.
@@ -371,13 +369,13 @@ def index_contexts_to_fts() -> int:
         logger.warning("Database file not found at %s, skipping FTS5 indexing", db_path)
         return 0
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
+    async with aiosqlite.connect(str(db_path)) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS contexts_fts "
             "USING fts5(key, content, tokenize='unicode61 remove_diacritics 2')"
         )
-        conn.execute("DELETE FROM contexts_fts")  # clear stale entries
+        await db.execute("DELETE FROM contexts_fts")  # clear stale entries
 
         count = 0
         for md_file in sorted(CONTEXTS_DIR.iterdir()):
@@ -389,17 +387,15 @@ def index_contexts_to_fts() -> int:
             content = safe_read_context_file(str(md_file), max_chars=10000)
             if content is None:
                 continue
-            conn.execute(
+            await db.execute(
                 "INSERT INTO contexts_fts(key, content) VALUES (?, ?)",
                 (key, content),
             )
             count += 1
 
-        conn.commit()
+        await db.commit()
         logger.info("Indexed %d context files into FTS5", count)
         return count
-    finally:
-        conn.close()
 
 
 # ============================================================================

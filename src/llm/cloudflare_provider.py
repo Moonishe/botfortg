@@ -11,7 +11,7 @@ CLOUDFLARE_CHAT_LIGHT = "@cf/qwen/qwen3-30b-a3b-fp8"
 CLOUDFLARE_CHAT_HEAVY = "@cf/moonshotai/kimi-k2.6"
 
 
-class CloudflareProvider(BaseLLMProvider, OpenAICompatEmbedMixin):
+class CloudflareProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
     """Cloudflare Workers AI провайдер (OpenAI-совместимый API).
 
     Использует AsyncOpenAI с кастомным base_url на Cloudflare Accounts AI Gateway.

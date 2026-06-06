@@ -5,14 +5,14 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 
+from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 logger = logging.getLogger(__name__)
 
 
-# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, validate_key, close
-class AnthropicProvider:
+class AnthropicProvider(BaseLLMProvider):
     """Anthropic Claude provider via Messages API.
 
     Unlike OpenAI, Anthropic uses a different API structure:
@@ -25,9 +25,16 @@ class AnthropicProvider:
     """
 
     name = "anthropic"
+    _LIGHT_MODEL = "claude-3-5-haiku-20241022"
+    _HEAVY_MODEL = "claude-3-5-sonnet-20241022"
 
     def __init__(
-        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        embed_model: str | None = None,
     ) -> None:
         import anthropic
 
@@ -36,7 +43,7 @@ class AnthropicProvider:
         if base_url:
             kwargs["base_url"] = base_url
         self._client: anthropic.AsyncAnthropic = anthropic.AsyncAnthropic(**kwargs)
-        self._model = model
+        super().__init__(api_key=api_key, model=model, embed_model=embed_model)
 
     async def validate_key(self) -> bool:
         try:
@@ -49,12 +56,13 @@ class AnthropicProvider:
         except Exception:
             return False
 
-    def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            "claude-3-5-sonnet-20241022" if heavy else "claude-3-5-haiku-20241022"
-        )
-
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> str:
         system, anthropic_messages = self._convert_messages(messages)
         model = self._resolve_model(heavy)
         kwargs: dict = {
@@ -72,7 +80,11 @@ class AnthropicProvider:
         return ""
 
     async def chat_stream(
-        self, messages: list[ChatMessage], *, heavy: bool = False
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
     ) -> AsyncGenerator[str, None]:
         system, anthropic_messages = self._convert_messages(messages)
         model = self._resolve_model(heavy)

@@ -59,14 +59,14 @@ async def search_docs(
         if provider is None:
             return {"error": "Недоступен embedding-провайдер"}
 
-        from src.core.actions.embedding_cache import get as cache_get
-        from src.core.actions.embedding_cache import set as cache_set
+        from src.core.actions.embedding_cache import aget as cache_get
+        from src.core.actions.embedding_cache import aset as cache_set
 
         model = getattr(provider, "_embed_model", None) or "text-embedding-3-small"
-        query_vec = cache_get(query, model)
+        query_vec = await cache_get(query, model)
         if query_vec is None:
             query_vec = await provider.embed(query[:500])
-            cache_set(query[:500], query_vec, model)
+            await cache_set(query[:500], query_vec, model)
 
         # Search Qdrant
         from src.core.rag.document_store import get_document_store

@@ -4,6 +4,7 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 
+from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
@@ -25,9 +26,10 @@ def _to_gemini_contents(messages: list[ChatMessage]) -> tuple[str | None, list[d
     return system, contents
 
 
-# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, embed_batch (partial)
-class GeminiProvider:
+class GeminiProvider(BaseLLMProvider):
     name = "gemini"
+    _LIGHT_MODEL = GEMINI_CHAT_LIGHT
+    _HEAVY_MODEL = GEMINI_CHAT_HEAVY
 
     def __init__(
         self,
@@ -46,8 +48,7 @@ class GeminiProvider:
             base_url
         )  # defense-in-depth: guards against non-None custom URLs
         self._client = genai.Client(api_key=api_key, http_options={"timeout": 60000})
-        self._model = model
-        self._embed_model = embed_model
+        super().__init__(api_key=api_key, model=model, embed_model=embed_model)
 
     async def validate_key(self) -> bool:
         def _check() -> bool:
@@ -66,10 +67,13 @@ class GeminiProvider:
 
         return await asyncio.to_thread(_check)
 
-    def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (GEMINI_CHAT_HEAVY if heavy else GEMINI_CHAT_LIGHT)
-
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> str:
         model = self._resolve_model(heavy)
         system, contents = _to_gemini_contents(messages)
 

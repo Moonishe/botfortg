@@ -7,9 +7,14 @@
 
 Иерархия:
     BaseLLMProvider (ABC)
-        └── OpenAICompatBaseMixin  — validate_key, list_models, close
-            └── OpenAICompatEmbedMixin  — embed, embed_batch
-                └── Конкретные провайдеры (OpenAI, DeepSeek, Mistral, ...)
+    OpenAICompatBaseMixin  — validate_key, list_models, close
+        └── OpenAICompatEmbedMixin  — embed, embed_batch
+            └── Конкретные провайдеры (OpenAI, DeepSeek, Mistral, ...)
+
+    Важно: при наследовании mixin должен быть ПЕРЕД BaseLLMProvider:
+        class MyProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
+    Это нужно, чтобы mixin-переопределения abstract-методов (close, validate_key)
+    были обнаружены механизмом ABC.
 
 AnthropicProvider и GeminiProvider — standalone, но тоже наследуют BaseLLMProvider
 для общих методов (_resolve_model, _fmt_messages).

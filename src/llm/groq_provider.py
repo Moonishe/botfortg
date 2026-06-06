@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
 from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
+from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
@@ -22,14 +23,20 @@ GROQ_CHAT_LIGHT = "llama-3.3-70b-versatile"
 GROQ_CHAT_HEAVY = "mixtral-8x7b-32768"
 
 
-# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__, chat, chat_stream
-class GroqProvider(OpenAICompatBaseMixin):
+class GroqProvider(OpenAICompatBaseMixin, BaseLLMProvider):
     """Провайдер для Groq — OpenAI-совместимый API. Без embeddings."""
 
     name = "groq"
+    _LIGHT_MODEL = GROQ_CHAT_LIGHT
+    _HEAVY_MODEL = GROQ_CHAT_HEAVY
 
     def __init__(
-        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        embed_model: str | None = None,
     ) -> None:
         base_url = _validate_base_url(base_url)
         kwargs: dict = dict(
@@ -38,24 +45,31 @@ class GroqProvider(OpenAICompatBaseMixin):
             timeout=httpx.Timeout(60.0, connect=10.0),
         )
         self._client = AsyncOpenAI(**kwargs)
-        self._model = model
+        super().__init__(api_key=api_key, model=model, embed_model=embed_model)
 
-    def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (GROQ_CHAT_HEAVY if heavy else GROQ_CHAT_LIGHT)
-
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> str:
         model = self._resolve_model(heavy)
         resp = await self._client.chat.completions.create(
             model=model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=self._fmt_messages(messages),
         )
         return resp.choices[0].message.content or ""
 
     async def chat_stream(
-        self, messages: list[ChatMessage], *, heavy: bool = False
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
     ) -> AsyncGenerator[str, None]:
         model = self._resolve_model(heavy)
-        fmt = [{"role": m.role, "content": m.content} for m in messages]
+        fmt = self._fmt_messages(messages)
         stream = await self._client.chat.completions.create(
             model=model, messages=fmt, stream=True
         )

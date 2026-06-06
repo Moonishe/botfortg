@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
 from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
@@ -10,9 +11,10 @@ OPENAI_CHAT_LIGHT = "gpt-5-mini"
 OPENAI_CHAT_HEAVY = "gpt-5.5"
 
 
-# TODO: inherit from BaseLLMProvider — дублирующийся _resolve_model, _fmt_messages, __init__
-class OpenAIProvider(OpenAICompatEmbedMixin):
+class OpenAIProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
     name = "openai"
+    _LIGHT_MODEL = OPENAI_CHAT_LIGHT
+    _HEAVY_MODEL = OPENAI_CHAT_HEAVY
 
     def __init__(
         self,
@@ -27,25 +29,31 @@ class OpenAIProvider(OpenAICompatEmbedMixin):
         if base_url:
             kwargs["base_url"] = base_url
         self._client = AsyncOpenAI(**kwargs)
-        self._model = model
-        self._embed_model = embed_model
+        super().__init__(api_key=api_key, model=model, embed_model=embed_model)
 
-    def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (OPENAI_CHAT_HEAVY if heavy else OPENAI_CHAT_LIGHT)
-
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> str:
         model = self._resolve_model(heavy)
         resp = await self._client.chat.completions.create(
             model=model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=self._fmt_messages(messages),
         )
         return resp.choices[0].message.content or ""
 
     async def chat_stream(
-        self, messages: list[ChatMessage], *, heavy: bool = False
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
     ) -> AsyncGenerator[str, None]:
         model = self._resolve_model(heavy)
-        fmt = [{"role": m.role, "content": m.content} for m in messages]
+        fmt = self._fmt_messages(messages)
         stream = await self._client.chat.completions.create(
             model=model, messages=fmt, stream=True
         )
