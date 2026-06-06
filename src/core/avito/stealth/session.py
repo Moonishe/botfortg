@@ -36,11 +36,13 @@ class AvitoSession:
         self,
         proxy: str | None = None,
         use_browser_fallback: bool = True,
+        max_connections: int = 5,
     ) -> None:
         self.fingerprint: Fingerprint = random_fingerprint()
         self.cookies: CookieStore = CookieStore()
         self.proxy: str | None = proxy
         self.use_browser_fallback: bool = use_browser_fallback
+        self._max_connections: int = max_connections
         self._created_at: float = asyncio.get_event_loop().time()
         self._requests_count: int = 0
         self._client: httpx.AsyncClient | None = None
@@ -50,7 +52,10 @@ class AvitoSession:
         if self._client is None:
             import httpx
 
-            limits = httpx.Limits(max_keepalive_connections=1, max_connections=1)
+            limits = httpx.Limits(
+                max_keepalive_connections=self._max_connections,
+                max_connections=self._max_connections,
+            )
             transport = httpx.AsyncHTTPTransport(retries=1)
             self._client = httpx.AsyncClient(
                 http2=True,

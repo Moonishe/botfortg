@@ -7,12 +7,16 @@
 - Оценка выгодности (deal_score)
 - Проверка на мошенничество (anti_scam)
 - Сравнение с БД (инкрементальный анализ)
+- Загрузка полных описаний с карточек (опционально)
+- LLM-анализ объявлений (опционально)
+- Ротация прокси (опционально)
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time as _time_module
 from typing import Any
@@ -21,6 +25,27 @@ from urllib.parse import quote_plus
 from src.core.avito.anti_scam import check_scam
 from src.core.avito.deal_score import calculate_deal_score
 from src.core.avito.parser import parse_listings
+
+# ── SSRF-защита: допустимые домены Авито ─────────────────────────────────
+_ALLOWED_AVITO_HOSTS = {"www.avito.ru", "m.avito.ru", "avito.ru"}
+
+
+def _validate_avito_url(url: str) -> str:
+    """Валидирует что URL указывает на домен Авито перед HTTP-запросом.
+
+    Предотвращает SSRF-атаки — запрещает запросы к другим доменам.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.hostname not in _ALLOWED_AVITO_HOSTS and not (
+        parsed.hostname and parsed.hostname.endswith(".avito.ru")
+    ):
+        raise ValueError(
+            f"URL not allowed: {parsed.hostname} (expected avito.ru domain)"
+        )
+    return url
+
 
 logger = logging.getLogger(__name__)
 
@@ -74,33 +99,131 @@ class ScanResult:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  HTTP-загрузка (stealth-сессия)
+#  HTTP-загрузка (stealth-сессия) + прокси
 # ═══════════════════════════════════════════════════════════════════════════
 
 _stealth_session: object | None = None
 _stealth_lock = asyncio.Lock()
+_proxy_rotator: object | None = None
+_proxy_rotator_lock = asyncio.Lock()
 
 
-async def _get_stealth_session():
+async def _get_proxy_rotator():
+    """Lazy-init ротатора прокси (если настроен)."""
+    global _proxy_rotator
+
+    if _proxy_rotator is not None:
+        return _proxy_rotator
+
+    async with _proxy_rotator_lock:
+        if _proxy_rotator is not None:
+            return _proxy_rotator
+
+        try:
+            from src.config import settings
+
+            proxy_list_raw = settings.avito_proxy_list
+            if not proxy_list_raw or not proxy_list_raw.strip():
+                _proxy_rotator = False  # маркер «не настроен»
+                return None
+
+            proxies = json.loads(proxy_list_raw)
+            if not proxies or not isinstance(proxies, list):
+                _proxy_rotator = False
+                return None
+
+            from src.core.avito.proxy_rotator import ProxyRotator
+
+            _proxy_rotator = ProxyRotator(proxies)
+            return _proxy_rotator
+        except Exception:
+            logger.debug(
+                "_get_proxy_rotator: не удалось инициализировать", exc_info=True
+            )
+            _proxy_rotator = False
+            return None
+
+
+async def _get_stealth_session(proxy_url: str | None = None):
     """Lazy-init the stealth session (warmup once, reuse)."""
     global _stealth_session
+
+    if proxy_url and _stealth_session is not None:
+        # Если прокси изменился — пересоздаём сессию
+        current_proxy = getattr(_stealth_session, "proxy", None)
+        if current_proxy != proxy_url:
+            await _close_stealth_session()
+            _stealth_session = None
+
     if _stealth_session is None:
         async with _stealth_lock:
             if _stealth_session is None:
                 from src.core.avito.stealth.session import AvitoSession
 
-                _stealth_session = AvitoSession()
+                _stealth_session = AvitoSession(proxy=proxy_url)
                 await _stealth_session.warmup()  # type: ignore[attr-defined]
     return _stealth_session
 
 
+async def _close_stealth_session() -> None:
+    """Закрывает глобальную stealth-сессию."""
+    global _stealth_session
+    if _stealth_session is not None:
+        try:
+            await _stealth_session.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        _stealth_session = None
+
+
 async def _fetch_page(url: str) -> str:
-    """Загружает HTML-страницу через stealth-сессию (httpx + browser fallback)."""
-    session = await _get_stealth_session()
-    resp = await session.fetch(url)  # type: ignore[attr-defined]
-    if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}: страница не загружена")
-    return resp.text
+    """Загружает HTML-страницу через stealth-сессию (httpx + browser fallback).
+
+    Если настроен ProxyRotator — использует прокси из пула.
+    """
+    # SSRF-защита: defence in depth
+    _validate_avito_url(url)
+
+    # Получаем прокси если настроен ротатор
+    proxy_url: str | None = None
+    proxy_entry: object | None = None
+
+    rotator = await _get_proxy_rotator()
+    if rotator is not False and rotator is not None:
+        proxy_entry = await rotator.get_proxy()  # type: ignore[attr-defined]
+        if proxy_entry is not None:
+            proxy_url = proxy_entry.url  # type: ignore[attr-defined]
+
+    session = await _get_stealth_session(proxy_url=proxy_url)
+    try:
+        resp = await session.fetch(url)  # type: ignore[attr-defined]
+        if resp.status_code != 200:
+            # Отмечаем ошибку прокси если был использован
+            if proxy_entry is not None and rotator is not None:
+                try:
+                    await rotator.mark_failure(proxy_entry)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            raise RuntimeError(f"HTTP {resp.status_code}: страница не загружена")
+
+        # Успех — сбрасываем счётчик ошибок прокси
+        if proxy_entry is not None and rotator is not None:
+            try:
+                await rotator.mark_success(proxy_entry)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        return resp.text
+    except RuntimeError:
+        raise
+    except Exception:
+        # Отмечаем ошибку прокси
+        if proxy_entry is not None and rotator is not None:
+            try:
+                await rotator.mark_failure(proxy_entry)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -232,6 +355,8 @@ async def scan_avito(
     params: SearchParams,
     *,
     existing: dict[str, dict[str, Any]] | None = None,
+    fetch_details: bool = False,  # NEW: загружать полные описания с карточек
+    detail_fetch_limit: int = 10,  # NEW: макс. карточек для обогащения (top-N)
 ) -> ScanResult:
     """Полный цикл сканирования Авито.
 
@@ -241,10 +366,14 @@ async def scan_avito(
     4. Считает deal_score для каждого
     5. Проверяет на мошенничество
     6. Сравнивает с existing (инкрементальный анализ)
+    7. (NEW) Если fetch_details=True — загружает полные описания
+    8. (NEW) Если avito_llm_analysis=True — анализирует через LLM
 
     Args:
         params: Параметры поиска.
         existing: Словарь {avito_id: listing_data} из БД для инкрементального анализа.
+        fetch_details: Загружать полные описания с карточек объявлений.
+        detail_fetch_limit: Максимум карточек для загрузки полных описаний.
 
     Returns:
         ScanResult с полными данными.
@@ -322,9 +451,44 @@ async def scan_avito(
                 "reasons": [],
             }
 
+    # ── (NEW) 6. Обогащение полными описаниями ───────────────────────────
+    if fetch_details and parsed:
+        await _enrich_listings(parsed, detail_fetch_limit)
+
+        # Пересчитываем deal_score с полным описанием
+        for listing in parsed:
+            full_desc = listing.get("full_description", "")
+            if full_desc:
+                # Подменяем description на полное для скоринга
+                original_desc = listing.get("description", "")
+                listing["description"] = full_desc
+                try:
+                    deal = calculate_deal_score(
+                        listing,
+                        avg_price=stats["avg_price"],
+                        min_price=stats["min_price"],
+                    )
+                    listing["deal_score"] = deal
+                except Exception:
+                    logger.exception(
+                        "scan_avito: ошибка пересчёта deal_score для %s",
+                        listing.get("avito_id"),
+                    )
+                # Восстанавливаем оригинальное короткое описание
+                listing["description"] = original_desc
+
+    # ── (NEW) 7. LLM-анализ ──────────────────────────────────────────────
+    try:
+        from src.config import settings
+
+        if settings.avito_llm_analysis:
+            await _llm_analyze_listings(parsed, detail_fetch_limit)
+    except Exception:
+        logger.exception("scan_avito: ошибка LLM-анализа")
+
     result.listings = parsed
 
-    # 6. Инкрементальный анализ
+    # 8. Инкрементальный анализ
     new_listings, price_changes, unchanged = _compare_with_db(parsed, existing)
     result.new_listings = new_listings
     result.price_changes = price_changes
@@ -341,12 +505,142 @@ async def scan_avito(
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Обогащение объявлений (полные описания)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def _enrich_listings(
+    parsed: list[dict[str, Any]],
+    limit: int,
+) -> None:
+    """Загружает полные описания для top-N объявлений по deal_score."""
+    if not parsed or limit <= 0:
+        return
+
+    # Сортируем по deal_score (лучшие первые)
+    sorted_listings = sorted(
+        parsed,
+        key=lambda x: x.get("deal_score", {}).get("score", 0),
+        reverse=True,
+    )
+
+    # Берём top-N с URL
+    to_fetch = [
+        (listing, listing["url"])
+        for listing in sorted_listings[:limit]
+        if listing.get("url")
+    ]
+
+    if not to_fetch:
+        return
+
+    urls = [url for _, url in to_fetch]
+    logger.info(
+        "_enrich_listings: загрузка %d карточек из %d объявлений",
+        len(urls),
+        len(parsed),
+    )
+
+    # Используем существующую сессию
+    session = await _get_stealth_session()
+
+    try:
+        from src.core.avito.listing_fetcher import fetch_listing_details_batch
+
+        details = await fetch_listing_details_batch(
+            urls, session=session, concurrency=3
+        )
+    except Exception:
+        logger.exception("_enrich_listings: ошибка загрузки деталей")
+        return
+
+    # Обновляем объявления
+    for listing, url in to_fetch:
+        detail = details.get(url)
+        if detail is None or detail.get("error"):
+            listing["_detail_error"] = detail.get("error") if detail else "no_data"
+            continue
+
+        # Сливаем данные
+        listing["full_description"] = detail.get("full_description", "")
+        listing["view_count"] = detail.get("view_count")
+        listing["extra_images"] = detail.get("extra_images", [])
+        listing["seller_joined_date"] = detail.get("seller_joined_date")
+        listing["listing_characteristics"] = detail.get("listing_characteristics", {})
+        listing["seller_other_listings_count"] = detail.get(
+            "seller_other_listings_count"
+        )
+        listing["_detail_error"] = None
+
+    enriched = sum(
+        1
+        for l, _ in to_fetch
+        if l.get("full_description") and not l.get("_detail_error")
+    )
+    logger.info("_enrich_listings: обогащено %d/%d", enriched, len(to_fetch))
+
+
+async def _llm_analyze_listings(
+    parsed: list[dict[str, Any]],
+    limit: int,
+) -> None:
+    """Анализирует top-N объявлений через LLM."""
+    if not parsed or limit <= 0:
+        return
+
+    # Берём top-N по deal_score с полным описанием
+    candidates = [
+        l for l in parsed if l.get("full_description") or l.get("description")
+    ]
+    candidates.sort(
+        key=lambda x: x.get("deal_score", {}).get("score", 0),
+        reverse=True,
+    )
+    to_analyze = candidates[:limit]
+
+    if not to_analyze:
+        return
+
+    logger.info(
+        "_llm_analyze_listings: анализ %d объявлений через LLM", len(to_analyze)
+    )
+
+    from src.core.avito.llm_analyzer import analyze_listing_llm
+
+    for listing in to_analyze:
+        try:
+            analysis = await analyze_listing_llm(listing)
+            listing["llm_analysis"] = analysis
+        except Exception:
+            logger.exception(
+                "_llm_analyze_listings: ошибка для %s", listing.get("avito_id")
+            )
+            listing["llm_analysis"] = {
+                "deal_quality": 0,
+                "red_flags": [],
+                "recommendation": "skip",
+                "summary": "",
+                "reasoning": "",
+                "error": "Ошибка анализа",
+            }
+
+
 async def quick_scan(url: str) -> ScanResult:
     """Быстрое сканирование по прямой ссылке (без построения URL).
 
     Полезно для ручной проверки конкретной страницы.
     """
     result = ScanResult()
+
+    # SSRF-защита: проверяем что URL ведёт на Авито
+    try:
+        url = _validate_avito_url(url)
+    except ValueError as exc:
+        result.error = str(exc)
+        logger.warning("quick_scan: %s", exc)
+        return result
+
     result.url = url
 
     try:

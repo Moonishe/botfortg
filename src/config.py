@@ -138,6 +138,20 @@ class Settings(BaseSettings):
     avito_default_city: str = Field(
         "moskva", description="Город по умолчанию для Авито"
     )
+    avito_proxy_list: str = Field(
+        "",
+        description='JSON-список прокси: [{"url":"...","type":"mobile","change_ip_url":"..."}]',
+    )
+    avito_fetch_details: bool = Field(
+        False, description="Загружать полные описания с карточек объявлений"
+    )
+    avito_detail_fetch_limit: int = Field(
+        10, description="Максимум карточек для загрузки полных описаний за один скан"
+    )
+    avito_llm_analysis: bool = Field(
+        False,
+        description="Анализировать объявления через LLM (требует полные описания)",
+    )
     sleep_tracker_check_sec: int = Field(900, description="Интервал трекера сна")
     sleep_tracker_fallback_sec: int = Field(600, description="Fallback трекера сна")
     memory_patterns_interval_sec: int = Field(

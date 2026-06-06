@@ -139,6 +139,67 @@ FINGERPRINTS: list[Fingerprint] = [
         platform="Win32",
         languages="ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     ),
+    # ── Мобильные отпечатки (для прокси-фермы) ──────────────────────────
+    # 9: Android Chrome 131 на Pixel 8 Pro (412x915)
+    Fingerprint(
+        user_agent=(
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.6778.200 Mobile Safari/537.36"
+        ),
+        sec_ch_ua='"Google Chrome";v="131", "Chromium";v="131", "Not=A?Brand";v="24"',
+        sec_ch_ua_platform='"Android"',
+        sec_ch_ua_mobile="?1",
+        viewport_width=412,
+        viewport_height=915,
+        platform="Linux armv8l",
+        languages="ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    ),
+    # 10: Android Chrome 130 на Samsung S24 (412x915)
+    Fingerprint(
+        user_agent=(
+            "Mozilla/5.0 (Linux; Android 14; SM-S921B) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/130.0.6723.102 Mobile Safari/537.36"
+        ),
+        sec_ch_ua='"Google Chrome";v="130", "Chromium";v="130", "Not=A?Brand";v="99"',
+        sec_ch_ua_platform='"Android"',
+        sec_ch_ua_mobile="?1",
+        viewport_width=412,
+        viewport_height=915,
+        platform="Linux armv8l",
+        languages="ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    ),
+    # 11: Android Chrome 131 на Xiaomi 14 (393x873)
+    Fingerprint(
+        user_agent=(
+            "Mozilla/5.0 (Linux; Android 14; 23127PN0CG) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.6778.135 Mobile Safari/537.36"
+        ),
+        sec_ch_ua='"Google Chrome";v="131", "Chromium";v="131", "Not=A?Brand";v="24"',
+        sec_ch_ua_platform='"Android"',
+        sec_ch_ua_mobile="?1",
+        viewport_width=393,
+        viewport_height=873,
+        platform="Linux armv8l",
+        languages="ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    ),
+    # 12: iOS Safari на iPhone 15 Pro (390x844)
+    Fingerprint(
+        user_agent=(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/18.0 Mobile/15E148 Safari/604.1"
+        ),
+        sec_ch_ua='"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+        sec_ch_ua_platform='"iOS"',
+        sec_ch_ua_mobile="?1",
+        viewport_width=390,
+        viewport_height=844,
+        platform="iPhone",
+        languages="ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    ),
 ]
 
 
@@ -159,6 +220,12 @@ class FingerprintPool:
     def by_index(idx: int) -> Fingerprint:
         """Return a specific fingerprint by index (0-based)."""
         return FINGERPRINTS[idx % len(FINGERPRINTS)]
+
+    @staticmethod
+    def random_mobile() -> Fingerprint:
+        """Return a random MOBILE fingerprint."""
+        mobile_fps = [fp for fp in FINGERPRINTS if fp.sec_ch_ua_mobile == "?1"]
+        return random.choice(mobile_fps) if mobile_fps else random.choice(FINGERPRINTS)
 
 
 def random_fingerprint() -> Fingerprint:
