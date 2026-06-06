@@ -66,6 +66,7 @@ from .free_text_pipeline import (
 )
 from src.core.humanizer import record_humanizer_feedback, _pop_last_humanized
 from .rate_limiter import check_rate_limit
+from src.bot.classifier import classify_message as _classify_message
 from src.core.security.prompt_injection_scanner import scan_content
 from httpx import RequestError, HTTPStatusError
 from aiogram.exceptions import TelegramAPIError
@@ -196,6 +197,84 @@ async def _pop_singalong_search(key: int) -> list | None:
     if val is not None:
         await _singalong_search_cache.invalidate(key)
     return val
+
+
+# ── Contact prefetch helpers ──────────────────────────────────────────
+
+
+def _extract_contact_hint(message: Message) -> str | None:
+    """Extract a contact hint from message entities and reply context.
+
+    Checks:
+    1. @mention entities (type='mention' or type='text_mention')
+    2. Reply context (reply_to_message author name)
+
+    Returns the hint string or None.
+    """
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "mention" and entity.offset is not None and message.text:
+                mention = message.text[entity.offset : entity.offset + entity.length]
+                return mention.lstrip("@").strip()
+            if entity.type == "text_mention" and entity.user:
+                # text_mention has a User object — use first_name or username
+                if entity.user.username:
+                    return entity.user.username
+                if entity.user.first_name:
+                    return entity.user.first_name
+
+    # Reply context
+    if message.reply_to_message and message.reply_to_message.from_user:
+        replied = message.reply_to_message.from_user
+        if replied.username:
+            return replied.username
+        if replied.first_name:
+            return replied.first_name
+
+    return None
+
+
+async def _do_prefetch_contact(
+    user_id: int,
+    contact_hint: str | None,
+    userbot_manager,
+) -> None:
+    """Fire-and-forget: prefetch contact data into cache.
+
+    Runs in background — errors are caught and logged, never propagated.
+    """
+    try:
+        from src.bot.prefetch import prefetch_contact
+        from src.db.repo import get_or_create_user
+        from src.db.session import get_session
+
+        telethon_client = None
+        owner = None
+        if contact_hint is not None and userbot_manager is not None:
+            try:
+                telethon_client = userbot_manager.get_client(user_id)
+            except Exception:
+                pass
+            if telethon_client is not None:
+                try:
+                    async with get_session() as session:
+                        owner = await get_or_create_user(session, user_id)
+                except Exception:
+                    pass
+
+        await prefetch_contact(
+            user_id,
+            contact_hint=contact_hint,
+            telethon_client=telethon_client,
+            owner=owner,
+        )
+    except Exception:
+        logger.debug(
+            "_do_prefetch_contact failed for user=%d hint=%r",
+            user_id,
+            contact_hint,
+            exc_info=True,
+        )
 
 
 class VoiceJob(NamedTuple):
@@ -569,6 +648,63 @@ async def _process_text(
 
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = await ctx_store.render_history_block(message.from_user.id)
+
+    # ── Stage -2: Trie/Aho-Corasick classifier (additive, pre-pipeline) ──
+    # Fast O(n) classification to skip expensive LLM checks for trivial messages.
+    # Does NOT replace pre_gate — it augments it by catching more patterns.
+    if settings.classifier_enabled:
+        try:
+            classification = _classify_message(raw)
+            logger.debug("Classifier result: %s", classification)
+        except Exception:
+            logger.debug("Classifier failed, proceeding normally", exc_info=True)
+            classification = None
+    else:
+        classification = None
+
+    # ── Classifier fast-path: greeting/trivial/farewell → pre_gate response ──
+    if classification and (
+        classification.get("greeting")
+        or classification.get("farewell")
+        or (classification.get("trivial") and not classification.get("command"))
+    ):
+        try:
+            from src.core.intelligence.pre_gate import check_pre_gate
+
+            gate_resp = check_pre_gate(raw)
+            if gate_resp:
+                await message.answer(sanitize_html(gate_resp))
+                # Record turn
+                try:
+                    from src.core.memory.session_recorder import record_turn
+
+                    async with get_session() as rec_session:
+                        await record_turn(
+                            rec_session, message.from_user.id, "user", raw[:100]
+                        )
+                        await record_turn(
+                            rec_session,
+                            message.from_user.id,
+                            "assistant",
+                            gate_resp[:100],
+                        )
+                except Exception:
+                    pass
+                _fire_record_trajectory(
+                    owner_telegram_id,
+                    request_text=raw,
+                    route_mode="classifier_gate",
+                    intent_json={
+                        "intent": "greeting",
+                        "classification": classification,
+                    },
+                    response_text=gate_resp,
+                    success=True,
+                    latency_ms=int((time.monotonic() - turn_started) * 1000),
+                )
+                return
+        except Exception:
+            logger.debug("Classifier fast-path failed, continuing", exc_info=True)
 
     # ── Stage -1: Background fact extraction (enqueue) ───────────────
     # Без этого extract_and_save_memories() НЕ вызывается в main flow,
@@ -1072,11 +1208,25 @@ async def _process_text(
         _last_purpose = await ctx_store.get_last_purpose(message.from_user.id)
     except Exception:
         logger.exception("failed to get last purpose")
+
+    # S1-T1: получить prefetched recall результат если есть
+    _prefetched_ctx: str | None = None
+    if settings.prefetch_recall_enabled:
+        try:
+            from src.core.memory.prefetch_recall import get_prefetched_recall
+
+            _pf_data = await get_prefetched_recall(owner_telegram_id)
+            if _pf_data:
+                _prefetched_ctx = _pf_data.get("memory_context", "") or None
+        except Exception:
+            pass  # prefetch — оптимизация
+
     plan = await make_plan(
         raw,
         owner_telegram_id,
         heavy_available=use_heavy,
         last_purpose=_last_purpose,
+        prefetched_context=_prefetched_ctx,
     )
     if plan is None:
         return
@@ -1316,6 +1466,35 @@ async def free_text(
 
     if len(raw) > 2000:
         raw = raw[:1987] + "...(truncated)"
+
+    # ── Stage -2: Contact prefetch (fire-and-forget) ───────────────────
+    # Extract contact hints from message entities and reply context.
+    # Prefetches contact data so later resolution can skip DB queries.
+    if settings.contact_prefetch_enabled:
+        try:
+            _contact_hint = _extract_contact_hint(message)
+            if _contact_hint is not None:
+                # Fire-and-forget: prefetch contact data in background
+                asyncio.create_task(
+                    _do_prefetch_contact(uid, _contact_hint, userbot_manager)
+                )
+            else:
+                # No hint found — prefetch the user's contact list anyway
+                asyncio.create_task(_do_prefetch_contact(uid, None, userbot_manager))
+        except Exception:
+            pass  # never block message processing
+
+    # ── S1-T1: Prefetch memory recall (fire-and-forget) ───────────────
+    # Оптимистичный prefetch: запускаем recall в фоне до того,
+    # как роутинг решит, нужна ли память. Если решит что нужна —
+    # результат уже будет в кэше (экономия 50-500ms).
+    if settings.prefetch_recall_enabled:
+        try:
+            from src.core.memory.prefetch_recall import prefetch_recall as _pf_recall
+
+            asyncio.create_task(_pf_recall(uid, raw))
+        except Exception:
+            pass  # prefetch — оптимизация, никогда не блокируем
 
     # ── Stage -1: Scheduled message NL intent ─────────────────────────
     # "напомни Маше про встречу завтра в 10:00" → создаём ScheduledMessage

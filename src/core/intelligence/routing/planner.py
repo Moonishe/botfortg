@@ -89,11 +89,16 @@ async def make_plan(
     provider_available: bool = True,
     heavy_available: bool = True,
     last_purpose: str | None = None,
+    prefetched_context: str | None = None,
 ) -> RouterPlan:
     """
     Строит план обработки запроса.
     Определяет режим ответа, собирает контекст (recall, self_profile),
     выбирает purpose, heavy/light, агентов, кэш.
+
+    prefetched_context — опционально: готовая строка memory_context
+    из оптимистичного prefetch (S1-T1). Если передана и recall_mode == "light"
+    — используется БЕЗ повторного вызова recall().
     """
     plan = RouterPlan()
     start = time.monotonic()
@@ -126,32 +131,74 @@ async def make_plan(
         plan.recall_mode = "deep"
 
     t1 = time.monotonic()
+
+    # ── S1-T1: Оптимистичный prefetch recall ─────────────────────
+    # Проверяем переданный prefetched_context или глобальный кэш.
+    # Если recall_mode == "light" и prefetch дал результат —
+    # пропускаем тяжёлый recall(), экономим 50-500ms.
+    _prefetched_used = False
+    if plan.recall_mode == "light":
+        if prefetched_context:
+            plan.memory_context = prefetched_context
+            plan.metrics["prefetch_hit"] = True
+            plan.metrics["recall_mode"] = "light"
+            _prefetched_used = True
+        else:
+            try:
+                from src.core.memory.prefetch_recall import get_prefetched_recall
+
+                _prefetch_data = await get_prefetched_recall(telegram_id)
+                if _prefetch_data:
+                    plan.memory_context = _prefetch_data.get("memory_context", "")
+                    plan.metrics["prefetch_hit"] = True
+                    plan.metrics["recall_mode"] = "light"
+                    _prefetched_used = True
+            except Exception:
+                pass  # prefetch — оптимизация, не критично
+
     # ---------- Общая сессия для recall + self-profile ----------
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
 
-        # Recall с общей сессией
-        try:
-            from src.core.memory.memory_recall import recall, format_recall_for_prompt
+        # Recall с общей сессией (только если prefetch НЕ сработал)
+        if not _prefetched_used:
+            try:
+                from src.core.memory.memory_recall import (
+                    recall,
+                    format_recall_for_prompt,
+                )
 
-            recall_result = await recall(
+                recall_result = await recall(
+                    telegram_id,
+                    session=session,
+                    query=user_text[:200],
+                    limit=10,
+                    include_self=True,
+                    include_pinned=True,
+                    include_tasks=True,
+                    include_deep=plan.recall_mode == "deep",
+                    mode=plan.recall_mode,
+                )
+                plan.recall_result = recall_result
+                plan.memory_context = format_recall_for_prompt(recall_result)
+                if recall_result and recall_result.facts:
+                    meta["recall_hit"] = len(recall_result.facts)
+                    meta["recall_facts"] = [
+                        rf.fact[:80] for rf in recall_result.facts[:3]
+                    ]
+            except Exception:
+                logger.debug("smart_autorouter: recall skipped", exc_info=True)
+        else:
+            # Prefetch использован — логируем для метрик
+            if prefetched_context:
+                meta["prefetch_source"] = "parameter"
+            else:
+                meta["prefetch_source"] = "cache"
+            logger.debug(
+                "smart_autorouter: prefetch recall used for user %s (%s)",
                 telegram_id,
-                session=session,
-                query=user_text[:200],
-                limit=10,
-                include_self=True,
-                include_pinned=True,
-                include_tasks=True,
-                include_deep=plan.recall_mode == "deep",
-                mode=plan.recall_mode,
+                meta.get("prefetch_source", "unknown"),
             )
-            plan.recall_result = recall_result
-            plan.memory_context = format_recall_for_prompt(recall_result)
-            if recall_result and recall_result.facts:
-                meta["recall_hit"] = len(recall_result.facts)
-                meta["recall_facts"] = [rf.fact[:80] for rf in recall_result.facts[:3]]
-        except Exception:
-            logger.debug("smart_autorouter: recall skipped", exc_info=True)
 
         # Self-profile той же сессией
         try:

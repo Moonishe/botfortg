@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     habit_tracker_interval_sec: int = Field(
         3600, description="Интервал трекера привычек"
     )
+    # ── Prefetch recall ──
+    prefetch_recall_enabled: bool = Field(
+        True, description="Включить оптимистичный prefetch memory recall (S1-T1)"
+    )
+    prefetch_recall_ttl: float = Field(
+        5.0, description="TTL кэша prefetch recall (секунды)"
+    )
+
     memory_check_interval_sec: int = Field(600, description="Интервал проверки памяти")
     auto_sync_interval_sec: int = Field(
         3600, description="Интервал авто-синхронизации контактов"
@@ -205,6 +213,11 @@ class Settings(BaseSettings):
     )
     key_rotation_interval_days: int = Field(
         30, description="Интервал ротации DEK (дни)"
+    )
+
+    # ── Message classifier ──
+    classifier_enabled: bool = Field(
+        True, description="Включить Trie/Aho-Corasick классификатор сообщений"
     )
 
     # ── Streaming ──
@@ -337,6 +350,14 @@ class Settings(BaseSettings):
         60.0, description="Recall cache TTL without facts (sec)"
     )
 
+    # ── Contact prefetch ──
+    contact_prefetch_enabled: bool = Field(
+        True, description="Prefetch contacto data at message handler start"
+    )
+    contact_cache_ttl: int = Field(
+        300, description="Contact prefetch cache TTL in seconds (5 min)"
+    )
+
     # Humanizer
     humanizer_deep_min_length: int = Field(
         100, description="Минимальная длина текста для deep humanizer"
@@ -384,6 +405,11 @@ class Settings(BaseSettings):
     skill_auto_evolve_min_failures: int = Field(
         3,
         description="Минимальное количество провалов для запуска auto-evolution навыка",
+    )
+
+    # Pre-gate pattern filtering
+    pre_gate_extended: bool = Field(
+        True, description="Enable extended pre-gate pattern matching (100+ patterns)"
     )
 
     # Smart correction
