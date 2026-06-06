@@ -574,7 +574,23 @@ class MultiKeyProvider:
         pass
 
     async def list_models(self) -> list[str]:
-        """Delegate to underlying provider. Not key-rotated — uses first key."""
+        """Возвращает включённые (enabled) модели для всех ключей провайдера.
+
+        Если в БД есть LlmKeySlotModel с enabled=True — возвращаем только их.
+        Иначе fallback: запрашиваем все модели через API первого ключа.
+        """
+        enabled = set()
+        if self._slot_ids:
+            from src.db.session import get_session
+
+            for slot_id in self._slot_ids:
+                async with get_session() as session:
+                    from src.db.repos.key_repo import get_enabled_models
+
+                    enabled.update(await get_enabled_models(session, slot_id))
+        if enabled:
+            return sorted(enabled)
+        # Fallback: если нет enabled моделей в БД — возвращаем все из API
         key = self._keys[0]
         provider = self._provider_class(key)
         try:
@@ -787,8 +803,15 @@ class ProviderFallback:
                 await p.close()
 
     async def list_models(self) -> list[str]:
-        """Delegate to primary provider's list_models."""
-        return await self.primary.list_models()
+        """Возвращает только включённые (enabled) модели из всех primary-провайдеров."""
+        all_models: set[str] = set()
+        for provider in self.providers:
+            try:
+                models = await provider.list_models()
+                all_models.update(models)
+            except Exception:
+                continue
+        return sorted(all_models)
 
 
 class ExhaustedProvider:

@@ -245,6 +245,17 @@ async def _build_models_keyboard(
             callback_data="models:close",
         ),
     )
+    # Кнопки экспорта/импорта моделей между слотами (Improvement 4)
+    kb.row(
+        InlineKeyboardButton(
+            text="📋 Скопировать в другой слот",
+            callback_data=f"models:export:{slot_id}",
+        ),
+        InlineKeyboardButton(
+            text="📋 Скопировать из другого слота",
+            callback_data=f"models:import:{slot_id}",
+        ),
+    )
 
     return kb.as_markup()
 

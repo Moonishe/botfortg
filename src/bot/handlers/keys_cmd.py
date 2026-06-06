@@ -64,6 +64,16 @@ _DISCOVERY_CACHE_TTL: float = 3600.0  # 1 час
 _multiselect_state: dict[int, set[str]] = {}  # slot_id → {выбранные model names}
 _multiselect_page: dict[int, int] = {}  # slot_id → текущая страница
 
+# ─── Capability metadata для авто-обнаруженных моделей (Improvement 2) ─────
+_discovery_models_info: dict[int, list[dict]] = {}
+# slot_id → [{"name": ..., "vision": bool, "embeddings": bool}, ...]
+
+# ─── Фильтр multi-select (Improvement 2) ────────────────────────────────
+_multiselect_filter: dict[int, str] = {}  # slot_id → "all" | "vision" | "embeddings"
+
+# ─── Результаты поиска моделей (Improvement 3, временный filtered view) ───
+_discovery_cache_search: dict[int, list[str]] = {}
+
 
 def _cache_models_discovery(slot_id: int, models: list[str]) -> None:
     """Сохранить обнаруженные модели в кэш."""
@@ -79,6 +89,51 @@ def _get_cached_discovery(slot_id: int) -> list[str] | None:
     _discovery_cache.pop(slot_id, None)
     _discovery_cache_ts.pop(slot_id, None)
     return None
+
+
+def _fetch_model_capabilities(models: list[str], provider_name: str) -> list[dict]:
+    """Эвристически определяет возможности моделей по имени (Improvement 2).
+
+    Поскольку /v1/models не всегда возвращает capabilities, используем
+    эвристики на основе известных паттернов в названиях моделей.
+    """
+    result = []
+    for name in models:
+        name_lower = name.lower()
+        result.append(
+            {
+                "name": name,
+                "vision": any(
+                    kw in name_lower
+                    for kw in (
+                        "vision",
+                        "gpt-4o",
+                        "gpt-4-turbo",
+                        "claude-3",
+                        "claude-4",
+                        "gemini-2",
+                        "gemini-1.5",
+                        "pixtral",
+                        "llava",
+                        "cogvlm",
+                        "qwen-vl",
+                        "vision",
+                    )
+                ),
+                "embeddings": any(
+                    kw in name_lower
+                    for kw in (
+                        "embed",
+                        "bge",
+                        "e5",
+                        "text-embedding",
+                        "babbage",
+                        "cohere",
+                    )
+                ),
+            }
+        )
+    return result
 
 
 # ─── /keys import helpers ─────────────────────────────────────────────
@@ -419,6 +474,23 @@ def _build_model_multiselect_keyboard(
     start = page * per_page
     page_models = models[start : start + per_page]
 
+    # ── Строка фильтров (Improvement 2) ──────────────────────────────
+    active_filter = _multiselect_filter.get(slot_id, "all")
+    filter_row: list[InlineKeyboardButton] = []
+    for ftype, label in [
+        ("all", "🔍 Все"),
+        ("vision", "👁 Vision"),
+        ("embeddings", "📊 Embeddings"),
+    ]:
+        prefix = "▶ " if active_filter == ftype else ""
+        filter_row.append(
+            InlineKeyboardButton(
+                text=f"{prefix}{label}",
+                callback_data=f"keys:msel_filter:{slot_id}:{ftype}",
+            )
+        )
+    kb.row(*filter_row)
+
     for i, model_name in enumerate(page_models):
         idx = start + i
         checked = "✅" if model_name in selected else "⬜"
@@ -451,6 +523,13 @@ def _build_model_multiselect_keyboard(
                 callback_data=f"keys:msel_pg:{slot_id}:{page + 1}",
             )
         )
+    # Кнопка поиска (Improvement 3)
+    nav.append(
+        InlineKeyboardButton(
+            text="🔍 Поиск",
+            callback_data=f"keys:msel_search:{slot_id}",
+        )
+    )
     if nav:
         kb.row(*nav)
 
@@ -526,6 +605,9 @@ async def _show_model_discovery(message: Message, slot: LlmKeySlot) -> None:
 
     # Кэшируем результат
     _cache_models_discovery(slot.id, models)
+
+    # Сохраняем информацию о возможностях моделей (Improvement 2)
+    _discovery_models_info[slot.id] = _fetch_model_capabilities(models, slot.provider)
 
     if error or not models:
         await status_msg.edit_text(
@@ -1263,6 +1345,68 @@ async def cb_multiselect_none(callback: CallbackQuery):
     await callback.answer()
 
 
+# ─── Фильтр по возможностям (Improvement 2) ───────────────────────────
+
+
+@router.callback_query(F.data.startswith("keys:msel_filter:"))
+async def cb_multiselect_filter(callback: CallbackQuery):
+    """Фильтрация моделей по capabilities: all / vision / embeddings."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    slot_id = int(parts[2])
+    ftype = parts[3]
+    _multiselect_filter[slot_id] = ftype
+
+    all_models = _discovery_models_info.get(slot_id, [])
+    if ftype == "vision":
+        models = [m["name"] for m in all_models if m["vision"]]
+    elif ftype == "embeddings":
+        models = [m["name"] for m in all_models if m["embeddings"]]
+    else:
+        # "all" — вернуть все модели из кэша
+        models = _discovery_cache.get(slot_id, [])
+
+    _discovery_cache[slot_id] = models
+    selected = _multiselect_state.get(slot_id, set())
+    # Убираем выбор с моделей, которых нет в отфильтрованном списке
+    selected = selected & set(models)
+    _multiselect_state[slot_id] = selected
+    _multiselect_page[slot_id] = 0
+
+    if callback.message:
+        await callback.message.edit_text(
+            callback.message.html_text or "📋 Модели",
+            reply_markup=_build_model_multiselect_keyboard(
+                slot_id, models, selected, 0
+            ),
+        )
+    await callback.answer(f"Показано {len(models)} моделей")
+
+
+# ─── Поиск моделей по названию (Improvement 3) ────────────────────────
+
+
+@router.callback_query(F.data.startswith("keys:msel_search:"))
+async def cb_multiselect_search(callback: CallbackQuery):
+    """Активирует режим поиска модели по названию."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    slot_id = int(parts[2])
+    _PENDING_KEY_ENTRIES[callback.from_user.id] = {
+        "type": "model_search",
+        "slot_id": slot_id,
+        "deadline": time.monotonic() + 300,
+    }
+    await callback.message.edit_text(
+        "🔍 Введи часть названия модели для поиска (минимум 2 символа):"
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("keys:msel_done:"))
 async def cb_multiselect_done(callback: CallbackQuery):
     """Сохранить выбранные модели в БД."""
@@ -1346,6 +1490,56 @@ async def _pending_key_entry_handler(message: Message) -> None:
 
     if not text or text.lower() in ("/cancel", "отмена"):
         await message.answer("❌ Добавление ключа отменено.")
+        return
+
+    # Поиск модели по названию (Improvement 3)
+    if entry.get("type") == "model_search":
+        slot_id = entry["slot_id"]
+        query = text.lower()
+
+        if len(query) < 2:
+            await message.answer("⚠️ Введи минимум 2 символа для поиска.")
+            # Возвращаем pending для повторной попытки
+            _PENDING_KEY_ENTRIES[uid] = {
+                "type": "model_search",
+                "slot_id": slot_id,
+                "deadline": time.monotonic() + 300,
+            }
+            return
+
+        # Ищем во всех моделях (полный кэш discovery)
+        models = _discovery_cache.get(slot_id, [])
+        filtered = [m for m in models if query in m.lower()]
+
+        if not filtered:
+            await message.answer(f"🔍 Ничего не найдено по «{text}».")
+            # Возвращаемся к полному списку через multi-select
+            selected = _multiselect_state.get(slot_id, set())
+            await message.answer(
+                f"📋 Доступные модели ({len(models)}) для слота #{slot_id}:\n"
+                f"<i>Выбери нужные (можно несколько)</i>",
+                reply_markup=_build_model_multiselect_keyboard(
+                    slot_id, models, selected, 0
+                ),
+            )
+            return
+
+        # Сохраняем отфильтрованные результаты во временный кэш поиска
+        _discovery_cache_search[slot_id] = filtered
+        # Обновляем discovery_cache для multi-select клавиатуры
+        _discovery_cache[slot_id] = filtered
+        selected = _multiselect_state.get(slot_id, set())
+        # Убираем выбор с моделей, которых нет в результате поиска
+        selected = selected & set(filtered)
+        _multiselect_state[slot_id] = selected
+        _multiselect_page[slot_id] = 0
+
+        await message.answer(
+            f"🔍 Найдено {len(filtered)} моделей по «{text}»:",
+            reply_markup=_build_model_multiselect_keyboard(
+                slot_id, filtered, selected, 0
+            ),
+        )
         return
 
     # Ручной ввод модели (из экрана авто-обнаружения)
