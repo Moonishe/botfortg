@@ -192,6 +192,63 @@ class PatternCache:
     def _make_key(user_id: int, intent_type: str) -> str:
         return f"{intent_type}:{user_id}"
 
+    async def reset_for_test(self) -> None:
+        """Reset pattern cache state for testing.
 
-# Глобальный синглтон
+        Clears all cached patterns and resets hit/miss/bypass counters
+        to zero.
+
+        Use in pytest fixtures to guarantee isolation between tests::
+
+            @pytest.fixture
+            async def pc():
+                _reset_pattern_cache_for_test()
+                yield pattern_cache
+                await pattern_cache.reset_for_test()
+        """
+        await self.clear()
+
+
+def create_pattern_cache() -> PatternCache:
+    """Create a new :class:`PatternCache` instance.
+
+    Use this factory for dependency injection when you want fine-grained
+    control over lifecycle (e.g. in tests or when embedding the library).
+
+    For normal application code, prefer the module-level ``pattern_cache``
+    singleton which is pre-configured and ready to use.
+
+    .. note::
+       The new instance registers its internal ``ManagedCache`` with the
+       global ``cache_manager`` singleton.  If you are also creating a
+       separate ``CacheManager`` for testing, call
+       :func:`create_cache_manager` first and replace the global singleton
+       via :func:`_reset_cache_manager_for_test`.
+    """
+    return PatternCache()
+
+
+def _reset_pattern_cache_for_test() -> PatternCache:
+    """Replace the global ``pattern_cache`` singleton with a fresh instance.
+
+    Returns the new instance.  Typical usage in a pytest fixture::
+
+        @pytest.fixture
+        def pattern_cache():
+            pc = _reset_pattern_cache_for_test()
+            yield pc
+
+    .. note::
+       This helper reaches into the module to swap the singleton so that
+       any code importing ``pattern_cache`` from
+       ``src.core.intelligence.pattern_cache`` will see the fresh instance.
+    """
+    new_pc = PatternCache()
+    import src.core.intelligence.pattern_cache as _mod
+
+    _mod.pattern_cache = new_pc
+    return new_pc
+
+
+# Глобальный синглтон (для обратной совместимости)
 pattern_cache = PatternCache()

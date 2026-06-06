@@ -363,6 +363,61 @@ class CacheManager:
             result[name] = await cache.stats()
         return result
 
+    async def reset_for_test(self) -> None:
+        """Reset cache manager state for testing.
 
-# Global instance
+        Cancels any running background cleanup task and clears all
+        registered caches, returning the manager to a clean initial state.
+
+        Use in pytest fixtures to guarantee isolation between tests::
+
+            @pytest.fixture
+            async def cm():
+                _reset_cache_manager_for_test()
+                yield cache_manager
+                await cache_manager.reset_for_test()
+        """
+        await self.stop_background_cleanup()
+        self._cleanup_task = None
+        caches = list(self._caches.values())
+        self._caches.clear()
+        for cache in caches:
+            await cache.clear()
+
+
+def create_cache_manager() -> CacheManager:
+    """Create a new :class:`CacheManager` instance.
+
+    Use this factory for dependency injection when you want fine-grained
+    control over lifecycle (e.g. in tests or when embedding the library).
+
+    For normal application code, prefer the module-level ``cache_manager``
+    singleton which is pre-configured and ready to use.
+    """
+    return CacheManager()
+
+
+def _reset_cache_manager_for_test() -> CacheManager:
+    """Replace the global ``cache_manager`` singleton with a fresh instance.
+
+    Returns the new instance.  Typical usage in a pytest fixture::
+
+        @pytest.fixture
+        def cache_manager():
+            cm = _reset_cache_manager_for_test()
+            yield cm
+
+    .. note::
+       This helper reaches into the module to swap the singleton so that
+       any code importing ``cache_manager`` from
+       ``src.core.cache.manager`` will see the fresh instance.
+    """
+    new_cm = CacheManager()
+    import src.core.cache.manager as _mod
+
+    _mod.cache_manager = new_cm
+    return new_cm
+
+
+# Global instance (singleton for backward compatibility)
 cache_manager = CacheManager()

@@ -2,9 +2,9 @@
 
 Covers:
   - _parse_reval_response (JSON parsing, validation, edge cases)
-  - select_stale_facts_for_reval (DB filters: pinned, confidence, limit, etc.)
+  - select_old_temporary_facts (DB filters: pinned, confidence, limit, etc.)
   - apply_reval_result (past/permanent/invalid/skip, supersedes links)
-  - rollback_recent_revals (restore + cleanup)
+  - rollback_reval_history (restore + cleanup)
   - revaluate_fact (LLM call + parsing integration)
   - revaluation_run (end-to-end with MockLLMProvider)
 
@@ -34,18 +34,20 @@ from src.core.memory.dreaming_reval import (
     _parse_reval_response,
     _build_user_prompt,
     _ALLOWED_ACTIONS,
-    _ALLOWED_MEMORY_TYPES,
-    select_stale_facts_for_reval,
     apply_reval_result,
-    deactivate_memory,
-    add_supersedes_link,
     reval_fact,
     reval_run,
-    rollback_recent_revals,
     RevalResult,
     RevalBatchSummary,
     reval_summary_text,
 )
+from src.core.memory.memory_admin import (
+    ALLOWED_MEMORY_TYPES,
+    select_old_temporary_facts,
+    deactivate_memory,
+    add_supersedes_link,
+)
+from src.core.memory.dreaming_reval_history import rollback_reval_history
 from src.db.session import get_session, init_db
 from src.db.repo import add_memory, get_or_create_user
 from src.db.models import Memory, MemoryLink
@@ -271,7 +273,7 @@ class TestParseRevalResponse:
         assert result["new_memory_type"] is None
 
     def test_valid_memory_types_accepted(self):
-        for mt in _ALLOWED_MEMORY_TYPES:
+        for mt in ALLOWED_MEMORY_TYPES:
             response = json.dumps(
                 {"action": "past", "new_memory_type": mt, "reason": "test"}
             )
@@ -319,12 +321,12 @@ class TestParseRevalResponse:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Tests: select_stale_facts_for_reval
+#  Tests: select_old_temporary_facts
 # ═══════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_filters_pinned():
+async def test_select_old_temporary_facts_filters_pinned():
     """Pinned facts are excluded even if they match other criteria."""
     owner = await _make_owner()
     await _make_memory(
@@ -345,14 +347,14 @@ async def test_select_stale_facts_filters_pinned():
     )
 
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(session, owner.id, limit=10)
+        facts = await select_old_temporary_facts(session, owner.id, limit=10)
 
     assert len(facts) == 1
     assert facts[0].fact == "Обычный"
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_filters_low_confidence():
+async def test_select_old_temporary_facts_filters_low_confidence():
     """Facts with confidence < threshold are excluded."""
     owner = await _make_owner()
     await _make_memory(
@@ -378,7 +380,7 @@ async def test_select_stale_facts_filters_low_confidence():
     )
 
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(
+        facts = await select_old_temporary_facts(
             session,
             owner.id,
             limit=10,
@@ -393,7 +395,7 @@ async def test_select_stale_facts_filters_low_confidence():
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_respects_limit():
+async def test_select_old_temporary_facts_respects_limit():
     """Returns at most `limit` facts."""
     owner = await _make_owner()
     for i in range(10):
@@ -406,13 +408,13 @@ async def test_select_stale_facts_respects_limit():
         )
 
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(session, owner.id, limit=5)
+        facts = await select_old_temporary_facts(session, owner.id, limit=5)
 
     assert len(facts) == 5
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_only_temporary_and_task():
+async def test_select_old_temporary_facts_only_temporary_and_task():
     """Only memory_type IN ('temporary', 'task') are selected."""
     owner = await _make_owner()
     await _make_memory(
@@ -445,7 +447,7 @@ async def test_select_stale_facts_only_temporary_and_task():
     )
 
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(session, owner.id, limit=10)
+        facts = await select_old_temporary_facts(session, owner.id, limit=10)
 
     types = {f.memory_type for f in facts}
     assert types <= {"temporary", "task"}
@@ -453,7 +455,7 @@ async def test_select_stale_facts_only_temporary_and_task():
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_excludes_inactive():
+async def test_select_old_temporary_facts_excludes_inactive():
     """is_active=False facts are excluded."""
     owner = await _make_owner()
     await _make_memory(
@@ -474,14 +476,14 @@ async def test_select_stale_facts_excludes_inactive():
     )
 
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(session, owner.id, limit=10)
+        facts = await select_old_temporary_facts(session, owner.id, limit=10)
 
     assert len(facts) == 1
     assert facts[0].fact == "Активный"
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_excludes_fresh():
+async def test_select_old_temporary_facts_excludes_fresh():
     """Facts created within the last 7 days are excluded."""
     owner = await _make_owner()
     await _make_memory(
@@ -500,14 +502,14 @@ async def test_select_stale_facts_excludes_fresh():
     )
 
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(session, owner.id, limit=10)
+        facts = await select_old_temporary_facts(session, owner.id, limit=10)
 
     assert len(facts) == 1
     assert facts[0].fact == "Старый факт"
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_lookback_filter():
+async def test_select_old_temporary_facts_lookback_filter():
     """Facts older than lookback_days are excluded."""
     owner = await _make_owner()
     await _make_memory(
@@ -526,7 +528,7 @@ async def test_select_stale_facts_lookback_filter():
     )
 
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(
+        facts = await select_old_temporary_facts(
             session,
             owner.id,
             limit=10,
@@ -538,12 +540,12 @@ async def test_select_stale_facts_lookback_filter():
 
 
 @pytest.mark.asyncio
-async def test_select_stale_facts_returns_empty_when_none_match():
+async def test_select_old_temporary_facts_returns_empty_when_none_match():
     """Returns empty list when no facts match criteria."""
     owner = await _make_owner()
     # No facts at all
     async with get_session() as session:
-        facts = await select_stale_facts_for_reval(session, owner.id, limit=10)
+        facts = await select_old_temporary_facts(session, owner.id, limit=10)
 
     assert facts == []
 
@@ -820,12 +822,12 @@ async def test_apply_reval_result_permanent_creates_fact():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Tests: rollback_recent_revals
+#  Tests: rollback_reval_history
 # ═══════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.asyncio
-async def test_rollback_recent_revals_restores():
+async def test_rollback_reval_history_restores():
     """Rollback reactivates old facts, deactivates new ones, removes links."""
     owner = await _make_owner()
     old = await _make_memory(
@@ -851,7 +853,7 @@ async def test_rollback_recent_revals_restores():
     new_id = result.new_memory_id
 
     # Perform rollback
-    undone = await rollback_recent_revals(owner.telegram_id, limit=10)
+    undone = await rollback_reval_history(owner.telegram_id, limit=10)
     assert undone >= 1
 
     async with get_session() as session:
@@ -880,10 +882,10 @@ async def test_rollback_recent_revals_restores():
 
 
 @pytest.mark.asyncio
-async def test_rollback_recent_revals_no_facts_returns_zero():
+async def test_rollback_reval_history_no_facts_returns_zero():
     """Rollback with no dreaming_reval facts returns 0."""
     owner = await _make_owner()
-    undone = await rollback_recent_revals(owner.telegram_id, limit=10)
+    undone = await rollback_reval_history(owner.telegram_id, limit=10)
     assert undone == 0
 
 

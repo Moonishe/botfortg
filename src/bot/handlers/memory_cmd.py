@@ -1072,10 +1072,7 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     # ── --reval: запуск LLM-переоценки (Dreaming V3) ─────────────────
     reval_mode = "--reval" in args
     if reval_mode:
-        from src.core.memory.dreaming_reval import (
-            reval_run,
-            reval_summary_text,
-        )
+        from src.core.memory.dreaming_reval import reval_run, reval_summary_text
 
         await message.answer("🧠 Dreaming V3: запускаю LLM-переоценку…")
         summary = await reval_run(
@@ -2135,17 +2132,17 @@ async def cb_memreval(callback: CallbackQuery) -> None:
 
     # detail / rollback_all — оба обрабатываются в show_last_revals (ниже)
     if action == "detail":
-        from src.core.memory.dreaming_reval import recent_reval_results
+        from src.core.memory.dreaming_reval_history import recent_reval_history
 
-        text = await recent_reval_results(user_id, limit=10)
+        text = await recent_reval_history(user_id, limit=10)
         await callback.message.answer(text)
         await callback.answer()
         return
 
     if action == "rollback_all":
-        from src.core.memory.dreaming_reval import rollback_recent_revals
+        from src.core.memory.dreaming_reval_history import rollback_reval_history
 
-        undone = await rollback_recent_revals(user_id, limit=20)
+        undone = await rollback_reval_history(user_id, limit=20)
         await callback.message.edit_text(
             f"↩️ Откатил {undone} фактов, созданных dreaming_reval."
         )
@@ -2166,7 +2163,7 @@ async def cb_memreval(callback: CallbackQuery) -> None:
             return
 
         if action == "reject":
-            from src.core.memory.dreaming_reval import deactivate_memory
+            from src.core.memory.memory_admin import deactivate_memory
 
             await deactivate_memory(session, memory_id, reason="manual_reject")
             await session.commit()
@@ -2175,7 +2172,7 @@ async def cb_memreval(callback: CallbackQuery) -> None:
             await callback.answer("Факт деактивирован")
 
         elif action == "permanent":
-            from src.core.memory.dreaming_reval import update_memory_text
+            from src.core.memory.memory_admin import update_memory_text
 
             await update_memory_text(
                 session,
@@ -2270,7 +2267,7 @@ async def handle_pending_correction(message: Message) -> None:
         await message.answer("⛔ Контент не прошёл проверку безопасности.")
         return
 
-    from src.core.memory.dreaming_reval import update_memory_text
+    from src.core.memory.memory_admin import update_memory_text
 
     async with get_session() as session:
         owner = await get_or_create_user(session, user_id)

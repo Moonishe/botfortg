@@ -1,7 +1,7 @@
 """Dreaming V3 — semantic re-evaluation of stale facts (LLM-driven).
 
 OpenAI's "Dreaming V3" (2026) feature: background LLM re-evaluates facts that
-have aged past their `validity_end` / `expires_at` and updates them semantically.
+have aged past their ``validity_end`` / ``expires_at`` and updates them semantically.
 
 Example:
     "Пользователь планирует поездку в Сингапур в июле 2026" (created Jan 2026)
@@ -9,24 +9,27 @@ Example:
         → old fact is superseded, new fact is personal/contact_fact, not temporary
 
 This module is the LLM-driven equivalent of TelegramHelper's math-only decay
-in `memory_checker.py`.  It runs nightly inside the Dream Cycle (phase 3.5)
+in ``memory_checker.py``.  It runs nightly inside the Dream Cycle (phase 3.5)
 and selectively updates only:
-  - memory_type='temporary' facts
-  - confidence >= settings.dreaming_reval_confidence_threshold
+  - ``memory_type='temporary'`` facts
+  - ``confidence >= settings.dreaming_reval_confidence_threshold``
   - NOT pinned
-  - up to settings.dreaming_reval_max_per_run per run
+  - up to ``settings.dreaming_reval_max_per_run`` per run
 
 Action types returned by LLM:
-  - past:   event has happened — supersede with updated_fact, switch type
-  - skip:   fact is still current — leave alone
-  - invalid: fact is no longer relevant — deactivate (is_active=False)
-  - permanent: fact should be promoted to long-term (decay → 0.01, type → personal)
+  - ``past``:   event has happened — supersede with updated_fact, switch type
+  - ``skip``:   fact is still current — leave alone
+  - ``invalid``: fact is no longer relevant — deactivate (is_active=False)
+  - ``permanent``: fact should be promoted to long-term (decay → 0.01, type → personal)
 
 Safety nets:
   - LLM errors fall back to "skip" (no destructive changes)
   - Empty / malformed / out-of-whitelist actions are dropped
   - Pinned facts are NEVER touched (user explicit opt-out)
-  - New fact must pass add_memory() dedup (won't create duplicates)
+  - New fact must pass ``add_memory()`` dedup (won't create duplicates)
+
+DB helpers live in :mod:`src.core.memory.memory_admin`;
+history / rollback functions live in :mod:`src.core.memory.dreaming_reval_history`.
 """
 
 from __future__ import annotations
@@ -45,6 +48,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
 from src.core.infra.key_guard import mask_keys, safe_str
 from src.core.infra.text_sanitizer import sanitize_html
+from src.core.memory.memory_admin import (
+    ALLOWED_MEMORY_TYPES,
+    MAX_FACT_LEN,
+    MIN_FACT_LEN,
+    select_old_temporary_facts,
+    deactivate_memory,
+    add_supersedes_link,
+)
+from src.core.memory.dreaming_reval_history import (
+    recent_reval_history,
+    rollback_reval_history,
+)
 from src.core.security.prompt_injection_scanner import scan_content
 from src.db.models._memory import Memory, MemoryLink
 
@@ -82,19 +97,26 @@ _REVAL_SYSTEM = (
     "Не выдумывай. Не добавляй новых деталей, которых не было в оригинале."
 )
 
-# Whitelist of allowed actions and memory_types — защита от LLM-галлюцинаций
+# Whitelist of allowed actions — защита от LLM-галлюцинаций
 _ALLOWED_ACTIONS: frozenset[str] = frozenset({"past", "skip", "invalid", "permanent"})
-_ALLOWED_MEMORY_TYPES: frozenset[str] = frozenset(
-    {"contact_fact", "personal", "relationship", "preference", "task", "general"}
-)
-_MAX_FACT_LEN = 500
-_MIN_FACT_LEN = 3
 
 # Module-level inflight-guard: prevents dream_cycle (cron) and
 # /memory --reval (manual) from processing the same facts concurrently.
 # Set is mutated only under the asyncio event loop's single-thread guarantee
-# (no `await` between read-and-add in revaluation_run()).
+# (no ``await`` between read-and-add in revaluation_run()).
 _REVAL_INFLIGHT: set[int] = set()
+
+
+# ── Re-exports for backward compatibility ───────────────────────────
+# These names were historically available from ``dreaming_reval`` and are
+# kept here so existing imports (e.g. from ``memory_cmd.py``) continue to
+# work without changes.
+# fmt: off
+from src.core.memory.memory_admin import (    # noqa: F811, F401
+    deactivate_memory as deactivate_memory,
+    update_memory_text as update_memory_text,
+)
+# fmt: on
 
 
 @dataclass
@@ -155,7 +177,7 @@ def _parse_reval_response(text: str | None) -> dict[str, Any] | None:
         logger.warning("Dreaming reval: invalid action %r", action)
         return None
     new_type = parsed.get("new_memory_type")
-    if new_type is not None and new_type not in _ALLOWED_MEMORY_TYPES:
+    if new_type is not None and new_type not in ALLOWED_MEMORY_TYPES:
         # Silently drop unknown type — defaults to original
         new_type = None
     decay = parsed.get("decay_rate")
@@ -168,7 +190,7 @@ def _parse_reval_response(text: str | None) -> dict[str, Any] | None:
     updated_fact = parsed.get("updated_fact")
     if updated_fact is not None:
         updated_fact = str(updated_fact).strip()
-        if not (3 <= len(updated_fact) <= _MAX_FACT_LEN):
+        if not (MIN_FACT_LEN <= len(updated_fact) <= MAX_FACT_LEN):
             updated_fact = None
     return {
         "action": action,
@@ -177,150 +199,6 @@ def _parse_reval_response(text: str | None) -> dict[str, Any] | None:
         "decay_rate": decay,
         "reason": str(parsed.get("reason") or "").strip()[:120],
     }
-
-
-# ── DB helpers ─────────────────────────────────────────────────────
-
-
-async def select_stale_facts_for_reval(
-    session: AsyncSession,
-    user_id: int,
-    *,
-    limit: int = 50,
-    confidence_threshold: float = 0.5,
-    lookback_days: int | None = None,
-) -> list[Memory]:
-    """Select active temporary facts older than 7 days with high confidence.
-
-    Filters:
-      - is_active=True
-      - pinned=False
-      - confidence >= confidence_threshold
-      - memory_type IN ('temporary', 'task')  # task may also have temporal marker
-      - created_at older than 7 days (don't reval fresh facts)
-      - within lookback_days (don't touch very old facts — let auto-forget handle)
-
-    Returns up to `limit` memories ordered by oldest-first.
-    """
-    from datetime import timedelta
-
-    now = datetime.now(timezone.utc)
-    cutoff_old = now - timedelta(days=7)
-    cutoff_recent = now - timedelta(
-        days=lookback_days if lookback_days is not None else 365
-    )
-
-    result = await session.execute(
-        select(Memory)
-        .where(
-            Memory.user_id == user_id,
-            Memory.is_active.is_(True),
-            Memory.pinned.is_(False),
-            Memory.confidence >= confidence_threshold,
-            Memory.memory_type.in_(("temporary", "task")),
-            Memory.created_at < cutoff_old,
-            Memory.created_at > cutoff_recent,
-        )
-        .order_by(Memory.created_at.asc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
-
-
-async def deactivate_memory(
-    session: AsyncSession,
-    memory_id: int,
-    *,
-    reason: str = "reval",
-) -> None:
-    """Mark a memory inactive. Used for action='invalid' and manual --correct.
-
-    Sets is_active=False and updates updated_at. Does NOT delete — history
-    is preserved for audit and undo.
-    """
-    mem = await session.get(Memory, memory_id)
-    if not mem or mem.user_id is None:
-        return
-    mem.is_active = False
-    mem.updated_at = datetime.now(timezone.utc)
-    await session.flush()
-    logger.info("Deactivated memory %d (reason=%s)", memory_id, reason)
-
-
-async def update_memory_text(
-    session: AsyncSession,
-    memory_id: int,
-    new_fact: str,
-    *,
-    new_memory_type: str | None = None,
-    new_decay_rate: float | None = None,
-) -> Memory | None:
-    """In-place update of fact text + optional type/decay. Used by /memory --correct.
-
-    Also bumps embedding_hash so the dedup layer treats this as a new fact
-    (prevents merge-back with the old version).
-    """
-    import hashlib
-
-    new_fact = new_fact.strip()
-    if not (3 <= len(new_fact) <= _MAX_FACT_LEN):
-        return None
-    mem = await session.get(Memory, memory_id)
-    if not mem:
-        return None
-    mem.fact = new_fact
-    mem.embedding_hash = hashlib.sha256(new_fact.lower().encode()).hexdigest()[:16]
-    if new_memory_type is not None and new_memory_type in _ALLOWED_MEMORY_TYPES:
-        mem.memory_type = new_memory_type
-    if new_decay_rate is not None:
-        mem.decay_rate = max(0.01, min(0.30, new_decay_rate))
-    mem.updated_at = datetime.now(timezone.utc)
-    await session.flush()
-    logger.info("Updated memory %d → new text len=%d", memory_id, len(new_fact))
-    return mem
-
-
-async def add_supersedes_link(
-    session: AsyncSession,
-    user_id: int,
-    *,
-    old_id: int,
-    new_id: int,
-    confidence: float = 1.0,
-) -> MemoryLink | None:
-    """Create a MemoryLink(old → new) of type 'supersedes'.
-
-    No-op if the same link already exists (idempotency for re-runs).
-    """
-    if old_id == new_id:
-        return None
-    # Check existing
-    existing_q = await session.execute(
-        select(MemoryLink).where(
-            MemoryLink.user_id == user_id,
-            MemoryLink.source_id == old_id,
-            MemoryLink.target_id == new_id,
-            MemoryLink.relation_type == "supersedes",
-        )
-    )
-    if existing_q.scalar_one_or_none() is not None:
-        return None
-    # NOTE: MemoryLink has no `source` column (introspection found only
-    # id, user_id, source_id, target_id, weight, relation_type, created_at).
-    # The logical source marker is carried in Memory.source of the target row.
-    link = MemoryLink(
-        user_id=user_id,
-        source_id=old_id,
-        target_id=new_id,
-        relation_type="supersedes",
-        weight=confidence,
-    )
-    session.add(link)
-    await session.flush()
-    logger.info(
-        "Created supersedes link: %d → %d (source=dreaming_reval)", old_id, new_id
-    )
-    return link
 
 
 # ── LLM call (one fact) ────────────────────────────────────────────
@@ -412,11 +290,11 @@ async def apply_reval_result(
     """Apply parsed LLM decision to a fact. Returns RevalResult with outcome.
 
     Actions:
-      - past:       create new fact via add_memory(), supersede old
-      - permanent:  create new fact via add_memory(), supersede old
-      - invalid:    deactivate old fact
-      - skip:       do nothing
-      - parsed=None: treat as skip
+      - ``past``:       create new fact via ``add_memory()``, supersede old
+      - ``permanent``:  create new fact via ``add_memory()``, supersede old
+      - ``invalid``:    deactivate old fact
+      - ``skip``:       do nothing
+      - ``parsed=None``: treat as skip
     """
     if parsed is None:
         return RevalResult(
@@ -448,7 +326,7 @@ async def apply_reval_result(
         return base
 
     # past / permanent → create new fact and supersede old
-    # Use explicit `is not None` (not `or`) so legitimate falsy values
+    # Use explicit ``is not None`` (not ``or``) so legitimate falsy values
     # (e.g. decay_rate=0.01, empty string) are preserved instead of
     # silently falling back to defaults.
     updated_raw = parsed.get("updated_fact")
@@ -597,7 +475,7 @@ async def _reval_run_impl(
             return summary
 
         # Select candidates
-        facts = await select_stale_facts_for_reval(
+        facts = await select_old_temporary_facts(
             session,
             owner.id,
             limit=limit,
@@ -746,126 +624,3 @@ def reval_summary_text(summary: RevalBatchSummary) -> str:
     if summary.errors:
         lines.append(f"⚠️ Ошибок: {summary.errors}")
     return "\n".join(lines)
-
-
-# ── History / rollback for UI (--reval, rollback_all) ──────────────
-
-
-async def recent_reval_results(owner_telegram_id: int, *, limit: int = 10) -> str:
-    """Show recent memories created by Dreaming V3 (source='dreaming_reval').
-
-    Used by /memory --reval "Подробнее" button.
-    """
-    from src.db.repo import get_or_create_user
-    from src.db.session import get_session
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, owner_telegram_id)
-        result = await session.execute(
-            select(Memory)
-            .where(
-                Memory.user_id == owner.id,
-                Memory.source == "dreaming_reval",
-            )
-            .order_by(Memory.created_at.desc())
-            .limit(limit)
-        )
-        facts = list(result.scalars().all())
-
-    if not facts:
-        return "🧠 Нет фактов, созданных через Dreaming V3."
-
-    lines = [f"🧠 <b>Последние {len(facts)} переоценок Dreaming V3:</b>", ""]
-    for f in facts:
-        ts = f.created_at.strftime("%d.%m %H:%M") if f.created_at else "?"
-        status = "✅ активен" if f.is_active else "🚫 деактивирован"
-        # Sanitize LLM-generated fact text — Telegram parse_mode=HTML is in
-        # effect; without escaping, LLM could inject <a>, <tg-spoiler>, etc.
-        fact_text = sanitize_html((f.fact or "")[:120])
-        lines.append(f"• <code>#{f.id}</code> [{ts}] {status}\n  <i>{fact_text}</i>")
-    return "\n".join(lines)
-
-
-async def rollback_recent_revals(owner_telegram_id: int, *, limit: int = 20) -> int:
-    """Rollback recent dreaming_reval changes.
-
-    1. Find Memory rows with source='dreaming_reval' and is_active=True
-       (most recent first), up to `limit`.
-    2. For each: deactivate it.
-    3. Find supersedes MemoryLink (target=new_mem) and reactivate the source fact.
-    4. Delete the MemoryLink (so the relationship is gone).
-
-    Returns count of rolled-back revaluations (deactivated new facts).
-    """
-    from src.db.repo import get_or_create_user
-    from src.db.session import get_session
-
-    undone = 0
-    async with get_session() as session:
-        owner = await get_or_create_user(session, owner_telegram_id)
-
-        new_facts_q = await session.execute(
-            select(Memory)
-            .where(
-                Memory.user_id == owner.id,
-                Memory.source == "dreaming_reval",
-                Memory.is_active.is_(True),
-            )
-            .order_by(Memory.created_at.desc())
-            .limit(limit)
-        )
-        new_facts = list(new_facts_q.scalars().all())
-        if not new_facts:
-            return 0
-
-        new_ids = [m.id for m in new_facts]
-
-        # Find supersedes links pointing to these new facts.
-        # NOTE: MemoryLink has no `source` column; we filter by target_id
-        # (new_facts created by dreaming_reval) and relation_type.
-        links_q = await session.execute(
-            select(MemoryLink).where(
-                MemoryLink.user_id == owner.id,
-                MemoryLink.target_id.in_(new_ids),
-                MemoryLink.relation_type == "supersedes",
-            )
-        )
-        links = list(links_q.scalars().all())
-
-        # Build map: new_id → old_id
-        new_to_old: dict[int, int] = {int(l.target_id): int(l.source_id) for l in links}
-
-        for new_fact in new_facts:
-            new_fact.is_active = False
-            new_fact.updated_at = datetime.now(timezone.utc)
-            old_id = new_to_old.get(new_fact.id)
-            if old_id is not None:
-                old = await session.get(Memory, old_id)
-                if old and old.user_id == owner.id:
-                    old.is_active = True
-                    old.updated_at = datetime.now(timezone.utc)
-            undone += 1
-
-        # Drop the supersedes links — they are no longer the truth
-        for link in links:
-            await session.delete(link)
-
-        try:
-            await session.commit()
-        except Exception:
-            logger.exception("rollback_recent_revals: commit failed")
-            await session.rollback()
-            return 0
-
-    # Invalidate cache outside the session
-    try:
-        from src.core.actions.stats_cache import invalidate
-        from src.core.memory.memory_recall import bump_recall_version
-
-        await invalidate("mem_")
-        await bump_recall_version(owner_telegram_id)
-    except Exception:
-        pass
-
-    logger.info("rollback_recent_revals: undone=%d", undone)
-    return undone
