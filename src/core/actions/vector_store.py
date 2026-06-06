@@ -182,7 +182,8 @@ class VectorStore:
                 ],
             )
 
-        await asyncio.to_thread(_do)
+        async with self._lock:
+            await asyncio.to_thread(_do)
 
     async def search_similar_memories(
         self,
@@ -301,7 +302,8 @@ class VectorStore:
                 ],
             )
 
-        await asyncio.to_thread(_do)
+        async with self._lock:
+            await asyncio.to_thread(_do)
 
     async def upsert_batch(
         self,
@@ -345,7 +347,8 @@ class VectorStore:
         def _do() -> None:
             self._client.upsert(collection_name=COLLECTION, points=qdrant_points)
 
-        await asyncio.to_thread(_do)
+        async with self._lock:
+            await asyncio.to_thread(_do)
 
     async def search(
         self,
