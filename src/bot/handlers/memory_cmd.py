@@ -5,7 +5,7 @@ import time
 from sqlalchemy import select
 
 from aiogram import F, Router
-from aiogram.filters import BaseFilter, Command
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
+from src.bot.states import MemoryCorrectionStates
 from src.config import settings
 from src.core.contacts.contact_resolver import resolve
 from src.core.infra.text_sanitizer import sanitize_html
@@ -41,366 +42,424 @@ router = Router(name="memory_cmd")
 router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
 
-# ─── /memory --correct: очередь ручного исправления факта (без FSM) ───
+# /memory --correct использует FSM-состояние MemoryCorrectionStates.waiting_new_text
+# (см. src.bot.handlers.memory_correction). Этот модуль только:
+#   • ставит состояние (в _cmd_memory_correct)
+#   • сбрасывает состояние (в cb_memreval cancel/reject/permanent)
+# Сам потребитель (handle_pending_correction) живёт в memory_correction.router.
 
-_PENDING_CORRECTIONS: dict[
-    int, dict
-] = {}  # user_id → {"memory_id": int, "original_fact": str, "mode": "edit_text"|"edit_type"|"edit_decay"}
+# ─── Dispatcher ───────────────────────────────────────────────────────
 
 
 @router.message(Command("memory"))
-async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
-    """Показать память — всё или про конкретный контакт, или --inbox."""
-    args = (message.text or "").replace("/memory", "").strip()
+async def cmd_memory(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
+    """Тонкий диспетчер: парсит режим и делегирует подфункциям.
 
-    inbox_mode = "--inbox" in args
-    if inbox_mode:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            candidates = await list_memory_candidates(session, owner)
-        if not candidates:
-            await message.answer("📭 Входящих фактов на подтверждение нет.")
-            return
-        lines = ["📬 <b>Входящие факты (Memory Inbox):</b>", ""]
-        for i, c in enumerate(candidates, 1):
-            sent_emoji = {
-                "positive": "🟢",
-                "negative": "🔴",
-                "neutral": "⚪",
-            }.get(c.sentiment or "", "⚪")
-            mem_type = f" ({c.memory_type})" if c.memory_type else ""
-            lines.append(
-                f"{i}. {sent_emoji} <i>{sanitize_html(c.fact)}</i>{mem_type}\n"
-                f"   важность={c.importance}, затухание={c.decay_rate}, источник={c.source}"
-            )
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="✅ Запомнить",
-                            callback_data=f"memb:confirm:{c.id}",
-                        ),
-                        InlineKeyboardButton(
-                            text="✏️ Исправить",
-                            callback_data=f"memb:edit:{c.id}",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="⏳ На неделю",
-                            callback_data=f"memb:temporary:{c.id}",
-                        ),
-                        InlineKeyboardButton(
-                            text="♾ Навсегда",
-                            callback_data=f"memb:permanent:{c.id}",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="❌ Удалить",
-                            callback_data=f"memb:discard:{c.id}",
-                        ),
-                    ],
-                ]
-            )
-            await message.answer(lines[-1], reply_markup=kb)
+    Режимы (сохранены один-в-один из исходной god-function):
+      --inbox, --forget-sweep, --reval, --correct, --graph:export, --graph,
+      --impact, --tag, --timeline, --story, (default = view)
+    """
+    raw = (message.text or "").replace("/memory", "").strip()
+
+    if "--inbox" in raw:
+        return await _cmd_memory_inbox(message)
+    if "--forget-sweep" in raw:
+        return await _cmd_memory_forget_sweep(message)
+    if "--reval" in raw:
+        return await _cmd_memory_reval(message)
+    if "--correct" in raw:
+        return await _cmd_memory_correct(message, raw, state)
+    if "--graph:export" in raw:
+        return await _cmd_memory_graph_export(message)
+    if "--graph" in raw:
+        return await _cmd_memory_graph_stats(message)
+    if "--impact" in raw:
+        name = raw.replace("--impact", "", 1).strip()
+        return await _cmd_memory_impact(message, userbot_manager, name)
+    if "--tag" in raw:
+        parts = raw.split("--tag", 1)
+        tag = parts[1].strip().split()[0] if len(parts) > 1 and parts[1].strip() else ""
+        return await _cmd_memory_tag(message, tag)
+    if "--timeline" in raw:
+        name = raw.replace("--timeline", "", 1).strip()
+        return await _cmd_memory_timeline(message, userbot_manager, name)
+    if "--story" in raw:
+        name = raw.replace("--story", "", 1).strip()
+        return await _cmd_memory_story(message, userbot_manager, name)
+
+    # default = view
+    return await _cmd_memory_view(message, userbot_manager, raw)
+
+
+# ─── Режим: --inbox ──────────────────────────────────────────────────
+
+
+async def _cmd_memory_inbox(message: Message) -> None:
+    """Показать входящие факты (Memory Inbox) с кнопками подтверждения."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        candidates = await list_memory_candidates(session, owner)
+    if not candidates:
+        await message.answer("📭 Входящих фактов на подтверждение нет.")
         return
-
-    forget_sweep_mode = "--forget-sweep" in args
-    if forget_sweep_mode:
-        from src.core.memory.auto_forget import auto_forget_sweep
-
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            count = await auto_forget_sweep(session, owner.id)
-            await session.commit()
-        await message.answer(
-            f"🧹 Auto-forget sweep: deactivated {count} low-retention facts."
+    lines = ["📬 <b>Входящие факты (Memory Inbox):</b>", ""]
+    for i, c in enumerate(candidates, 1):
+        sent_emoji = {
+            "positive": "🟢",
+            "negative": "🔴",
+            "neutral": "⚪",
+        }.get(c.sentiment or "", "⚪")
+        mem_type = f" ({c.memory_type})" if c.memory_type else ""
+        lines.append(
+            f"{i}. {sent_emoji} <i>{sanitize_html(c.fact)}</i>{mem_type}\n"
+            f"   важность={c.importance}, затухание={c.decay_rate}, источник={c.source}"
         )
-        return
-
-    # ── --reval: запуск LLM-переоценки (Dreaming V3) ─────────────────
-    reval_mode = "--reval" in args
-    if reval_mode:
-        from src.core.memory.dreaming_reval import reval_run, reval_summary_text
-
-        await message.answer("🧠 Dreaming V3: запускаю LLM-переоценку…")
-        summary = await reval_run(
-            message.from_user.id,
-            limit=getattr(settings, "dreaming_reval_max_per_run", 50),
-        )
-        text = reval_summary_text(summary)
-        # Если были изменения — показываем кнопки для подтверждения
-        if summary.past + summary.permanent + summary.invalid > 0:
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="📋 Подробнее",
-                            callback_data="memreval:detail",
-                        ),
-                        InlineKeyboardButton(
-                            text="↩️ Откатить все",
-                            callback_data="memreval:rollback_all",
-                        ),
-                    ]
-                ]
-            )
-            await message.answer(text, reply_markup=kb)
-        else:
-            await message.answer(text)
-        return
-
-    # ── --correct <id>: ручное исправление факта (FSM-lite через dict) ─
-    correct_mode = "--correct" in args
-    if correct_mode:
-        parts = args.replace("--correct", "").strip().split()
-        if not parts or not parts[0].isdigit():
-            await message.answer(
-                "Использование: <code>/memory --correct &lt;id&gt;</code>\n"
-                "Пример: <code>/memory --correct 1234</code>"
-            )
-            return
-        memory_id = int(parts[0])
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            fact = await session.get(Memory, memory_id)
-            if not fact or fact.user_id != owner.id:
-                await message.answer(f"❌ Факт #{memory_id} не найден.")
-                return
-            original = fact.fact
-            await session.commit()
-        # Set pending state
-        _PENDING_CORRECTIONS[message.from_user.id] = {
-            "memory_id": memory_id,
-            "original_fact": original,
-            "mode": "edit_text",
-            "deadline": time.monotonic() + 300,
-        }
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="♾ Сделать постоянным",
-                        callback_data=f"memreval:permanent:{memory_id}",
+                        text="✅ Запомнить",
+                        callback_data=f"memb:confirm:{c.id}",
                     ),
                     InlineKeyboardButton(
-                        text="🗑 Деактивировать",
-                        callback_data=f"memreval:reject:{memory_id}",
+                        text="✏️ Исправить",
+                        callback_data=f"memb:edit:{c.id}",
                     ),
                 ],
                 [
                     InlineKeyboardButton(
-                        text="❌ Отмена",
-                        callback_data="memreval:cancel",
+                        text="⏳ На неделю",
+                        callback_data=f"memb:temporary:{c.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="♾ Навсегда",
+                        callback_data=f"memb:permanent:{c.id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Удалить",
+                        callback_data=f"memb:discard:{c.id}",
                     ),
                 ],
             ]
         )
+        await message.answer(lines[-1], reply_markup=kb)
+
+
+# ─── Режим: --forget-sweep ──────────────────────────────────────────
+
+
+async def _cmd_memory_forget_sweep(message: Message) -> None:
+    """Запустить auto-forget sweep — деактивировать низко-retention факты."""
+    from src.core.memory.auto_forget import auto_forget_sweep
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        count = await auto_forget_sweep(session, owner.id)
+        await session.commit()
+    await message.answer(
+        f"🧹 Auto-forget sweep: deactivated {count} low-retention facts."
+    )
+
+
+# ─── Режим: --reval ─────────────────────────────────────────────────
+
+
+async def _cmd_memory_reval(message: Message) -> None:
+    """Запустить LLM-переоценку памяти (Dreaming V3)."""
+    from src.core.memory.dreaming_reval import reval_run, reval_summary_text
+
+    await message.answer("🧠 Dreaming V3: запускаю LLM-переоценку…")
+    summary = await reval_run(
+        message.from_user.id,
+        limit=getattr(settings, "dreaming_reval_max_per_run", 50),
+    )
+    text = reval_summary_text(summary)
+    # Если были изменения — показываем кнопки для подтверждения
+    if summary.past + summary.permanent + summary.invalid > 0:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📋 Подробнее",
+                        callback_data="memreval:detail",
+                    ),
+                    InlineKeyboardButton(
+                        text="↩️ Откатить все",
+                        callback_data="memreval:rollback_all",
+                    ),
+                ]
+            ]
+        )
+        await message.answer(text, reply_markup=kb)
+    else:
+        await message.answer(text)
+
+
+# ─── Режим: --correct <id> ───────────────────────────────────────────
+
+
+async def _cmd_memory_correct(
+    message: Message, raw_args: str, state: FSMContext
+) -> None:
+    """Поставить факт в очередь на ручное исправление (FSM).
+
+    Пишет в FSMContext: MemoryCorrectionStates.waiting_new_text + memory_id +
+    original_fact + set_at_ts. Потребитель — handle_pending_correction в
+    memory_correction.router.
+    """
+    parts = raw_args.replace("--correct", "", 1).strip().split()
+    if not parts or not parts[0].isdigit():
         await message.answer(
-            f"✏️ <b>Исправление факта #{memory_id}</b>\n\n"
-            f"<i>{sanitize_html(original)}</i>\n\n"
-            f"Напиши новый текст одним сообщением, или нажми кнопку:",
-            reply_markup=kb,
+            "Использование: <code>/memory --correct &lt;id&gt;</code>\n"
+            "Пример: <code>/memory --correct 1234</code>"
         )
         return
+    memory_id = int(parts[0])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        fact = await session.get(Memory, memory_id)
+        if not fact or fact.user_id != owner.id:
+            await message.answer(f"❌ Факт #{memory_id} не найден.")
+            return
+        original = fact.fact
+        await session.commit()
+    # Set FSM state — consumer is handle_pending_correction in
+    # memory_correction router. Lazy TTL via set_at_ts in state data.
+    await state.set_state(MemoryCorrectionStates.waiting_new_text)
+    await state.update_data(
+        memory_id=memory_id,
+        original_fact=original,
+        set_at_ts=time.monotonic(),
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="♾ Сделать постоянным",
+                    callback_data=f"memreval:permanent:{memory_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Деактивировать",
+                    callback_data=f"memreval:reject:{memory_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="memreval:cancel",
+                ),
+            ],
+        ]
+    )
+    await message.answer(
+        f"✏️ <b>Исправление факта #{memory_id}</b>\n\n"
+        f"<i>{sanitize_html(original)}</i>\n\n"
+        f"Напиши новый текст одним сообщением, или нажми кнопку:",
+        reply_markup=kb,
+    )
 
-    graph_export_mode = "--graph:export" in args
-    if graph_export_mode:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            # Nodes: active memories (max 500)
-            all_mems = await list_memories(session, owner, limit=500, is_active=True)
-            nodes = [
-                {
-                    "id": m.id,
-                    "fact": m.fact,
-                    "contact_id": m.contact_id,
-                    "memory_type": m.memory_type,
-                    "importance": m.importance,
-                    "sentiment": m.sentiment,
-                    "created_at": m.created_at.isoformat() if m.created_at else None,
-                }
-                for m in all_mems
-            ]
-            # Edges: all links for user
-            edges_result = await session.execute(
-                select(
-                    MemoryLink.source_id,
-                    MemoryLink.target_id,
-                    MemoryLink.weight,
-                    MemoryLink.relation_type,
-                ).where(MemoryLink.user_id == owner.id)
-            )
-            edges = [
-                {
-                    "source": int(r.source_id),
-                    "target": int(r.target_id),
-                    "weight": float(r.weight),
-                    "relation_type": r.relation_type,
-                }
-                for r in edges_result.all()
-            ]
-        payload = {"nodes": nodes, "edges": edges}
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
-        # Telegram message limit ~4000 chars for safety
-        if len(text) > 3900:
-            text = text[:3900] + "\n...]}"  # truncated
-        await message.answer(
-            f"<b>📊 Graph export:</b>\n<pre>{sanitize_html(text)}</pre>"
+
+# ─── Режим: --graph:export ──────────────────────────────────────────
+
+
+async def _cmd_memory_graph_export(message: Message) -> None:
+    """Экспорт графа памяти (узлы + рёбра) в JSON."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        # Nodes: active memories (max 500)
+        all_mems = await list_memories(session, owner, limit=500, is_active=True)
+        nodes = [
+            {
+                "id": m.id,
+                "fact": m.fact,
+                "contact_id": m.contact_id,
+                "memory_type": m.memory_type,
+                "importance": m.importance,
+                "sentiment": m.sentiment,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in all_mems
+        ]
+        # Edges: all links for user
+        edges_result = await session.execute(
+            select(
+                MemoryLink.source_id,
+                MemoryLink.target_id,
+                MemoryLink.weight,
+                MemoryLink.relation_type,
+            ).where(MemoryLink.user_id == owner.id)
         )
-        return
-
-    graph_mode = "--graph" in args
-    if graph_mode:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            stats = await get_graph_stats(session, owner.id)
-        lines = [
-            "📊 <b>Knowledge Graph Statistics</b>",
-            "",
-            f"🧠 <b>Nodes (active memories):</b> {stats['node_count']}",
-            f"🔗 <b>Edges (links):</b> {stats['total_edges']}",
-            f"📏 <b>Average degree:</b> {stats['avg_degree']}",
-            f"🔗 <b>Connected components:</b> {stats['components']}",
-            f"🕳 <b>Isolated nodes:</b> {stats['isolated_nodes']}",
-            "",
-            "<b>Edges by type:</b>",
+        edges = [
+            {
+                "source": int(r.source_id),
+                "target": int(r.target_id),
+                "weight": float(r.weight),
+                "relation_type": r.relation_type,
+            }
+            for r in edges_result.all()
         ]
-        for rel_type, cnt in sorted(
-            stats["edges_by_type"].items(), key=lambda x: -x[1]
-        ):
-            lines.append(f"  • <b>{rel_type}</b>: {cnt}")
-        if stats["top_hubs"]:
-            lines.extend(["", "<b>Top-5 hub nodes:</b>"])
-            for hub in stats["top_hubs"]:
-                fact_snippet = sanitize_html(hub["fact"][:60])
-                lines.append(
-                    f"  🔗 <b>ID {hub['memory_id']}</b> — degree {hub['degree']}: "
-                    f"«{fact_snippet}»"
-                )
-        await message.answer("\n".join(lines))
-        return
+    payload = {"nodes": nodes, "edges": edges}
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    # Telegram message limit ~4000 chars for safety
+    if len(text) > 3900:
+        text = text[:3900] + "\n...]}"  # truncated
+    await message.answer(f"<b>📊 Graph export:</b>\n<pre>{sanitize_html(text)}</pre>")
 
-    impact_mode = "--impact" in args
-    if impact_mode:
-        parts = args.replace("--impact", "").strip()
-        if not parts:
-            await message.answer("Использование: /memory --impact @имя_контакта")
-            return
-        contact_name = parts.strip()
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            client = (
-                userbot_manager.get_client(message.from_user.id)
-                if userbot_manager
-                else None
+
+# ─── Режим: --graph ─────────────────────────────────────────────────
+
+
+async def _cmd_memory_graph_stats(message: Message) -> None:
+    """Показать статистику knowledge graph (узлы, рёбра, хабы)."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        stats = await get_graph_stats(session, owner.id)
+    lines = [
+        "📊 <b>Knowledge Graph Statistics</b>",
+        "",
+        f"🧠 <b>Nodes (active memories):</b> {stats['node_count']}",
+        f"🔗 <b>Edges (links):</b> {stats['total_edges']}",
+        f"📏 <b>Average degree:</b> {stats['avg_degree']}",
+        f"🔗 <b>Connected components:</b> {stats['components']}",
+        f"🕳 <b>Isolated nodes:</b> {stats['isolated_nodes']}",
+        "",
+        "<b>Edges by type:</b>",
+    ]
+    for rel_type, cnt in sorted(stats["edges_by_type"].items(), key=lambda x: -x[1]):
+        lines.append(f"  • <b>{rel_type}</b>: {cnt}")
+    if stats["top_hubs"]:
+        lines.extend(["", "<b>Top-5 hub nodes:</b>"])
+        for hub in stats["top_hubs"]:
+            fact_snippet = sanitize_html(hub["fact"][:60])
+            lines.append(
+                f"  🔗 <b>ID {hub['memory_id']}</b> — degree {hub['degree']}: "
+                f"«{fact_snippet}»"
             )
-            if client is None:
-                await message.answer("⚠️ Userbot не подключён.")
-                return
-            candidates = await resolve(client, owner, contact_name)
-            if not candidates:
-                await message.answer(f"Контакт «{contact_name}» не найден.")
-                return
-            from src.db.repos.memory_repo import contact_impact
+    await message.answer("\n".join(lines))
 
-            impact = await contact_impact(session, owner.id, candidates[0].peer_id)
-        lines = [
-            f"📊 <b>Impact: {sanitize_html(impact.contact_name)}</b>",
-            "",
-            f"📌 Фактов: {len(impact.direct_facts)}",
-            f"👥 Связанных контактов: {len(impact.related_contacts)}",
-            f"🕸 Всего узлов в графе: {impact.total_nodes}",
-        ]
-        if impact.topics:
-            lines.append(f"🏷 Темы: {', '.join(impact.topics[:5])}")
-        if impact.upcoming_events:
-            lines.extend(["", "⏰ <b>Напоминания:</b>"])
-            for ev in impact.upcoming_events:
-                deadline = f" ({ev['deadline']})" if ev["deadline"] else ""
-                lines.append(f"  • {sanitize_html(ev['text'])}{deadline}")
-        if impact.related_contacts:
-            lines.extend(["", "👥 <b>Связи:</b>"])
-            for rc in impact.related_contacts[:5]:
-                lines.append(
-                    f"  • {sanitize_html(rc['name'])} "
-                    f"(via: «{sanitize_html(rc['via_fact'])}»)"
-                )
-        if impact.direct_facts:
-            lines.extend(["", "📌 <b>Факты:</b>"])
-            for f in impact.direct_facts[:5]:
-                snippet = sanitize_html((f.fact or "")[:80])
-                lines.append(f"  • #{f.id} {snippet}")
-        await message.answer("\n".join(lines))
+
+# ─── Режим: --impact <name> ──────────────────────────────────────────
+
+
+async def _cmd_memory_impact(
+    message: Message, userbot_manager: UserbotManager, contact_name: str
+) -> None:
+    """Показать impact контакта в графе памяти."""
+    if not contact_name:
+        await message.answer("Использование: /memory --impact @имя_контакта")
         return
-
-    tag_mode = "--tag" in args
-    if tag_mode:
-        parts = args.split("--tag", 1)
-        tag = parts[1].strip().split()[0] if len(parts) > 1 and parts[1].strip() else ""
-        from src.core.memory.memory_tagger import format_tagged, search_by_tag
-
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            facts = await search_by_tag(session, owner, tag)
-        text = format_tagged(facts, tag)
-        await message.answer(text)
-        return
-
-    timeline_mode = "--timeline" in args
-    if timeline_mode:
-        args = args.replace("--timeline", "").strip()
-
-    story_mode = "--story" in args
-    if story_mode:
-        args = args.replace("--story", "").strip()
-
-    contact_id = None
-    label = ""
-    if args:
-        contact_name = args.strip()
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            client = (
-                userbot_manager.get_client(message.from_user.id)
-                if userbot_manager
-                else None
-            )
-            if client is not None:
-                candidates = await resolve(client, owner, contact_name)
-                if candidates:
-                    contact_id = candidates[0].peer_id
-                    label = f" — {candidates[0].label()}"
-
-    if story_mode:
-        if contact_id:
-            from src.core.memory.memory_chain import build_chain_narrative
-
-            narrative = await build_chain_narrative(contact_id, message.from_user.id)
-            if narrative:
-                await message.answer(sanitize_html(narrative))
-            else:
-                await message.answer(
-                    "Недостаточно данных для истории (нужно минимум 3 факта)."
-                )
-        else:
-            await message.answer("Укажи контакт: <code>/memory --story имя</code>")
-        return
-
-    # ── Timeline mode ──────────────────────────────────────────────────
-    if timeline_mode:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            items = await list_memories(session, owner, contact_id=contact_id)
-
-        if not items:
-            await message.answer("Память пуста.")
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        client = (
+            userbot_manager.get_client(message.from_user.id)
+            if userbot_manager
+            else None
+        )
+        if client is None:
+            await message.answer("⚠️ Userbot не подключён.")
             return
+        candidates = await resolve(client, owner, contact_name)
+        if not candidates:
+            await message.answer(f"Контакт «{contact_name}» не найден.")
+            return
+        from src.db.repos.memory_repo import contact_impact
 
-        text = _format_timeline(items, contact_id, message.from_user.id)
-        await message.answer(text)
+        impact = await contact_impact(session, owner.id, candidates[0].peer_id)
+    lines = [
+        f"📊 <b>Impact: {sanitize_html(impact.contact_name)}</b>",
+        "",
+        f"📌 Фактов: {len(impact.direct_facts)}",
+        f"👥 Связанных контактов: {len(impact.related_contacts)}",
+        f"🕸 Всего узлов в графе: {impact.total_nodes}",
+    ]
+    if impact.topics:
+        lines.append(f"🏷 Темы: {', '.join(impact.topics[:5])}")
+    if impact.upcoming_events:
+        lines.extend(["", "⏰ <b>Напоминания:</b>"])
+        for ev in impact.upcoming_events:
+            deadline = f" ({ev['deadline']})" if ev["deadline"] else ""
+            lines.append(f"  • {sanitize_html(ev['text'])}{deadline}")
+    if impact.related_contacts:
+        lines.extend(["", "👥 <b>Связи:</b>"])
+        for rc in impact.related_contacts[:5]:
+            lines.append(
+                f"  • {sanitize_html(rc['name'])} "
+                f"(via: «{sanitize_html(rc['via_fact'])}»)"
+            )
+    if impact.direct_facts:
+        lines.extend(["", "📌 <b>Факты:</b>"])
+        for f in impact.direct_facts[:5]:
+            snippet = sanitize_html((f.fact or "")[:80])
+            lines.append(f"  • #{f.id} {snippet}")
+    await message.answer("\n".join(lines))
+
+
+# ─── Режим: --tag <tag> ─────────────────────────────────────────────
+
+
+async def _cmd_memory_tag(message: Message, tag: str) -> None:
+    """Поиск фактов по тегу."""
+    from src.core.memory.memory_tagger import format_tagged, search_by_tag
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        facts = await search_by_tag(session, owner, tag)
+    text = format_tagged(facts, tag)
+    await message.answer(text)
+
+
+# ─── Режим: --timeline [name] ───────────────────────────────────────
+
+
+async def _cmd_memory_timeline(
+    message: Message, userbot_manager: UserbotManager, contact_name: str
+) -> None:
+    """Хронология памяти (опционально отфильтрованная по контакту)."""
+    contact_id, _ = await _resolve_contact(message, userbot_manager, contact_name)
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        items = await list_memories(session, owner, contact_id=contact_id)
+
+    if not items:
+        await message.answer("Память пуста.")
         return
+
+    text = _format_timeline(items, contact_id, message.from_user.id)
+    await message.answer(text)
+
+
+# ─── Режим: --story <name> ──────────────────────────────────────────
+
+
+async def _cmd_memory_story(
+    message: Message, userbot_manager: UserbotManager, contact_name: str
+) -> None:
+    """История/нарратив по контакту (минимум 3 факта)."""
+    contact_id, _ = await _resolve_contact(message, userbot_manager, contact_name)
+    if not contact_id:
+        await message.answer("Укажи контакт: <code>/memory --story имя</code>")
+        return
+    from src.core.memory.memory_chain import build_chain_narrative
+
+    narrative = await build_chain_narrative(contact_id, message.from_user.id)
+    if narrative:
+        await message.answer(sanitize_html(narrative))
+    else:
+        await message.answer("Недостаточно данных для истории (нужно минимум 3 факта).")
+
+
+# ─── Режим: view (default) ───────────────────────────────────────────
+
+
+async def _cmd_memory_view(
+    message: Message, userbot_manager: UserbotManager, contact_name: str
+) -> None:
+    """Показать память: всё, или про конкретный контакт, или task-факты."""
+    contact_id, label = await _resolve_contact(message, userbot_manager, contact_name)
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -544,11 +603,39 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     await message.answer(body, reply_markup=kb)
 
 
+# ─── Утилита: resolve контакта ──────────────────────────────────────
+
+
+async def _resolve_contact(
+    message: Message, userbot_manager: UserbotManager, contact_name: str
+) -> tuple[int | None, str]:
+    """Резолвит имя контакта через userbot → (contact_id, label).
+
+    Возвращает (None, "") если:
+      - contact_name пустой
+      - userbot не подключён
+      - контакт не найден
+    """
+    if not contact_name:
+        return None, ""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+    client = (
+        userbot_manager.get_client(message.from_user.id) if userbot_manager else None
+    )
+    if client is None:
+        return None, ""
+    candidates = await resolve(client, owner, contact_name)
+    if candidates:
+        return candidates[0].peer_id, f" — {candidates[0].label()}"
+    return None, ""
+
+
 # ── Dreaming V3 UI: /memory --reval and /memory --correct handlers ──
 
 
 @router.callback_query(F.data.startswith("memreval:"))
-async def cb_memreval(callback: CallbackQuery) -> None:
+async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает кнопки Dreaming V3: confirm/reject/permanent/cancel/rollback."""
     if callback.data is None or callback.message is None:
         await callback.answer("Ошибка")
@@ -559,7 +646,10 @@ async def cb_memreval(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if action == "cancel":
-        _PENDING_CORRECTIONS.pop(user_id, None)
+        # Clear pending correction FSM state if the user was in it.
+        current = await state.get_state()
+        if current == MemoryCorrectionStates.waiting_new_text.state:
+            await state.clear()
         await callback.message.edit_text("❌ Отменено.")
         await callback.answer()
         return
@@ -604,6 +694,10 @@ async def cb_memreval(callback: CallbackQuery) -> None:
             fact_text = sanitize_html(mem.fact)
             await callback.message.edit_text(f"🗑 Деактивирован: <i>{fact_text}</i>")
             await callback.answer("Факт деактивирован")
+            # Clear pending correction FSM state if the user was in it.
+            current = await state.get_state()
+            if current == MemoryCorrectionStates.waiting_new_text.state:
+                await state.clear()
 
         elif action == "permanent":
             from src.core.memory.memory_admin import update_memory_text
@@ -624,103 +718,18 @@ async def cb_memreval(callback: CallbackQuery) -> None:
                 f"♾ Сделано постоянным: <i>{fact_text}</i>"
             )
             await callback.answer("Факт сохранён навсегда")
+            # Clear pending correction FSM state if the user was in it.
+            current = await state.get_state()
+            if current == MemoryCorrectionStates.waiting_new_text.state:
+                await state.clear()
 
         else:
             await callback.answer("Неизвестное действие", show_alert=True)
 
 
-# ─── /cancel: command to abort pending correction ──────────────────────
-
-
-@router.message(Command("cancel"))
-async def cmd_cancel_pending(message: Message) -> None:
-    """Отменяет активное ожидание исправления факта."""
-    uid = message.from_user.id if message.from_user else None
-    if uid is None:
-        return
-    if uid in _PENDING_CORRECTIONS:
-        _PENDING_CORRECTIONS.pop(uid, None)
-        await message.answer("❌ Исправление факта отменено.")
-    else:
-        await message.answer("Нет активных операций для отмены.")
-
-
-# ─── /memory --correct: filter + handler (FSM-lite via _PENDING_CORRECTIONS) ──
-
-
-class _PendingCorrectionFilter(BaseFilter):
-    """Фильтр: сообщение от юзера с активным ожиданием исправления факта.
-    Возвращает True только если у юзера есть незавершённая и не протухшая запись
-    в _PENDING_CORRECTIONS, и нет активного FSM-состояния.
-    """
-
-    async def __call__(self, message: Message, state: FSMContext | None = None) -> bool:
-        if message.from_user is None:
-            return False
-        uid = message.from_user.id
-        pending = _PENDING_CORRECTIONS.get(uid)
-        if pending is None:
-            return False
-        # Check TTL — cleanup is opportunistic (on next message).
-        # TTL is 300s, bounded by user count — no separate sweep needed.
-        deadline = pending.get("deadline", 0)
-        if time.monotonic() > deadline:
-            _PENDING_CORRECTIONS.pop(uid, None)
-            return False
-        if state is not None and await state.get_state() is not None:
-            return False
-        return True
-
-
-# ВАЖНО: memory_cmd.router зарегистрирован ВЫШЕ free_text.router в app.py,
-# поэтому этот handler перехватывает текст раньше free_text.
-@router.message(_PendingCorrectionFilter())
-async def handle_pending_correction(message: Message) -> None:
-    """Обрабатывает текст, если у пользователя есть pending /memory --correct."""
-    user_id = message.from_user.id
-    pending = _PENDING_CORRECTIONS.get(user_id)
-
-    new_text = (message.text or "").strip()
-    if not new_text or len(new_text) < 3:
-        await message.answer("Текст слишком короткий. Напиши заново или /cancel.")
-        return
-    if len(new_text) > 500:
-        await message.answer(
-            f"Слишком длинный текст ({len(new_text)} > 500). Сократи и пришли заново."
-        )
-        return
-
-    memory_id = pending["memory_id"]
-
-    # Scan user-supplied correction text for prompt injection
-    from src.core.security.prompt_injection_scanner import scan_content
-
-    scan_result = scan_content(new_text, "memory_correction")
-    if scan_result.blocked:
-        _PENDING_CORRECTIONS.pop(user_id, None)
-        await message.answer("⛔ Контент не прошёл проверку безопасности.")
-        return
-
-    from src.core.memory.memory_admin import update_memory_text
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, user_id)
-        mem = await session.get(Memory, memory_id)
-        if not mem or mem.user_id != owner.id:
-            _PENDING_CORRECTIONS.pop(user_id, None)
-            await message.answer("❌ Факт не найден, отменяю.")
-            return
-        old_fact = mem.fact
-        await update_memory_text(session, memory_id, new_text)
-        await session.commit()
-
-    _PENDING_CORRECTIONS.pop(user_id, None)
-    await message.answer(
-        f"✅ Факт #{memory_id} обновлён:\n\n"
-        f"<s>{sanitize_html(old_fact)}</s>\n"
-        f"→ <i>{sanitize_html(new_text)}</i>"
-    )
-
+# ─── /cancel: global handler lives in login.cmd_cancel — clears ANY FSM
+# state including MemoryCorrectionStates.waiting_new_text. No need for a
+# dedicated /cancel_pending here.
 
 # ── Timeline format ───────────────────────────────────────────────────
 

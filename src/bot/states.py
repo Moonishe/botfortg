@@ -66,3 +66,14 @@ class CustomProviderStates(StatesGroup):
     waiting_endpoint = State()
     waiting_key = State()
     waiting_model = State()
+
+
+class MemoryCorrectionStates(StatesGroup):
+    """FSM для ручного исправления факта памяти (`/memory --correct <id>`).
+
+    Использует встроенный aiogram FSM вместо legacy _PENDING_CORRECTIONS dict.
+    TTL проверяется лениво через `set_at_ts` в state data при обработке
+    следующего сообщения.
+    """
+
+    waiting_new_text = State()  # user typing the corrected fact
