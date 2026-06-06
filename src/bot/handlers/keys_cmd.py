@@ -398,13 +398,25 @@ async def cmd_keys(message: Message) -> None:
                 success += 1
 
         if len(keys) == 1 and success == 1:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="📋 Посмотреть доступные модели",
+                            callback_data=f"keys:disc:{slot.id}",
+                        )
+                    ]
+                ]
+            )
             if not is_new:
                 await message.answer(
-                    f"ℹ️ Ключ {provider}/{purpose} уже был добавлен ранее (слот #{slot.id})."
+                    f"ℹ️ Ключ {provider}/{purpose} уже был добавлен ранее (слот #{slot.id}).",
+                    reply_markup=kb,
                 )
             else:
                 await message.answer(
-                    f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{slot.id})"
+                    f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{slot.id})",
+                    reply_markup=kb,
                 )
         elif len(keys) == 1 and failed == 1:
             await message.answer(
@@ -882,9 +894,20 @@ async def _pending_key_entry_handler(message: Message) -> None:
         )
 
     if not is_new:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📋 Посмотреть доступные модели",
+                        callback_data=f"keys:disc:{slot.id}",
+                    )
+                ]
+            ]
+        )
         await message.answer(
             f"ℹ️ Ключ {provider_name}/{model or ''} "
-            f"уже был добавлен ранее (слот #{slot.id})."
+            f"уже был добавлен ранее (слот #{slot.id}).",
+            reply_markup=kb,
         )
         return
 
@@ -912,14 +935,36 @@ async def _pending_key_entry_handler(message: Message) -> None:
                 f"не прошёл валидацию. Проверь ключ."
             )
         else:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="📋 Посмотреть доступные модели",
+                            callback_data=f"keys:disc:{slot.id}",
+                        )
+                    ]
+                ]
+            )
             await message.answer(
                 f"✅ Ключ {provider_name}/{model or ''} "
-                f"добавлен и проверен! (слот #{slot.id})"
+                f"добавлен и проверен! (слот #{slot.id})",
+                reply_markup=kb,
             )
     except Exception:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📋 Посмотреть доступные модели",
+                        callback_data=f"keys:disc:{slot.id}",
+                    )
+                ]
+            ]
+        )
         await message.answer(
             f"✅ Ключ {provider_name}/{model or ''} "
-            f"добавлен! (слот #{slot.id}, проверка недоступна)"
+            f"добавлен! (слот #{slot.id}, проверка недоступна)",
+            reply_markup=kb,
         )
 
 
