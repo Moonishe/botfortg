@@ -634,6 +634,81 @@ async def _process_text_fallback(
         logger.exception("failed to set last purpose")
 
 
+# ── INSTANT bypass helpers ─────────────────────────────────────────
+
+
+def _get_classify_mode(classification: dict) -> str | None:
+    """Определяет режим ответа на основе результата Stage -2 классификатора.
+
+    Если классификация содержит категории, для которых не нужен LLM —
+    возвращает "INSTANT", чтобы пропустить Stage 0-3 полностью.
+    """
+    if not classification:
+        return None
+    # Категории, для которых достаточно мгновенного ответа без LLM
+    instant_categories = {"agreement", "gratitude", "emotion", "command"}
+    if any(classification.get(cat) for cat in instant_categories):
+        return "INSTANT"
+    return None
+
+
+def _instant_response(text: str, classification: dict, message: Message) -> str | None:
+    """Генерирует мгновенный протокольный ответ без LLM, памяти и планирования.
+
+    Использует результат Stage -2 классификатора + эвристики по тексту.
+    Возвращает None если сообщение не подходит для мгновенного ответа —
+    тогда пайплайн продолжается в Stage 0.
+    """
+    text_lower = text.strip().lower()
+
+    # Согласие (ага, ок, да, понял, ладно, etc.)
+    if classification.get("agreement"):
+        responses = ["👍", "👌", "🤝", "ага", "ок", "добро"]
+        return random.choice(responses)
+
+    # Благодарность
+    if classification.get("gratitude"):
+        return "😊"
+
+    # Эмоции (смех, удивление, etc.)
+    if classification.get("emotion"):
+        # Смех / laughter
+        _laugh_markers = (
+            "ха",
+            "ахах",
+            "хех",
+            "hehe",
+            "lol",
+            "lmao",
+            "ржа",
+            "ржу",
+            "смех",
+            "смешно",
+            "угар",
+        )
+        if any(m in text_lower for m in _laugh_markers):
+            return random.choice(["😂", "😄", "😆", "ахах"])
+
+        # Удивление / surprise
+        _surprise_markers = ("ого", "вау", "ничего себе", "wow", "огонь", "обалдеть")
+        if any(m in text_lower for m in _surprise_markers):
+            return random.choice(["😮", "😯", "ого"])
+
+        # Общая эмоция
+        return random.choice(["😊", "👍", "ок"])
+
+    # Короткая команда (отправь, напиши, найди — но коротко)
+    if classification.get("command"):
+        return "👀"
+
+    # Очень короткое сообщение — универсальный мгновенный ответ
+    if len(text_lower) < 10:
+        return random.choice(["👍", "ок", "м"])
+
+    # Не подходит для мгновенного ответа — продолжаем пайплайн
+    return None
+
+
 async def _process_text(
     raw: str,
     message: Message,
@@ -713,6 +788,81 @@ async def _process_text(
                 return
         except Exception:
             logger.debug("Classifier fast-path failed, continuing", exc_info=True)
+
+    # ── INSTANT bypass: пропускаем Stage 0-3 для мгновенных ответов ──
+    # Срабатывает после классификатора, но ДО извлечения фактов и LLM.
+    # Экономит токены и latency для сообщений типа «ага», «спс», «😂», «ок».
+    if classification:
+        classify_mode = _get_classify_mode(classification)
+        if classify_mode == "INSTANT":
+            # Edge-кейсы: не отвечаем мгновенно на URL, forwarded и @mention
+            _has_url = bool(_URL_RE.search(raw))
+            _is_forwarded = bool(
+                message.forward_date
+                or message.forward_from
+                or message.forward_from_chat
+                or message.forward_from_message_id
+            )
+            _has_mention = any(
+                ent.type in ("mention", "text_mention")
+                for ent in (message.entities or [])
+            )
+
+            if not _has_url and not _is_forwarded and not _has_mention:
+                response = _instant_response(raw, classification, message)
+                if response is not None:
+                    await message.answer(response)
+
+                    # Запись в историю диалога (best-effort)
+                    try:
+                        from src.core.memory.session_recorder import record_turn
+
+                        async with get_session() as rec_session:
+                            await record_turn(
+                                rec_session,
+                                message.from_user.id,
+                                "user",
+                                raw[:100],
+                            )
+                            await record_turn(
+                                rec_session,
+                                message.from_user.id,
+                                "assistant",
+                                response[:100],
+                            )
+                    except Exception:
+                        logger.debug("Failed to record instant turn", exc_info=True)
+
+                    _fire_record_trajectory(
+                        owner_telegram_id,
+                        request_text=raw,
+                        route_mode="classifier_instant",
+                        intent_json={
+                            "intent": "instant",
+                            "classification": classification,
+                        },
+                        response_text=response,
+                        success=True,
+                        latency_ms=int((time.monotonic() - turn_started) * 1000),
+                    )
+
+                    # Эмитим хук on_message_processed
+                    try:
+                        from src.core.infra.hooks import hooks
+
+                        await hooks.emit(
+                            "on_message_processed",
+                            user_id=str(owner_telegram_id),
+                            raw=raw[:200],
+                            mode="instant",
+                            response=response[:200],
+                        )
+                    except Exception:
+                        logger.debug(
+                            "hooks.emit failed for instant bypass", exc_info=True
+                        )
+
+                    return  # Полностью пропускаем Stage 0-3
 
     # ── Stage -1: Background fact extraction (enqueue) ───────────────
     # Без этого extract_and_save_memories() НЕ вызывается в main flow,

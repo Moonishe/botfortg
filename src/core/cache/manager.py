@@ -64,6 +64,13 @@ class ManagedCache(Generic[K, V]):
         self._lock = asyncio.Lock()
         self.metrics = CacheMetrics()
 
+        # Single-writer pattern: только один writer вычисляет значение,
+        # остальные читатели ждут через asyncio.Event.
+        self._writer_lock = asyncio.Lock()  # Сериализует writer'ы
+        self._write_events: dict[
+            K, asyncio.Event
+        ] = {}  # По-ключевые события для оповещения читателей
+
     async def get(self, key: K) -> V | None:
         """Get value from cache. Returns None if not found or expired."""
         async with self._lock:
@@ -81,6 +88,119 @@ class ManagedCache(Generic[K, V]):
             self._cache.move_to_end(key)
             self.metrics.hits += 1
             return value
+
+    async def get_or_compute(
+        self, key: K, computer: Callable[[], Any], ttl: float | None = None
+    ) -> V:
+        """Получить значение из кэша или вычислить его (single-writer pattern).
+
+        **Читатели (множественные):** возвращают закэшированное значение если
+        оно свежее.  Если значение отсутствует или протухло — ждут, пока
+        writer вычислит новое значение (через ``asyncio.Event``).
+
+        **Writer (один):** только ОДНА корутина выполняет ``computer()``
+        для данного ключа.  Остальные корутины, которые тоже хотели
+        вычислить значение, просто дожидаются результата первого writer'а.
+
+        Отличие от :meth:`upsert`:
+        - ``upsert`` использует double-checked locking — несколько writer'ов
+          могут гоняться, но записывается только один результат.
+        - ``get_or_compute`` использует single-writer с ``asyncio.Event`` —
+          writer только ОДИН, остальные ждут и **не** вызывают ``computer()``.
+          Это оптимально когда ``computer()`` — дорогой вызов (LLM, БД, сеть).
+
+        Args:
+            key: Ключ кэша.
+            computer: callable, возвращающий значение (или coroutine).
+                      Вызывается **только** когда ни у кого нет свежего
+                      значения и нет другого writer'а для этого ключа.
+            ttl: Опциональный TTL в секундах. Если None — :attr:`default_ttl`.
+
+        Returns:
+            Значение из кэша (свежее) или только что вычисленное.
+        """
+        # ── Fast path: cache hit (под локом для консистентности) ──
+        async with self._lock:
+            if key in self._cache:
+                expires_at, value = self._cache[key]
+                if time.monotonic() < expires_at:
+                    self._cache.move_to_end(key)
+                    self.metrics.hits += 1
+                    return value
+
+        # ── Получить или создать per-key Event ──
+        if key not in self._write_events:
+            self._write_events[key] = asyncio.Event()
+            self._write_events[key].set()  # Изначально «готово» (писатель не активен)
+
+        event = self._write_events[key]
+
+        # ── Если другой writer уже вычисляет этот ключ — ждём ──
+        if not event.is_set():
+            await event.wait()
+            # После сигнала — перепроверяем кэш
+            async with self._lock:
+                if key in self._cache:
+                    expires_at, value = self._cache[key]
+                    if time.monotonic() < expires_at:
+                        self._cache.move_to_end(key)
+                        self.metrics.hits += 1
+                        return value
+
+        # ── Мы — writer (или значение всё ещё не готово) ──
+        actual_ttl = ttl if ttl is not None else self.default_ttl
+
+        async with self._writer_lock:
+            # Double-check: другой writer мог уже вычислить, пока мы ждали _writer_lock
+            async with self._lock:
+                if key in self._cache:
+                    expires_at, value = self._cache[key]
+                    if time.monotonic() < expires_at:
+                        self._cache.move_to_end(key)
+                        self.metrics.hits += 1
+                        return value
+
+            # Сигнализируем: writer начал работу (читатели будут ждать)
+            event.clear()
+            self.metrics.misses += 1
+
+            try:
+                # Вычисляем ВНЕ лока (_writer_lock удерживается для сериализации,
+                # но _lock отпущен — другие операции с кэшем не блокируются)
+                result = computer()
+                if asyncio.iscoroutine(result):
+                    result = await result
+
+                # Сохраняем результат
+                expires_at = time.monotonic() + actual_ttl
+
+                async with self._lock:
+                    # LRU eviction если нужно
+                    while len(self._cache) >= self.max_size:
+                        oldest_key, (_, oldest_value) = self._cache.popitem(last=False)
+                        self._expires.pop(oldest_key, None)
+                        self.metrics.evictions += 1
+                        if self.on_evict:
+                            try:
+                                self.on_evict(oldest_key, oldest_value)
+                            except Exception:
+                                logger.debug(
+                                    "on_evict failed for %s", oldest_key, exc_info=True
+                                )
+
+                    self._cache[key] = (expires_at, result)
+                    self._expires[key] = expires_at
+
+                return result
+
+            except Exception:
+                # При ошибке — зачищаем tracking, чтобы следующий запрос
+                # попробовал снова (не оставляем ключ в состоянии «пишется»)
+                raise
+
+            finally:
+                # Сигнализируем: writer завершил (все читатели просыпаются)
+                event.set()
 
     async def set(self, key: K, value: V, ttl: float | None = None) -> None:
         """Set value in cache with optional TTL override."""
@@ -114,7 +234,9 @@ class ManagedCache(Generic[K, V]):
     async def invalidate(self, key: K) -> bool:
         """Manually remove key from cache. Returns True if key existed."""
         async with self._lock:
-            return self._evict(key, expired=False)
+            result = self._evict(key, expired=False)
+            self._write_events.pop(key, None)  # Очистка per-key event
+            return result
 
     async def clear(self) -> int:
         """Clear all entries. Returns count of removed items."""
@@ -123,6 +245,7 @@ class ManagedCache(Generic[K, V]):
             count = len(self._cache)
             self._cache.clear()
             self._expires.clear()
+            self._write_events.clear()  # Очистка всех per-key events
         for key, (_, value) in items:
             if self.on_evict:
                 try:

@@ -145,20 +145,20 @@ async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object
         }
 
     # ManagedCache path: LRU-bounded, auto-TTL, thread-safe
-    cached = await _settings_cache.get(telegram_id)
-    if cached is not None:
-        return cached  # type: ignore[return-value]
+    # Используем single-writer pattern: только один writer делает БД-запрос,
+    # остальные корутины ждут результат через asyncio.Event.
 
-    async with get_session() as session:
-        owner = await get_or_create_user(session, telegram_id)
-        ctx = {
-            "owner_telegram_id": owner.telegram_id,
-            "tz_name": get_user_tz(owner),
-            "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
-            "global_style_profile": owner.global_style_profile,
-        }
-        await _settings_cache.set(telegram_id, ctx)
-    return ctx  # type: ignore[return-value]
+    async def _compute_ctx() -> dict[str, object]:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            return {
+                "owner_telegram_id": owner.telegram_id,
+                "tz_name": get_user_tz(owner),
+                "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
+                "global_style_profile": owner.global_style_profile,
+            }
+
+    return await _settings_cache.get_or_compute(telegram_id, _compute_ctx)
 
 
 def _fire_record_trajectory(*args: object, **kwargs: object) -> None:
