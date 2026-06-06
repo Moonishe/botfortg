@@ -258,27 +258,41 @@ async def cleanup_circuit_breakers(
     stale_threshold: float = 3600.0,
     open_timeout: float = 1800.0,
 ) -> int:
-    """Remove circuit breakers that haven't been accessed recently.
+    """Remove stale entries from global in-memory caches to prevent memory leaks.
 
-    Called periodically (every ~5 min) from the global cleanup loop to prevent
-    unbounded growth of ``_CIRCUIT_BREAKERS`` when keys are rotated or removed
-    from the database.
+    Called periodically (every ~5 min) from the global cleanup loop.
 
-    Cleanup rules:
+    Cleans:
+
+    * ``_CIRCUIT_BREAKERS`` — circuit breakers that haven't been accessed
+      recently (prevents unbounded growth when keys are rotated or removed
+      from the database).
+
       - CLOSED:  removed if ``_last_touched`` > stale_threshold ago (1 h).
       - OPEN / HALF_OPEN: removed if ``_last_failure_time`` > open_timeout
         ago (30 min) — the breaker should retry from scratch instead of
         staying stuck forever.
 
+    * ``_PROVIDER_METRICS`` — per-provider performance metrics for adaptive
+      provider selection (prevents unbounded growth when many provider names
+      appear over time).
+
+      - Entries are removed if the last activity (max of last_success_time
+        and last_failure_time) is older than ``stale_threshold``.
+      - Entries that have never recorded any activity (last_active == 0)
+        are preserved — they represent newly-seen providers with optimistic
+        (exploration) scores.
+
     Args:
         stale_threshold: seconds since last activity after which a CLOSED
-            breaker is considered eligible for cleanup. Default: 3600 (1 h).
+            breaker or a provider-metrics entry is considered eligible for
+            cleanup. Default: 3600 (1 h).
         open_timeout: seconds since last failure after which an OPEN /
             HALF_OPEN breaker is considered stuck and eligible for cleanup.
             Default: 1800 (30 min).
 
     Returns:
-        Number of circuit breakers removed.
+        Total number of entries removed (circuit breakers + provider metrics).
     """
     if _CIRCUIT_BREAKERS_LOCK is None:
         return 0
@@ -302,10 +316,33 @@ async def cleanup_circuit_breakers(
 
     if removed:
         logger.debug(
-            "cleanup_circuit_breakers: removed %d stale entries (%d remain)",
+            "cleanup_circuit_breakers: removed %d stale circuit breakers (%d remain)",
             removed,
             len(_CIRCUIT_BREAKERS),
         )
+
+    # ── Clean stale _PROVIDER_METRICS entries ──────────────────────
+    if _PROVIDER_METRICS_LOCK is not None:
+        async with _PROVIDER_METRICS_LOCK:
+            stale_metrics: list[str] = []
+            for name, m in _PROVIDER_METRICS.items():
+                last_active = max(m.last_success_time, m.last_failure_time)
+                # last_active == 0 means the entry was just created and never
+                # had any activity — keep it (exploration bias).
+                if last_active > 0 and (now - last_active) > stale_threshold:
+                    stale_metrics.append(name)
+
+            for name in stale_metrics:
+                del _PROVIDER_METRICS[name]
+                removed += 1
+
+        if stale_metrics:
+            logger.debug(
+                "cleanup_circuit_breakers: removed %d stale provider-metrics entries "
+                "(%d remain)",
+                len(stale_metrics),
+                len(_PROVIDER_METRICS),
+            )
 
     return removed
 
