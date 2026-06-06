@@ -136,7 +136,7 @@ class MultiKeyProvider:
         keys: list[str],
         slot_ids: list[int] | None = None,
         endpoints: list[str | None] | None = None,
-        models: list[str | None] | None = None,
+        models: list[str | None] | list[list[str]] | None = None,
         embed_model: str | None = None,
         session_provider: Callable[[], tuple[AsyncSession, object]] | None = None,
         purpose: str = "main",
@@ -149,7 +149,12 @@ class MultiKeyProvider:
         self._keys = keys
         self._slot_ids = slot_ids or []
         self._endpoints = endpoints or []
-        self._models = models or []
+        # Поддержка старого (list[str]) и нового (list[list[str]]) форматов
+        self._models: list[list[str]] = (
+            [[m] for m in models]
+            if models and isinstance(models[0], str)
+            else (models if models else [[] for _ in keys])  # type: ignore[arg-type]
+        )
         self._embed_model = embed_model
         self._session_provider = session_provider
         self._kwargs = kwargs
@@ -223,7 +228,10 @@ class MultiKeyProvider:
                 elif self._model:
                     provider_kwargs["model"] = self._model
                 elif self._models and idx < len(self._models):
-                    provider_kwargs["model"] = self._models[idx]
+                    per_slot = self._models[idx]
+                    if per_slot:
+                        # Используем первую enabled-модель из списка слота
+                        provider_kwargs["model"] = per_slot[0]
                 if self._embed_model:
                     provider_kwargs["embed_model"] = self._embed_model
                 provider = self._provider_class(key, **provider_kwargs)

@@ -130,7 +130,9 @@ async def _fetch_models(slot: LlmKeySlot) -> tuple[list[str], str | None]:
 # ─── Клавиатура моделей с пагинацией ───────────────────────────────────
 
 
-def _build_models_message(slot: LlmKeySlot, error: str | None, page: int) -> str:
+def _build_models_message(
+    slot: LlmKeySlot, error: str | None, page: int, enabled_count: int = 0
+) -> str:
     """Форматирует текст сообщения со списком моделей."""
     if error:
         return f"❌ <b>Слот #{slot.id}</b> ({slot.provider}/{slot.purpose})\n{error}"
@@ -147,21 +149,33 @@ def _build_models_message(slot: LlmKeySlot, error: str | None, page: int) -> str
     ]
     if slot.endpoint:
         lines.append(f"🔗 {slot.endpoint}")
-    lines.append(f"Найдено: {total} | стр. {page + 1}/{total_pages}")
+    lines.append(
+        f"Найдено: {total} | Включено: {enabled_count} | стр. {page + 1}/{total_pages}"
+    )
     return "\n".join(lines)
 
 
-def _build_models_keyboard(
+async def _build_models_keyboard(
     slot_id: int,
     page: int = 0,
 ) -> InlineKeyboardMarkup:
-    """Строит инлайн-клавиатуру с моделями и навигацией."""
+    """Строит инлайн-клавиатуру с моделями, навигацией и toggle-состоянием."""
     cached = _cache_get(slot_id)
     if not cached:
         # Нет данных — только кнопка закрытия
         kb = InlineKeyboardBuilder()
         kb.button(text="❌ Закрыть", callback_data="models:close")
         return kb.as_markup()
+
+    # Загружаем enabled-модели из БД
+    enabled_set: set[str] = set()
+    try:
+        async with get_session() as session:
+            from src.db.repos.key_repo import get_enabled_models as _gem
+
+            enabled_set = set(await _gem(session, slot_id))
+    except Exception:
+        pass
 
     total = len(cached)
     total_pages = max(1, (total + MODELS_PER_PAGE - 1) // MODELS_PER_PAGE)
@@ -174,10 +188,11 @@ def _build_models_keyboard(
 
     for i, m in enumerate(page_models):
         global_idx = start + i
-        display = m[:44] + "…" if len(m) > 44 else m
+        checked = "✅" if m in enabled_set else "⬜"
+        display = m[:40] + "…" if len(m) > 40 else m
         kb.button(
-            text=display,
-            callback_data=f"models:save:{slot_id}:{global_idx}",
+            text=f"{checked} {display}",
+            callback_data=f"models:toggle:{slot_id}:{global_idx}",
         )
 
     kb.adjust(1)
@@ -210,6 +225,16 @@ def _build_models_keyboard(
         kb.row(*nav_row)
 
     # Строка действий
+    kb.row(
+        InlineKeyboardButton(
+            text="✅ Выбрать все",
+            callback_data=f"models:enable_all:{slot_id}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Снять все",
+            callback_data=f"models:disable_all:{slot_id}",
+        ),
+    )
     kb.row(
         InlineKeyboardButton(
             text="🔄 Обновить",
@@ -371,7 +396,7 @@ async def _fetch_and_show_models(
 
     await msg.edit_text(
         _build_models_message(slot, None, 0),
-        reply_markup=_build_models_keyboard(slot.id, page=0),
+        reply_markup=await _build_models_keyboard(slot.id, page=0),
     )
 
 
@@ -455,7 +480,7 @@ async def cb_models_page(callback: CallbackQuery) -> None:
 
     await callback.message.edit_text(
         _build_models_message(slot, None, page),
-        reply_markup=_build_models_keyboard(slot_id, page=page),
+        reply_markup=await _build_models_keyboard(slot_id, page=page),
     )
     await callback.answer()
 
@@ -540,6 +565,170 @@ async def cb_models_save(callback: CallbackQuery) -> None:
         f"✅ Модель «{model_name[:50]}» сохранена в слот #{slot_id}.",
         show_alert=True,
     )
+
+
+# ─── Toggle модели: включить/выключить в LlmKeySlotModel ──────────────
+
+
+@router.callback_query(F.data.startswith("models:toggle:"))
+async def cb_models_toggle(callback: CallbackQuery) -> None:
+    """Включить/выключить модель в мульти-модельном выборе слота."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    try:
+        slot_id = int(parts[2])
+        model_idx = int(parts[3])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+
+    cached = _cache_get(slot_id)
+    if cached is None or model_idx < 0 or model_idx >= len(cached):
+        await callback.answer("Данные устарели. Нажми «🔄 Обновить».", show_alert=True)
+        return
+
+    model_name = cached[model_idx]
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        slot = await session.get(LlmKeySlot, slot_id)
+        if slot is None or slot.user_id != owner.id:
+            await callback.answer("Слот не найден или не твой.", show_alert=True)
+            return
+
+        from src.db.repos.key_repo import toggle_slot_model, get_enabled_models
+
+        # Проверяем текущее состояние и переключаем
+        enabled_models = await get_enabled_models(session, slot_id)
+        currently_enabled = model_name in enabled_models
+        await toggle_slot_model(session, slot_id, model_name, not currently_enabled)
+
+        # Обратная совместимость: обновляем slot.model
+        updated = await get_enabled_models(session, slot_id)
+        slot.model = updated[0] if updated else None
+        await session.commit()
+
+    # Инвалидируем кэш настроек
+    try:
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(callback.from_user.id)
+    except Exception:
+        pass
+
+    # Перерисовываем клавиатуру
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=await _build_models_keyboard(
+                slot_id, page=_get_current_page(callback)
+            )
+        )
+    await callback.answer(
+        f"{'✅ Включена' if not currently_enabled else '❌ Выключена'}: {model_name[:50]}"
+    )
+
+
+@router.callback_query(F.data.startswith("models:enable_all:"))
+async def cb_models_enable_all(callback: CallbackQuery) -> None:
+    """Включить все модели для слота."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+
+    cached = _cache_get(slot_id)
+    if not cached:
+        await callback.answer("Нет моделей для выбора.", show_alert=True)
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        slot = await session.get(LlmKeySlot, slot_id)
+        if slot is None or slot.user_id != owner.id:
+            await callback.answer("Слот не найден или не твой.", show_alert=True)
+            return
+
+        from src.db.repos.key_repo import set_slot_models
+
+        await set_slot_models(session, slot_id, cached)
+        slot.model = cached[0] if cached else None
+        await session.commit()
+
+    # Инвалидируем кэш
+    try:
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(callback.from_user.id)
+    except Exception:
+        pass
+
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=await _build_models_keyboard(slot_id, page=0)
+        )
+    await callback.answer(f"✅ Включены все {len(cached)} моделей")
+
+
+@router.callback_query(F.data.startswith("models:disable_all:"))
+async def cb_models_disable_all(callback: CallbackQuery) -> None:
+    """Выключить все модели для слота."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        slot = await session.get(LlmKeySlot, slot_id)
+        if slot is None or slot.user_id != owner.id:
+            await callback.answer("Слот не найден или не твой.", show_alert=True)
+            return
+
+        from src.db.repos.key_repo import set_slot_models
+
+        await set_slot_models(session, slot_id, [])
+        slot.model = None
+        await session.commit()
+
+    try:
+        from src.bot.handlers.free_text_common import invalidate_settings_cache
+
+        await invalidate_settings_cache(callback.from_user.id)
+    except Exception:
+        pass
+
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=await _build_models_keyboard(slot_id, page=0)
+        )
+    await callback.answer("❌ Все модели выключены")
+
+
+def _get_current_page(callback: CallbackQuery) -> int:
+    """Извлекает текущую страницу из текста сообщения (если возможно)."""
+    # Простая эвристика: из текста вида "стр. X/Y" парсим X
+    if callback.message and callback.message.text:
+        import re
+
+        m = re.search(r"стр\.\s*(\d+)/", callback.message.text)
+        if m:
+            return int(m.group(1)) - 1
+    return 0
 
 
 # ─── Обработчик из keys_cmd: показать модели после добавления ключа ────

@@ -1,16 +1,17 @@
-"""Key repository — ApiKey, LlmKeySlot."""
+"""Key repository — ApiKey, LlmKeySlot, LlmKeySlotModel."""
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import (
     ApiKey,
     LlmKeySlot,
+    LlmKeySlotModel,
 )
 from src.crypto import decrypt, encrypt
 
@@ -196,3 +197,52 @@ async def mark_key_used(session: AsyncSession, slot_id: int) -> None:
         slot.cooldown_until = None
         slot.last_error = None
         await session.flush()
+
+
+# ─── LlmKeySlotModel CRUD ───────────────────────────────────────────────
+
+
+async def get_slot_models(session: AsyncSession, slot_id: int) -> list[LlmKeySlotModel]:
+    """Получить все модели слота (включая выключенные)."""
+    stmt = (
+        select(LlmKeySlotModel)
+        .where(LlmKeySlotModel.slot_id == slot_id)
+        .order_by(LlmKeySlotModel.created_at)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def set_slot_models(
+    session: AsyncSession, slot_id: int, model_names: list[str]
+) -> None:
+    """Заменить модели слота (удалить старые, добавить новые)."""
+    # Удаляем существующие
+    await session.execute(
+        delete(LlmKeySlotModel).where(LlmKeySlotModel.slot_id == slot_id)
+    )
+    # Добавляем новые
+    for name in model_names:
+        session.add(LlmKeySlotModel(slot_id=slot_id, model_name=name, enabled=True))
+    await session.flush()
+
+
+async def toggle_slot_model(
+    session: AsyncSession, slot_id: int, model_name: str, enabled: bool
+) -> bool:
+    """Включить/выключить модель в слоте. Возвращает True если переключено."""
+    stmt = select(LlmKeySlotModel).where(
+        LlmKeySlotModel.slot_id == slot_id,
+        LlmKeySlotModel.model_name == model_name,
+    )
+    model = (await session.execute(stmt)).scalar_one_or_none()
+    if model is not None:
+        model.enabled = enabled
+        return True
+    return False
+
+
+async def get_enabled_models(session: AsyncSession, slot_id: int) -> list[str]:
+    """Получить список имён enabled-моделей для слота."""
+    models = await get_slot_models(session, slot_id)
+    return [m.model_name for m in models if m.enabled]

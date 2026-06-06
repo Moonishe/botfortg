@@ -6,6 +6,7 @@ from src.db.models._auth import (
     TelegramSession,
     ApiKey,
     LlmKeySlot,
+    LlmKeySlotModel,
     PendingQuestion,
 )
 from src.db.models._contacts import (
@@ -63,6 +64,7 @@ __all__ = [
     "TelegramSession",
     "ApiKey",
     "LlmKeySlot",
+    "LlmKeySlotModel",
     "PendingQuestion",
     "Contact",
     "ContactProfile",

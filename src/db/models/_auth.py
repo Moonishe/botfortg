@@ -188,6 +188,29 @@ class LlmKeySlot(Base):
 
     user: Mapped[User] = relationship(back_populates="key_slots")
 
+    # ─── Мульти-модель: выбранные модели для этого слота ───────────────
+    models: Mapped[list[LlmKeySlotModel]] = relationship(
+        back_populates="slot", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class LlmKeySlotModel(Base):
+    """Модель слота ключа — выбранная модель для использования."""
+
+    __tablename__ = "llm_key_slot_models"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slot_id: Mapped[int] = mapped_column(
+        ForeignKey("llm_key_slots.id", ondelete="CASCADE"), index=True
+    )
+    model_name: Mapped[str] = mapped_column(String(128))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    slot: Mapped[LlmKeySlot] = relationship(back_populates="models")
+
 
 class PendingQuestion(Base):
     """Pending questions queued during async reply generation."""

@@ -60,6 +60,10 @@ _discovery_cache: dict[int, list[str]] = {}  # slot_id → models
 _discovery_cache_ts: dict[int, float] = {}  # slot_id → timestamp
 _DISCOVERY_CACHE_TTL: float = 3600.0  # 1 час
 
+# ─── Multi-select state (выбор нескольких моделей для слота) ────────────
+_multiselect_state: dict[int, set[str]] = {}  # slot_id → {выбранные model names}
+_multiselect_page: dict[int, int] = {}  # slot_id → текущая страница
+
 
 def _cache_models_discovery(slot_id: int, models: list[str]) -> None:
     """Сохранить обнаруженные модели в кэш."""
@@ -404,6 +408,78 @@ def _build_discovered_keyboard(
     return kb.as_markup()
 
 
+def _build_model_multiselect_keyboard(
+    slot_id: int, models: list[str], selected: set[str], page: int = 0
+) -> InlineKeyboardMarkup:
+    """Multi-select клавиатура с чекбоксами для выбора моделей."""
+    kb = InlineKeyboardBuilder()
+    per_page = 8
+    total_pages = (len(models) + per_page - 1) // per_page if models else 1
+    page = max(0, min(page, total_pages - 1)) if total_pages > 0 else 0
+    start = page * per_page
+    page_models = models[start : start + per_page]
+
+    for i, model_name in enumerate(page_models):
+        idx = start + i
+        checked = "✅" if model_name in selected else "⬜"
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{checked} {model_name[:40]}",
+                callback_data=f"keys:msel:{slot_id}:{idx}",
+            )
+        )
+
+    # Навигация + кнопки действий
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀",
+                callback_data=f"keys:msel_pg:{slot_id}:{page - 1}",
+            )
+        )
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{max(1, total_pages)}",
+            callback_data="keys:noop",
+        )
+    )
+    if page < total_pages - 1:
+        nav.append(
+            InlineKeyboardButton(
+                text="▶",
+                callback_data=f"keys:msel_pg:{slot_id}:{page + 1}",
+            )
+        )
+    if nav:
+        kb.row(*nav)
+
+    kb.row(
+        InlineKeyboardButton(
+            text="✅ Выбрать все",
+            callback_data=f"keys:msel_all:{slot_id}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Снять все",
+            callback_data=f"keys:msel_none:{slot_id}",
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text=f"💾 Готово ({len(selected)} выбрано)",
+            callback_data=f"keys:msel_done:{slot_id}",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="✏️ Ввести вручную",
+            callback_data=f"keys:disc_manual:{slot_id}",
+        )
+    )
+
+    return kb.as_markup()
+
+
 async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
     """Получить доступные модели через API провайдера, используя ключ из слота."""
     from src.llm.provider_manager import _provider_class_for
@@ -459,10 +535,14 @@ async def _show_model_discovery(message: Message, slot: LlmKeySlot) -> None:
         )
         return
 
+    # Инициализируем multi-select — пока ничего не выбрано
+    _multiselect_state[slot.id] = set()
+    _multiselect_page[slot.id] = 0
+
     await status_msg.edit_text(
         f"📋 Доступные модели ({len(models)}) для {slot.provider}:\n"
-        f"Выбери модель или введи свою:",
-        reply_markup=_build_discovered_keyboard(slot.id, models, page=0),
+        f"<i>Выбери нужные (можно несколько)</i>",
+        reply_markup=_build_model_multiselect_keyboard(slot.id, models, set(), 0),
     )
 
 
@@ -1092,6 +1172,139 @@ async def cb_disc_skip(callback: CallbackQuery) -> None:
         f"Будет использоваться модель по умолчанию для {provider_name}.\n"
         f"Указать позже: /models {slot_id}",
     )
+    await callback.answer()
+
+
+# ─── Multi-select: колбэки выбора нескольких моделей ──────────────────
+
+
+@router.callback_query(F.data.startswith("keys:msel:"))
+async def cb_multiselect_toggle(callback: CallbackQuery):
+    """Переключить чекбокс модели в multi-select."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    slot_id = int(parts[2])
+    idx = int(parts[3])
+
+    models = _discovery_cache.get(slot_id, [])
+    selected = _multiselect_state.get(slot_id, set())
+
+    model_name = models[idx] if idx < len(models) else None
+    if model_name:
+        if model_name in selected:
+            selected.discard(model_name)
+        else:
+            selected.add(model_name)
+    _multiselect_state[slot_id] = selected
+
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=_build_model_multiselect_keyboard(
+                slot_id, models, selected, _multiselect_page.get(slot_id, 0)
+            )
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:msel_pg:"))
+async def cb_multiselect_page(callback: CallbackQuery):
+    """Пагинация multi-select."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    slot_id = int(parts[2])
+    page = int(parts[3])
+    _multiselect_page[slot_id] = page
+
+    models = _discovery_cache.get(slot_id, [])
+    selected = _multiselect_state.get(slot_id, set())
+
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=_build_model_multiselect_keyboard(
+                slot_id, models, selected, page
+            )
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:msel_all:"))
+async def cb_multiselect_all(callback: CallbackQuery):
+    """Выбрать все модели."""
+    slot_id = int(callback.data.split(":")[2])
+    models = _discovery_cache.get(slot_id, [])
+    _multiselect_state[slot_id] = set(models)
+
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=_build_model_multiselect_keyboard(
+                slot_id, models, set(models), _multiselect_page.get(slot_id, 0)
+            )
+        )
+    await callback.answer(f"✅ Выбрано {len(models)} моделей")
+
+
+@router.callback_query(F.data.startswith("keys:msel_none:"))
+async def cb_multiselect_none(callback: CallbackQuery):
+    """Снять выбор со всех моделей."""
+    slot_id = int(callback.data.split(":")[2])
+    models = _discovery_cache.get(slot_id, [])
+    _multiselect_state[slot_id] = set()
+
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=_build_model_multiselect_keyboard(
+                slot_id, models, set(), _multiselect_page.get(slot_id, 0)
+            )
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:msel_done:"))
+async def cb_multiselect_done(callback: CallbackQuery):
+    """Сохранить выбранные модели в БД."""
+    slot_id = int(callback.data.split(":")[2])
+    selected = _multiselect_state.get(slot_id, set())
+
+    if not selected:
+        await callback.answer("⚠️ Выбери хотя бы одну модель", show_alert=True)
+        return
+
+    async with get_session() as session:
+        from src.db.repos.key_repo import set_slot_models
+
+        owner = await get_or_create_user(session, callback.from_user.id)
+
+        # Проверка владения слотом
+        stmt = select(LlmKeySlot).where(
+            LlmKeySlot.id == slot_id, LlmKeySlot.user_id == owner.id
+        )
+        slot = (await session.execute(stmt)).scalar_one_or_none()
+        if not slot:
+            await callback.answer("Слот не найден", show_alert=True)
+            return
+
+        await set_slot_models(session, slot_id, list(selected))
+        # Обратная совместимость: slot.model = первая выбранная модель
+        slot.model = list(selected)[0] if selected else None
+        await session.commit()
+
+    # Очистка состояния
+    _multiselect_state.pop(slot_id, None)
+    _multiselect_page.pop(slot_id, None)
+
+    model_list = "\n".join(f"  • {m}" for m in list(selected)[:10])
+    suffix = f"\n  ... и ещё {len(selected) - 10}" if len(selected) > 10 else ""
+
+    if callback.message:
+        await callback.message.edit_text(
+            f"✅ Сохранено {len(selected)} моделей для слота #{slot_id}:\n"
+            f"{model_list}{suffix}\n\n"
+            f"Управлять: /models {slot_id}"
+        )
     await callback.answer()
 
 

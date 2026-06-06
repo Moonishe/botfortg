@@ -801,7 +801,18 @@ async def build_provider(
             keys = [decrypt(s.key_enc) for s in slots]
             slot_ids = [s.id for s in slots]
             endpoints = [s.endpoint for s in slots]
-            models = [s.model for s in slots]
+            # Читаем мульти-модели из LlmKeySlotModel; fallback на s.model
+            from src.db.repos.key_repo import get_enabled_models as _get_enabled
+
+            models = []
+            for s in slots:
+                enabled = await _get_enabled(session, s.id)
+                if enabled:
+                    models.append(enabled)
+                elif s.model:
+                    models.append([s.model])
+                else:
+                    models.append([])
             all_slot_ids.extend(slot_ids)
             provider_class = _provider_class_for(name)
             if provider_class is None:
