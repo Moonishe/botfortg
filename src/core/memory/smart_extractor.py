@@ -208,16 +208,18 @@ def score_extract_priority(text: str) -> float:
 
 
 def _normalize_for_cache(text: str) -> str:
-    """Нормализует текст для кэша: lowercase, убирает пунктуацию и числа."""
+    """Нормализует текст для кэша: lowercase, убирает пунктуацию.
+
+    Цифры НЕ удаляются — они семантически значимы
+    (телефоны, возраст, даты, суммы).
+    """
     text_lower = text.lower().strip()
     # Убираем пунктуацию
     text_no_punct = text_lower.translate(
         str.maketrans("", "", string.punctuation + "«»—–")
     )
-    # Убираем числа
-    text_no_digits = re.sub(r"\d+", "", text_no_punct)
     # Убираем лишние пробелы
-    text_normalized = " ".join(text_no_digits.split())
+    text_normalized = " ".join(text_no_punct.split())
     return text_normalized
 
 
@@ -332,24 +334,37 @@ async def make_extract_decision(
         classification = None
 
     if classification:
-        # Приветствия и прощания — пропускаем
+        # Приветствия и прощания — пропускаем, НО проверяем фактические индикаторы
         if classification.get("greeting") or classification.get("farewell"):
-            return ExtractDecision(
-                should_extract=False,
-                priority=ExtractPriority.SKIP,
-                score=0.0,
-                reason="приветствие/прощание (classifier)",
-                fast_skip=True,
+            if not _has_factual_indicators(text_stripped):
+                return ExtractDecision(
+                    should_extract=False,
+                    priority=ExtractPriority.SKIP,
+                    score=0.0,
+                    reason="приветствие/прощание (classifier)",
+                    fast_skip=True,
+                )
+            # Иначе: содержит факты → не скипаем, продолжаем scoring
+            logger.debug(
+                "Classifier returned greeting/farewell but message has factual "
+                "indicators — proceeding to scoring: %.60s",
+                text_stripped,
             )
 
-        # Тривиальные (ага, ок, да) — пропускаем
+        # Тривиальные (ага, ок, да) — пропускаем, НО проверяем фактические индикаторы
         if classification.get("trivial") and not classification.get("command"):
-            return ExtractDecision(
-                should_extract=False,
-                priority=ExtractPriority.SKIP,
-                score=0.0,
-                reason="тривиальное сообщение (classifier)",
-                fast_skip=True,
+            if not _has_factual_indicators(text_stripped):
+                return ExtractDecision(
+                    should_extract=False,
+                    priority=ExtractPriority.SKIP,
+                    score=0.0,
+                    reason="тривиальное сообщение (classifier)",
+                    fast_skip=True,
+                )
+            logger.debug(
+                "Classifier returned trivial but message has factual "
+                "indicators — proceeding to scoring: %.60s",
+                text_stripped,
             )
 
     # ── Оптимизация C: scoring приоритетности ──
@@ -494,6 +509,36 @@ def _get_managed_cache():
             )
         )
     return _extract_managed_cache
+
+
+def _has_factual_indicators(text: str) -> bool:
+    """Проверяет наличие фактических индикаторов в сообщении.
+
+    Используется чтобы не пропускать сообщения вроде
+    «Привет! Я купил квартиру в центре.»
+    только из-за того, что classifier определил их как greeting.
+
+    Индикаторы:
+      - Длина > 20 символов (вероятно содержит контент помимо приветствия)
+      - Самореференция: «я», «мой», «мне», «меня», «мной»
+      - Запятая — возможный разделитель приветствия и основного содержания
+    """
+    text_lower = text.lower()
+
+    # Длина > 20 символов — вероятно содержит контент помимо приветствия
+    if len(text) > 20:
+        return True
+
+    # Самореференция
+    self_ref_kw = ("я", "мой", "моя", "моё", "мои", "мне", "меня", "мной")
+    if any(f" {kw} " in f" {text_lower} " for kw in self_ref_kw):
+        return True
+
+    # Запятая — возможный разделитель приветствия и основного содержания
+    if "," in text:
+        return True
+
+    return False
 
 
 def _classify_message(text: str) -> dict[str, bool] | None:

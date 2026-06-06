@@ -452,6 +452,8 @@ async def _voice_worker() -> None:
                             await _cc.set_transcription_meta(
                                 message.from_user.id, transcription_meta
                             )
+                        except asyncio.CancelledError:
+                            raise  # propagate to outer handler for clean shutdown
                         except Exception:
                             logger.debug(
                                 "Failed to save transcription_meta", exc_info=True
@@ -469,6 +471,8 @@ async def _voice_worker() -> None:
                                 await _process_text(
                                     text, message, None, userbot_manager
                                 )
+                        except asyncio.CancelledError:
+                            raise  # propagate to outer handler for clean shutdown
                         except Exception:
                             logger.exception(
                                 "Failed to process transcribed text in worker"
@@ -1325,7 +1329,7 @@ async def _process_text(
                     plan,
                     provider,
                     message,
-                    state,  # type: ignore[arg-type]
+                    state,
                     userbot_manager,
                     tz_name,
                     owner_telegram_id,

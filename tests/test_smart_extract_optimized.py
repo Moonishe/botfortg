@@ -338,21 +338,24 @@ class TestNormalization:
         assert "!" not in norm
         assert "привет" in norm
 
-    def test_numbers_removed(self) -> None:
+    def test_numbers_preserved(self) -> None:
+        """Цифры сохраняются — они семантически значимы (телефоны, даты)."""
         norm = _normalize_for_cache("мой номер 1234567890")
-        assert "1234567890" not in norm
+        assert "1234567890" in norm
         assert "номер" in norm
 
     def test_case_normalized(self) -> None:
         norm = _normalize_for_cache("ПРИВЕТ МИР")
         assert norm == "привет мир"
 
-    def test_identical_after_normalization(self) -> None:
-        """Разные формы одного сообщения нормализуются одинаково."""
+    def test_numbers_distinguish_cache_keys(self) -> None:
+        """Разные числа → разные ключи кэша (цифры значимы)."""
         n1 = _normalize_for_cache("Я купил машину за 1000000 рублей!!!")
         n2 = _normalize_for_cache("я купил машину за рублей")
-        # После удаления чисел и пунктуации — должны совпасть
-        assert n1 == n2
+        # После удаления пунктуации числа остаются → ключи разные
+        assert n1 != n2
+        assert "1000000" in n1
+        assert "1000000" not in n2
 
     def test_hash_consistent(self) -> None:
         """Одинаковые нормализованные тексты дают одинаковый хэш."""
@@ -503,3 +506,77 @@ class TestEdgeCases:
         # Пунктуация в середине тоже должна работать
         score2 = score_extract_priority("я купил, машину!")
         assert score2 >= 0.4, f"Expected >= 0.4 with punctuation, got {score2}"
+
+
+# ── Тесты: регрессии (BUG 1, BUG 3) ─────────────────────────────────
+
+
+class TestBugRegressions:
+    """Тесты на исправленные HIGH-severity баги."""
+
+    # ── BUG 1: Cache key normalization strips digits → data corruption ──
+
+    def test_phone_numbers_produce_different_cache_keys(self) -> None:
+        """Разные телефонные номера → разные ключи кэша (BUG 1 fix)."""
+        key1 = _build_cache_key("мой телефон 89161234567", user_id=123)
+        key2 = _build_cache_key("мой телефон 89269876543", user_id=123)
+        assert key1 != key2, (
+            f"BUG 1 regression: phone numbers should produce different keys, "
+            f"got {key1} == {key2}"
+        )
+
+    def test_digits_preserved_in_normalization(self) -> None:
+        """Цифры сохраняются при нормализации (BUG 1 fix)."""
+        norm = _normalize_for_cache("мой возраст 25 лет")
+        assert "25" in norm, "BUG 1: digits must be preserved"
+
+        norm2 = _normalize_for_cache("мой возраст 30 лет")
+        assert "30" in norm2
+        assert norm != norm2, "BUG 1: different ages must produce different keys"
+
+    # ── BUG 3: Classifier misclassifies factual messages as greetings ──
+
+    @pytest.mark.asyncio
+    async def test_greeting_with_fact_not_skipped(self) -> None:
+        """Приветствие + факт → НЕ пропускаем (BUG 3 fix).
+
+        «Привет! Я купил квартиру в центре.» — classifier говорит greeting,
+        но сообщение содержит фактические индикаторы → не скипаем.
+        """
+        decision = await make_extract_decision("Привет! Я купил квартиру в центре.")
+        # Не должно быть fast_skip из-за classifier greeting
+        if decision.should_extract is False:
+            # Если всё же skip — причина не должна быть classifier greeting
+            assert "приветствие" not in decision.reason.lower(), (
+                f"BUG 3 regression: factual message with greeting should not "
+                f"be skipped as greeting. Reason: {decision.reason}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_pure_greeting_still_skipped(self) -> None:
+        """Чистое приветствие без фактов — всё ещё пропускаем."""
+        decision = await make_extract_decision("привет")
+        assert decision.should_extract is False
+
+    @pytest.mark.asyncio
+    async def test_farewell_with_fact_not_skipped(self) -> None:
+        """Прощание + факт → НЕ пропускаем."""
+        decision = await make_extract_decision(
+            "Пока! Я переехал в новый офис на прошлой неделе."
+        )
+        if decision.should_extract is False:
+            assert "прощание" not in decision.reason.lower(), (
+                f"BUG 3 regression: factual message with farewell should not "
+                f"be skipped. Reason: {decision.reason}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_trivial_with_self_reference_not_skipped(self) -> None:
+        """Тривиальное + самореференция → не скипаем."""
+        decision = await make_extract_decision("ага, я понял, мне нужно завтра в офис")
+        # Должен либо извлечь (should_extract=True), либо хотя бы не из-за trivial
+        if decision.should_extract is False:
+            assert "тривиальное" not in decision.reason.lower(), (
+                f"BUG 3 regression: message with self-reference should not "
+                f"be skipped as trivial. Reason: {decision.reason}"
+            )

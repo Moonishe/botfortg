@@ -509,33 +509,37 @@ async def _maybe_auto_save_facts(
         use_light = False
         decision = None
 
-    # Quick pre-check: skip if message is clearly not personal
-    text_lower = user_text.lower()
-    if not any(
-        kw in text_lower
-        for kw in (
-            "я ",
-            "мой ",
-            "моя ",
-            "моё ",
-            "мои ",
-            "мне ",
-            "меня ",
-            "у меня",
-            "день рождения",
-            "др ",
-            "работаю",
-            "учусь",
-            "живу",
-            "люблю",
-            "нравится",
-            "хочу",
-            "планирую",
-            "собираюсь",
-            "занимаюсь",
-        )
-    ):
-        return
+    # Quick pre-check: skip if message is clearly not personal.
+    # This legacy check runs ONLY as fallback when SmartExtractor is disabled
+    # or failed. When SmartExtractor already decided should_extract=True,
+    # we trust its decision and skip this check entirely.
+    if decision is None:
+        text_lower = user_text.lower()
+        if not any(
+            kw in text_lower
+            for kw in (
+                "я ",
+                "мой ",
+                "моя ",
+                "моё ",
+                "мои ",
+                "мне ",
+                "меня ",
+                "у меня",
+                "день рождения",
+                "др ",
+                "работаю",
+                "учусь",
+                "живу",
+                "люблю",
+                "нравится",
+                "хочу",
+                "планирую",
+                "собираюсь",
+                "занимаюсь",
+            )
+        ):
+            return
 
     async def _do_save():
         # ── Батчевый режим: накопление сообщений + сброс единым LLM-запросом ──
@@ -1130,12 +1134,15 @@ async def check_followup(
     raw: str,
     owner_telegram_id: int,
     message: Message,
-    state: FSMContext,
+    state: FSMContext | None,
     userbot_manager: UserbotManager,
     tz_name: str,
     turn_started: float,
 ) -> bool:
     """Проверяет follow-up контекст. Возвращает True если обработано."""
+    if state is None:
+        logger.debug("check_followup skipped: state is None (voice transcription path)")
+        return False
     followup = await _detect_followup(raw, owner_telegram_id)
     if followup:
         intent, _update_type = followup
