@@ -217,8 +217,8 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(keys_cmd.router)
     dp.include_router(memory_inbox.router)
     dp.include_router(memory_admin_cmds.router)
-    dp.include_router(memory_correction.router)  # FSM consumer for /memory --correct
     dp.include_router(memory_cmd.router)
+    dp.include_router(memory_correction.router)  # FSM consumer for /memory --correct
     dp.include_router(news_cmd.router)
     dp.include_router(draft_actions.router)
     dp.include_router(news_topics.router)
