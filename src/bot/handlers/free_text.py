@@ -1278,6 +1278,18 @@ async def _process_text(
         )
         return
 
+    # ── Smart Model Routing: переопределяем тяжёлую/лёгкую модель ──
+    if settings.smart_routing_enabled and plan.model_mode:
+        try:
+            if plan.model_mode == "light":
+                provider._default_heavy = False  # type: ignore[attr-defined]
+                logger.debug("SmartRouter override: forcing LIGHT model")
+            elif plan.model_mode == "heavy":
+                provider._default_heavy = True  # type: ignore[attr-defined]
+                logger.debug("SmartRouter override: forcing HEAVY model")
+        except Exception:
+            logger.debug("SmartRouter override failed", exc_info=True)
+
     # Stage 7: FAST_ROUTE
     if plan.response_mode == "fast_route":
         await execute_fast_route(

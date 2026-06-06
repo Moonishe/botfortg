@@ -11,19 +11,14 @@ from src.llm.base import ChatMessage
 
 logger = logging.getLogger(__name__)
 
-DIGEST_SYSTEM = """Ты — агент-дайджестер. Собери сводку входящих сообщений.
+DIGEST_SYSTEM = """Ты — AI-ассистент. Собери сводку входящих сообщений.
+Дан список с пометками срочности (🔴 urgent, 🟡 important, 🟢 normal). Сгруппируй кратко.
 
-Тебе дан список сообщений с пометками срочности (🔴 urgent, 🟡 important, 🟢 normal).
-Сгруппируй и опиши кратко.
-
-## Формат ответа
 Верни JSON: {
-  "urgent_count": 2,
-  "important_count": 3,
-  "normal_count": 5,
-  "highlights": ["краткое описание urgent/important сообщений"],
+  "urgent_count": N, "important_count": N, "normal_count": N,
+  "highlights": ["описание urgent/important"],
   "summary": "общая сводка (2-3 предложения)",
-  "html": "HTML для отправки пользователю (с тегами b, i, emoji)"
+  "html": "HTML с тегами b, i, emoji"
 }
 """
 

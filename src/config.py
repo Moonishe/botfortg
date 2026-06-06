@@ -215,9 +215,20 @@ class Settings(BaseSettings):
         30, description="Интервал ротации DEK (дни)"
     )
 
+    # ── Prompt size ──
+    prompt_size_limit: int = Field(
+        2000, description="Max system prompt chars before warning (0=disable)"
+    )
+
     # ── Message classifier ──
     classifier_enabled: bool = Field(
         True, description="Включить Trie/Aho-Corasick классификатор сообщений"
+    )
+
+    # ── Smart LLM Routing ──
+    smart_routing_enabled: bool = Field(
+        True,
+        description="Включить умный выбор лёгкой/тяжёлой модели по сложности запроса",
     )
 
     # ── Streaming ──
@@ -335,6 +346,14 @@ class Settings(BaseSettings):
     max_voice_queue_size: int = Field(20, description="Max voice messages in queue")
     voice_queue_timeout: float = Field(
         10.0, description="Seconds before dropping voice msg"
+    )
+
+    # ── LLM Response Cache ──
+    response_cache_enabled: bool = Field(
+        True, description="Кэшировать ответы LLM (SmartCache)"
+    )
+    response_cache_ttl: int = Field(
+        300, description="TTL кэша ответов LLM по умолчанию (секунды)"
     )
 
     # ── Caching ──

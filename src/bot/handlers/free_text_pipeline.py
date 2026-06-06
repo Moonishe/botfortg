@@ -119,6 +119,27 @@ from .free_text_exec import (
 
 logger = logging.getLogger(__name__)
 
+
+# ── Smart Model Routing: вспомогательная функция логирования ──────────
+
+
+def _log_smart_routing(plan, raw: str) -> None:
+    """Логирует решение SmartModelRouter если оно принято в плане."""
+    if not plan or not getattr(plan, "model_mode", None):
+        return
+    try:
+        from src.config import settings
+
+        if settings.smart_routing_enabled:
+            logger.debug(
+                "SmartModelRouting: mode=%s text=%.60s…",
+                plan.model_mode,
+                raw,
+            )
+    except Exception:
+        pass
+
+
 # ── Follow-up context ────────────────────────────────────────────────
 
 from src.core.cache import ManagedCache, cache_manager
@@ -1118,6 +1139,9 @@ async def execute_instant(
     except Exception:
         pass  # hooks are optional, never break core flow
 
+    # ── Smart Model Routing: логгирование решения ──────────────────
+    _log_smart_routing(plan, raw)
+
     # Log user message to session (fire-and-forget)
     from src.core.scheduling.session_logger import log_user_message
 
@@ -1356,6 +1380,9 @@ async def execute_maestro(
     except Exception:
         pass  # hooks are optional, never break core flow
 
+    # ── Smart Model Routing: логгирование решения ──────────────────
+    _log_smart_routing(plan, raw)
+
     # Log user message to session (fire-and-forget)
     from src.core.scheduling.session_logger import log_user_message
 
@@ -1384,6 +1411,48 @@ async def execute_maestro(
         from src.core.scheduling.session_logger import log_assistant_response
 
         asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
+        return True
+
+    # 🧠 LLM Response Cache: проверяем кэш перед LLM-вызовом
+    from src.core.intelligence.llm_response_cache import response_cache
+
+    cached_response = await response_cache.get(raw)
+    if cached_response:
+        # Применяем humanization и отправляем закэшированный ответ
+        anti_ai_mode = await _get_anti_ai_mode(owner_telegram_id)
+        context_hint = _detect_context_hint(
+            raw,
+            plan_purpose=plan.tasks[0].purpose.value if plan.tasks else None,
+        )
+        humanized = await _humanize_assistant_response(
+            cached_response,
+            owner_telegram_id=owner_telegram_id,
+            context_hint=context_hint,
+            style_profile="",
+            source="free_text_pipeline.cached",
+            mode=anti_ai_mode,
+        )
+        response_text = sanitize_html(humanized)
+        _cache_last_humanized(owner_telegram_id, response_text)
+        await safe_answer(message, response_text, reply_markup=memory_quick_keyboard())
+        await ctx_store.add_turn(message.from_user.id, raw[:200], response_text[:400])
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="maestro_cache_hit",
+            intent_json={"intent": "chat"},
+            response_text=response_text,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        await _post_turn_optimize(owner_telegram_id, raw, response_text)
+        # Log assistant response to session
+        from src.core.scheduling.session_logger import log_assistant_response
+
+        asyncio.ensure_future(
+            log_assistant_response(message.from_user.id, response_text)
+        )
+        logger.debug("LLM response cache HIT, bypassed LLM call: %.60s", raw)
         return True
 
     rag_needed = plan.recall_mode == "deep"
@@ -1567,6 +1636,10 @@ async def execute_maestro(
             response_text = sanitize_html(humanized)
             _cache_last_humanized(owner_telegram_id, response_text)
 
+            # 🧠 Кэшируем оригинальный ответ LLM (до humanization)
+            # для будущих семантически похожих запросов
+            track_ff(asyncio.create_task(response_cache.set(raw, original_text)))
+
             # Final message without cursor
             try:
                 await sent_msg.edit_text(
@@ -1669,6 +1742,13 @@ async def execute_maestro(
             # Stage 1: Anti-AI mode (off/log/fix). Fix clips endings and applies light replacements.
             anti_ai_mode = await _get_anti_ai_mode(owner_telegram_id)
             original_response_text = response_text
+
+            # 🧠 Кэшируем оригинальный ответ LLM (до humanization)
+            # для будущих семантически похожих запросов
+            track_ff(
+                asyncio.create_task(response_cache.set(raw, original_response_text))
+            )
+
             humanized = await _humanize_assistant_response(
                 original_response_text,
                 owner_telegram_id=owner_telegram_id,

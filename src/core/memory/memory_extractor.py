@@ -28,33 +28,24 @@ MEMORIES_SYSTEM = (
     '   "importance": 7,\n'
     '   "decay_rate": 0.05,\n'
     '   "memory_type": "personal|contact_fact|relationship|task|preference|temporary",\n'
-    '   "relation_type": "cause" | null,\n'
+    '   "relation_type": "'
+    + f"{RelationType.CAUSE.value}|{RelationType.EFFECT.value}|{RelationType.CONTRADICTS.value}|"
+    + f"{RelationType.SUPPORTS.value}|{RelationType.CONTINUES.value}|{RelationType.EXAMPLE_OF.value}"
+    + '" | null,\n'
     '   "relation_to_index": 0 | null}\n'
     "]\n"
-    "importance (1-10):\n"
-    "  1-3 — мелкая деталь, быстро забывается\n"
-    "  4-7 — значимый факт, живёт недели\n"
-    "  8-10 — критично (аллергии, адреса, отношения, контакты)\n"
-    "decay_rate:\n"
-    "  0.01 — почти не забывается (критичные факты)\n"
-    "  0.07 — норма (неделя-две)\n"
-    "  0.15 — быстро устаревает (настроения, планы на день)\n"
-    "  0.30 — моментально (погода, «я поел»)\n"
-    "memory_type — тип факта:\n"
-    '  "personal" — о себе: "я не люблю рано вставать", "у меня аллергия на кошек"\n'
-    '  "contact_fact" — о собеседнике: "Настя живёт в Москве", "Артём работает в Яндексе"\n'
-    '  "relationship" — отношения: "с Настей тёплые отношения", "с боссом напряжённо"\n'
-    '  "task" — обещания/задачи: "обещал отправить договор Пете"\n'
-    '  "preference" — предпочтения: "предпочитаю чай кофе", "люблю получать голосовые"\n'
-    '  "temporary" — временное: "я сегодня устал", "сейчас нахожусь в Краснодаре"\n'
-    "Для каждого факта укажи связь с ПРЕДЫДУЩИМИ фактами из того же диалога, если она есть:\n"
-    f'- "relation_type": "{RelationType.CAUSE.value}" (причина), '
-    f'"{RelationType.EFFECT.value}" (следствие), '
-    f'"{RelationType.CONTRADICTS.value}" (противоречие), '
-    f'"{RelationType.SUPPORTS.value}" (подтверждение), '
-    f'"{RelationType.CONTINUES.value}" (продолжение темы), '
-    f'"{RelationType.EXAMPLE_OF.value}" (пример)\n'
-    '- "relation_to_index": индекс предыдущего факта (0-based) в этом же ответе, с которым связан\n'
+    "importance (1-10): 1-3 — мелкая деталь, 4-7 — значимый факт, 8-10 — критично.\n"
+    "decay_rate: 0.01 — почти не забывается, 0.07 — норма, 0.15 — быстро устаревает, 0.30 — моментально.\n"
+    "memory_type: personal — о себе, contact_fact — о собеседнике, relationship — отношения,\n"
+    "  task — обещания, preference — предпочтения, temporary — временное.\n"
+    "relation_type — связь с предыдущим фактом: "
+    + f'"{RelationType.CAUSE.value}" (причина), '
+    + f'"{RelationType.EFFECT.value}" (следствие), '
+    + f'"{RelationType.CONTRADICTS.value}" (противоречие), '
+    + f'"{RelationType.SUPPORTS.value}" (подтверждение), '
+    + f'"{RelationType.CONTINUES.value}" (продолжение), '
+    + f'"{RelationType.EXAMPLE_OF.value}" (пример).\n'
+    "relation_to_index — индекс предыдущего факта (0-based) в этом же ответе.\n"
     "Если значимых фактов нет — пустой массив [].\n"
     "Не выдумывай то, чего нет в переписке. Пиши на русском."
 )

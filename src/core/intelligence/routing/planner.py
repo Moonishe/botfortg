@@ -77,6 +77,7 @@ class RouterPlan:
     rag_context: str = ""  # RAG-контекст
     response_mode: str = "maestro"  # instant | fast_route | maestro
     recall_mode: str = "deep"  # light | normal | deep
+    model_mode: str = ""  # light | heavy — решение SmartModelRouter
     metrics: dict = field(
         default_factory=dict
     )  # {recall_ms, router_ms, llm_ms, maestro_ms, total_ms}
@@ -591,6 +592,20 @@ async def make_plan(
     )
     task.heavy = should_use_heavy
     task.meta = meta
+
+    # ---------- Слой 7: Smart Model Routing (выбор лёгкой/тяжёлой модели) ----------
+    try:
+        from src.config import settings
+        from src.core.intelligence.smart_router import get_router
+
+        if settings.smart_routing_enabled and not should_use_heavy:
+            sr_router = get_router()
+            plan.model_mode = sr_router.route(user_text, mode="auto")
+        else:
+            plan.model_mode = "heavy" if should_use_heavy else "light"
+    except Exception:
+        logger.debug("SmartModelRouter: routing skipped", exc_info=True)
+        plan.model_mode = "heavy" if should_use_heavy else "light"
 
     plan.tasks.append(task)
     plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)

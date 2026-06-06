@@ -1,5 +1,9 @@
 # Intelligence: LLM interaction, prompt building, agent orchestration
 
+from src.core.intelligence.llm_response_cache import (
+    LLMResponseCache,
+    response_cache,
+)
 from src.core.intelligence.pattern_cache import PatternCache, pattern_cache
 from src.core.intelligence.skill_yaml import (
     build_skill_description,
@@ -9,6 +13,8 @@ from src.core.intelligence.skill_yaml import (
 )
 
 __all__ = [
+    "LLMResponseCache",
+    "response_cache",
     "PatternCache",
     "pattern_cache",
     "parse_skill_frontmatter",
