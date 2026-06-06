@@ -366,6 +366,11 @@ class Settings(BaseSettings):
         description="Минимальное количество провалов для запуска auto-evolution навыка",
     )
 
+    # Smart correction
+    smart_correction_action_ttl: float = Field(
+        60.0, description="TTL хранимых действий для smart-correction (сек)"
+    )
+
     # Pending
     pending_ttl_sec: int = Field(
         300, description="TTL ожидающих подтверждений (5 минут)"

@@ -254,16 +254,28 @@ _CIRCUIT_BREAKERS_LOCK: asyncio.Lock | None = (
 )
 
 
-async def cleanup_circuit_breakers(stale_threshold: float = 3600.0) -> int:
-    """Remove circuit breakers that are CLOSED and haven't been touched recently.
+async def cleanup_circuit_breakers(
+    stale_threshold: float = 3600.0,
+    open_timeout: float = 1800.0,
+) -> int:
+    """Remove circuit breakers that haven't been accessed recently.
 
     Called periodically (every ~5 min) from the global cleanup loop to prevent
     unbounded growth of ``_CIRCUIT_BREAKERS`` when keys are rotated or removed
     from the database.
 
+    Cleanup rules:
+      - CLOSED:  removed if ``_last_touched`` > stale_threshold ago (1 h).
+      - OPEN / HALF_OPEN: removed if ``_last_failure_time`` > open_timeout
+        ago (30 min) — the breaker should retry from scratch instead of
+        staying stuck forever.
+
     Args:
         stale_threshold: seconds since last activity after which a CLOSED
-            breaker is considered eligible for cleanup. Default: 3600 (1 hour).
+            breaker is considered eligible for cleanup. Default: 3600 (1 h).
+        open_timeout: seconds since last failure after which an OPEN /
+            HALF_OPEN breaker is considered stuck and eligible for cleanup.
+            Default: 1800 (30 min).
 
     Returns:
         Number of circuit breakers removed.
@@ -275,12 +287,15 @@ async def cleanup_circuit_breakers(stale_threshold: float = 3600.0) -> int:
     removed = 0
 
     async with _CIRCUIT_BREAKERS_LOCK:
-        stale_keys = [
-            key
-            for key, cb in _CIRCUIT_BREAKERS.items()
-            if cb.state == _CircuitState.CLOSED
-            and (now - cb._last_touched) > stale_threshold
-        ]
+        stale_keys: list[tuple] = []
+        for key, cb in _CIRCUIT_BREAKERS.items():
+            if cb.state == _CircuitState.CLOSED:
+                if (now - cb._last_touched) > stale_threshold:
+                    stale_keys.append(key)
+            elif cb.state in (_CircuitState.OPEN, _CircuitState.HALF_OPEN):
+                if (now - cb._last_failure_time) > open_timeout:
+                    stale_keys.append(key)
+
         for key in stale_keys:
             del _CIRCUIT_BREAKERS[key]
             removed += 1

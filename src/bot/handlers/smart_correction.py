@@ -13,14 +13,17 @@ import logging
 import re
 import time
 
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
 # Track last action per user for correction context
 _last_actions: dict[int, dict] = {}
 _actions_lock = asyncio.Lock()
 
-# Time-to-live for recorded actions: corrections must come within 60 seconds
-_ACTION_TTL = 60.0
+# Time-to-live for recorded actions — sourced from config so it can be
+# tuned without code changes (env: SMART_CORRECTION_ACTION_TTL).
+_ACTION_TTL = settings.smart_correction_action_ttl
 
 
 # ── Correction pattern matching ─────────────────────────────────────

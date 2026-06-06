@@ -48,6 +48,18 @@ _recall_cache: "ManagedCache[str, RecallResult]" = cache_manager.register(
 #
 # bump_recall_version() MUST be called from every memory mutation point:
 #   add_memory(), delete_memory(), _exec_update_memory()  (see repo/handlers).
+#
+# ⚠️  DESIGN NOTE — In-memory only, resets on restart:
+#   _rec_version lives in a plain dict, NOT persisted to SQLite/Redis/etc.
+#   On service restart ALL version counters drop to 0, which means the
+#   existing cache (ManagedCache, also in-memory) is wiped anyway — so the
+#   version reset is harmless.  After restart, recall fills via cold misses
+#   and bump_recall_version() starts re-incrementing from 0.
+#
+#   Trade-off: ultra-cheap reads (lock-free sync dict lookup in CPython)
+#   vs ~0 cost on restart (cache is empty).  If recall cache ever gains a
+#   persistent backend (e.g. Redis), the version counter MUST be persisted
+#   alongside it.
 # ─────────────────────────────────────────────────────────────────────────────
 _rec_version: dict[int, int] = {}
 _rec_version_lock: asyncio.Lock | None = None

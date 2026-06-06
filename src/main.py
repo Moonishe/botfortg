@@ -453,6 +453,10 @@ def run() -> None:
         sys.stderr.flush()
         raise
     finally:
+        # Two-phase shutdown: first let running tasks finish gracefully,
+        # then cancel any stragglers.  This avoids abandoning in-flight
+        # DB writes / schema work that could corrupt the database.
+        executor.shutdown(wait=True, cancel_futures=False)
         executor.shutdown(wait=False, cancel_futures=True)
 
     asyncio.run(main())
