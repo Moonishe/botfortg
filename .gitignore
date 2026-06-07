@@ -12,6 +12,13 @@ logs/
 *.sqlite3
 *.session
 *.session-journal
+_audit/
+test_create_all.py
+test_full_head.py
+test_initial.py
+test_key_rotation.py
+test_merge.py
+test_db_check/
 *.pem
 *.p12
 *.pfx
