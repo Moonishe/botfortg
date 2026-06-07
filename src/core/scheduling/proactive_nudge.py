@@ -23,6 +23,8 @@ from src.core.scheduling.notification_queue import notification_queue
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 # Urgency keywords — recognised in incoming messages
 _URGENCY_KEYWORDS: frozenset[str] = frozenset({"срочно", "жду", "когда", "ответь", "?"})
 
@@ -129,22 +131,26 @@ def format_nudge(nudges: list[dict]) -> str:
 async def nudge_loop(owner_telegram_id: int) -> None:
     """Background loop: check every 3 hours for unanswered messages."""
     while True:
-        await asyncio.sleep(10800)  # 3 hours
-        try:
-            nudges = await collect_nudges(owner_telegram_id)
-            if nudges:
-                text = format_nudge(nudges)
-                if text:
-                    from src.db.models import Notification
+        if _overlap_guard.locked():
+            await asyncio.sleep(10800)
+            continue
+        async with _overlap_guard:
+            try:
+                nudges = await collect_nudges(owner_telegram_id)
+                if nudges:
+                    text = format_nudge(nudges)
+                    if text:
+                        from src.db.models import Notification
 
-                    await notification_queue.enqueue(
-                        topic="nudge",
-                        text=text,
-                        priority=Notification.PRIORITY_HIGH,
-                    )
-                    logger.info("Nudge sent: %d contacts", len(nudges))
-        except Exception:
-            logger.exception("Nudge loop error")
+                        await notification_queue.enqueue(
+                            topic="nudge",
+                            text=text,
+                            priority=Notification.PRIORITY_HIGH,
+                        )
+                        logger.info("Nudge sent: %d contacts", len(nudges))
+            except Exception:
+                logger.exception("Nudge loop error")
+        await asyncio.sleep(10800)  # 3 hours
 
 
 # Register via task_manager — matches project pattern (proactive_briefing.py)

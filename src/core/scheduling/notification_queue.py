@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_notification_queue_guard = asyncio.Lock()
+
 
 class NotificationQueue:
     """
@@ -246,23 +248,27 @@ class NotificationQueue:
         """Бесконечный цикл: flush() + периодическая очистка."""
         _cleanup_counter = 0
         while True:
-            try:
-                flushed = await self.flush()
-                if flushed > 0:
-                    logger.info("Flushed %d notifications", flushed)
-            except Exception:
-                logger.exception("NotificationQueue flush error")
-
-            # Очистка просроченных — раз в час (60 итераций при интервале 60с)
-            _cleanup_counter += 1
-            if _cleanup_counter >= 60:
-                _cleanup_counter = 0
+            if _notification_queue_guard.locked():
+                await asyncio.sleep(self._flush_interval)
+                continue
+            async with _notification_queue_guard:
                 try:
-                    cleaned = await self.cleanup_expired()
-                    if cleaned > 0:
-                        logger.info("Cleaned %d expired notifications", cleaned)
+                    flushed = await self.flush()
+                    if flushed > 0:
+                        logger.info("Flushed %d notifications", flushed)
                 except Exception:
-                    logger.exception("NotificationQueue cleanup error")
+                    logger.exception("NotificationQueue flush error")
+
+                # Очистка просроченных — раз в час (60 итераций при интервале 60с)
+                _cleanup_counter += 1
+                if _cleanup_counter >= 60:
+                    _cleanup_counter = 0
+                    try:
+                        cleaned = await self.cleanup_expired()
+                        if cleaned > 0:
+                            logger.info("Cleaned %d expired notifications", cleaned)
+                    except Exception:
+                        logger.exception("NotificationQueue cleanup error")
 
             await asyncio.sleep(self._flush_interval)
 

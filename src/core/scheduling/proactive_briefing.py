@@ -37,6 +37,8 @@ from src.core.infra.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Backward compat: старые структуры для ручной команды /briefing
@@ -538,50 +540,53 @@ async def proactive_briefing_loop(owner_id: int) -> None:
     from src.core.infra.timeutil import now_in_tz
 
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = (
-                    owner.settings.timezone
-                    if owner.settings and owner.settings.timezone
-                    else "UTC"
-                )
-
-            now_tz = now_in_tz(tz_name)
-            if now_tz.hour == 9 and now_tz.minute < 5:
-                # Вычислить начало часового слота в tz пользователя, затем в UTC
-                slot_start_tz = now_tz.replace(
-                    hour=9, minute=0, second=0, microsecond=0
-                )
-                slot_start_utc = slot_start_tz.astimezone(timezone.utc).replace(
-                    tzinfo=None
-                )
-
+        if _overlap_guard.locked():
+            await asyncio.sleep(settings.proactive_briefing_check_sec)
+            continue
+        async with _overlap_guard:
+            try:
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_id)
-                    if owner.settings.proactive_last_sent == slot_start_utc:
-                        await asyncio.sleep(settings.proactive_briefing_check_sec)
-                        continue
-                    owner.settings.proactive_last_sent = slot_start_utc
-                    await session.commit()
+                    tz_name = (
+                        owner.settings.timezone
+                        if owner.settings and owner.settings.timezone
+                        else "UTC"
+                    )
 
-                from src.core.infra.settings_cache import invalidate_settings_cache
+                now_tz = now_in_tz(tz_name)
+                if now_tz.hour == 9 and now_tz.minute < 5:
+                    # Вычислить начало часового слота в tz пользователя, затем в UTC
+                    slot_start_tz = now_tz.replace(
+                        hour=9, minute=0, second=0, microsecond=0
+                    )
+                    slot_start_utc = slot_start_tz.astimezone(timezone.utc).replace(
+                        tzinfo=None
+                    )
 
-                await invalidate_settings_cache(owner_id)
+                    async with get_session() as session:
+                        owner = await get_or_create_user(session, owner_id)
+                        if owner.settings.proactive_last_sent == slot_start_utc:
+                            await asyncio.sleep(settings.proactive_briefing_check_sec)
+                            continue
+                        owner.settings.proactive_last_sent = slot_start_utc
+                        await session.commit()
 
-                text = await _collect_morning_digest(owner_id)
-                await notification_queue.enqueue(
-                    topic="briefing",
-                    text=text,
-                    priority=Notification.PRIORITY_MEDIUM,
-                    category="morning",
-                )
-                await asyncio.sleep(3600)  # не повторять в этот час
+                    from src.core.infra.settings_cache import invalidate_settings_cache
 
-            await asyncio.sleep(settings.proactive_briefing_check_sec)
-        except Exception:
-            logger.exception("Briefing loop error")
-            await asyncio.sleep(settings.proactive_briefing_check_sec)
+                    await invalidate_settings_cache(owner_id)
+
+                    text = await _collect_morning_digest(owner_id)
+                    await notification_queue.enqueue(
+                        topic="briefing",
+                        text=text,
+                        priority=Notification.PRIORITY_MEDIUM,
+                        category="morning",
+                    )
+                    await asyncio.sleep(3600)  # не повторять в этот час
+
+            except Exception:
+                logger.exception("Briefing loop error")
+        await asyncio.sleep(settings.proactive_briefing_check_sec)
 
 
 task_manager.register(

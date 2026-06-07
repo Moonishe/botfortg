@@ -20,6 +20,8 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 # module-level cache: owner_id -> sha256 of last sent digest text
 _last_digest_hash: dict[int, str] = {}
 
@@ -164,52 +166,56 @@ def build_smart_digest(messages_by_peer: dict[int, dict], interval: int) -> str:
 async def smart_digest_loop(owner_telegram_id: int) -> None:
     """Фоновый цикл: каждые 60 секунд проверяет, пора ли отправить дайджест."""
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_telegram_id)
-                settings = owner.settings
+        if _overlap_guard.locked():
+            await asyncio.sleep(60)
+            continue
+        async with _overlap_guard:
+            try:
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_telegram_id)
+                    settings = owner.settings
 
-                if not settings.smart_digest_enabled:
-                    await asyncio.sleep(60)
-                    continue
-
-                now = datetime.now(timezone.utc).replace(tzinfo=None)
-                last_sent = settings.smart_digest_last_sent
-                interval = settings.smart_digest_interval_min
-
-                if last_sent is not None:
-                    elapsed = (now - last_sent).total_seconds() / 60
-                    if elapsed < interval:
+                    if not settings.smart_digest_enabled:
                         await asyncio.sleep(60)
                         continue
 
-                messages = await collect_recent_messages(
-                    session, owner, since_minutes=interval
-                )
-                text = build_smart_digest(messages, interval)
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    last_sent = settings.smart_digest_last_sent
+                    interval = settings.smart_digest_interval_min
 
-                # — duplicate suppression —
-                current_hash = hashlib.sha256(text.encode()).hexdigest()
-                prev_hash = _last_digest_hash.get(owner.id)
-                if prev_hash == current_hash:
-                    logger.info("duplicate digest skipped for owner %s", owner.id)
-                    # still update last_sent so the interval clock resets
+                    if last_sent is not None:
+                        elapsed = (now - last_sent).total_seconds() / 60
+                        if elapsed < interval:
+                            await asyncio.sleep(60)
+                            continue
+
+                    messages = await collect_recent_messages(
+                        session, owner, since_minutes=interval
+                    )
+                    text = build_smart_digest(messages, interval)
+
+                    # — duplicate suppression —
+                    current_hash = hashlib.sha256(text.encode()).hexdigest()
+                    prev_hash = _last_digest_hash.get(owner.id)
+                    if prev_hash == current_hash:
+                        logger.info("duplicate digest skipped for owner %s", owner.id)
+                        # still update last_sent so the interval clock resets
+                        settings.smart_digest_last_sent = now
+                        await session.commit()
+                        await asyncio.sleep(60)
+                        continue
+
+                    await notification_queue.enqueue(
+                        topic="smart_digest",
+                        text=text,
+                        priority=Notification.PRIORITY_MEDIUM,
+                    )
+
+                    _last_digest_hash[owner.id] = current_hash
                     settings.smart_digest_last_sent = now
                     await session.commit()
-                    await asyncio.sleep(60)
-                    continue
-
-                await notification_queue.enqueue(
-                    topic="smart_digest",
-                    text=text,
-                    priority=Notification.PRIORITY_MEDIUM,
-                )
-
-                _last_digest_hash[owner.id] = current_hash
-                settings.smart_digest_last_sent = now
-                await session.commit()
-        except Exception:
-            logger.exception("smart_digest_loop tick failed")
+            except Exception:
+                logger.exception("smart_digest_loop tick failed")
         await asyncio.sleep(60)
 
 

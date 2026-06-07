@@ -19,6 +19,8 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 # Интервал проверки берётся из конфига
 # AVITO_TICK_SECONDS = settings.avito_check_sec  # используется в task loop
 
@@ -328,8 +330,12 @@ from src.core.infra.task_manager import task_manager
 async def avito_checker_loop() -> None:
     """Фоновый цикл проверки Авито."""
     while True:
-        try:
-            await _check_watches(settings.owner_telegram_id)
-        except Exception:
-            logger.exception("avito checker tick failed")
+        if _overlap_guard.locked():
+            await asyncio.sleep(settings.avito_check_sec)
+            continue
+        async with _overlap_guard:
+            try:
+                await _check_watches(settings.owner_telegram_id)
+            except Exception:
+                logger.exception("avito checker tick failed")
         await asyncio.sleep(settings.avito_check_sec)

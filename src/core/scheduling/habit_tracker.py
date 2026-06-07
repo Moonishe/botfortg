@@ -14,6 +14,8 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 # Стоп-слова для фильтрации тем
 STOP_WORDS: set[str] = {
     "я",
@@ -188,44 +190,48 @@ def format_habits(habits: list[dict[str, Any]]) -> str:
 async def habit_tracker_loop(owner_id: int) -> None:
     """Фоновый цикл: поиск привычек раз в неделю (ВС 18:00)."""
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = get_user_tz(owner)
-
-            now = now_in_tz(tz_name)
-            # Воскресенье 18:00, не чаще раза в день
-            if now.weekday() == 6 and now.hour == 18:
-                habits = None
+        if _overlap_guard.locked():
+            await asyncio.sleep(settings.habit_tracker_interval_sec)
+            continue
+        async with _overlap_guard:
+            try:
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_id)
-                    if (
-                        owner.settings.habit_last_run_date is None
-                        or owner.settings.habit_last_run_date < now.date()
-                    ):
-                        owner.settings.habit_last_run_date = now.date()
-                        await session.commit()
+                    tz_name = get_user_tz(owner)
 
-                        from src.core.infra.settings_cache import (
-                            invalidate_settings_cache,
-                        )
+                now = now_in_tz(tz_name)
+                # Воскресенье 18:00, не чаще раза в день
+                if now.weekday() == 6 and now.hour == 18:
+                    habits = None
+                    async with get_session() as session:
+                        owner = await get_or_create_user(session, owner_id)
+                        if (
+                            owner.settings.habit_last_run_date is None
+                            or owner.settings.habit_last_run_date < now.date()
+                        ):
+                            owner.settings.habit_last_run_date = now.date()
+                            await session.commit()
 
-                        await invalidate_settings_cache(owner_id)
+                            from src.core.infra.settings_cache import (
+                                invalidate_settings_cache,
+                            )
 
-                        memories = await list_memories(session, owner)
-                        active = [m for m in memories if m.is_active and m.created_at]
-                        habits = find_habit_candidates(active)
-                if habits:
-                    text = format_habits(habits)
-                else:
-                    text = "🔍 Привычек пока не обнаружено. Нужно больше данных."
-                await notification_queue.enqueue(
-                    topic="habits",
-                    text=text,
-                    priority=Notification.PRIORITY_LOW,
-                )
-        except Exception as e:
-            logger.exception("Habit tracker error: %s", e)
+                            await invalidate_settings_cache(owner_id)
+
+                            memories = await list_memories(session, owner)
+                            active = [m for m in memories if m.is_active and m.created_at]
+                            habits = find_habit_candidates(active)
+                    if habits:
+                        text = format_habits(habits)
+                    else:
+                        text = "🔍 Привычек пока не обнаружено. Нужно больше данных."
+                    await notification_queue.enqueue(
+                        topic="habits",
+                        text=text,
+                        priority=Notification.PRIORITY_LOW,
+                    )
+            except Exception as e:
+                logger.exception("Habit tracker error: %s", e)
         await asyncio.sleep(settings.habit_tracker_interval_sec)  # проверять каждый час
 
 

@@ -25,6 +25,8 @@ from src.core.infra.userbot_gateway import get_userbot_gateway
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 MAX_CONTACTS = 2
 INTERVAL_HOURS = 6
 MIN_NEW_MESSAGES = 20
@@ -140,10 +142,14 @@ async def _analyze_contact(
 async def _proactive_loop(telegram_id: int) -> None:
     """Бесконечный цикл с интервалом."""
     while True:
-        try:
-            await _proactive_scan(telegram_id)
-        except Exception:
-            logger.exception("proactive_analyzer iteration failed")
+        if _overlap_guard.locked():
+            await asyncio.sleep(INTERVAL_HOURS * 3600)
+            continue
+        async with _overlap_guard:
+            try:
+                await _proactive_scan(telegram_id)
+            except Exception:
+                logger.exception("proactive_analyzer iteration failed")
         await asyncio.sleep(INTERVAL_HOURS * 3600)
 
 

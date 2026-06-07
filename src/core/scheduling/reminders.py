@@ -17,6 +17,7 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
 
 REMINDER_TICK_SECONDS = 300
 
@@ -96,8 +97,12 @@ from src.core.infra.task_manager import task_manager
 @task_manager.task("reminders-loop")
 async def reminders_loop() -> None:
     while True:
-        try:
-            await _check_once(settings.owner_telegram_id)
-        except Exception:
-            logger.exception("reminders tick failed")
+        if _overlap_guard.locked():
+            await asyncio.sleep(REMINDER_TICK_SECONDS)
+            continue
+        async with _overlap_guard:
+            try:
+                await _check_once(settings.owner_telegram_id)
+            except Exception:
+                logger.exception("reminders tick failed")
         await asyncio.sleep(REMINDER_TICK_SECONDS)

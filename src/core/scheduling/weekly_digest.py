@@ -25,6 +25,8 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 
 @dataclass
 class WeeklyStats:
@@ -418,43 +420,46 @@ async def weekly_digest_loop(owner_id: int) -> None:
     last_run_date = None
 
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = (
-                    owner.settings.timezone
-                    if owner.settings and owner.settings.timezone
-                    else "UTC"
-                )
-
-            now = now_in_tz(tz_name)
-            # Воскресенье, между 12:00 и 13:00
-            if (
-                now.weekday() == 6
-                and 12 <= now.hour < 13
-                and last_run_date != now.date()
-            ):
-                last_run_date = now.date()
-
-                builder = WeeklyDigestBuilder()
-                async with get_session() as session:
-                    # Передаём объект User (содержит и id, и telegram_id)
-                    owner_db = await get_or_create_user(session, owner_id)
-                    stats = await builder.gather_stats(session, owner_db)
-                    report = builder.format_report(stats)
-
-                await notification_queue.enqueue(
-                    topic="weekly_digest",
-                    text=report,
-                    priority=Notification.PRIORITY_MEDIUM,
-                    category="weekly_report",
-                )
-                logger.info("Weekly digest sent for owner %d", owner_id)
-
-            await asyncio.sleep(settings.weekly_digest_check_sec)  # проверка раз в час
-        except Exception:
-            logger.exception("Weekly digest error")
+        if _overlap_guard.locked():
             await asyncio.sleep(settings.weekly_digest_check_sec)
+            continue
+        async with _overlap_guard:
+            try:
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    tz_name = (
+                        owner.settings.timezone
+                        if owner.settings and owner.settings.timezone
+                        else "UTC"
+                    )
+
+                now = now_in_tz(tz_name)
+                # Воскресенье, между 12:00 и 13:00
+                if (
+                    now.weekday() == 6
+                    and 12 <= now.hour < 13
+                    and last_run_date != now.date()
+                ):
+                    last_run_date = now.date()
+
+                    builder = WeeklyDigestBuilder()
+                    async with get_session() as session:
+                        # Передаём объект User (содержит и id, и telegram_id)
+                        owner_db = await get_or_create_user(session, owner_id)
+                        stats = await builder.gather_stats(session, owner_db)
+                        report = builder.format_report(stats)
+
+                    await notification_queue.enqueue(
+                        topic="weekly_digest",
+                        text=report,
+                        priority=Notification.PRIORITY_MEDIUM,
+                        category="weekly_report",
+                    )
+                    logger.info("Weekly digest sent for owner %d", owner_id)
+
+            except Exception:
+                logger.exception("Weekly digest error")
+        await asyncio.sleep(settings.weekly_digest_check_sec)  # проверка раз в час
 
 
 from functools import partial
