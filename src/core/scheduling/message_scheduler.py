@@ -7,6 +7,11 @@ from src.core.infra.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
 
+# ── Защита от наложения (overlap guard) ──
+# Если предыдущий тик scheduled_messages_loop ещё не завершился — пропускаем,
+# чтобы избежать двойной отправки отложенных сообщений.
+_overlap_guard = asyncio.Lock()
+
 SCHEDULED_TICK_SECONDS = 30
 
 
@@ -77,6 +82,11 @@ async def _check_once(client=None) -> None:
 async def scheduled_messages_loop() -> None:
     """Точка входа: получает клиент userbot и передаёт в чистую бизнес-логику."""
     while True:
+        # Защита от наложения: если предыдущий тик ещё не завершён — пропускаем
+        if _overlap_guard.locked():
+            await asyncio.sleep(SCHEDULED_TICK_SECONDS)
+            continue
+        await _overlap_guard.acquire()
         try:
             from src.config import settings
             from src.core.infra.userbot_gateway import get_userbot_gateway
@@ -87,4 +97,6 @@ async def scheduled_messages_loop() -> None:
             await _check_once(client)
         except Exception:
             logger.exception("scheduled-messages tick failed")
+        finally:
+            _overlap_guard.release()
         await asyncio.sleep(SCHEDULED_TICK_SECONDS)

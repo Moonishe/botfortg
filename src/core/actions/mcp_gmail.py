@@ -17,6 +17,7 @@ from typing import Any
 
 from src.config import settings
 from src.core.actions.tool_registry import tool
+from src.core.security.web_sanitizer import sanitize_search_result
 
 logger = logging.getLogger(__name__)
 
@@ -170,11 +171,17 @@ async def _gmail_check(max_results: int, query: str) -> dict[str, Any]:
             headers = msg_data.get("payload", {}).get("headers", [])
             header_map = {h["name"].lower(): h["value"] for h in headers}
 
+            # Защита от prompt injection: санируем subject и snippet письма
+            # перед возвратом LLM (внешний контент из Gmail)
+            safe_subject, safe_snippet = sanitize_search_result(
+                header_map.get("subject", ""),
+                msg_data.get("snippet", ""),
+            )
             output.append(
                 {
                     "from": header_map.get("from", ""),
-                    "subject": header_map.get("subject", ""),
-                    "snippet": msg_data.get("snippet", ""),
+                    "subject": safe_subject,
+                    "snippet": safe_snippet,
                     "date": header_map.get("date", ""),
                 }
             )

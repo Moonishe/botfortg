@@ -21,6 +21,11 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+# ── Защита от наложения (overlap guard) ──
+# Если предыдущий запуск dream_cycle ещё не завершился — пропускаем тик,
+# чтобы избежать двойной обработки и contention'а в БД.
+_overlap_guard = asyncio.Lock()
+
 
 async def dream_cycle(owner_telegram_id: int) -> None:
     """Run complete nightly memory maintenance.
@@ -414,8 +419,16 @@ async def dream_loop(owner_telegram_id: int) -> None:
         )
         await asyncio.sleep(wait_sec)
 
+        # Защита от наложения: если предыдущий запуск ещё не завершён — пропускаем тик
+        if _overlap_guard.locked():
+            logger.warning(
+                "Dream cycle: предыдущий запуск ещё не завершён, пропускаем тик"
+            )
+            continue
+
         try:
-            await dream_cycle(owner_telegram_id)
+            async with _overlap_guard:
+                await dream_cycle(owner_telegram_id)
         except Exception:
             logger.exception("Dream cycle: fatal error, retrying in 1 hour")
             await asyncio.sleep(3600)  # retry in 1 hour

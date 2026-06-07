@@ -45,6 +45,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
+# ── Семафор для параллельного выполнения инструментов ──
+# Ограничивает одновременные вызовы инструментов (макс. 4 конкурентных),
+# чтобы не перегружать внешние API и не создавать избыточных соединений.
+_TOOL_SEMAPHORE = asyncio.Semaphore(4)
+
 # ── Fallback chains для инструментов ──
 # При ошибке выполнения тула пробуем альтернативы по порядку.
 # admit_ignorance — всегда последний рубеж: признаём неспособность и предлагаем поиск.
@@ -101,6 +106,87 @@ MAESTRO_AFTER_AGENTS = """Ты — главный AI-ассистент. Ты з
 {{
   "final_response": "твой ответ (на русском, естественно, без роботных фраз)"
 }}"""
+
+
+async def _execute_one_tool(
+    tool_name: str,
+    tool_params: dict,
+    *,
+    sanitized_params: dict,
+    runtime_kwargs: dict,
+    owner_id: int | None,
+    session_factory,
+    get_or_create_user_fn,
+    userbot_manager: Any | None = None,
+) -> dict:
+    """Выполнить один инструмент с семафором, fallback-цепочками и обработкой ошибок."""
+    async with _TOOL_SEMAPHORE:
+        tool_result = None
+
+        # Открываем сессию БД и резолвим пользователя
+        if owner_id is not None:
+            try:
+                async with session_factory() as session:
+                    owner = await get_or_create_user_fn(session, owner_id)
+                    runtime_kwargs["session"] = session
+                    runtime_kwargs["user"] = owner
+                    if userbot_manager is not None:
+                        client = userbot_manager.get_client(owner_id)
+                        if client is not None:
+                            runtime_kwargs["client"] = client
+
+                    tool_result = await tool_registry.execute(
+                        tool_name,
+                        _confirmed=False,
+                        **sanitized_params,
+                        **runtime_kwargs,
+                    )
+            except Exception:
+                tool_result = {"error": f"DB/ORM error for tool '{tool_name}'"}
+
+        if tool_result is None:
+            try:
+                tool_result = await tool_registry.execute(
+                    tool_name,
+                    _confirmed=False,
+                    **sanitized_params,
+                    **runtime_kwargs,
+                )
+            except Exception as e:
+                tool_result = {"error": str(e)}
+
+        # Fallback chains
+        if tool_result and isinstance(tool_result, dict) and "error" in tool_result:
+            fallbacks = _TOOL_FALLBACKS.get(tool_name, ["admit_ignorance"])
+            logger.warning(
+                "Tool '%s' failed: %s. Trying fallbacks: %s",
+                tool_name,
+                tool_result.get("error", "unknown"),
+                fallbacks,
+            )
+            for fb in fallbacks:
+                if fb == "admit_ignorance":
+                    return {"_fallback": "admit_ignorance", "tool": tool_name}
+                try:
+                    fb_params = dict(sanitized_params)
+                    if fb == "mcp_web" and "action" not in fb_params:
+                        fb_params["action"] = "search"
+                    fb_result = await tool_registry.execute(
+                        fb,
+                        _confirmed=False,
+                        **fb_params,
+                        **runtime_kwargs,
+                    )
+                    if isinstance(fb_result, dict) and "error" in fb_result:
+                        continue
+                    logger.info("Fallback '%s' succeeded for '%s'", fb, tool_name)
+                    return fb_result
+                except Exception:
+                    continue
+            # Все fallback'и исчерпаны
+            return {"_fallback": "admit_ignorance", "tool": tool_name}
+
+        return tool_result
 
 
 async def process(
@@ -470,23 +556,22 @@ async def process(
                     "trace": trace,
                 }
 
-            # Execute tool with runtime dependencies
-            # Open a DB session and resolve the User ORM for the duration
-            # of the tool call.  The session stays alive until the tool
-            # returns, then commits/rolls back automatically.
+            # ── Параллельное выполнение инструментов с семафором ──
+            # Семафор _TOOL_SEMAPHORE (макс. 4 конкурентных) предотвращает
+            # hammering внешних API. Инструменты read-only по дизайну —
+            # параллельное выполнение безопасно.
             runtime_kwargs: dict[str, Any] = {"provider": provider}
             if userbot_manager is not None:
                 runtime_kwargs["userbot_manager"] = userbot_manager
 
             tool_result = None
 
-            # Duplicate web_search query guard
+            # Duplicate web_search query guard (defence-in-depth сохранён)
             if tool_name == "web_search":
                 q = str((tool_params or {}).get("query", "")).strip().lower()
                 if q and q in _searched_queries:
                     tool_result = {"error": "duplicate web_search query in this turn"}
                 else:
-                    # B1 defense-in-depth: respect user override even in tool loop
                     from src.core.infra.text_filters import should_skip_web_search
 
                     if should_skip_web_search(user_text or ""):
@@ -496,93 +581,27 @@ async def process(
                     elif q:
                         _searched_queries.add(q)
 
-            if tool_result is None and owner_id is not None:
-                async with get_session() as session:
-                    owner = await get_or_create_user(session, owner_id)
-                    runtime_kwargs["session"] = session
-                    runtime_kwargs["user"] = owner
-                    if userbot_manager is not None:
-                        client = userbot_manager.get_client(owner_id)
-                        if client is not None:
-                            runtime_kwargs["client"] = client
-                    # ── Tool execution with fallback chains (Plan B) ──
-                    try:
-                        tool_result = await tool_registry.execute(
-                            tool_name,
-                            _confirmed=False,
-                            **gr.sanitized_params,
-                            **runtime_kwargs,
-                        )
-                    except (
-                        Exception
-                    ) as e:  # TODO: specify exceptions — tools raise arbitrary errors
-                        tool_result = {"error": str(e)}
+            # Выполнение инструмента через обёртку с семафором и fallback-цепочками
             if tool_result is None:
-                # ── Tool execution with fallback chains (Plan B) ──
-                try:
-                    tool_result = await tool_registry.execute(
-                        tool_name,
-                        _confirmed=False,
-                        **gr.sanitized_params,
-                        **runtime_kwargs,
-                    )
-                except (
-                    Exception
-                ) as e:  # TODO: specify exceptions — tools raise arbitrary errors
-                    tool_result = {"error": str(e)}
-
-            # Fallback chains — если инструмент вернул ошибку, пробуем альтернативы
-            if tool_result and isinstance(tool_result, dict) and "error" in tool_result:
-                fallbacks = _TOOL_FALLBACKS.get(tool_name, ["admit_ignorance"])
-                logger.warning(
-                    "Tool '%s' failed: %s. Trying fallbacks: %s",
+                tool_result = await _execute_one_tool(
                     tool_name,
-                    tool_result.get("error", "unknown"),
-                    fallbacks,
+                    tool_params,
+                    sanitized_params=gr.sanitized_params,
+                    runtime_kwargs=runtime_kwargs,
+                    owner_id=owner_id,
+                    session_factory=get_session,
+                    get_or_create_user_fn=get_or_create_user,
+                    userbot_manager=userbot_manager,
                 )
-                for fb in fallbacks:
-                    if fb == "admit_ignorance":
-                        intent = "admit_ignorance"
-                        parsed["intent"] = intent
-                        tool_result = None
-                        break
-                    # Пробуем альтернативный инструмент
-                    try:
-                        # B3 fix: mcp_web требует action="search" — прокидываем явно
-                        fb_params = dict(gr.sanitized_params)
-                        if fb == "mcp_web" and "action" not in fb_params:
-                            fb_params["action"] = "search"
-                        fb_result = await tool_registry.execute(
-                            fb,
-                            _confirmed=False,
-                            **fb_params,
-                            **runtime_kwargs,
-                        )
-                        if isinstance(fb_result, dict) and "error" in fb_result:
-                            continue  # этот fallback тоже с ошибкой, пробуем следующий
-                        tool_result = fb_result
-                        tool_name = fb  # запомнили что сработал fallback
-                        logger.info(
-                            "Fallback '%s' succeeded for '%s'", fb, parsed["tool"]
-                        )
-                        break
-                    except (
-                        Exception
-                    ):  # TODO: specify exceptions — tool execution can raise anything
-                        continue
-                else:
-                    # Все fallback'и исчерпаны — последний рубеж: admit_ignorance
-                    intent = "admit_ignorance"
-                    parsed["intent"] = intent
-                    tool_result = None
-                    logger.warning(
-                        "All fallbacks exhausted for '%s', falling back to admit_ignorance",
-                        parsed["tool"],
-                    )
 
-            # Если fallback привёл к admit_ignorance — обработаем ниже
-            if intent == "admit_ignorance":
-                pass  # fall through к admit_ignorance handler
+            # Обработка результата: admit_ignorance fallback или фидбек в LLM
+            if (
+                isinstance(tool_result, dict)
+                and tool_result.get("_fallback") == "admit_ignorance"
+            ):
+                intent = "admit_ignorance"
+                parsed["intent"] = intent
+                tool_result = None
             elif tool_result is not None:
                 # Feed result back to LLM
                 trace["tools_executed"].append(tool_name)

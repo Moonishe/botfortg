@@ -1,5 +1,6 @@
 """Утренний дайджест: входящие без ответа, горящие обещания и авто-ответы за ночь."""
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -19,6 +20,11 @@ from src.llm.router import build_provider
 
 
 logger = logging.getLogger(__name__)
+
+# ── Защита от наложения (overlap guard) ──
+# Если предыдущий тик digest_scheduler_loop ещё не завершился — пропускаем,
+# чтобы избежать двойной отправки утреннего дайджеста.
+_overlap_guard = asyncio.Lock()
 
 
 DIGEST_SYSTEM = (
@@ -202,6 +208,11 @@ async def digest_scheduler_loop() -> None:
 
     last_sent: dict[int, str] = {}  # telegram_id -> "YYYY-MM-DD"
     while True:
+        # Защита от наложения: если предыдущий тик ещё не завершён — пропускаем
+        if _overlap_guard.locked():
+            await asyncio.sleep(settings.digest_check_sec)
+            continue
+        await _overlap_guard.acquire()
         try:
             owner_id = settings.owner_telegram_id
             async with get_session() as session:
@@ -233,4 +244,6 @@ async def digest_scheduler_loop() -> None:
                 last_sent[owner_id] = current_day
         except Exception:
             logger.exception("digest scheduler tick failed")
+        finally:
+            _overlap_guard.release()
         await asyncio.sleep(settings.digest_check_sec)

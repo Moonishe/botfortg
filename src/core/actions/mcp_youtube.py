@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from src.core.actions.tool_registry import tool
+from src.core.security.web_sanitizer import sanitize_search_snippet
 from src.config import settings
 from src.llm.base import ChatMessage
 
@@ -184,9 +185,12 @@ async def _youtube_search(query: str, limit: int) -> dict[str, Any]:
             for entry in entries[:limit]:
                 if entry is None:
                     continue
+                # Защита от prompt injection: санируем title видео
+                # перед возвратом LLM (внешний контент из YouTube)
+                safe_title = sanitize_search_snippet(entry.get("title", ""))
                 results.append(
                     {
-                        "title": entry.get("title", ""),
+                        "title": safe_title,
                         "url": f"https://www.youtube.com/watch?v={entry.get('id', '')}",
                         "duration": entry.get("duration"),
                         "views": entry.get("view_count"),
@@ -538,8 +542,10 @@ async def _youtube_comments(url: str, limit: int) -> dict[str, Any]:
                 text = c.get("text", str(c))
             else:
                 text = str(c)
-            # Truncate each comment to 300 chars
-            comments.append(text[:300] if text else "")
+            # Защита от prompt injection: санируем текст комментария
+            # перед возвратом LLM (внешний контент из YouTube)
+            safe_text = sanitize_search_snippet(text)
+            comments.append(safe_text if safe_text else "")
 
         return {
             "ok": True,

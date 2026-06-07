@@ -23,6 +23,11 @@ from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
 
+# ── Защита от наложения (overlap guard) ──
+# Если предыдущий тик news_scheduler_loop ещё не завершился — пропускаем,
+# чтобы избежать двойного сбора постов и дублирования нотификаций.
+_overlap_guard = asyncio.Lock()
+
 
 NEWS_SYSTEM = (
     "Ты собираешь новостной дайджест по запрошенной теме на основе постов из Telegram-каналов.\n"
@@ -193,6 +198,11 @@ from src.core.infra.task_manager import task_manager
 async def news_scheduler_loop() -> None:
     last_sent: dict[int, str] = {}
     while True:
+        # Защита от наложения: если предыдущий тик ещё не завершён — пропускаем
+        if _overlap_guard.locked():
+            await asyncio.sleep(settings.news_check_sec)
+            continue
+        await _overlap_guard.acquire()
         try:
             owner_id = settings.owner_telegram_id
             topics_to_run: list[tuple[str, int]] = []
@@ -253,4 +263,6 @@ async def news_scheduler_loop() -> None:
                             logger.exception("news topic failed: %s", topic)
         except Exception:
             logger.exception("news scheduler tick failed")
+        finally:
+            _overlap_guard.release()
         await asyncio.sleep(settings.news_check_sec)

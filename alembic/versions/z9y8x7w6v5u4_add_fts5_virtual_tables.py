@@ -35,7 +35,7 @@ def upgrade() -> None:
             sender_name,
             content='messages',
             content_rowid='id',
-            tokenize='unicode61 remove_diacritics 2'
+            tokenize='unicode61 remove_diacritics 2 categories ''L* N* Co'''
         )
         """
     )
@@ -72,7 +72,7 @@ def upgrade() -> None:
         CREATE VIRTUAL TABLE IF NOT EXISTS agent_session_messages_fts USING fts5(
             content, role, session_id UNINDEXED,
             content='agent_session_messages', content_rowid='id',
-            tokenize='unicode61 remove_diacritics 2'
+            tokenize='unicode61 remove_diacritics 2 categories ''L* N* Co'''
         )
         """
     )
@@ -84,7 +84,7 @@ def upgrade() -> None:
             fact, sentiment, cluster_topic,
             content='memories',
             content_rowid='id',
-            tokenize='unicode61 remove_diacritics 2'
+            tokenize='unicode61 remove_diacritics 2 categories ''L* N* Co'''
         )
         """
     )

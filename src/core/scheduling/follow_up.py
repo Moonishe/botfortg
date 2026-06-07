@@ -10,10 +10,20 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+# ── Защита от наложения (overlap guard) ──
+# Если предыдущий тик follow_up_loop ещё не завершился — пропускаем,
+# чтобы избежать дублирования нотификаций о непрочитанных сообщениях.
+_overlap_guard = asyncio.Lock()
+
 
 async def follow_up_loop(owner_id: int) -> None:
     """Проверка переписок без ответа >24 часов, раз в 4 часа."""
     while True:
+        # Защита от наложения: если предыдущий тик ещё не завершён — пропускаем
+        if _overlap_guard.locked():
+            await asyncio.sleep(min(settings.follow_up_interval_sec, 120))
+            continue
+        await _overlap_guard.acquire()
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
@@ -45,10 +55,11 @@ async def follow_up_loop(owner_id: int) -> None:
                         f"<i>/threads — просмотреть и ответить</i>",
                         priority=Notification.PRIORITY_HIGH,
                     )
-            await asyncio.sleep(settings.follow_up_interval_sec)  # раз в 4 часа
         except Exception:
             logger.exception("FollowUp loop error")
-            await asyncio.sleep(settings.follow_up_interval_sec)
+        finally:
+            _overlap_guard.release()
+        await asyncio.sleep(settings.follow_up_interval_sec)  # раз в 4 часа
 
 
 from functools import partial

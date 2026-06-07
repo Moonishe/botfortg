@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 
 from src.core.actions.tool_registry import tool
 from src.core.security.ssrf_guard import _check_ssrf_async
+from src.core.security.web_sanitizer import sanitize_search_result
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +191,14 @@ async def _web_search(query: str, max_results: int = 5) -> dict[str, Any]:
                 snippet = snippet_el.get_text(strip=True)
 
             if title and actual_url:
+                # Защита от prompt injection: санируем title и snippet
+                # перед возвратом LLM (внешний контент из поисковой выдачи)
+                safe_title, safe_snippet = sanitize_search_result(title, snippet)
                 results.append(
                     {
-                        "title": title,
+                        "title": safe_title,
                         "url": actual_url,
-                        "snippet": snippet,
+                        "snippet": safe_snippet,
                     }
                 )
 
