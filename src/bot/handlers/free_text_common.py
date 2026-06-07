@@ -221,11 +221,13 @@ def _coerce_setting_value(spec: str, raw):
     return None, "неизвестный тип"
 
 
-def _confirm_keyboard(action_id: int):
+def _confirm_keyboard(action_id: int, hmac_signature: str | None = None):
+    """Клавиатура подтверждения отправки с HMAC-подписью в callback_data."""
+    sig = hmac_signature or ""
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
-            text="✅ Отправить", callback_data=f"send:confirm:{action_id}"
+            text="✅ Отправить", callback_data=f"send:confirm:{action_id}:{sig}"
         ),
         InlineKeyboardButton(text="✏ Изменить", callback_data=f"send:edit:{action_id}"),
     )

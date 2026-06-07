@@ -90,16 +90,20 @@ from src.db.repos.memory_repo import (
 )
 
 from src.db.repos.commitment_repo import (
+    _compute_hmac,
     add_commitment,
     add_pending_question,
+    cleanup_expired_actions,
     create_pending_action,
     delete_pending_action,
     get_commitment,
     get_commitment_by_source_memory,
     get_pending_action,
     get_pending_questions,
+    is_pending_action_expired,
     list_open_commitments,
     update_commitment_status,
+    verify_pending_action_hmac,
 )
 
 from src.db.repos.skill_repo import (
@@ -210,16 +214,20 @@ __all__ = [
     "unlink_memories",
     "upsert_memory_cluster",
     # commitments
+    "_compute_hmac",
     "add_commitment",
     "add_pending_question",
+    "cleanup_expired_actions",
     "create_pending_action",
     "delete_pending_action",
     "get_commitment",
     "get_commitment_by_source_memory",
     "get_pending_action",
     "get_pending_questions",
+    "is_pending_action_expired",
     "list_open_commitments",
     "update_commitment_status",
+    "verify_pending_action_hmac",
     # skills
     "add_skill_usage",
     "add_trajectory",

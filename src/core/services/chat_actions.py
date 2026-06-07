@@ -223,7 +223,8 @@ async def draft_reply_action(
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
-            text="✅ Отправить", callback_data=f"send:confirm:{action.id}"
+            text="✅ Отправить",
+            callback_data=f"send:confirm:{action.id}:{action.hmac_signature or ''}",
         ),
         InlineKeyboardButton(
             text="❌ Отмена", callback_data=f"send:cancel:{action.id}"

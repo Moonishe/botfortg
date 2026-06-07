@@ -154,6 +154,9 @@ class PendingAction(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+    # Безопасность: TTL + HMAC-подпись (nullable для обратной совместимости)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    hmac_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class NewsTopic(Base):

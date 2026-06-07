@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
@@ -62,6 +63,21 @@ async def main() -> None:
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
     )
     logger.info("Starting TelegramAssistant")
+
+    # --- Обработчики сигналов для graceful shutdown ---
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def _shutdown() -> None:
+        logger.info("Received shutdown signal, cancelling main task...")
+        main_task.cancel()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _shutdown)
+        except NotImplementedError:
+            # Windows: add_signal_handler не поддерживается — fallback на signal.signal
+            signal.signal(sig, lambda s, f: main_task.cancel())
 
     await init_db()
 
@@ -188,6 +204,20 @@ async def main() -> None:
                         )
                 except Exception:
                     logger.debug("circuit_breaker cleanup failed", exc_info=True)
+            # Очистка просроченных PendingAction (каждые 5 минут, вместе с circuit_breaker)
+            if _tick == 0:
+                try:
+                    from src.db.repo import cleanup_expired_actions
+                    from src.db.session import get_session
+
+                    async with get_session() as _cleanup_sess:
+                        removed_pa = await cleanup_expired_actions(_cleanup_sess)
+                        if removed_pa:
+                            logger.info(
+                                "PendingAction cleanup: removed %d expired", removed_pa
+                            )
+                except Exception:
+                    logger.debug("pending_action cleanup failed", exc_info=True)
 
     _cleanup_task = asyncio.create_task(_cleanup_global_state())
     _update_check_task = asyncio.create_task(check_and_notify_update())
@@ -340,6 +370,8 @@ async def main() -> None:
 
     try:
         await run_bot(userbot_manager)
+    except asyncio.CancelledError:
+        logger.info("Main task cancelled, shutting down...")
     finally:
         logger.info("Shutting down…")
 
@@ -445,30 +477,11 @@ def run() -> None:
         sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
         sys.stderr.flush()
     except FutureTimeoutError:
-        sys.stderr.write(
-            "=== alembic TIMEOUT — stamping head and using init_db() fallback ===\n"
-        )
-        sys.stderr.flush()
-        # Alembic hung — stamp the head revision and let init_db() create tables
-        import sqlite3
-
-        _db_url = str(PROJECT_ROOT / "data" / "app.db")
-        _conn = sqlite3.connect(_db_url)
-        _conn.execute(
-            "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"
-        )
-        _conn.execute(
-            "INSERT OR REPLACE INTO alembic_version (version_num) VALUES (?)",
-            (head_rev,),
-        )
-        _conn.commit()
-        _conn.close()
-        sys.stderr.write(f"=== alembic stamped head={head_rev} manually ===\n")
-        sys.stderr.flush()
-    except Exception:
-        sys.stderr.write("=== alembic CRASHED ===\n")
-        sys.stderr.flush()
-        raise
+        logger.critical("Alembic migration timed out after 120s. Refusing to start.")
+        raise SystemExit(1) from None
+    except Exception as e:
+        logger.critical("Alembic migration failed: %s. Refusing to start.", e)
+        raise SystemExit(1) from e
     finally:
         # Two-phase shutdown: first let running tasks finish gracefully,
         # then cancel any stragglers.  This avoids abandoning in-flight

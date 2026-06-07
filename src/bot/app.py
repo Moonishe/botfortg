@@ -247,6 +247,11 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     logger.info("Control bot started as @%s", me.username)
 
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        # close_bot_session=False — сессией управляем явно в finally
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            close_bot_session=False,
+        )
     finally:
         await bot.session.close()

@@ -20,6 +20,8 @@ from src.db.repo import (
     get_contact,
     get_or_create_user,
     get_pending_action,
+    is_pending_action_expired,
+    verify_pending_action_hmac,
 )
 from src.db.session import get_session
 from src.llm.base import ChatMessage
@@ -61,11 +63,13 @@ def _parse_json(text: str) -> dict:
         return {}
 
 
-def _confirm_keyboard(action_id: int):
+def _confirm_keyboard(action_id: int, hmac_signature: str | None = None):
+    """Клавиатура подтверждения отправки с HMAC-подписью в callback_data."""
+    sig = hmac_signature or ""
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
-            text="✅ Отправить", callback_data=f"send:confirm:{action_id}"
+            text="✅ Отправить", callback_data=f"send:confirm:{action_id}:{sig}"
         ),
         InlineKeyboardButton(text="✏ Изменить", callback_data=f"send:edit:{action_id}"),
     )
@@ -204,7 +208,7 @@ async def _create_and_confirm(
         sanitize_html(
             f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}{guard_hint}\n\n<i>Подтверди отправку 👇</i>"
         ),
-        reply_markup=_confirm_keyboard(action.id),
+        reply_markup=_confirm_keyboard(action.id, action.hmac_signature),
     )
 
 
@@ -249,7 +253,7 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
                 f"→ <b>Кому:</b> {label}\n"
                 f"→ <b>Текст:</b>\n{text}{guard_hint}"
             ),
-            reply_markup=_confirm_keyboard(action.id),
+            reply_markup=_confirm_keyboard(action.id, action.hmac_signature),
         )
     await callback.answer()
 
@@ -327,7 +331,7 @@ async def step_edit(message: Message, state: FSMContext) -> None:
         sanitize_html(
             f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{new_text}{guard_hint}"
         ),
-        reply_markup=_confirm_keyboard(action_id),
+        reply_markup=_confirm_keyboard(action_id, action.hmac_signature),
     )
 
 
@@ -338,6 +342,15 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         await callback.answer("Ошибка данных.", show_alert=True)
         return
     action_id = int(parts[2])
+    # Извлекаем HMAC-подпись (если есть)
+    callback_hmac = parts[3] if len(parts) > 3 else ""
+
+    # Проверка HMAC-подписи (пропускается для старых callback без подписи)
+    if callback_hmac and not await verify_pending_action_hmac(action_id, callback_hmac):
+        await callback.answer("❌ Недействительная подпись.", show_alert=True)
+        logger.warning("cb_confirm: HMAC mismatch for action_id=%d", action_id)
+        return
+
     client = userbot_manager.get_client(callback.from_user.id)
     if client is None:
         await callback.answer("Сначала /login", show_alert=True)
@@ -348,9 +361,26 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         action = await get_pending_action(session, action_id, user)
         if action is None:
             await callback.answer(
-                "Действие не найдено или уже выполнено", show_alert=True
+                "❌ Действие не найдено или уже выполнено.", show_alert=True
             )
             return
+
+        # Проверка TTL
+        if is_pending_action_expired(action):
+            await callback.answer("❌ Срок действия истёк.", show_alert=True)
+            logger.info("cb_confirm: expired action_id=%d", action_id)
+            return
+
+        # Двойная проверка HMAC (сверяем с хранимым в БД)
+        if action.hmac_signature and not await verify_pending_action_hmac(
+            action_id, callback_hmac
+        ):
+            await callback.answer("❌ Недействительная подпись.", show_alert=True)
+            logger.warning(
+                "cb_confirm: stored HMAC mismatch for action_id=%d", action_id
+            )
+            return
+
         payload = json.loads(action.payload)
         peer_id = payload["peer_id"]
         text = payload["text"]

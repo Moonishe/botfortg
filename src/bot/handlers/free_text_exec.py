@@ -1023,7 +1023,7 @@ async def exec_classic_send_message(
                 f"→ <b>Кому:</b> {target.label()}\n"
                 f"→ <b>Текст:</b>\n{text}{guard_hint}"
             ),
-            reply_markup=_confirm_keyboard(action.id),
+            reply_markup=_confirm_keyboard(action.id, action.hmac_signature),
         )
     else:
         if state is None:

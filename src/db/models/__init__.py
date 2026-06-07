@@ -36,7 +36,6 @@ from src.db.models._memory import (
     MemoryCandidate,
 )
 from src.db.models._cache import SmartCacheEntry
-from src.db.models._embedding_cache import EmbeddingCacheEntry
 from src.db.models._avito import AvitoListing, AvitoPriceHistory, AvitoWatch
 from src.db.models._monitor import (
     MonitoredSource,
@@ -92,7 +91,6 @@ __all__ = [
     "MemoryClusterMember",
     "MemoryCandidate",
     "SmartCacheEntry",
-    "EmbeddingCacheEntry",
     "AgentCache",
     "SelfProfile",
     "AdaptivePersona",
