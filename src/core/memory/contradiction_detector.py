@@ -449,6 +449,13 @@ async def check_contradiction_response(
                         from src.core.actions.stats_cache import invalidate
 
                         await invalidate("mem_")
+                        # Инвалидируем contact_digest для контакта противоречащего факта
+                        if old_mem.contact_id is not None:
+                            from src.core.contacts.contact_memory_digest import (
+                                invalidate_contact_digest,
+                            )
+
+                            await invalidate_contact_digest(old_mem.contact_id)
             except Exception:
                 logger.debug("Failed to mark contradicted fact", exc_info=True)
 

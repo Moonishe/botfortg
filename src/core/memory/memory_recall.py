@@ -96,6 +96,17 @@ async def bump_recall_version(telegram_id: int) -> None:
         from src.core.memory.prefetch_recall import clear_prefetch
 
         await clear_prefetch(telegram_id)
+        # B2: инвалидировать RouteCache — после мутации памяти маршруты могут измениться
+        try:
+            from src.core.intelligence.routing.pattern_cache import route_cache
+
+            await route_cache.invalidate_user(telegram_id)
+        except Exception:
+            logger.debug(
+                "RouteCache invalidation failed in bump_recall_version(%s)",
+                telegram_id,
+                exc_info=True,
+            )
     except Exception:
         logger.debug("bump_recall_version(%s) failed", telegram_id, exc_info=True)
 

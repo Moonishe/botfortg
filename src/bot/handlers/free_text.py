@@ -646,7 +646,7 @@ def _get_classify_mode(classification: dict) -> str | None:
     if not classification:
         return None
     # Категории, для которых достаточно мгновенного ответа без LLM
-    instant_categories = {"agreement", "gratitude", "emotion", "command"}
+    instant_categories = {"agreement", "gratitude", "emotion"}
     if any(classification.get(cat) for cat in instant_categories):
         return "INSTANT"
     return None

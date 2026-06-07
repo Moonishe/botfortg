@@ -133,6 +133,7 @@ async def run_async_migrations() -> None:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 
     async with connectable.connect() as connection:

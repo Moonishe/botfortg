@@ -308,13 +308,16 @@ async def apply_reval_result(
         return base
 
     if action == "invalid":
+        # Шаг 1: деактивация — в savepoint для атомарности
         try:
-            await deactivate_memory(session, fact.id, reason="reval_invalid")
+            async with session.begin_nested() as sp:
+                await deactivate_memory(session, fact.id, reason="reval_invalid")
         except Exception as exc:
             base.error = f"deactivate failed: {exc}"
         return base
 
     # past / permanent → create new fact and supersede old
+    # (шаги 2-3: add_memory + supersedes_link + deactivate — в одном savepoint)
     # Use explicit ``is not None`` (not ``or``) so legitimate falsy values
     # (e.g. decay_rate=0.01, empty string) are preserved instead of
     # silently falling back to defaults.
@@ -345,35 +348,36 @@ async def apply_reval_result(
     new_decay = new_decay_raw if new_decay_raw is not None else 0.02
 
     try:
-        from src.db.repos.memory_repo import add_memory
+        async with session.begin_nested() as savepoint:
+            from src.db.repos.memory_repo import add_memory
 
-        new_mem = await add_memory(
-            session,
-            user,
-            fact=updated,
-            contact_id=fact.contact_id,
-            sentiment=fact.sentiment,
-            source="dreaming_reval",
-            confidence=max(0.6, fact.confidence or 0.5),
-            memory_type=new_type,
-            decay_rate=new_decay,
-            pinned=False,
-            deduplicate=True,
-            vector_store_obj=vector_store_obj,
-        )
-        if new_mem and new_mem.id != fact.id:
-            await add_supersedes_link(
+            new_mem = await add_memory(
                 session,
-                user.id,
-                old_id=fact.id,
-                new_id=new_mem.id,
+                user,
+                fact=updated,
+                contact_id=fact.contact_id,
+                sentiment=fact.sentiment,
+                source="dreaming_reval",
+                confidence=max(0.6, fact.confidence or 0.5),
+                memory_type=new_type,
+                decay_rate=new_decay,
+                pinned=False,
+                deduplicate=True,
+                vector_store_obj=vector_store_obj,
             )
-            base.new_memory_id = new_mem.id
-            # Deactivate old fact to keep recall clean
-            await deactivate_memory(session, fact.id, reason="superseded_by_reval")
-        elif new_mem and new_mem.id == fact.id:
-            # Dedup caught it — fact already exists in some form. Leave alone.
-            base.reason = (base.reason or "") + " [dedup: same fact exists]"
+            if new_mem and new_mem.id != fact.id:
+                await add_supersedes_link(
+                    session,
+                    user.id,
+                    old_id=fact.id,
+                    new_id=new_mem.id,
+                )
+                base.new_memory_id = new_mem.id
+                # Deactivate old fact to keep recall clean
+                await deactivate_memory(session, fact.id, reason="superseded_by_reval")
+            elif new_mem and new_mem.id == fact.id:
+                # Dedup caught it — fact already exists in some form. Leave alone.
+                base.reason = (base.reason or "") + " [dedup: same fact exists]"
     except Exception as exc:
         logger.exception("apply_reval_result: add_memory failed for fact %d", fact.id)
         base.error = f"add_memory failed: {exc}"

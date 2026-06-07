@@ -75,6 +75,33 @@ _multiselect_filter: dict[int, str] = {}  # slot_id → "all" | "vision" | "embe
 _discovery_cache_search: dict[int, list[str]] = {}
 
 
+def _get_visible_models_for_slot(slot_id: int) -> list[str]:
+    """Возвращает список моделей, видимых пользователем с учётом фильтра/поиска.
+
+    Никогда не модифицирует _discovery_cache — читает из _discovery_models_info
+    (никогда не портится) или из _discovery_cache_search (временный результат поиска).
+    """
+    # 1. Есть активный результат поиска — возвращаем его
+    if slot_id in _discovery_cache_search:
+        return _discovery_cache_search[slot_id]
+
+    # 2. Есть активный фильтр по capabilities
+    ftype = _multiselect_filter.get(slot_id, "all")
+    all_info = _discovery_models_info.get(slot_id, [])
+    if ftype == "vision":
+        return [m["name"] for m in all_info if m["vision"]]
+    elif ftype == "embeddings":
+        return [m["name"] for m in all_info if m["embeddings"]]
+
+    # 3. "all" — полный список из _discovery_models_info (не _discovery_cache,
+    #    который мог быть испорчен предыдущими вызовами фильтра)
+    if all_info:
+        return [m["name"] for m in all_info]
+
+    # 4. Fallback: _discovery_cache (для совместимости со старыми данными)
+    return _discovery_cache.get(slot_id, [])
+
+
 def _cache_models_discovery(slot_id: int, models: list[str]) -> None:
     """Сохранить обнаруженные модели в кэш."""
     _discovery_cache[slot_id] = models
@@ -1270,7 +1297,7 @@ async def cb_multiselect_toggle(callback: CallbackQuery):
     slot_id = int(parts[2])
     idx = int(parts[3])
 
-    models = _discovery_cache.get(slot_id, [])
+    models = _get_visible_models_for_slot(slot_id)
     selected = _multiselect_state.get(slot_id, set())
 
     model_name = models[idx] if idx < len(models) else None
@@ -1301,7 +1328,7 @@ async def cb_multiselect_page(callback: CallbackQuery):
     page = int(parts[3])
     _multiselect_page[slot_id] = page
 
-    models = _discovery_cache.get(slot_id, [])
+    models = _get_visible_models_for_slot(slot_id)
     selected = _multiselect_state.get(slot_id, set())
 
     if callback.message:
@@ -1317,7 +1344,7 @@ async def cb_multiselect_page(callback: CallbackQuery):
 async def cb_multiselect_all(callback: CallbackQuery):
     """Выбрать все модели."""
     slot_id = int(callback.data.split(":")[2])
-    models = _discovery_cache.get(slot_id, [])
+    models = _get_visible_models_for_slot(slot_id)
     _multiselect_state[slot_id] = set(models)
 
     if callback.message:
@@ -1333,7 +1360,7 @@ async def cb_multiselect_all(callback: CallbackQuery):
 async def cb_multiselect_none(callback: CallbackQuery):
     """Снять выбор со всех моделей."""
     slot_id = int(callback.data.split(":")[2])
-    models = _discovery_cache.get(slot_id, [])
+    models = _get_visible_models_for_slot(slot_id)
     _multiselect_state[slot_id] = set()
 
     if callback.message:
@@ -1358,17 +1385,13 @@ async def cb_multiselect_filter(callback: CallbackQuery):
     slot_id = int(parts[2])
     ftype = parts[3]
     _multiselect_filter[slot_id] = ftype
+    # Сбрасываем результаты поиска (фильтр переопределяет поиск)
+    _discovery_cache_search.pop(slot_id, None)
 
-    all_models = _discovery_models_info.get(slot_id, [])
-    if ftype == "vision":
-        models = [m["name"] for m in all_models if m["vision"]]
-    elif ftype == "embeddings":
-        models = [m["name"] for m in all_models if m["embeddings"]]
-    else:
-        # "all" — вернуть все модели из кэша
-        models = _discovery_cache.get(slot_id, [])
+    # _get_visible_models_for_slot учитывает активный фильтр,
+    # используя _discovery_models_info (никогда не портится)
+    models = _get_visible_models_for_slot(slot_id)
 
-    _discovery_cache[slot_id] = models
     selected = _multiselect_state.get(slot_id, set())
     # Убираем выбор с моделей, которых нет в отфильтрованном списке
     selected = selected & set(models)
@@ -1507,7 +1530,7 @@ async def _pending_key_entry_handler(message: Message) -> None:
             }
             return
 
-        # Ищем во всех моделях (полный кэш discovery)
+        # Ищем во всех моделях (полный кэш discovery, никогда не портим)
         models = _discovery_cache.get(slot_id, [])
         filtered = [m for m in models if query in m.lower()]
 
@@ -1524,10 +1547,9 @@ async def _pending_key_entry_handler(message: Message) -> None:
             )
             return
 
-        # Сохраняем отфильтрованные результаты во временный кэш поиска
+        # Сохраняем отфильтрованные результаты только во временный кэш поиска
+        # НЕ трогаем _discovery_cache — он должен оставаться нетронутым
         _discovery_cache_search[slot_id] = filtered
-        # Обновляем discovery_cache для multi-select клавиатуры
-        _discovery_cache[slot_id] = filtered
         selected = _multiselect_state.get(slot_id, set())
         # Убираем выбор с моделей, которых нет в результате поиска
         selected = selected & set(filtered)

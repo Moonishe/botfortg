@@ -441,7 +441,9 @@ class MultiKeyProvider:
                     elif self._model:
                         provider_kwargs["model"] = self._model
                     elif self._models and idx < len(self._models):
-                        provider_kwargs["model"] = self._models[idx]
+                        per_slot = self._models[idx]
+                        if per_slot:
+                            provider_kwargs["model"] = per_slot[0]
                     if self._embed_model:
                         provider_kwargs["embed_model"] = self._embed_model
                     provider = self._provider_class(key, **provider_kwargs)
@@ -577,6 +579,7 @@ class MultiKeyProvider:
         """Возвращает включённые (enabled) модели для всех ключей провайдера.
 
         Если в БД есть LlmKeySlotModel с enabled=True — возвращаем только их.
+        Иначе проверяем self._models (старые single-model слоты с slot.model).
         Иначе fallback: запрашиваем все модели через API первого ключа.
         """
         enabled = set()
@@ -588,9 +591,15 @@ class MultiKeyProvider:
                     from src.db.repos.key_repo import get_enabled_models
 
                     enabled.update(await get_enabled_models(session, slot_id))
+        # Проверяем старые single-model слоты (slot.model без LlmKeySlotModel)
+        for model_list in self._models:
+            for m in model_list:
+                if m:
+                    enabled.add(m)
         if enabled:
             return sorted(enabled)
-        # Fallback: если нет enabled моделей в БД — возвращаем все из API
+        # Fallback: если нет enabled моделей ни в БД, ни в self._models —
+        # запрашиваем все модели через API первого ключа
         key = self._keys[0]
         provider = self._provider_class(key)
         try:

@@ -10,9 +10,11 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 
 from src.bot.filters import OwnerOnly
 from src.config import settings
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.models._monitor import (
     MonitoredAlert,
     MonitoredMessage,
@@ -67,7 +69,7 @@ async def cmd_monitor(message: Message, command: CommandObject) -> None:
         await _handle_rule_del(message, args[1:])
     else:
         await message.answer(
-            f"❓ Неизвестное действие: <b>{action}</b>\nЖми /monitor для справки."
+            f"❓ Неизвестное действие: <b>{sanitize_html(action)}</b>\nЖми /monitor для справки."
         )
 
 
@@ -99,7 +101,9 @@ async def _handle_add(message: Message, args: list[str]) -> None:
         await message.answer("❌ Юзербот не подключён. Сделай /login.")
         return
 
-    status_msg = await message.answer(f"🔍 Разрешаю <code>{identifier}</code>…")
+    status_msg = await message.answer(
+        f"🔍 Разрешаю <code>{sanitize_html(identifier)}</code>…"
+    )
 
     try:
         from src.core.monitor.source_resolver import resolve_source
@@ -128,7 +132,7 @@ async def _handle_add(message: Message, args: list[str]) -> None:
             status_line = "✅ Активен" if existing.is_active else "⏸ Неактивен"
             await status_msg.edit_text(
                 f"ℹ️ Источник уже в мониторинге:\n\n"
-                f"📌 <b>{existing.title}</b>\n"
+                f"📌 <b>{sanitize_html(existing.title)}</b>\n"
                 f"🆔 ID: <code>{existing.id}</code>\n"
                 f"📊 Статус: {status_line}\n"
                 f"📅 Добавлен: {existing.added_at.strftime('%d.%m.%Y %H:%M') if existing.added_at else '?'}\n\n"
@@ -137,18 +141,22 @@ async def _handle_add(message: Message, args: list[str]) -> None:
             return
 
         # Сохраняем источник
-        source = MonitoredSource(
-            user_id=owner.id,
-            entity_id=info["entity_id"],
-            entity_type=info["type"],
-            title=info["title"],
-            username=info.get("username"),
-            access_hash=info.get("access_hash"),
-            is_active=True,
-            settings={"keywords": [], "exclude_keywords": []},
-        )
-        session.add(source)
-        await session.flush()
+        try:
+            source = MonitoredSource(
+                user_id=owner.id,
+                entity_id=info["entity_id"],
+                entity_type=info["type"],
+                title=info["title"],
+                username=info.get("username"),
+                access_hash=info.get("access_hash"),
+                is_active=True,
+                settings={"keywords": [], "exclude_keywords": []},
+            )
+            session.add(source)
+            await session.flush()
+        except IntegrityError:
+            await status_msg.edit_text("ℹ️ Этот источник уже добавлен.")
+            return
 
         # Создаём правило по умолчанию (отслеживать всё)
         default_rule = MonitorRule(
@@ -170,9 +178,9 @@ async def _handle_add(message: Message, args: list[str]) -> None:
 
     await status_msg.edit_text(
         f"{type_emoji} <b>Источник добавлен!</b>\n\n"
-        f"📌 <b>{info['title']}</b>\n"
-        f"🔗 @{info['username'] if info.get('username') else '—'}\n"
-        f"📂 Тип: {info['type']}\n"
+        f"📌 <b>{sanitize_html(info['title'])}</b>\n"
+        f"🔗 @{sanitize_html(info['username'] if info.get('username') else '—')}\n"
+        f"📂 Тип: {sanitize_html(info['type'])}\n"
         f"🆔 ID источника: <code>{source_id}</code>\n\n"
         f"Создано правило по умолчанию. Используй:\n"
         f"• /monitor rules {source_id} — просмотр правил\n"
@@ -215,7 +223,7 @@ async def _handle_list(message: Message) -> None:
             else "никогда"
         )
         lines.append(
-            f"{emoji} <b>{src.title or 'Без названия'}</b>\n"
+            f"{emoji} <b>{sanitize_html(src.title or 'Без названия')}</b>\n"
             f"  🆔 ID: <code>{src.id}</code> | Статус: {status}\n"
             f"  📥 Последний фетч: {last_fetch}\n"
             f"  💬 Последнее сообщение: #{src.last_message_id or 0}"
@@ -286,7 +294,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
         return
 
     status_msg = await message.answer(
-        f"📥 Фетчу сообщения из <b>{source.title}</b> за <b>{hours}ч</b>…"
+        f"📥 Фетчу сообщения из <b>{sanitize_html(source.title)}</b> за <b>{hours}ч</b>…"
     )
 
     try:
@@ -296,7 +304,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
 
         if not msgs:
             await status_msg.edit_text(
-                f"📭 Новых сообщений в <b>{source.title}</b> не найдено (за {hours}ч)."
+                f"📭 Новых сообщений в <b>{sanitize_html(source.title)}</b> не найдено (за {hours}ч)."
             )
             return
 
@@ -319,21 +327,25 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
         alerts_created = 0
         async with get_session() as session:
             for msg_dict, matched_rules in matched_pairs:
-                # Сохраняем сообщение
-                db_msg = MonitoredMessage(
-                    source_id=source.id,
-                    message_id=msg_dict["message_id"],
-                    date=msg_dict["date"],
-                    sender_id=msg_dict.get("sender_id"),
-                    sender_name=msg_dict.get("sender_name"),
-                    text=msg_dict.get("text"),
-                    media_type=msg_dict.get("media_type"),
-                    entities=msg_dict.get("entities"),
-                    views=msg_dict.get("views"),
-                    forwards=msg_dict.get("forwards"),
-                )
-                session.add(db_msg)
-                await session.flush()
+                # Сохраняем сообщение (пропускаем, если уже есть — concurrent fetch)
+                try:
+                    async with session.begin_nested():
+                        db_msg = MonitoredMessage(
+                            source_id=source.id,
+                            message_id=msg_dict["message_id"],
+                            date=msg_dict["date"],
+                            sender_id=msg_dict.get("sender_id"),
+                            sender_name=msg_dict.get("sender_name"),
+                            text=msg_dict.get("text"),
+                            media_type=msg_dict.get("media_type"),
+                            entities=msg_dict.get("entities"),
+                            views=msg_dict.get("views"),
+                            forwards=msg_dict.get("forwards"),
+                        )
+                        session.add(db_msg)
+                        await session.flush()
+                except IntegrityError:
+                    continue  # savepoint rolled back, skip duplicate
 
                 # Создаём алерты
                 for rule in matched_rules:
@@ -347,7 +359,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
                     alerts_created += 1
 
         await status_msg.edit_text(
-            f"📥 <b>Фетч завершён: {source.title}</b>\n\n"
+            f"📥 <b>Фетч завершён: {sanitize_html(source.title)}</b>\n\n"
             f"📨 Сообщений: <b>{len(msgs)}</b>\n"
             f"🎯 Сработавших правил: <b>{len(matched_pairs)}</b>\n"
             f"🚨 Алертов создано: <b>{alerts_created}</b>\n\n"
@@ -357,7 +369,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
     except Exception:
         logger.exception("fetch failed for source %s", source.title)
         await status_msg.edit_text(
-            f"❌ Ошибка фетчинга <b>{source.title}</b>. Проверь права доступа и логи."
+            f"❌ Ошибка фетчинга <b>{sanitize_html(source.title)}</b>. Проверь права доступа и логи."
         )
 
 
@@ -519,12 +531,12 @@ async def _handle_rules(message: Message, args: list[str]) -> None:
 
     if not rules:
         await message.answer(
-            f"📋 Для <b>{src.title}</b> нет правил.\n"
+            f"📋 Для <b>{sanitize_html(src.title)}</b> нет правил.\n"
             f"Добавь: <code>/monitor rule_add {source_id} Название ключевые_слова</code>"
         )
         return
 
-    lines = [f"📋 <b>Правила для {src.title}</b> (ID: {source_id})\n"]
+    lines = [f"📋 <b>Правила для {sanitize_html(src.title)}</b> (ID: {source_id})\n"]
     for rule in rules:
         status = "✅" if rule.is_active else "⏸"
         conds = rule.conditions or {}
@@ -536,9 +548,9 @@ async def _handle_rules(message: Message, args: list[str]) -> None:
         rx_str = f" [regex: {regex}]" if regex else ""
 
         lines.append(
-            f"• <b>{rule.name or 'Без названия'}</b> ({status})\n"
+            f"• <b>{sanitize_html(rule.name or 'Без названия')}</b> ({status})\n"
             f"  🆔 ID правила: <code>{rule.id}</code> | Приоритет: {rule.priority}\n"
-            f"  🔑 Ключевые слова: {kw_str}{ex_str}{rx_str}"
+            f"  🔑 Ключевые слова: {sanitize_html(kw_str)}{sanitize_html(ex_str)}{sanitize_html(rx_str)}"
         )
 
     text = "\n".join(lines)
@@ -546,7 +558,7 @@ async def _handle_rules(message: Message, args: list[str]) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  /monitor rule_add <source_id> <название> [ключевые_слова через запятую]
+#  /monitor rule_add <source_id> <название> | <ключевые_слова через запятую>
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -555,8 +567,8 @@ async def _handle_rule_add(message: Message, args: list[str]) -> None:
     if len(args) < 2:
         await message.answer(
             "Использование: <code>/monitor rule_add &lt;source_id&gt; "
-            "Название [ключевое1,ключевое2]</code>\n"
-            "Пример: <code>/monitor rule_add 1 Важное срочно,важно,деньги</code>"
+            "&lt;название&gt; | &lt;ключевые_слова&gt;</code>\n"
+            "Пример: <code>/monitor rule_add 1 Важное | срочно,важно,деньги</code>"
         )
         return
 
@@ -566,8 +578,29 @@ async def _handle_rule_add(message: Message, args: list[str]) -> None:
         await message.answer("❌ source_id должен быть числом.")
         return
 
-    name = args[1]
-    keywords_str = " ".join(args[2:]) if len(args) > 2 else ""
+    # Проверяем разделитель | для многословных названий
+    remaining = args[1:]
+    if "|" in remaining:
+        # Разделяем название и ключевые слова по |
+        pipe_idx = remaining.index("|")
+        name = " ".join(remaining[:pipe_idx]).strip()
+        keywords_str = (
+            " ".join(remaining[pipe_idx + 1 :]).strip()
+            if pipe_idx + 1 < len(remaining)
+            else ""
+        )
+    elif len(remaining) >= 2:
+        # Больше одного токена без разделителя — неоднозначность
+        await message.answer(
+            "❓ Для многословного названия используй разделитель <code>|</code>:\n"
+            "<code>/monitor rule_add &lt;source_id&gt; &lt;название&gt; | &lt;ключевые_слова&gt;</code>\n"
+            "Пример: <code>/monitor rule_add 1 Мой Важный Фильтр | срочно,важно,деньги</code>"
+        )
+        return
+    else:
+        name = remaining[0]
+        keywords_str = ""
+
     keywords = (
         [kw.strip() for kw in keywords_str.split(",") if kw.strip()]
         if keywords_str
@@ -607,12 +640,12 @@ async def _handle_rule_add(message: Message, args: list[str]) -> None:
         await session.flush()
         rule_id = rule.id
 
-    kw_display = ", ".join(keywords) if keywords else "все сообщения"
+    kw_display = sanitize_html(", ".join(keywords)) if keywords else "все сообщения"
     await message.answer(
         f"✅ <b>Правило добавлено!</b>\n\n"
-        f"📌 Название: <b>{name}</b>\n"
+        f"📌 Название: <b>{sanitize_html(name)}</b>\n"
         f"🆔 ID правила: <code>{rule_id}</code>\n"
-        f"📂 Источник: {src.title} (#{source_id})\n"
+        f"📂 Источник: {sanitize_html(src.title)} (#{source_id})\n"
         f"🔑 Ключевые слова: {kw_display}\n\n"
         f"Используй /monitor rules {source_id} для просмотра."
     )

@@ -137,8 +137,15 @@ class ManagedCache(Generic[K, V]):
 
         # ── Если другой writer уже вычисляет этот ключ — ждём ──
         if not event.is_set():
-            await event.wait()
-            # После сигнала — перепроверяем кэш
+            try:
+                await asyncio.wait_for(event.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "get_or_compute: reader timed out waiting for writer on key=%s, "
+                    "falling through to writer path",
+                    key,
+                )
+            # После сигнала (или таймаута) — перепроверяем кэш
             async with self._lock:
                 if key in self._cache:
                     expires_at, value = self._cache[key]
@@ -385,6 +392,7 @@ class ManagedCache(Generic[K, V]):
             return False
         _, value = self._cache.pop(key)
         self._expires.pop(key, None)
+        self._write_events.pop(key, None)  # Предотвращает утечку asyncio.Event
         if expired:
             self.metrics.expirations += 1
         if self.on_evict:

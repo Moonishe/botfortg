@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, update
+from telethon.errors import FloodWaitError
 
 from src.db.models._monitor import MonitoredSource, MonitorRule, MonitoredMessage
 from src.db.session import get_session
@@ -121,32 +122,41 @@ async def fetch_history(
 
             break  # Успех — выходим из цикла ретраев
 
-        except Exception as e:
-            clsname = type(e).__name__
-            if clsname == "FloodWaitError":
-                wait = getattr(e, "seconds", FLOOD_BASE_DELAY * (2**attempt))
-                logger.warning(
-                    "FloodWait %ds for source %s (attempt %d/%d)",
+        except FloodWaitError as e:
+            wait = e.seconds
+            if wait > 30:
+                logger.error(
+                    "FloodWait too long (%ds) for source %s, aborting",
                     wait,
                     source.title,
-                    attempt + 1,
-                    max_retries,
                 )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-            else:
-                logger.exception(
-                    "fetch_history failed for source %s (entity_id=%d)",
-                    source.title,
-                    source.entity_id,
-                )
-                if attempt < max_retries - 1:
-                    delay = FLOOD_BASE_DELAY * (2**attempt)
-                    await asyncio.sleep(delay)
-                    continue
-                raise
+                raise RuntimeError(
+                    f"FloodWait {wait}с для {source.title}: "
+                    f"сервер просит подождать слишком долго, фетчинг прерван."
+                ) from e
+            logger.warning(
+                "FloodWait %ds for source %s (attempt %d/%d)",
+                wait,
+                source.title,
+                attempt + 1,
+                max_retries,
+            )
+            if attempt < max_retries - 1:
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+        except Exception as e:
+            logger.exception(
+                "fetch_history failed for source %s (entity_id=%d)",
+                source.title,
+                source.entity_id,
+            )
+            if attempt < max_retries - 1:
+                delay = FLOOD_BASE_DELAY * (2**attempt)
+                await asyncio.sleep(delay)
+                continue
+            raise
 
     # Обновляем last_fetched_at и last_message_id если были сообщения
     if messages:

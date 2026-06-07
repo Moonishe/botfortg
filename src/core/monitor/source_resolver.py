@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 # Паттерны для разбора t.me/ ссылок
 _RE_TME_USERNAME = re.compile(r"^https?://t\.me/([a-zA-Z][\w]{3,31})(?:/\d+)?/?$")
+_RE_TME_USERNAME_NOPROTO = re.compile(
+    r"^(?:https?://)?t\.me/([a-zA-Z][\w]{4,31})(?:/\d+)?/?$"
+)
 _RE_TME_CHANNEL = re.compile(r"^https?://t\.me/c/(-?\d+)(?:/\d+)?/?$")
 _RE_TME_INVITE = re.compile(r"^https?://t\.me/\+([\w-]+)$")
 _RE_NUMERIC = re.compile(r"^-?\d+$")
@@ -72,6 +75,12 @@ async def resolve_source(client: TelegramClient, identifier: str) -> dict:
     m_username = _RE_TME_USERNAME.match(identifier)
     if m_username:
         username = m_username.group(1)
+        return await _resolve_by_username(client, username)
+
+    # ── t.me/username без протокола (http:// или https://) ──
+    m_username_noproto = _RE_TME_USERNAME_NOPROTO.match(identifier)
+    if m_username_noproto:
+        username = m_username_noproto.group(1)
         return await _resolve_by_username(client, username)
 
     # ── @username ──

@@ -116,19 +116,15 @@ class RouteCache:
             entry_ttl,
         )
 
-    def invalidate_user(self, user_id: int) -> None:
-        """Инвалидировать ВСЕ записи для пользователя.
+    async def invalidate_user(self, user_id: int) -> None:
+        """Clear cached routes for a user (called on memory mutation).
 
-        Вызывается при смене настроек, сбросе сессии и т.д.
-        ManagedCache не поддерживает инвалидацию по префиксу,
-        поэтому перебираем все ключи (операция O(n)).
+        ManagedCache не поддерживает инвалидацию по префиксу, поэтому
+        очищаем весь кэш целиком.  Это консервативно, но безопасно —
+        свежие маршруты перестроятся на следующем холодном промахе.
         """
-        # ManagedCache не предоставляет keys(), инвалидация по префиксу делается
-        # через bump версии.  Пока — заглушка, полная очистка только при явном clear().
-        logger.debug(
-            "RouteCache: invalidate_user(%d) — full invalidation via prefix not supported, use clear()",
-            user_id,
-        )
+        await self._cache.clear()
+        logger.debug("RouteCache: full clear for user=%d", user_id)
 
     async def clear(self) -> None:
         """Полная очистка кэша."""

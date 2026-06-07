@@ -215,11 +215,6 @@ class Settings(BaseSettings):
         30, description="Интервал ротации DEK (дни)"
     )
 
-    # ── Prompt size ──
-    prompt_size_limit: int = Field(
-        2000, description="Max system prompt chars before warning (0=disable)"
-    )
-
     # ── Message classifier ──
     classifier_enabled: bool = Field(
         True, description="Включить Trie/Aho-Corasick классификатор сообщений"
@@ -284,9 +279,7 @@ class Settings(BaseSettings):
     disk_monitor_interval_sec: int = Field(600, description="Интервал проверки диска")
 
     # Memory
-    max_recall_cache_size: int = Field(
-        1000, description="Максимальный размер кэша recall"
-    )
+    # TODO: implement or remove — max_recall_cache_size was deleted (duplicate of recall_cache_max_size)
     memory_consolidation_interval_sec: int = Field(
         21600, description="Интервал консолидации памяти (6 часов)"
     )

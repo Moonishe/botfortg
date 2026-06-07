@@ -118,11 +118,16 @@ async def update_memory_text(
     *,
     new_memory_type: str | None = None,
     new_decay_rate: float | None = None,
+    request_version: datetime | None = None,
 ) -> Memory | None:
     """In-place update of fact text + optional type/decay.
 
     Also bumps ``embedding_hash`` so the dedup layer treats this as a new fact
     (prevents merge-back with the old version).
+
+    Оптимистическая блокировка: если передан *request_version*,
+    сравнивается с ``mem.updated_at`` — при расхождении выбрасывается
+    ``ValueError`` (ConflictError).
 
     Returns the updated ``Memory`` row or ``None`` if the fact text is invalid
     or the memory does not exist.
@@ -133,6 +138,15 @@ async def update_memory_text(
     mem = await session.get(Memory, memory_id)
     if not mem:
         return None
+
+    # Оптимистическая блокировка: проверяем, что факт не был изменён
+    # параллельно с момента чтения клиентом.
+    if request_version is not None and mem.updated_at != request_version:
+        raise ValueError(
+            f"Конфликт версий: memory {memory_id} был изменён "
+            f"({mem.updated_at} != {request_version})"
+        )
+
     mem.fact = new_fact
     mem.embedding_hash = hashlib.sha256(new_fact.lower().encode()).hexdigest()[:16]
     if new_memory_type is not None and new_memory_type in ALLOWED_MEMORY_TYPES:
@@ -141,6 +155,20 @@ async def update_memory_text(
         mem.decay_rate = max(0.01, min(0.30, new_decay_rate))
     mem.updated_at = datetime.now(timezone.utc)
     await session.flush()
+
+    # Инвалидация кэша: сбрасываем recall-кэш и stats-кэш владельца
+    from src.core.actions.stats_cache import invalidate
+    from src.core.memory.memory_recall import bump_recall_version
+    from src.db.models._base import User
+
+    user_result = await session.execute(
+        select(User.telegram_id).where(User.id == mem.user_id)
+    )
+    owner_telegram_id = user_result.scalar_one_or_none()
+    if owner_telegram_id is not None:
+        await invalidate("mem_")
+        await bump_recall_version(owner_telegram_id)
+
     logger.info("Updated memory %d → new text len=%d", memory_id, len(new_fact))
     return mem
 

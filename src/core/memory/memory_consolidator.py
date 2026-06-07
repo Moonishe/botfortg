@@ -52,6 +52,10 @@ async def consolidate_memories(telegram_id: int) -> int:
                 overlap = len(words1 & words2) / max(len(words1), len(words2))
 
                 if overlap >= SIM_THRESHOLD and m1.contact_id == m2.contact_id:
+                    # Не деактивируем закреплённые (pinned) факты —
+                    # пользователь явно пометил их как важные.
+                    if m2.pinned:
+                        continue
                     # Merge: boost confidence of older fact, deactivate newer
                     avg_conf = ((m1.confidence or 0.5) + (m2.confidence or 0.5)) / 2
                     m1.confidence = min(1.0, avg_conf * 1.1)

@@ -14,6 +14,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -24,6 +25,9 @@ class MonitoredSource(Base):
     """Источник мониторинга — канал, группа, супергруппа или чат."""
 
     __tablename__ = "monitored_sources"
+    __table_args__ = (
+        UniqueConstraint("user_id", "entity_id", name="uq_monitor_source_user_entity"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
@@ -106,6 +110,9 @@ class MonitoredMessage(Base):
     """Сохранённое сообщение из отслеживаемого источника."""
 
     __tablename__ = "monitored_messages"
+    __table_args__ = (
+        UniqueConstraint("source_id", "message_id", name="uq_monmsg_source_msgid"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_id: Mapped[int] = mapped_column(

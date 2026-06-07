@@ -51,13 +51,14 @@ async def auto_forget_sweep(session: AsyncSession, user_id: int) -> int:
     if not to_deactivate:
         return 0
 
-    # Bulk deactivate
+    # Bulk deactivate — только активные (защита от повторной деактивации)
     await session.execute(
         sa_update(Memory)
-        .where(Memory.id.in_(to_deactivate))
+        .where(Memory.id.in_(to_deactivate), Memory.is_active == True)
         .values(
             is_active=False,
             validity_end=now,
+            updated_at=now,
         )
     )
 

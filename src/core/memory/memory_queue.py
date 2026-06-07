@@ -85,7 +85,8 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
                 "Failed to save fact for user %d, skipping", job.telegram_id
             )
 
-    # Сохраняем связи между фактами, указанные LLM (relation_type / relation_to_index)
+    # Сохраняем связи между фактами, указанные LLM (relation_type / relation_to_index).
+    # Каждая связь — в своём savepoint, чтобы ошибка в одной не откатывала другие.
     for i, fact_data in enumerate(facts):
         source_memory = saved_by_index.get(i)
         if source_memory is None:
@@ -99,14 +100,22 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
                 continue
             target_memory = saved_by_index.get(target_idx)
             if target_memory is not None:
-                await link_memories(
-                    session,
-                    owner,
-                    source_id=source_memory.id,
-                    target_id=target_memory.id,
-                    relation_type=relation_type,
-                    weight=0.9,
-                )
+                try:
+                    async with session.begin_nested():
+                        await link_memories(
+                            session,
+                            owner,
+                            source_id=source_memory.id,
+                            target_id=target_memory.id,
+                            relation_type=relation_type,
+                            weight=0.9,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to link memories %d -> %d, skipping",
+                        source_memory.id,
+                        target_memory.id,
+                    )
 
     # --- Persona auto-rebuild: check if enough new personal facts ---
     try:

@@ -819,7 +819,9 @@ async def delete_memory(session: AsyncSession, user, memory_id: int) -> bool:
     m = await session.get(Memory, memory_id)
     if m is None or m.user_id != user.id:
         return False
-    await session.delete(m)
+    # Soft delete — данные не удаляются безвозвратно
+    m.is_active = False
+    m.validity_end = datetime.now(timezone.utc)
     await invalidate("mem_")
     await session.flush()
     from src.core.memory.memory_recall import bump_recall_version

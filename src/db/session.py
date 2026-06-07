@@ -30,6 +30,7 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
     cursor.execute("PRAGMA cache_size=-64000")
     cursor.execute("PRAGMA mmap_size=134217728")  # 128 MB (safe for containers)
     cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA temp_store=MEMORY")
     cursor.execute("PRAGMA wal_autocheckpoint=1000")
     cursor.close()
@@ -209,6 +210,7 @@ async def init_db() -> None:
         await conn.execute(text("PRAGMA cache_size=-64000"))  # 64 MB page cache
         await conn.execute(text("PRAGMA mmap_size=134217728"))  # 128 MB mmap
         await conn.execute(text("PRAGMA busy_timeout=30000"))  # 30s busy timeout
+        await conn.execute(text("PRAGMA foreign_keys=ON"))  # enforce FK constraints
         await conn.execute(text("PRAGMA temp_store=MEMORY"))  # temp tables in memory
         await conn.execute(
             text("PRAGMA wal_autocheckpoint=1000")
