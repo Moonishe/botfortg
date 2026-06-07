@@ -38,6 +38,12 @@ from src.db.models._memory import (
 from src.db.models._cache import SmartCacheEntry
 from src.db.models._embedding_cache import EmbeddingCacheEntry
 from src.db.models._avito import AvitoListing, AvitoPriceHistory, AvitoWatch
+from src.db.models._monitor import (
+    MonitoredSource,
+    MonitorRule,
+    MonitoredMessage,
+    MonitoredAlert,
+)
 from src.db.models._learning import (
     AgentCache,
     SelfProfile,
@@ -100,6 +106,10 @@ __all__ = [
     "AvitoListing",
     "AvitoPriceHistory",
     "AvitoWatch",
+    "MonitoredSource",
+    "MonitorRule",
+    "MonitoredMessage",
+    "MonitoredAlert",
     "AgentSession",
     "AgentSessionMessage",
     "EncryptionKey",

@@ -32,6 +32,7 @@ from src.bot.handlers import (
     keys_cmd,
     mode_cmd,
     models_cmd,
+    monitor_cmd,
     free_text,
     free_text_memory,
     free_text_settings,
@@ -235,6 +236,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(trajectory_cmd.router)
     dp.include_router(wiki_cmd.router)
     dp.include_router(avito_cmd.router)
+    dp.include_router(monitor_cmd.router)
     dp.include_router(free_text_memory.router)
     dp.include_router(free_text_settings.router)
     dp.include_router(confirm_router)
