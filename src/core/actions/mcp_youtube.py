@@ -21,11 +21,15 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 from src.core.actions.tool_registry import tool
-from src.core.security.web_sanitizer import sanitize_search_snippet
+from src.core.security.web_sanitizer import (
+    sanitize_search_result,
+    sanitize_search_snippet,
+)
 from src.config import settings
 from src.llm.base import ChatMessage
 
@@ -238,14 +242,20 @@ async def _youtube_info(url: str) -> dict[str, Any]:
                 logger.warning("yt-dlp info failed for %r: %s", url, exc)
                 raise
 
+            # Защита от prompt injection: санируем title и description видео
+            # перед возвратом LLM (внешний контент из YouTube)
+            safe_title, safe_description = sanitize_search_result(
+                info.get("title", ""),
+                (info.get("description") or "")[:500],
+            )
             return {
-                "title": info.get("title", ""),
+                "title": safe_title,
                 "url": info.get("webpage_url", url),
                 "duration": info.get("duration"),
                 "views": info.get("view_count"),
                 "channel": info.get("channel", info.get("uploader", "")),
                 "upload_date": info.get("upload_date", ""),
-                "description": (info.get("description") or "")[:500],
+                "description": safe_description,
                 "tags": info.get("tags") or [],
                 "categories": info.get("categories") or [],
             }
@@ -289,12 +299,15 @@ async def _youtube_audio(url: str) -> dict[str, Any]:
         video_id: str = info.get("id", "")
         safe_title = _sanitize_filename(title)
 
-        # Step 2: Clean up old audio files to prevent unbounded disk usage
-        # (fixes BUG 4 — infinite accumulation)
+        # Step 2: Clean up old audio files (age-based, >1 hour)
+        # M-40: удаляем только старые файлы — параллельные загрузки не затрагиваются
+        _now = time.time()
+        _ONE_HOUR = 3600
         for old_file in _YOUTUBE_DIR.iterdir():
             if old_file.suffix.lower() in (".mp3", ".m4a", ".webm", ".opus"):
                 try:
-                    old_file.unlink()
+                    if (_now - old_file.stat().st_mtime) > _ONE_HOUR:
+                        old_file.unlink()
                 except OSError:
                     pass
 

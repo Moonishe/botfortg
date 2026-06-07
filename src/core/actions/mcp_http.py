@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 10  # seconds
 _MAX_BODY_CHARS = 3000
+_MAX_BODY_BYTES = 1_000_000  # M-29: защита от oversized-ответов (1 MB)
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -36,6 +37,17 @@ _USER_AGENT = (
 )
 
 _VALID_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
+
+# M-31: заголовки, которые LLM не может подменять
+_FORBIDDEN_HEADERS: frozenset[str] = frozenset(
+    {
+        "host",
+        "cookie",
+        "authorization",
+        "proxy-authorization",
+        "set-cookie",
+    }
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -141,7 +153,7 @@ async def _do_request(
         if not isinstance(custom, dict):
             return {"error": "headers JSON must be an object (dict)"}
 
-        # Merge — custom keys override defaults
+        # M-31: запрещаем подмену критичных заголовков
         for k, v in custom.items():
             if not isinstance(k, str) or not isinstance(v, str):
                 return {
@@ -150,12 +162,16 @@ async def _do_request(
                         f"must be strings"
                     )
                 }
+            if k.lower() in _FORBIDDEN_HEADERS:
+                return {"error": f"Forbidden header: {k!r}"}
         request_headers.update(custom)
 
     # ── Execute request (threaded via executor) ────────────────────────
     loop = asyncio.get_running_loop()
 
     def _do_http() -> dict[str, Any]:
+        # M-29: проверяем Content-Length заголовок ДО чтения тела
+        # (предварительный HEAD-запрос не делаем — полагаемся на stream=True)
         try:
             resp = requests.request(
                 method=method,
@@ -164,6 +180,7 @@ async def _do_request(
                 data=body,
                 timeout=_HTTP_TIMEOUT,
                 allow_redirects=False,
+                stream=True,  # M-30: стриминговое чтение вместо resp.text
             )
         except requests.ConnectionError as exc:
             logger.warning("Connection error for %s %s: %s", method, url, exc)
@@ -178,8 +195,50 @@ async def _do_request(
         # ── Build response ──────────────────────────────────────────
         status_code = resp.status_code
         response_headers = dict(resp.headers)
-        body_text = resp.text[:_MAX_BODY_CHARS]
-        truncated = len(resp.text) > _MAX_BODY_CHARS
+
+        # M-29: проверка Content-Length заголовка (если сервер прислал)
+        content_length = resp.headers.get("Content-Length")
+        if content_length and content_length.isdigit():
+            if int(content_length) > _MAX_BODY_BYTES:
+                resp.close()
+                return {
+                    "error": (
+                        f"Response body too large: {content_length} bytes "
+                        f"(max {_MAX_BODY_BYTES})"
+                    ),
+                }
+
+        # M-30: стриминговое чтение с early stop при превышении cap
+        body_chunks: list[bytes] = []
+        total_read = 0
+        truncated_bytes = False
+        try:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk is None:
+                    continue
+                remaining = _MAX_BODY_BYTES - total_read
+                if remaining <= 0:
+                    truncated_bytes = True
+                    break
+                if len(chunk) > remaining:
+                    body_chunks.append(chunk[:remaining])
+                    total_read += remaining
+                    truncated_bytes = True
+                    break
+                body_chunks.append(chunk)
+                total_read += len(chunk)
+        finally:
+            resp.close()
+
+        body_bytes = b"".join(body_chunks)
+        try:
+            body_text = body_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            body_text = body_bytes.decode("latin-1", errors="replace")
+
+        total_chars = len(body_text)
+        truncated = truncated_bytes or total_chars > _MAX_BODY_CHARS
+        body_text = body_text[:_MAX_BODY_CHARS]
 
         return {
             "ok": True,
@@ -187,7 +246,8 @@ async def _do_request(
             "headers": response_headers,
             "body": body_text,
             "truncated": truncated,
-            "total_chars": len(resp.text),
+            "total_chars": total_chars,
+            "total_bytes_read": total_read,
         }
 
     return await loop.run_in_executor(None, _do_http)

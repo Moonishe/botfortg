@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,19 @@ _SCREENSHOTS_DIR: Path = settings.data_dir / "screenshots"
 _NAVIGATE_TIMEOUT = 30_000  # ms (30 s)
 _OPERATION_TIMEOUT = 30  # seconds for asyncio.wait_for
 _IDLE_TIMEOUT = 300  # seconds (5 min) before closing idle page
-_BROWSER_ARGS = ["--no-sandbox", "--disable-setuid-sandbox"]
+
+# Платформенно-зависимые аргументы Chromium:
+#   - Windows: песочница Chromium не поддерживается — нужен --no-sandbox.
+#   - Linux:   песочница работает, флаг НЕ передаём.
+#              В Docker под root — использовать seccomp-профиль или --cap-add=SYS_ADMIN.
+if sys.platform == "win32":
+    # Windows не поддерживает sandbox Chromium
+    _BROWSER_ARGS = ["--no-sandbox", "--disable-setuid-sandbox"]
+    logger.info("Playwright: Windows detected, running with --no-sandbox")
+else:
+    # Linux/macOS: sandbox включён по умолчанию — безопаснее
+    _BROWSER_ARGS: list[str] = []
+    logger.info("Playwright: non-Windows platform, running with Chromium sandbox")
 _MAX_TEXT_CHARS = 3000
 _VALID_SCHEMES = frozenset({"http", "https"})
 _BLOCKED_SCHEMES = frozenset({"file", "chrome", "data", "javascript"})

@@ -391,7 +391,8 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         payload = json.loads(action.payload)
         peer_id = payload["peer_id"]
         text = payload["text"]
-        await delete_pending_action(session, action_id, user)
+        # M-44: НЕ удаляем PendingAction до отправки —
+        # при ошибке отправки кнопка остаётся доступной для retry
 
     # Send Guard — предупреждение перед отправкой
     from src.core.contacts.send_guard import build_send_guard, store_undo
@@ -404,9 +405,13 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
     try:
         entity = await client.get_entity(peer_id)
         sent_msg = await client.send_message(entity, text)
+        # M-44: удаляем PendingAction только после успешной отправки
+        async with get_session() as session:
+            user = await get_or_create_user(session, callback.from_user.id)
+            await delete_pending_action(session, action_id, user)
     except Exception as e:
         logger.warning("send_message failed: %s", e)
-        await callback.answer("Ошибка при отправке", show_alert=True)
+        await callback.answer("❌ Ошибка отправки. Попробуй ещё раз.", show_alert=True)
         if callback.message:
             await callback.message.edit_text(
                 sanitize_html("❌ Не удалось отправить сообщение. Попробуй ещё раз")

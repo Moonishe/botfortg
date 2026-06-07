@@ -60,21 +60,27 @@ def _safe_resolve(raw: str) -> Path | None:
        Unlike previous behaviour, ``PROJECT_ROOT`` itself is **not** an
        allowed root — filesystem tools may **only** read from ``data/``.
     """
-    # Normalise separators so checks work on both Unix and Windows
+    # Нормализуем сепараторы для единообразной обработки
     normalised = raw.replace("/", os.sep).replace("\\", os.sep)
-    if ".." in normalised.split(os.sep):
+
+    # Используем os.path.realpath вместо Path.resolve():
+    #   - realpath корректно обрабатывает data/..foo (не путает с «..»)
+    #   - realpath разрешает symlink'и до конечной цели
+    #   - split("..") проверка удалена — обходилась через data/..foo
+    raw_path = str(PROJECT_ROOT / normalised)
+    resolved_str = os.path.realpath(raw_path)
+
+    # Проверка: реальный путь должен быть внутри _ALLOWED_ROOTS
+    for root in _ALLOWED_ROOTS:
+        root_str = str(root)
+        if resolved_str.startswith(root_str + os.sep) or resolved_str == root_str:
+            break
+    else:
         return None
 
-    resolved = (PROJECT_ROOT / raw).resolve()
-
-    # Check against allowed roots
-    for root in _ALLOWED_ROOTS:
-        try:
-            resolved.relative_to(root)
-            break
-        except ValueError:
-            continue
-    else:
+    # Проверка на симлинки (запрещены)
+    resolved = Path(resolved_str)
+    if resolved.is_symlink():
         return None
 
     # Check against denied paths
@@ -419,7 +425,9 @@ async def mcp_system(action: str, **kwargs: Any) -> dict:
         elif action == "doctor":
             return await _sys_doctor()
         else:
-            return {"error": f"Unknown action {action!r}. Valid: status, version, doctor"}
+            return {
+                "error": f"Unknown action {action!r}. Valid: status, version, doctor"
+            }
     except Exception as exc:
         logger.exception("mcp_system(%r) failed", action)
         return {"error": str(exc)}
@@ -540,11 +548,7 @@ async def _sys_doctor() -> dict[str, Any]:
         failures.append(f"tool bootstrap failed: {exc.__class__.__name__}")
 
     tools = sorted(
-        (
-            spec
-            for specs in tool_registry.list_by_category().values()
-            for spec in specs
-        ),
+        (spec for specs in tool_registry.list_by_category().values() for spec in specs),
         key=lambda spec: spec.name,
     )
     names = [spec.name for spec in tools]
@@ -562,7 +566,9 @@ async def _sys_doctor() -> dict[str, Any]:
             for action in spec.actions.values():
                 action_risk = action.risk.strip().lower()
                 if not action.read_only and action_risk == "low":
-                    warnings.append(f"{spec.name}.{action.name}: write action has low risk")
+                    warnings.append(
+                        f"{spec.name}.{action.name}: write action has low risk"
+                    )
 
     try:
         register_builtin_connectors()

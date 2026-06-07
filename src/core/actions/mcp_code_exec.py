@@ -156,6 +156,21 @@ _WRAPPER_TEMPLATE = """\
 import builtins
 import sys
 
+# ── RLIMITs: ограничение ресурсов подпроцесса (только Linux/macOS) ──
+# Ограничиваем CPU, память и запрещаем fork для предотвращения DoS.
+# На Windows resource отсутствует — ограничения не применяются.
+try:
+    import resource as _resource
+    try:
+        _resource.setrlimit(_resource.RLIMIT_CPU, (5, 5))           # 5 сек CPU
+        _resource.setrlimit(_resource.RLIMIT_AS, (128*1024*1024, 128*1024*1024))  # 128 MB
+        _resource.setrlimit(_resource.RLIMIT_NPROC, (0, 0))         # запрет subprocess
+    except (ValueError, _resource.error):
+        pass  # RLIMITs недоступны на данной платформе
+    del _resource
+except ImportError:
+    pass  # Windows — модуль resource отсутствует
+
 _SAFE_BUILTINS = {
     name: getattr(builtins, name)
     for name in {
@@ -204,6 +219,10 @@ del _original_import, _safe_import, _SAFE_BUILTINS, _DISALLOWED, builtins, sys
 # Выполняем код пользователя
 try:
 __USER_CODE__
+except MemoryError:
+    print("Error: MemoryError: превышен лимит памяти (128 MB)", file=_stderr)
+except TimeoutError:
+    print("Error: TimeoutError: превышен лимит CPU (5 сек)", file=_stderr)
 except Exception as e:
     print(f"Error: {type(e).__name__}: {e}", file=_stderr)
 """

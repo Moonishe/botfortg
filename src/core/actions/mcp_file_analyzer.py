@@ -50,8 +50,12 @@ def _safe_resolve(root_str: str) -> Path | None:
 
 # ── Supported extensions ──────────────────────────────────────────────────
 
-_TEXT_EXTENSIONS = frozenset({".txt", ".md", ".py", ".log"})
+_TEXT_EXTENSIONS = frozenset({".txt", ".md", ".log"})
 _STRUCTURED_EXTENSIONS = frozenset({".json", ".csv", ".yaml", ".yml", ".xml"})
+# Явно запрещённые расширения — защита от чтения исходного кода и конфигов
+# (belt-and-suspenders: _safe_resolve уже ограничивает data_dir, но
+#  дополнительно блокируем чувствительные типы файлов)
+_DENIED_EXTENSIONS = frozenset({".py", ".pyc", ".env", ".pem", ".key", ".crt"})
 
 _READ_CHARS_LIMIT = 2000
 
@@ -104,6 +108,15 @@ async def mcp_file_analyzer(
             }
         if not resolved.is_file():
             return {"error": f"Path {path!r} is not a file"}
+
+        # Защита: явно запрещаем чувствительные расширения (.py, .env, ключи)
+        if resolved.suffix.lower() in _DENIED_EXTENSIONS:
+            return {
+                "error": (
+                    f"Files with extension {resolved.suffix!r} are not accessible "
+                    f"for security reasons"
+                )
+            }
 
         if action == "read":
             return await _file_read(resolved)

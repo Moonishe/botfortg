@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -105,7 +106,8 @@ async def _current_weather(city: str) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
 
     def _fetch() -> str:
-        url = f"{_WTTR_BASE}/{city}?format=3"
+        city_encoded = quote(city)  # M-33: URL-encoding для пробелов и спецсимволов
+        url = f"{_WTTR_BASE}/{city_encoded}?format=3"
         try:
             resp = requests.get(url, headers=_REQUEST_HEADERS, timeout=_FETCH_TIMEOUT)
             resp.raise_for_status()
@@ -132,7 +134,8 @@ async def _forecast_weather(city: str, days: int) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
 
     def _fetch() -> dict[str, Any]:
-        url = f"{_WTTR_BASE}/{city}?format=j1"
+        city_encoded = quote(city)  # M-33: URL-encoding для пробелов и спецсимволов
+        url = f"{_WTTR_BASE}/{city_encoded}?format=j1"
         try:
             resp = requests.get(url, headers=_REQUEST_HEADERS, timeout=_FETCH_TIMEOUT)
             resp.raise_for_status()
