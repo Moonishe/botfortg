@@ -21,6 +21,7 @@ from typing import Any
 from src.config import PROJECT_ROOT
 from src.core.actions.mcp_playwright import _browser_manager
 from src.core.actions.tool_registry import tool
+from src.core.security.ssrf_guard import _check_ssrf_async
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,11 @@ async def _take_screenshot(
         # raises a RuntimeError with a helpful install hint.
         browser = await _browser_manager.get_browser()
         try:
+            # ── SSRF-защита: проверяем URL до навигации Playwright ─────
+            ssrf_error = await _check_ssrf_async(url)
+            if ssrf_error:
+                return ssrf_error
+
             page = await browser.new_page()
 
             # Navigate with timeout

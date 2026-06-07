@@ -66,26 +66,41 @@ class FtsHit:
     date: datetime | None = None
 
 
+def _escape_fts_query(text: str) -> str:
+    """Экранирует спецсимволы FTS5 и удаляет операторные токены.
+
+    Заменяет кавычки, скобки, двоеточия, ^, * на пробелы,
+    затем фильтрует standalone-токены AND/OR/NOT/NEAR.
+    Возвращает очищенную строку для безопасной FTS5-матч-операции.
+    """
+    # Удаляем FTS5-спецсимволы: кавычки, скобки, операторы столбцов и т.д.
+    for char in ('"', "'", "(", ")", ":", "^", "*"):
+        text = text.replace(char, " ")
+    # Удаляем standalone FTS5-операторы (AND, OR, NOT, NEAR)
+    # — матч только по этим токенам не имеет смысла и ломает синтаксис
+    _FTS5_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
+    text = " ".join(w for w in text.split() if w.upper() not in _FTS5_OPERATORS)
+    return text.strip()
+
+
 def _fts_query_for(query: str) -> str:
     """Build an FTS5-safe MATCH expression from free-text user query.
 
     Each word becomes a prefix-match joined with OR.
-    FTS5 operator keywords (OR, AND, NOT, NEAR) are double-quoted to
-    prevent them from being interpreted as query operators — this is the
-    standard SQLite FTS5 escaping mechanism for literal keyword search.
+    Uses ``_escape_fts_query`` for defence-in-depth against FTS5 syntax
+    injection via special characters and operator keywords.
     """
-    _FTS5_KEYWORDS = frozenset({"or", "and", "not", "near"})
+    # Экранируем FTS5-спецсимволы и операторы перед построением запроса
+    safe_query = _escape_fts_query(query)
+    if not safe_query:
+        return ""
 
     parts: list[str] = []
-    for raw in query.split():
+    for raw in safe_query.split():
         clean = "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
         if len(clean) < 2:
             continue
-        lower = clean.lower()
-        if lower in _FTS5_KEYWORDS:
-            parts.append(f'"{lower}"')
-        else:
-            parts.append(lower + "*")
+        parts.append(clean.lower() + "*")
     if not parts:
         return ""
     return " OR ".join(parts)

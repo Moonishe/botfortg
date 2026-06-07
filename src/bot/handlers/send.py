@@ -308,9 +308,16 @@ async def step_edit(message: Message, state: FSMContext) -> None:
             await message.answer("Сессия отправки потеряна. Запусти /send заново.")
             return
         payload = json.loads(action.payload)
-        payload["text"] = new_text
-        action.payload = json.dumps(payload, ensure_ascii=False)
         peer_id = payload["peer_id"]
+        # Удаляем старый PendingAction — HMAC был вычислен от старого текста
+        # и больше не валиден. Создаём новый с обновлённым payload.
+        await delete_pending_action(session, action_id, user)
+        new_payload = json.dumps(
+            {"peer_id": peer_id, "text": new_text}, ensure_ascii=False
+        )
+        action = await create_pending_action(
+            session, user_id=user.id, kind="send_message", payload=new_payload
+        )
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -331,7 +338,7 @@ async def step_edit(message: Message, state: FSMContext) -> None:
         sanitize_html(
             f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{new_text}{guard_hint}"
         ),
-        reply_markup=_confirm_keyboard(action_id, action.hmac_signature),
+        reply_markup=_confirm_keyboard(action.id, action.hmac_signature),
     )
 
 

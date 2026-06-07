@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 from src.core.actions.tool_registry import tool
+from src.core.security.ssrf_guard import _check_ssrf_async, _check_ssrf
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,11 @@ async def _read_feed(url: str, limit: int) -> dict[str, Any]:
 
         return entries
 
+    # ── SSRF-защита: проверяем URL до HTTP-запроса ──────────────────
+    ssrf_error = await _check_ssrf_async(url)
+    if ssrf_error:
+        return ssrf_error
+
     try:
         entries = await loop.run_in_executor(None, _fetch)
     except ImportError as exc:
@@ -240,6 +246,11 @@ async def _discover_feed(url: str) -> dict[str, Any]:
                 )
 
         return feed_links
+
+    # ── SSRF-защита: проверяем URL до HTTP-запроса ──────────────────
+    ssrf_error = await _check_ssrf_async(url)
+    if ssrf_error:
+        return ssrf_error
 
     try:
         feeds = await loop.run_in_executor(None, _discover)
