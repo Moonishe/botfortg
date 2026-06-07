@@ -156,9 +156,14 @@ async def make_plan(
     # Если recall_mode == "light" и prefetch дал результат —
     # пропускаем тяжёлый recall(), экономим 50-500ms.
     _prefetched_used = False
-    if plan.recall_mode == "light":
+    if plan.recall_mode in ("light", "shallow"):
         if prefetched_context:
-            plan.memory_context = prefetched_context
+            # Для shallow — обрезаем контекст до 200 символов, чтобы не грузить
+            # модель лишним для тривиальных сообщений («ага», «ок», «спс»).
+            _ctx = prefetched_context
+            if plan.recall_mode == "shallow" and len(_ctx) > 200:
+                _ctx = _ctx[:200] + "…"
+            plan.memory_context = _ctx
             plan.metrics["prefetch_hit"] = True
             plan.metrics["recall_mode"] = "light"
             _prefetched_used = True
@@ -635,6 +640,9 @@ async def make_plan(
     plan.elapsed_ms = plan.metrics["router_ms"]
 
     # ── S2-T1: Сохраняем план в RouteCache (если не deep и без prefetch) ──
+    # Кэшируем только простые планы без prefetch.
+    # Maestro-планы и планы с prefetch зависят от волатильного контекста (память,
+    # сессия), кэширование которых даст stale-результаты при следующем запросе.
     try:
         if plan.response_mode != "maestro" and not _prefetched_used:
             await _route_cache.set(user_text, telegram_id, plan)

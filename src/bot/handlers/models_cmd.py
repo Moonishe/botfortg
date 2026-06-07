@@ -33,6 +33,10 @@ router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
 
 # ─── In-memory cache ─────────────────────────────────────────────────
+# Design note: keys_cmd._discovery_cache stores the same models data
+# independently (separate lifecycle). Keep both — models_cmd cache is
+# the «единый источник правды» для /models UI; keys_cmd cache обслуживает
+# multi-select flow после /keys add. Синхронизация не требуется.
 # slot_id → (timestamp, [model_ids])
 _MODEL_CACHE: dict[int, tuple[float, list[str]]] = {}
 _CACHE_TTL: float = 3600.0  # 1 час

@@ -203,7 +203,10 @@ async def mark_key_used(session: AsyncSession, slot_id: int) -> None:
 
 
 async def get_slot_models(session: AsyncSession, slot_id: int) -> list[LlmKeySlotModel]:
-    """Получить все модели слота (включая выключенные)."""
+    """Получить все модели слота (включая выключенные).
+
+    NOTE: caller must verify slot.user_id == owner.id before calling.
+    """
     stmt = (
         select(LlmKeySlotModel)
         .where(LlmKeySlotModel.slot_id == slot_id)
@@ -216,7 +219,11 @@ async def get_slot_models(session: AsyncSession, slot_id: int) -> list[LlmKeySlo
 async def set_slot_models(
     session: AsyncSession, slot_id: int, model_names: list[str]
 ) -> None:
-    """Заменить модели слота (удалить старые, добавить новые)."""
+    """Заменить модели слота (удалить старые, добавить новые).
+
+    NOTE: caller must verify slot.user_id == owner.id before calling.
+    Idempotent: repeat calls produce same result. Transaction-level atomicity sufficient.
+    """
     # Удаляем существующие
     await session.execute(
         delete(LlmKeySlotModel).where(LlmKeySlotModel.slot_id == slot_id)
@@ -230,7 +237,10 @@ async def set_slot_models(
 async def toggle_slot_model(
     session: AsyncSession, slot_id: int, model_name: str, enabled: bool
 ) -> bool:
-    """Включить/выключить модель в слоте. Возвращает True если переключено."""
+    """Включить/выключить модель в слоте. Возвращает True если переключено.
+
+    NOTE: caller must verify slot.user_id == owner.id before calling.
+    """
     stmt = select(LlmKeySlotModel).where(
         LlmKeySlotModel.slot_id == slot_id,
         LlmKeySlotModel.model_name == model_name,
@@ -243,6 +253,9 @@ async def toggle_slot_model(
 
 
 async def get_enabled_models(session: AsyncSession, slot_id: int) -> list[str]:
-    """Получить список имён enabled-моделей для слота."""
+    """Получить список имён enabled-моделей для слота.
+
+    NOTE: caller must verify slot.user_id == owner.id before calling.
+    """
     models = await get_slot_models(session, slot_id)
     return [m.model_name for m in models if m.enabled]

@@ -65,6 +65,37 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator("avito_proxy_list", mode="after")
+    @classmethod
+    def _validate_avito_proxy_list(cls, v: str) -> str:
+        """Validate AVITO_PROXY_LIST is valid JSON or empty."""
+        if v and v.strip():
+            import json
+
+            try:
+                parsed = json.loads(v)
+                if not isinstance(parsed, list):
+                    raise ValueError("AVITO_PROXY_LIST must be a JSON array")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"AVITO_PROXY_LIST is not valid JSON: {e}") from e
+        return v
+
+    @field_validator("extract_priority_threshold", mode="after")
+    @classmethod
+    def _validate_extract_priority_threshold(cls, v: float) -> float:
+        """Must be between 0.0 and 1.0."""
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"EXTRACT_PRIORITY_THRESHOLD must be 0.0–1.0, got {v}")
+        return v
+
+    @field_validator("recall_max_prefetch", mode="after")
+    @classmethod
+    def _validate_recall_max_prefetch(cls, v: int) -> int:
+        """Must be a positive integer."""
+        if v <= 0:
+            raise ValueError(f"RECALL_MAX_PREFETCH must be > 0, got {v}")
+        return v
+
     @field_validator("bot_token", mode="after")
     @classmethod
     def _validate_bot_token(cls, v: str) -> str:

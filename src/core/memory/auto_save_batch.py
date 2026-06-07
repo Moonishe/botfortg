@@ -429,6 +429,12 @@ class FactBatchBuffer:
                 )
         finally:
             self._is_flushing = False
+            # M1: если во время flush в буфер добавились новые сообщения —
+            # запускаем таймер для их сброса (раньше буфер «зависал» до следующего add)
+            if self._buffer:
+                self._flush_task = asyncio.create_task(
+                    self._timeout_flush(), name="auto-save-flush-post-flush"
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════

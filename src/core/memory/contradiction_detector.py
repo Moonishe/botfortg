@@ -410,34 +410,39 @@ async def check_contradiction_response(
                                     Memory.created_at >= threshold,
                                 )
                                 .order_by(Memory.created_at.desc())
-                                .limit(1)
+                                # M6: limit(5) вместо limit(1) — если за окно поиска
+                                # создано несколько новых фактов, все они должны получить
+                                # supersedes-связь. limit(1) оставлял «сирот» без ссылки
+                                # на противоречащий факт.
+                                .limit(5)
                             )
-                            new_mem = new_mem_result.scalar_one_or_none()
-                            if new_mem is not None:
-                                link_result = await link_memories(
-                                    link_session,
-                                    link_owner,
-                                    source_id=new_mem.id,
-                                    target_id=old_mem.id,
-                                    weight=0.95,
-                                    relation_type="supersedes",
-                                )
-                                if link_result is not None:
-                                    logger.debug(
-                                        "Created supersedes link new=%d old=%d for user %d",
-                                        new_mem.id,
-                                        old_mem.id,
-                                        link_owner.id,
+                            new_mems = new_mem_result.scalars().all()
+                            for new_mem in new_mems:
+                                if new_mem is not None:
+                                    link_result = await link_memories(
+                                        link_session,
+                                        link_owner,
+                                        source_id=new_mem.id,
+                                        target_id=old_mem.id,
+                                        weight=0.95,
+                                        relation_type="supersedes",
                                     )
-                                else:
-                                    logger.warning(
-                                        "Failed to create supersedes link "
-                                        "new=%d old=%d for user %d "
-                                        "(link_memories returned None)",
-                                        new_mem.id,
-                                        old_mem.id,
-                                        link_owner.id,
-                                    )
+                                    if link_result is not None:
+                                        logger.debug(
+                                            "Created supersedes link new=%d old=%d for user %d",
+                                            new_mem.id,
+                                            old_mem.id,
+                                            link_owner.id,
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "Failed to create supersedes link "
+                                            "new=%d old=%d for user %d "
+                                            "(link_memories returned None)",
+                                            new_mem.id,
+                                            old_mem.id,
+                                            link_owner.id,
+                                        )
                         except Exception:
                             logger.debug(
                                 "Failed to create supersedes link", exc_info=True
@@ -515,6 +520,11 @@ async def _scan_contradictions_batch(
     If *session* and *owner* are provided, creates MemoryLink edges
     (relation_type='contradicts') for each detected contradiction pair.
     """
+    # L7: `found` — общий счётчик для обоих проходов проверки (Check 1 + Check 2).
+    # Каждый проход инкрементирует один и тот же счётчик. Кэпирование (`found >= 100`)
+    # работает на суммарное значение — это намеренно: ограничиваем общее количество
+    # contradiction-связей за один вызов, а не отдельно по каждому проходу.
+    # Если нужно раздельное кэпирование — добавить found1 и found2.
     found = 0
     _MAX_PAIRS = min(len(memories) * 50, 5000)
     pairs_checked = 0

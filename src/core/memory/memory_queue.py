@@ -87,6 +87,8 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
 
     # Сохраняем связи между фактами, указанные LLM (relation_type / relation_to_index).
     # Каждая связь — в своём savepoint, чтобы ошибка в одной не откатывала другие.
+    # Гарантируем, что все ID доступны: flush после цикла сохранения.
+    await session.flush()
     for i, fact_data in enumerate(facts):
         source_memory = saved_by_index.get(i)
         if source_memory is None:
@@ -225,6 +227,12 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
             break
         try:
             await tag_new_fact(provider, session, mem.id)
+            # L8: commit() после каждого успешного тегирования —
+            # tag_new_fact может оставить session в dirty-состоянии
+            # (flush-only изменения), и без commit следующая итерация
+            # может увидеть stale данные. rollback() в except —
+            # откатывает грязные изменения после ошибки тегирования,
+            # возвращая session в чистое состояние для следующего факта.
             await session.commit()
             tagged += 1
         except (ValueError, AttributeError, ConnectionError, OSError):

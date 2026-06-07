@@ -61,6 +61,7 @@ _discovery_cache_ts: dict[int, float] = {}  # slot_id → timestamp
 _DISCOVERY_CACHE_TTL: float = 3600.0  # 1 час
 
 # ─── Multi-select state (выбор нескольких моделей для слота) ────────────
+# Design trade-off: in-memory state resets on restart. Acceptable for single-user bot.
 _multiselect_state: dict[int, set[str]] = {}  # slot_id → {выбранные model names}
 _multiselect_page: dict[int, int] = {}  # slot_id → текущая страница
 
@@ -136,7 +137,8 @@ def _fetch_model_capabilities(models: list[str], provider_name: str) -> list[dic
                         "vision",
                         "gpt-4o",
                         "gpt-4-turbo",
-                        "claude-3",
+                        "claude-3-opus",
+                        "claude-3-sonnet",
                         "claude-4",
                         "gemini-2",
                         "gemini-1.5",
@@ -144,7 +146,6 @@ def _fetch_model_capabilities(models: list[str], provider_name: str) -> list[dic
                         "llava",
                         "cogvlm",
                         "qwen-vl",
-                        "vision",
                     )
                 ),
                 "embeddings": any(
@@ -155,7 +156,7 @@ def _fetch_model_capabilities(models: list[str], provider_name: str) -> list[dic
                         "e5",
                         "text-embedding",
                         "babbage",
-                        "cohere",
+                        "cohere-embed",
                     )
                 ),
             }
@@ -625,6 +626,13 @@ async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
 
 async def _show_model_discovery(message: Message, slot: LlmKeySlot) -> None:
     """Загружает и показывает доступные модели для только что созданного слота."""
+    # M1: очищаем старые multiselect-состояния при новом заходе —
+    # предотвращает утечку stale state между сессиями одного slot_id.
+    _multiselect_state.pop(slot.id, None)
+    _multiselect_page.pop(slot.id, None)
+    _discovery_cache_search.pop(slot.id, None)
+    _multiselect_filter.pop(slot.id, None)
+
     status_msg = await message.answer("🔄 Загружаю список доступных моделей с сервера…")
 
     # Получаем модели через API провайдера
@@ -1289,7 +1297,10 @@ async def cb_disc_skip(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("keys:msel:"))
 async def cb_multiselect_toggle(callback: CallbackQuery):
-    """Переключить чекбокс модели в multi-select."""
+    """Переключить чекбокс модели в multi-select.
+
+    aiogram сериализует колбэки для одного чата — lock не нужен.
+    """
     parts = callback.data.split(":")
     if len(parts) < 4:
         await callback.answer("Ошибка данных.", show_alert=True)
@@ -1518,7 +1529,7 @@ async def _pending_key_entry_handler(message: Message) -> None:
     # Поиск модели по названию (Improvement 3)
     if entry.get("type") == "model_search":
         slot_id = entry["slot_id"]
-        query = text.lower()
+        query = text.lower()[:200]  # L4: cap search query to prevent abuse
 
         if len(query) < 2:
             await message.answer("⚠️ Введи минимум 2 символа для поиска.")

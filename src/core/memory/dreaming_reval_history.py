@@ -105,16 +105,27 @@ async def rollback_reval_history(owner_telegram_id: int, *, limit: int = 20) -> 
 
         new_to_old: dict[int, int] = {int(l.target_id): int(l.source_id) for l in links}
 
+        # M8: атомарный savepoint для каждой пары (деактивация нового +
+        # реактивация старого). Если реактивация упадёт — откатываем
+        # деактивацию нового, чтобы избежать ситуации «оба неактивны».
         for new_fact in new_facts:
-            new_fact.is_active = False
-            new_fact.updated_at = datetime.now(timezone.utc)
-            old_id = new_to_old.get(new_fact.id)
-            if old_id is not None:
-                old = await session.get(Memory, old_id)
-                if old and old.user_id == owner.id:
-                    old.is_active = True
-                    old.updated_at = datetime.now(timezone.utc)
-            undone += 1
+            try:
+                async with session.begin_nested() as sp:
+                    new_fact.is_active = False
+                    new_fact.updated_at = datetime.now(timezone.utc)
+                    old_id = new_to_old.get(new_fact.id)
+                    if old_id is not None:
+                        old = await session.get(Memory, old_id)
+                        if old and old.user_id == owner.id:
+                            old.is_active = True
+                            old.updated_at = datetime.now(timezone.utc)
+                    undone += 1
+            except Exception:
+                logger.exception(
+                    "rollback_reval_history: savepoint failed for new_fact=%d, "
+                    "skipping to avoid both-inactive state",
+                    new_fact.id,
+                )
 
         for link in links:
             await session.delete(link)

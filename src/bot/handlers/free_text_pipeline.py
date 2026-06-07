@@ -555,7 +555,11 @@ async def _maybe_auto_save_facts(
             try:
                 await batch_buffer.add(telegram_id, user_text, response_text, provider)
             except asyncio.CancelledError:
-                pass
+                # L3: НЕ глотаем CancelledError — даём ему прокинуться вверх,
+                # чтобы asyncio мог корректно отменить цепочку задач.
+                # Раньше здесь было `pass`, что приводило к «тихой отмене» —
+                # задача отменялась, но родительский код об этом не узнавал.
+                raise
             except (
                 RequestError,
                 HTTPStatusError,
@@ -1020,7 +1024,13 @@ async def check_instructions(
                         )
                     )
                     return True
-    except (SQLAlchemyError, TelegramAPIError, RequestError, HTTPStatusError):
+    except (
+        SQLAlchemyError,
+        TelegramAPIError,
+        RequestError,
+        HTTPStatusError,
+        Exception,
+    ):
         logger.exception("adaptive instruction check failed")
     return False
 
@@ -1309,6 +1319,9 @@ async def execute_instant(
     )
 
     # ✨ Pre-LLM gate: handle greetings/farewells without LLM
+    # check_pre_gate уже вызван в Stage -2 классификатора (free_text.py:757).
+    # Повторный вызов — no-op (возвращает None для уже обработанных сообщений),
+    # но оставлен как defense-in-depth на случай пропуска Stage -2.
     gate_response = check_pre_gate(raw)
     if gate_response:
         response = gate_response
@@ -1363,12 +1376,20 @@ async def execute_instant(
         return True
 
     # Динамическое приветствие с учётом наличия памяти и сессии
-    async with get_session() as session:
-        owner = await get_or_create_user(session, owner_telegram_id)
-        memories = await recall(telegram_id=owner_telegram_id, limit=1, mode="normal")
-        has_memory = bool(memories and memories.facts)
-        has_session = owner.session is not None
-        name = getattr(owner, "alias", None) or ""
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_telegram_id)
+            memories = await recall(
+                telegram_id=owner_telegram_id, limit=1, mode="normal"
+            )
+            has_memory = bool(memories and memories.facts)
+            has_session = owner.session is not None
+            name = getattr(owner, "alias", None) or ""
+    except Exception:
+        logger.exception("execute_instant: DB/recall failed, using default greeting")
+        has_memory = False
+        has_session = False
+        name = ""
 
     if not has_memory and not has_session:
         # Совершенно новый пользователь — first touch
@@ -1581,6 +1602,8 @@ async def execute_maestro(
     asyncio.ensure_future(log_user_message(message.from_user.id, raw))
 
     # ✨ Pre-LLM gate: handle greetings/farewells without LLM
+    # check_pre_gate уже вызван в Stage -2 классификатора (free_text.py:757).
+    # Повторный вызов — no-op, но оставлен как defense-in-depth.
     gate_response = check_pre_gate(raw)
     if gate_response:
         response = gate_response
@@ -1779,7 +1802,7 @@ async def execute_maestro(
                             except TelegramAPIError:
                                 pass  # message deleted or too old
                             last_update = now
-                except (RequestError, HTTPStatusError):
+                except Exception:
                     logger.debug("Stream interrupted", exc_info=True)
             else:
                 # Non-streaming: accumulate text silently
@@ -1788,7 +1811,7 @@ async def execute_maestro(
                 try:
                     async for chunk in stream:
                         full_text += chunk
-                except (RequestError, HTTPStatusError):
+                except Exception:
                     logger.debug("Stream interrupted", exc_info=True)
 
             if not full_text.strip():

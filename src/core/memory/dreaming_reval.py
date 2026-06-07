@@ -105,6 +105,11 @@ _ALLOWED_ACTIONS: frozenset[str] = frozenset({"past", "skip", "invalid", "perman
 # /memory --reval (manual) from processing the same facts concurrently.
 # Set is mutated only under the asyncio event loop's single-thread guarantee
 # (no ``await`` between read-and-add in revaluation_run()).
+# L6: asyncio однопоточный — .discard() и __contains__ атомарны на уровне
+# Python (GIL защищает dict/set операции). Блокировка не требуется,
+# пока между проверкой и добавлением нет await. Если в будущем
+# reval_run() станет конкурентным (несколько event loop'ов), добавить
+# asyncio.Lock().
 _REVAL_INFLIGHT: set[int] = set()
 
 
@@ -572,10 +577,18 @@ async def _reval_run_impl(
     # gather() with default return_exceptions=False: _process_one_fact catches
     # all internal exceptions, so an exception here means a programming bug
     # (e.g. asyncio.CancelledError) and should propagate.
+    # L4: явный handler для CancelledError — чистим provider и пробрасываем дальше,
+    # чтобы вызывающий код мог корректно обработать отмену.
     try:
         results: list[RevalResult] = await asyncio.gather(
             *[_tracked_process(f) for f in facts]
         )
+    except asyncio.CancelledError:
+        try:
+            await provider.close()
+        except Exception:
+            pass
+        raise
     except Exception:
         logger.exception("Dreaming reval: gather failed")
         try:

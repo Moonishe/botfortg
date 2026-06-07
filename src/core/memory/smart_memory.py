@@ -175,6 +175,9 @@ async def smart_extract_after_sync(
         owner = await get_or_create_user(session, owner_id)
 
     # Pre-build display-name map for progress_tracker (avoids DB calls in item_name_fn)
+    # L5: get_session() на каждый контакт — допустимо для типичных списков
+    # (<100 контактов). Каждая сессия короткая (один запрос) и живёт недолго.
+    # При большом количестве контактов (>500) стоит перейти на batch-загрузку.
     _name_map: dict[int, str] = {}
     if progress_message and total > 0:
         from src.db.repo import get_contact

@@ -40,6 +40,9 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(),
             nullable=False,
+            # NOTE: datetime('now') возвращает локальное время без timezone.
+            # ORM использует timezone.utc — миграция принимает расхождение,
+            # т.к. SQLite в GIL-блокировке, а бот однопользовательский.
             server_default=sa.text("(datetime('now'))"),
         ),
         sa.PrimaryKeyConstraint("id"),

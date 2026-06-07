@@ -380,7 +380,10 @@ async def _voice_worker() -> None:
                     got_job = True
                     voice_path = job.voice_path
                     message = job.message
-                    _state_str = (
+                    # _state_str зарезервирован для будущего использования:
+                    # может понадобиться при асинхронном восстановлении FSM-контекста
+                    # после транскрипции голосового сообщения.
+                    _state_str = (  # noqa: F841
                         job.state_str
                     )  # string | None — FSMContext value, NOT the FSMContext object
                     userbot_manager = job.userbot_manager
@@ -1472,6 +1475,27 @@ async def _process_text(
 
     # Stage 7: FAST_ROUTE
     if plan.response_mode == "fast_route":
+        if state is None:
+            # Голосовой путь: FSMContext недоступен, fallback к route_intent
+            logger.debug(
+                "fast_route skipped: state is None (voice transcription path), "
+                "falling back to route_intent for user %d",
+                owner_telegram_id,
+            )
+            await _process_text_fallback(
+                raw,
+                provider,
+                message,
+                state,
+                userbot_manager,
+                tz_name,
+                owner_telegram_id,
+                history_block,
+                plan,
+                turn_started,
+                now_local_str,
+            )
+            return
         await execute_fast_route(
             raw,
             plan,
@@ -1495,6 +1519,27 @@ async def _process_text(
 
     # Stage 8: MAESTRO — heavy tasks run as background tasks for preemption
     if plan.response_mode == "maestro":
+        if state is None:
+            # Голосовой путь: FSMContext недоступен, maestro не может работать
+            logger.debug(
+                "maestro skipped: state is None (voice transcription path), "
+                "falling back to route_intent for user %d",
+                owner_telegram_id,
+            )
+            await _process_text_fallback(
+                raw,
+                provider,
+                message,
+                state,
+                userbot_manager,
+                tz_name,
+                owner_telegram_id,
+                history_block,
+                plan,
+                turn_started,
+                now_local_str,
+            )
+            return
         injected_style: str | None = ctx.get("global_style_profile") or None  # type: ignore[assignment]
 
         async def _run_maestro_background():
@@ -1727,6 +1772,11 @@ async def free_text(
     except SQLAlchemyError:
         await message.answer("❌ Произошла ошибка. Попробуй ещё раз.")
         return
+    except Exception as e:
+        # Широкий catch для неожиданных ошибок парсинга расписания
+        logger.warning("parse_schedule_message unexpected error: %s", e)
+        await message.answer("❌ Не удалось обработать сообщение.")
+        return
 
     if scheduled:
         send_at_str = scheduled["send_at"].strftime("%d.%m в %H:%M")
@@ -1812,6 +1862,8 @@ async def free_text(
     try:
         with start_span("message.process", user_id=str(uid), text_len=len(raw)):
             await _process_text(raw, message, state, userbot_manager)
+    except asyncio.CancelledError:
+        raise  # не перехватываем CancelledError — даём штатно завершиться
     except Exception:
         logger.exception("_process_text failed for user %s", uid)
         try:
@@ -2140,5 +2192,9 @@ async def handle_edited_message(
                             pattern[0][:50],
                             pattern[1][:50],
                         )
-    except SQLAlchemyError:
-        pass  # best-effort
+    except Exception:
+        logger.debug(
+            "handle_edited_message best-effort failed for user %d",
+            message.from_user.id if message.from_user else 0,
+            exc_info=True,
+        )  # best-effort — не ломаем основной поток при ошибках фидбека

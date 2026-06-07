@@ -258,6 +258,12 @@ async def cleanup_circuit_breakers(
 
     Called periodically (every ~5 min) from the global cleanup loop.
 
+    Design trade-off: CLOSED breakers удаляются при неактивности >1h;
+    OPEN/HALF_OPEN — при простое >30 мин, даже если backoff ещё не истёк.
+    Это предотвращает перманентную блокировку ключа после transient outage,
+    ценой сброса экспоненциального backoff-состояния. Для single-user бота
+    приемлемо — повторная ошибка быстро восстановит OPEN.
+
     Cleans:
 
     * ``_CIRCUIT_BREAKERS`` — circuit breakers that haven't been accessed
@@ -376,6 +382,8 @@ async def ensure_locks_initialized() -> None:
             "background": asyncio.Semaphore(3),
             "analysis": asyncio.Semaphore(1),
             "urgent": asyncio.Semaphore(2),
+            "search": asyncio.Semaphore(2),
+            "summarize": asyncio.Semaphore(2),
             "fallback": asyncio.Semaphore(2),
         }
         _locks_initialized = True
@@ -791,10 +799,10 @@ async def build_provider(
     use_heavy = user.settings.use_heavy_model if user.settings else False
 
     # Попытка через новую систему LlmKeySlot
-    try:
-        providers: list[MultiKeyProvider] = []
-        all_slot_ids: list[int] = []
-        for name in _provider_order(provider_name):
+    providers: list[MultiKeyProvider] = []
+    all_slot_ids: list[int] = []
+    for name in _provider_order(provider_name):
+        try:
             slots = await get_active_keys(session, user, name, purpose)
             if not slots:
                 continue
@@ -833,33 +841,35 @@ async def build_provider(
                     purpose=purpose,
                 )
             )
-        # Восстанавливаем cooldown за один проход по всем провайдерам
-        await _restore_cooldowns(all_slot_ids)
-        if providers:
-            if len(providers) > 1:
-                logger.info(
-                    "LLM fallback chain (slots): %s",
-                    " -> ".join(p.name for p in providers),
-                )
-            from src.core.context_cache import put as cache_put
+        except (SQLAlchemyError, ValueError, TypeError) as exc:
+            # M7: сбой одного провайдера не убивает всю цепочку — пропускаем и идём дальше
+            logger.warning("Failed to build provider %s, skipping: %s", name, exc)
+            continue
+    # Восстанавливаем cooldown за один проход по всем провайдерам
+    await _restore_cooldowns(all_slot_ids)
+    if providers:
+        if len(providers) > 1:
+            logger.info(
+                "LLM fallback chain (slots): %s",
+                " -> ".join(p.name for p in providers),
+            )
+        from src.core.context_cache import put as cache_put
 
-            result = ProviderFallback(providers)
-            result._default_heavy = use_heavy
-            # Resolve model for task_type (user overrides > settings > provider default)
-            if task_type != TaskType.DEFAULT:
-                user_overrides = _parse_user_model_overrides(user)
-                resolved_model = _resolve_model_for_task(task_type, user_overrides)
-                if resolved_model:
-                    result._model = resolved_model
-                    logger.debug(
-                        "build_provider: task_type=%s → model=%s (from overrides)",
-                        task_type,
-                        resolved_model,
-                    )
-            await cache_put(cache_key, result, ttl=300)
-            return result
-    except (SQLAlchemyError, ValueError, TypeError):
-        logger.exception("LlmKeySlot lookup failed, falling back to old ApiKey table")
+        result = ProviderFallback(providers)
+        result._default_heavy = use_heavy
+        # Resolve model for task_type (user overrides > settings > provider default)
+        if task_type != TaskType.DEFAULT:
+            user_overrides = _parse_user_model_overrides(user)
+            resolved_model = _resolve_model_for_task(task_type, user_overrides)
+            if resolved_model:
+                result._model = resolved_model
+                logger.debug(
+                    "build_provider: task_type=%s → model=%s (from overrides)",
+                    task_type,
+                    resolved_model,
+                )
+        await cache_put(cache_key, result, ttl=300)
+        return result
 
     # Fallback: старый ApiKey
     providers = []

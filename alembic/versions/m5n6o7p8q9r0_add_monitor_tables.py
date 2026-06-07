@@ -71,6 +71,7 @@ def upgrade() -> None:
             ),
             sa.PrimaryKeyConstraint("id"),
         )
+        op.create_index("ix_monitor_rules_source_id", "monitor_rules", ["source_id"])
 
     # ── monitored_messages ──
     if "monitored_messages" not in existing:

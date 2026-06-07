@@ -17,6 +17,10 @@ async def summarize_message(
 ) -> str:
     """Генерирует краткое (10-15 слов) LLM-саммари сообщения.
 
+    TODO(L3): Функция определена, но ещё не подключена к пайплайну фетчинга.
+    Её нужно вызывать из check_periodic() или _handle_fetch() при сохранении
+    алертов, когда rule.actions.get("llm_summary") == True.
+
     Args:
         text: Текст сообщения.
         source_title: Название канала/чата для контекста.

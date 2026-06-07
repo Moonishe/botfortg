@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from aiogram import Router
@@ -43,7 +44,8 @@ async def cmd_monitor(message: Message, command: CommandObject) -> None:
             "/monitor fetch &lt;id&gt; [hours=24] — ручной запуск\n"
             "/monitor remove &lt;id&gt; — удалить\n"
             "/monitor rules &lt;source_id&gt; — правила для источника\n"
-            "/monitor rule_add &lt;source_id&gt; &lt;название&gt; — добавить правило\n"
+            "/monitor rule_add &lt;source_id&gt; &lt;название&gt; | &lt;ключевые_слова&gt; — добавить правило\n"
+            "  ⚠️ Используй | между названием и ключевыми словами\n"
             "/monitor rule_del &lt;rule_id&gt; — удалить правило\n"
             "/monitor status — статус мониторинга"
         )
@@ -260,6 +262,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
         except ValueError:
             await message.answer("❌ Часы должны быть числом.")
             return
+        hours = max(1, min(hours, 168))  # 1 час – 7 дней
 
     # Загружаем источник из БД
     async with get_session() as session:
@@ -592,7 +595,7 @@ async def _handle_rule_add(message: Message, args: list[str]) -> None:
     elif len(remaining) >= 2:
         # Больше одного токена без разделителя — неоднозначность
         await message.answer(
-            "❓ Для многословного названия используй разделитель <code>|</code>:\n"
+            "⚠️ Для многословного названия используй разделитель <code>|</code>:\n"
             "<code>/monitor rule_add &lt;source_id&gt; &lt;название&gt; | &lt;ключевые_слова&gt;</code>\n"
             "Пример: <code>/monitor rule_add 1 Мой Важный Фильтр | срочно,важно,деньги</code>"
         )
@@ -624,15 +627,27 @@ async def _handle_rule_add(message: Message, args: list[str]) -> None:
             await message.answer(f"❌ Источник #{source_id} не найден.")
             return
 
+        # Валидация regex в conditions (если задан)
+        conditions = {
+            "keywords": keywords,
+            "exclude_keywords": [],
+        }
+        regex_pattern = conditions.get("regex")
+        if regex_pattern:
+            try:
+                re.compile(regex_pattern)
+            except re.error as e:
+                await message.answer(
+                    f"❌ Некорректное регулярное выражение: {sanitize_html(str(e))}"
+                )
+                return
+
         rule = MonitorRule(
             user_id=owner.id,
             source_id=source_id,
             name=name,
             priority=0,
-            conditions={
-                "keywords": keywords,
-                "exclude_keywords": [],
-            },
+            conditions=conditions,
             actions={"notify": True, "save": True, "llm_summary": True},
             is_active=True,
         )

@@ -211,6 +211,10 @@ async def init_db() -> None:
         await conn.execute(text("PRAGMA mmap_size=134217728"))  # 128 MB mmap
         await conn.execute(text("PRAGMA busy_timeout=30000"))  # 30s busy timeout
         await conn.execute(text("PRAGMA foreign_keys=ON"))  # enforce FK constraints
+        # ВАЖНО: После включения foreign_keys=ON существующие orphan-строки
+        # (например, messages.source_id -> несуществующий MonitoredSource)
+        # вызовут IntegrityError. Для диагностики: PRAGMA foreign_key_check;
+        # Рекомендуется запускать при старте и чистить orphans через data migration.
         await conn.execute(text("PRAGMA temp_store=MEMORY"))  # temp tables in memory
         await conn.execute(
             text("PRAGMA wal_autocheckpoint=1000")

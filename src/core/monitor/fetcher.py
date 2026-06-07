@@ -23,6 +23,43 @@ MAX_FETCH_LIMIT = 200
 # Базовое ожидание при FloodWait
 FLOOD_BASE_DELAY = 5.0
 
+# Классификация ошибок Telethon: фатальные ошибки не ретраятся
+_FATAL_ERROR_TYPES: tuple[type, ...] = ()
+try:
+    from telethon.errors.rpcerrorlist import (
+        AuthKeyError,
+        AuthKeyDuplicatedError,
+        UnauthorizedError,
+        AccessTokenInvalidError,
+        ApiIdInvalidError,
+    )
+
+    _FATAL_ERROR_TYPES = (
+        AuthKeyError,
+        AuthKeyDuplicatedError,
+        UnauthorizedError,
+        AccessTokenInvalidError,
+        ApiIdInvalidError,
+    )
+except ImportError:
+    pass  # Telethon может быть недоступен на этапе импорта
+
+
+def _is_fatal_error(exc: Exception) -> bool:
+    """Проверяет, является ли исключение фатальным (не требует ретрая)."""
+    if _FATAL_ERROR_TYPES and isinstance(exc, _FATAL_ERROR_TYPES):
+        return True
+    # Проверяем по имени класса, если импорт типов не удался
+    exc_name = type(exc).__name__
+    fatal_names = {
+        "AuthKeyError",
+        "AuthKeyDuplicatedError",
+        "UnauthorizedError",
+        "AccessTokenInvalidError",
+        "ApiIdInvalidError",
+    }
+    return exc_name in fatal_names
+
 
 async def fetch_history(
     client,  # TelegramClient (lazy import для избежания циркулярных импортов)
@@ -52,6 +89,11 @@ async def fetch_history(
 
     messages: list[dict] = []
     max_retries = 3
+    # Отслеживаем последний ID, полученный от API (включая пропущенные по дате).
+    # Если достигли границы since_hours, не продвигаем offset_id дальше —
+    # чтобы сообщения за пределами окна не были потеряны при смене since_hours.
+    oldest_kept_id: int | None = None
+    hit_time_boundary: bool = False
 
     for attempt in range(max_retries):
         try:
@@ -67,9 +109,12 @@ async def fetch_history(
                 if not isinstance(msg, TgMessage):
                     continue
 
-                # Пропускаем сообщения старше since_hours
+                # Пропускаем сообщения старше since_hours,
+                # но НЕ продвигаем offset_id за границу окна
                 if msg.date and msg.date < since_date:
-                    continue
+                    hit_time_boundary = True
+                    # Сообщения идут от новых к старым; всё что дальше — ещё старше
+                    break
 
                 # Извлекаем текст
                 text = msg.message or ""
@@ -105,6 +150,10 @@ async def fetch_history(
                     sender_name = getattr(sender_raw, "first_name", None) or getattr(
                         sender_raw, "title", None
                     )
+
+                # Отслеживаем самое старое (минимальный ID) сообщение в окне
+                if oldest_kept_id is None or msg.id < oldest_kept_id:
+                    oldest_kept_id = msg.id
 
                 messages.append(
                     {
@@ -147,6 +196,16 @@ async def fetch_history(
             raise
 
         except Exception as e:
+            # Фатальные ошибки (auth, ключи) — не ретраим, выбрасываем сразу
+            if _is_fatal_error(e):
+                logger.error(
+                    "fetch_history: fatal error for source %s (entity_id=%d): %s",
+                    source.title,
+                    source.entity_id,
+                    e,
+                )
+                raise
+
             logger.exception(
                 "fetch_history failed for source %s (entity_id=%d)",
                 source.title,
@@ -159,20 +218,33 @@ async def fetch_history(
             raise
 
     # Обновляем last_fetched_at и last_message_id если были сообщения
+    # При hit_time_boundary продвигаем offset_id только до старейшего
+    # сообщения ВНУТРИ окна, чтобы сообщения за границей не были потеряны.
     if messages:
-        newest_id = max(m["message_id"] for m in messages)
+        if hit_time_boundary and oldest_kept_id is not None:
+            # Не продвигаем offset_id за границу окна:
+            # followers с другим since_hours смогут дофетчить пропущенное.
+            new_last_id = (
+                oldest_kept_id
+                if source.last_message_id == 0
+                else max(oldest_kept_id, source.last_message_id)
+            )
+        else:
+            newest_id = max(m["message_id"] for m in messages)
+            new_last_id = max(newest_id, source.last_message_id)
+
         async with get_session() as session:
             await session.execute(
                 update(MonitoredSource)
                 .where(MonitoredSource.id == source.id)
                 .values(
                     last_fetched_at=datetime.now(timezone.utc),
-                    last_message_id=max(newest_id, source.last_message_id),
+                    last_message_id=new_last_id,
                 )
             )
             # Обновляем in-memory объект
             source.last_fetched_at = datetime.now(timezone.utc)
-            source.last_message_id = max(newest_id, source.last_message_id)
+            source.last_message_id = new_last_id
 
     return messages
 
@@ -204,6 +276,9 @@ def match_rules(message_dict: dict, rules: list[MonitorRule]) -> list[MonitorRul
         conditions = rule.conditions or {}
 
         # Проверка exclude_keywords — если есть любое слово-исключение, правило не срабатывает
+        # NOTE: kw.lower() in text ищет ПОДСТРОКУ, а не слово целиком.
+        # Это осознанный tradeoff: быстрый поиск ценой ложных срабатываний
+        # (например, "дом" сматчит "домовой"). Для точного поиска используй regex.
         exclude_kw = conditions.get("exclude_keywords", [])
         if exclude_kw:
             if any(kw.lower() in text for kw in exclude_kw):
@@ -216,10 +291,20 @@ def match_rules(message_dict: dict, rules: list[MonitorRule]) -> list[MonitorRul
                 if not re.search(regex_pattern, text, re.IGNORECASE):
                     continue
             except re.error:
-                logger.warning("Invalid regex in rule %d: %s", rule.id, regex_pattern)
+                # Инвалидный regex: логируем ошибку уровня error,
+                # но не роняем весь матчинг — правило просто не срабатывает.
+                # Валидация regex должна происходить при создании правила.
+                logger.error(
+                    "Invalid regex in rule %d (source_id=%d): %r",
+                    rule.id,
+                    rule.source_id,
+                    regex_pattern,
+                )
                 continue
 
         # Проверка keywords
+        # NOTE: kw.lower() in text — поиск подстроки, не слова.
+        # Для точного совпадения используй regex с \b границами слов.
         keywords = conditions.get("keywords", [])
         if keywords:
             if not any(kw.lower() in text for kw in keywords):
@@ -259,6 +344,14 @@ async def check_periodic(user_id: int) -> list[dict]:
     client = _MANAGER_SINGLETON.get_client(user_id) if _MANAGER_SINGLETON else None
     if client is None:
         logger.warning("check_periodic: no Telethon client for user %d", user_id)
+        return []
+
+    # Проверяем подключение — если клиент отвалился, не пытаемся фетчить
+    if not client.is_connected():
+        logger.warning(
+            "check_periodic: Telethon client disconnected for user %d, skipping fetch",
+            user_id,
+        )
         return []
 
     results: list[dict] = []

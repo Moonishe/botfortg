@@ -72,6 +72,10 @@ def message_weight(text: str) -> float:
 def get_recall_mode(depth: int, weight: float, text: str = "") -> RecallMode:
     t = (text or "").lower()
     # S2-T3: SHALLOW — сверхлёгкий режим для тривиальных сообщений
+    # Порог: weight < 0.3 (очень короткое/лёгкое сообщение, например «ага», «ок»),
+    # len < 50 символов (исключаем средние/длинные сообщения),
+    # depth <= 1 (диалог только начался — избегаем shallow для активных бесед,
+    # где даже короткое сообщение может быть осмысленным продолжением).
     if weight < 0.3 and len(t) < 50 and depth <= 1:
         return "shallow"
     if any(hint in t for hint in DEEP_HINTS):

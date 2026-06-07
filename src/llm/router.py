@@ -209,7 +209,8 @@ class MultiKeyProvider:
             async with _CIRCUIT_BREAKERS_LOCK:
                 cb = _CIRCUIT_BREAKERS.get(cache_key)
             if cb is not None and not cb.is_ready(now):
-                _ = cb.try_half_open(now)  # проверяем, не пора ли попробовать
+                # asyncio single-threaded: состояние cb читается/модифицируется атомарно без отдельного лока
+                _ = cb.try_half_open(now)
                 if not cb.is_ready(now):
                     skipped += 1
                     continue
@@ -566,6 +567,8 @@ class MultiKeyProvider:
             release_purpose_slot(sem)
 
     async def validate_key(self) -> bool:
+        # NOTE: валидирует доступ к ключу, а не наличие конкретной модели.
+        # model_override не передаётся — проверяется только сам факт доступа к API.
         try:
             return await self._try_with_retry(lambda p: p.validate_key())
         except Exception:  # TODO: specify exceptions
@@ -587,10 +590,15 @@ class MultiKeyProvider:
             from src.db.session import get_session
 
             for slot_id in self._slot_ids:
-                async with get_session() as session:
-                    from src.db.repos.key_repo import get_enabled_models
+                try:
+                    async with get_session() as session:
+                        from src.db.repos.key_repo import get_enabled_models
 
-                    enabled.update(await get_enabled_models(session, slot_id))
+                        enabled.update(await get_enabled_models(session, slot_id))
+                except SQLAlchemyError:
+                    logger.exception(
+                        "Failed to get enabled models for slot %d", slot_id
+                    )
         # Проверяем старые single-model слоты (slot.model без LlmKeySlotModel)
         for model_list in self._models:
             for m in model_list:
@@ -738,12 +746,11 @@ class ProviderFallback:
         for i, provider in enumerate(self.providers):
             try:
                 result = await provider.embed(text)
-                if i == 0:
+                # M8: запоминаем размерность первого успешного эмбеддинга,
+                # даже если primary не сработал — для последующей валидации размерностей.
+                if self._last_primary_dim is None:
                     self._last_primary_dim = len(result)
-                elif (
-                    self._last_primary_dim is not None
-                    and len(result) != self._last_primary_dim
-                ):
+                elif len(result) != self._last_primary_dim:
                     raise ValueError(
                         f"Embedding dimension mismatch: primary={self._last_primary_dim}, "
                         f"fallback {provider.name}={len(result)}. "
@@ -774,12 +781,10 @@ class ProviderFallback:
             try:
                 result = await provider.embed_batch(texts)
                 if result:
-                    if i == 0:
+                    # M8: запоминаем размерность первого успешного эмбеддинга
+                    if self._last_primary_dim is None:
                         self._last_primary_dim = len(result[0])
-                    elif (
-                        self._last_primary_dim is not None
-                        and len(result[0]) != self._last_primary_dim
-                    ):
+                    elif len(result[0]) != self._last_primary_dim:
                         raise ValueError(
                             f"Embedding dimension mismatch: primary={self._last_primary_dim}, "
                             f"fallback {provider.name}={len(result[0])}. "

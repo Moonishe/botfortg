@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import select, update as sa_update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
@@ -27,12 +27,19 @@ async def auto_forget_sweep(session: AsyncSession, user_id: int) -> int:
     now = datetime.now(timezone.utc)
 
     # Load active, non-pinned, non-task memories for user
+    # M9: Memory.memory_type != "task" исключает NULL из sweep —
+    # строки с memory_type=NULL не попадают в результат.
+    # Добавляем Memory.memory_type.is_(None) чтобы sweep охватывал
+    # и факты без указанного типа (по умолчанию они — кандидаты на забывание).
     result = await session.execute(
         select(Memory).where(
             Memory.user_id == user_id,
             Memory.is_active == True,
             Memory.pinned == False,
-            Memory.memory_type != "task",
+            or_(
+                Memory.memory_type != "task",
+                Memory.memory_type.is_(None),
+            ),
         )
     )
     memories = list(result.scalars().all())

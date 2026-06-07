@@ -143,6 +143,9 @@ class MonitoredAlert(Base):
     """Алерт — срабатывание правила на конкретном сообщении."""
 
     __tablename__ = "monitor_alerts"
+    __table_args__ = (
+        UniqueConstraint("rule_id", "message_id", name="uq_monitor_alert_rule_msg"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(

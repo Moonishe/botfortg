@@ -17,6 +17,7 @@ _RE_TME_USERNAME_NOPROTO = re.compile(
 _RE_TME_CHANNEL = re.compile(r"^https?://t\.me/c/(-?\d+)(?:/\d+)?/?$")
 _RE_TME_INVITE = re.compile(r"^https?://t\.me/\+([\w-]+)$")
 _RE_NUMERIC = re.compile(r"^-?\d+$")
+_RE_U_PREFIX = re.compile(r"^u:(\d+)$", re.IGNORECASE)
 
 
 async def resolve_source(client: TelegramClient, identifier: str) -> dict:
@@ -88,6 +89,16 @@ async def resolve_source(client: TelegramClient, identifier: str) -> dict:
         username = identifier[1:]
         return await _resolve_by_username(client, username)
 
+    # ── u:<user_id> — явное указание пользователя ──
+    m_u_prefix = _RE_U_PREFIX.match(identifier)
+    if m_u_prefix:
+        user_id = int(m_u_prefix.group(1))
+        if user_id == 0:
+            raise ValueError(
+                "entity_id == 0 не является корректным идентификатором пользователя."
+            )
+        return await _resolve_user_by_id(client, user_id)
+
     # ── Чисто числовой ID ──
     if _RE_NUMERIC.match(identifier):
         entity_id = int(identifier)
@@ -119,7 +130,17 @@ async def _resolve_by_username(client: TelegramClient, username: str) -> dict:
 
 
 async def _resolve_by_id(client: TelegramClient, entity_id: int) -> dict:
-    """Разрешает сущность по числовому ID."""
+    """Разрешает сущность по числовому ID.
+
+    Положительные ID могут быть как PeerChat, так и PeerUser.
+    Пробуем PeerChat первым, при ошибке — PeerUser.
+    Для указания пользователя используй префикс u: (например, u:123456789).
+    """
+    if entity_id == 0:
+        raise ValueError(
+            "entity_id == 0 не является корректным идентификатором Telegram-сущности."
+        )
+
     try:
         from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
@@ -127,7 +148,20 @@ async def _resolve_by_id(client: TelegramClient, entity_id: int) -> dict:
         if entity_id < 0 or entity_id > 1_000_000_000_000:
             peer = PeerChannel(entity_id)
         elif entity_id > 0:
-            peer = PeerChat(entity_id)
+            # Маленькие положительные ID могут быть пользователями.
+            # Пробуем PeerChat первым, при неудаче — PeerUser.
+            try:
+                peer = PeerChat(entity_id)
+                entity = await client.get_entity(peer)
+                return entity_to_dict(entity)
+            except (ValueError, AttributeError):
+                # Возможно это пользователь — пробуем PeerUser
+                logger.debug(
+                    "entity_id=%d не найден как чат, пробуем PeerUser", entity_id
+                )
+                peer = PeerUser(entity_id)
+                entity = await client.get_entity(peer)
+                return entity_to_dict(entity)
         else:
             peer = PeerUser(entity_id)
 
@@ -135,11 +169,35 @@ async def _resolve_by_id(client: TelegramClient, entity_id: int) -> dict:
     except ValueError:
         raise ValueError(
             f"Сущность с ID {entity_id} не найдена. "
-            "Возможно, бот/юзербот не состоит в этом чате/канале."
+            "Возможно, бот/юзербот не состоит в этом чате/канале. "
+            "Для пользователей используй префикс u: (например, u:123456789)."
         ) from None
     except Exception as e:
         logger.exception("get_entity failed for id=%d", entity_id)
         raise ValueError(f"Ошибка получения сущности {entity_id}: {e}") from e
+
+    return entity_to_dict(entity)
+
+
+async def _resolve_user_by_id(client: TelegramClient, entity_id: int) -> dict:
+    """Разрешает пользователя по числовому ID."""
+    from telethon.tl.types import PeerUser
+
+    if entity_id == 0:
+        raise ValueError(
+            "entity_id == 0 не является корректным идентификатором пользователя."
+        )
+    try:
+        peer = PeerUser(entity_id)
+        entity = await client.get_entity(peer)
+    except ValueError:
+        raise ValueError(
+            f"Пользователь с ID {entity_id} не найден. "
+            "Возможно, бот/юзербот не имеет доступа к этому пользователю."
+        ) from None
+    except Exception as e:
+        logger.exception("get_entity failed for user id=%d", entity_id)
+        raise ValueError(f"Ошибка получения пользователя {entity_id}: {e}") from e
 
     return entity_to_dict(entity)
 

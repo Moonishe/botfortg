@@ -129,11 +129,16 @@ class ManagedCache(Generic[K, V]):
                     return value
 
         # ── Получить или создать per-key Event ──
-        if key not in self._write_events:
-            self._write_events[key] = asyncio.Event()
-            self._write_events[key].set()  # Изначально «готово» (писатель не активен)
+        # L1: доступ к _write_events под _lock — предотвращает состояние гонки
+        # между reader'ами (параллельные вызовы get_or_compute с одним ключом).
+        async with self._lock:
+            if key not in self._write_events:
+                self._write_events[key] = asyncio.Event()
+                self._write_events[
+                    key
+                ].set()  # Изначально «готово» (писатель не активен)
 
-        event = self._write_events[key]
+            event = self._write_events[key]
 
         # ── Если другой writer уже вычисляет этот ключ — ждём ──
         if not event.is_set():
@@ -345,11 +350,13 @@ class ManagedCache(Generic[K, V]):
                     return value, False
                 # H1: Don't evict yet — factory might fail.  Just note it.
                 existing_expired = True
-                self.metrics.misses += 1
             else:
                 existing_expired = False
 
         # ── Compute value OUTSIDE the lock ──
+        # L5: счётчик misses вне лока — учитываем каждый промах,
+        # даже если double-check внутри writer_lock обнаружит свежее значение.
+        self.metrics.misses += 1
         result = factory()
         if asyncio.iscoroutine(result):
             result = await result

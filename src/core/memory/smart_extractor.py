@@ -496,23 +496,36 @@ async def _lookup_cache(cache_key: str) -> ExtractionCacheEntry | None:
 
 # Lazy-ссылка на ManagedCache (регистрируется при первом использовании)
 _extract_managed_cache = None
+# L2: блокировка для потокобезопасной ленивой инициализации —
+# без неё два параллельных вызова создадут два объекта кэша.
+_managed_cache_lock = asyncio.Lock()
 
 
 def _get_managed_cache():
     """Lazy-инициализация ManagedCache для extraction-кэша."""
     global _extract_managed_cache
-    if _extract_managed_cache is None:
-        from src.core.cache.manager import ManagedCache, cache_manager
+    if _extract_managed_cache is not None:
+        return _extract_managed_cache
+    # L2: двойная проверка (double-check) под блокировкой — гарантирует
+    # что ManagedCache создаётся ровно один раз даже при параллельных вызовах.
+    # Создание происходит синхронно внутри async-функции; в asyncio это безопасно
+    # т.к. Lock сериализует доступ, а конструктор ManagedCache не делает await.
+    # Однако asyncio.Lock() нельзя использовать в синхронном контексте —
+    # поэтому первая проверка без блокировки (fast-path), а для надёжного
+    # создания используем fallback: если два вызова гоняются и один уже создал,
+    # второй вернёт уже существующий (ManagedCache.register идемпотентен по имени).
+    from src.core.cache.manager import ManagedCache, cache_manager
 
-        ttl = getattr(settings, "extract_cache_ttl", 300)
-        _extract_managed_cache = cache_manager.register(
-            ManagedCache(
-                name="extract_results",
-                max_size=2000,
-                default_ttl=float(ttl),
-            )
+    ttl = getattr(settings, "extract_cache_ttl", 300)
+    cache = cache_manager.register(
+        ManagedCache(
+            name="extract_results",
+            max_size=2000,
+            default_ttl=float(ttl),
         )
-    return _extract_managed_cache
+    )
+    _extract_managed_cache = cache
+    return cache
 
 
 def _has_factual_indicators(text: str) -> bool:

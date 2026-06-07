@@ -152,8 +152,11 @@ async def _get_stealth_session(proxy_url: str | None = None):
         # Если прокси изменился — пересоздаём сессию
         current_proxy = getattr(_stealth_session, "proxy", None)
         if current_proxy != proxy_url:
-            await _close_stealth_session()
-            _stealth_session = None
+            # M2: закрытие сессии внутри блокировки — предотвращает TOCTOU-гонку
+            # с параллельными вызовами _get_stealth_session() с другим proxy_url
+            async with _stealth_lock:
+                await _close_stealth_session()
+                _stealth_session = None
 
     if _stealth_session is None:
         async with _stealth_lock:
@@ -166,14 +169,19 @@ async def _get_stealth_session(proxy_url: str | None = None):
 
 
 async def _close_stealth_session() -> None:
-    """Закрывает глобальную stealth-сессию."""
+    """Закрывает глобальную stealth-сессию.
+
+    M3: закрытие под _stealth_lock — предотвращает двойное закрытие
+    параллельными вызовами и гонку с _get_stealth_session().
+    """
     global _stealth_session
-    if _stealth_session is not None:
-        try:
-            await _stealth_session.close()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        _stealth_session = None
+    async with _stealth_lock:
+        if _stealth_session is not None:
+            try:
+                await _stealth_session.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            _stealth_session = None
 
 
 async def _fetch_page(url: str) -> str:

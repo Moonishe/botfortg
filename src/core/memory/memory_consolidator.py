@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from src.db.repo import list_memories, get_or_create_user
 from src.db.session import get_session
@@ -60,6 +61,10 @@ async def consolidate_memories(telegram_id: int) -> int:
                     avg_conf = ((m1.confidence or 0.5) + (m2.confidence or 0.5)) / 2
                     m1.confidence = min(1.0, avg_conf * 1.1)
                     m2.is_active = False
+                    # M10: устанавливаем validity_end — без него деактивированный
+                    # факт не имеет временной метки деактивации, что ломает
+                    # запросы фильтрации по времени и health-метрики.
+                    m2.validity_end = datetime.now(timezone.utc)
                     m2.memory_tier = 0  # archived
                     merged += 1
                     logger.debug(

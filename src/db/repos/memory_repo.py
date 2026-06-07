@@ -301,6 +301,13 @@ async def add_memory(
     source_weight = {"chat": 0.3, "user": 0.6, "weekly": 0.15}.get(source, 0.3)
 
     # Временные маркеры — не мерджим, создаём как новый факт
+    # M5: намеренно пропускаем ВСЮ дедупликацию (и SHA256, и Qdrant) для фактов
+    # с временными маркерами. Даже если факт идентичен предыдущему, временной
+    # маркер («сейчас», «уже не», «перестал») сигнализирует об ИЗМЕНЕНИИ
+    # состояния — нужно создать новую запись, а не мерджить со старой.
+    # Торговля (tradeoff): возможны дубликаты («сейчас я работаю в X» →
+    # «сейчас я работаю в X» через день), но ложно-отрицательный пропуск
+    # изменения («перестал работать в Y») критичнее чем дубликат.
     temporal_markers = {"сейчас", "раньше", "уже не", "больше не", "перестал"}
     has_temporal_marker = any(m in fact.lower() for m in temporal_markers)
 
@@ -448,7 +455,18 @@ async def add_memory(
                 embedding=embedding,
             )
         except Exception:  # TODO: specify exceptions (vector_store.upsert_memory — Qdrant network call)
-            logger.exception("Failed to index memory embedding in Qdrant")
+            # M4: факт сохранён в SQLite, но НЕ в Qdrant — дедупликация и поиск
+            # по вектору не увидят этот факт. Логируем ERROR с memory_id чтобы
+            # мониторинг мог отследить рассинхрон и запустить переиндексацию.
+            logger.error(
+                "CRITICAL: Failed to index memory %d in Qdrant — "
+                "fact saved in SQLite but NOT searchable via vector. "
+                "Re-index required: memory_id=%d user_id=%d",
+                mem.id,
+                mem.id,
+                user.id,
+                exc_info=True,
+            )
 
     await invalidate("mem_")
     from src.core.memory.memory_recall import bump_recall_version
@@ -1270,6 +1288,14 @@ async def link_memories(
     session.add(link)
 
     # Обратная связь (если не дубль)
+    # M7: обратная связь использует тот же relation_type что и прямая.
+    # Семантически это неверно (relation_type описывает направление:
+    # A supersedes B ≠ B supersedes A), но большинство downstream-кода
+    # (memory_graph, memory_chain) работает с bidirectional edges и не
+    # различает направление. Полноценный фикс потребовал бы reverse-
+    # relation_type mapping (supersedes→superseded_by, cause→effect),
+    # что — breaking change для memory_graph BFS.
+    # Пока оставляем как есть — tradeoff осознанный.
     reverse_check = await session.execute(
         select(MemoryLink).where(
             MemoryLink.user_id == user.id,
