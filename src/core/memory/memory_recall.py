@@ -108,7 +108,11 @@ async def bump_recall_version(telegram_id: int) -> None:
                 exc_info=True,
             )
     except Exception:
-        logger.debug("bump_recall_version(%s) failed", telegram_id, exc_info=True)
+        logger.warning(
+            "bump_recall_version: cache invalidation failed for user %d",
+            telegram_id,
+            exc_info=True,
+        )
 
 
 def _utc_now() -> datetime:

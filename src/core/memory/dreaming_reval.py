@@ -107,10 +107,9 @@ _ALLOWED_ACTIONS: frozenset[str] = frozenset({"past", "skip", "invalid", "perman
 # (no ``await`` between read-and-add in revaluation_run()).
 # L6: asyncio однопоточный — .discard() и __contains__ атомарны на уровне
 # Python (GIL защищает dict/set операции). Блокировка не требуется,
-# пока между проверкой и добавлением нет await. Если в будущем
-# reval_run() станет конкурентным (несколько event loop'ов), добавить
-# asyncio.Lock().
+# H-N1: TOCTOU race fixed — asyncio.Lock() guards inflight check.
 _REVAL_INFLIGHT: set[int] = set()
+_REVAL_INFLIGHT_LOCK = asyncio.Lock()
 
 
 @dataclass
@@ -414,17 +413,17 @@ async def reval_run(
     # Inflight-guard: dream_cycle (cron) and /memory --reval (manual) can both
     # call revaluation_run. Without coordination, the same facts would be
     # processed twice → duplicate supersedes links + wasted LLM budget.
-    # Module-level set ensures only one reval per owner at a time.
-    global _REVAL_INFLIGHT
-    if owner_telegram_id in _REVAL_INFLIGHT:
-        logger.info(
-            "Dreaming reval: already in progress for owner %d, skipping",
-            owner_telegram_id,
-        )
-        # Caller (cmd_memory / dream_cycle) surfaces this via summary.errors path;
-        # no dedicated field needed — the warning line is enough signal.
-        return summary
-    _REVAL_INFLIGHT.add(owner_telegram_id)
+    # Module-level set + asyncio.Lock to prevent TOCTOU race.
+    async with _REVAL_INFLIGHT_LOCK:
+        if owner_telegram_id in _REVAL_INFLIGHT:
+            logger.info(
+                "Dreaming reval: already in progress for owner %d, skipping",
+                owner_telegram_id,
+            )
+            # Caller (cmd_memory / dream_cycle) surfaces this via summary.errors path;
+            # no dedicated field needed — the warning line is enough signal.
+            return summary
+        _REVAL_INFLIGHT.add(owner_telegram_id)
     try:
         with start_span(
             "dreaming.reval_run",
@@ -438,7 +437,8 @@ async def reval_run(
                 vector_store_obj=vector_store_obj,
             )
     finally:
-        _REVAL_INFLIGHT.discard(owner_telegram_id)
+        async with _REVAL_INFLIGHT_LOCK:
+            _REVAL_INFLIGHT.discard(owner_telegram_id)
 
 
 async def _reval_run_impl(

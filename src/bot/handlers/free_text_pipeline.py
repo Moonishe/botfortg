@@ -1840,14 +1840,35 @@ async def execute_maestro(
                 and len(humanized) > 100
                 and _safe_for_deep_humanize(humanized, context_hint=context_hint)
             ):
+                from src.llm.provider_manager import build_provider
+
+                humanize_provider = None
                 try:
-                    humanized = await humanize_deep(
-                        humanized, provider, user_style=style_block or ""
-                    )
+                    from src.db.session import get_session as _get_hp_session
+                    from src.db.repo import get_or_create_user as _get_hp_user
+
+                    async with _get_hp_session() as hp_session:
+                        hp_user = await _get_hp_user(hp_session, owner_telegram_id)
+                        humanize_provider = await build_provider(
+                            hp_session,
+                            hp_user,
+                            purpose="humanize",
+                            task_type=TaskType.HUMANIZE,
+                        )
+                    if humanize_provider:
+                        humanized = await humanize_deep(
+                            humanized, humanize_provider, user_style=style_block or ""
+                        )
                 except Exception:
                     # humanize_deep внутренне ловит все исключения и возвращает исходный текст;
                     # этот catch — для неожиданных ошибок самого вызова
                     logger.debug("humanize_deep failed on streamed text", exc_info=True)
+                finally:
+                    if humanize_provider:
+                        try:
+                            await humanize_provider.close()
+                        except Exception:
+                            pass
 
             humanizer_changed = humanized != original_text
             response_text = sanitize_html(humanized)
@@ -1975,50 +1996,94 @@ async def execute_maestro(
                 mode=anti_ai_mode,
             )
 
-            # Stage 2: deep humanize if still too AI-like
-            score, _ = analyze_ai_score(humanized)
-            if (
-                anti_ai_mode == "fix"
-                and score > 0.3
-                and len(humanized) > 100
-                and _safe_for_deep_humanize(humanized, context_hint=context_hint)
-            ):
-                try:
-                    user_style_hint = style_block or ""
-                    humanized = await humanize_deep(
-                        humanized, provider, user_style=user_style_hint
+            # Stage 2: deep humanize + self-correction (общий humanize_provider).
+            # X1: build_provider с purpose="humanize" подхватывает humanize_model из настроек.
+            humanize_provider = None
+            try:
+                from src.llm.provider_manager import build_provider
+
+                async with get_session() as hp_session:
+                    hp_user = await get_or_create_user(hp_session, owner_telegram_id)
+                    humanize_provider = await build_provider(
+                        hp_session,
+                        hp_user,
+                        purpose="humanize",
+                        task_type=TaskType.HUMANIZE,
                     )
-                except Exception:
-                    # humanize_deep внутренне ловит все исключения и возвращает исходный текст;
-                    # этот catch — для неожиданных ошибок самого вызова
-                    logger.debug(
-                        "humanize_deep failed, using light humanized", exc_info=True
-                    )
+
+                if humanize_provider:
+                    score, _ = analyze_ai_score(humanized)
+                    if (
+                        anti_ai_mode == "fix"
+                        and score > 0.3
+                        and len(humanized) > 100
+                        and _safe_for_deep_humanize(
+                            humanized, context_hint=context_hint
+                        )
+                    ):
+                        try:
+                            user_style_hint = style_block or ""
+                            humanized = await humanize_deep(
+                                humanized,
+                                humanize_provider,
+                                user_style=user_style_hint,
+                            )
+                        except Exception:
+                            # humanize_deep внутренне ловит все исключения и возвращает
+                            # исходный текст; этот catch — для неожиданных ошибок вызова
+                            logger.debug(
+                                "humanize_deep failed, using light humanized",
+                                exc_info=True,
+                            )
+            except Exception:
+                logger.debug(
+                    "humanize_provider build failed, humanize skipped",
+                    exc_info=True,
+                )
 
             response_text = humanized
             _cache_last_humanized(owner_telegram_id, response_text)
 
-            # ── Self-correction loop: re-generate if too AI-like ──────
+            # ── Self-correction loop (X2: budget ≤1, stop-if-improved) ──
             if anti_ai_mode == "fix" and response_text and len(response_text) > 50:
-                for _ in range(2):
-                    score_before, _ = analyze_ai_score(response_text)
-                    if score_before < 0.3:
-                        break
+                score_before, _ = analyze_ai_score(response_text)
+                if score_before >= 0.3 and humanize_provider:
                     correction_prompt = (
                         f"Твой ответ вышел слишком AI-шаблонным (score={score_before:.2f}). "
                         f"Перепиши его естественно, как человек:\n\n{response_text[:1000]}"
                     )
                     try:
-                        rewritten = await provider.chat(
+                        rewritten = await humanize_provider.chat(
                             [ChatMessage(role="user", content=correction_prompt)],
                             task_type=TaskType.HUMANIZE,
                         )
                         if rewritten and len(rewritten) > 20:
                             rewritten = _preservation_check(response_text, rewritten)
-                            response_text = rewritten
+                            score_after, _ = analyze_ai_score(rewritten)
+                            if score_after < score_before:
+                                # Только если улучшило — применяем
+                                response_text = rewritten
+                                logger.debug(
+                                    "Self-correction improved score %.2f -> %.2f",
+                                    score_before,
+                                    score_after,
+                                )
+                            else:
+                                logger.debug(
+                                    "Self-correction didn't improve (%.2f -> %.2f)",
+                                    score_before,
+                                    score_after,
+                                )
                     except Exception:
-                        break
+                        logger.debug("Self-correction rewrite failed", exc_info=True)
             # ── End Self-correction ────────────────────────────────────
+
+            # Закрываем humanize_provider после использования
+            if humanize_provider:
+                try:
+                    await humanize_provider.close()
+                except Exception:
+                    pass
 
             # ── End Humanizer ─────────────────────────────────────────
 
