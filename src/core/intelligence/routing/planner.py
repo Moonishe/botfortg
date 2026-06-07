@@ -12,6 +12,7 @@ from src.db.repo import get_or_create_user, get_conversation_state
 from src.db.session import get_session
 
 from ..pattern_cache import pattern_cache
+from .pattern_cache import route_cache as _route_cache
 from ..routing_wordlists import (
     CHAIN_WORDS,
     GREETINGS,
@@ -104,6 +105,18 @@ async def make_plan(
     plan = RouterPlan()
     start = time.monotonic()
 
+    # ── S2-T1: RouteCache — проверяем закэшированный план ДО всех стадий ──
+    try:
+        cached_plan = await _route_cache.get(user_text, telegram_id)
+        if cached_plan is not None:
+            # Кэш-hit: возвращаем готовый план, пропуская все стадии
+            cached_plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+            cached_plan.metrics["total_ms"] = cached_plan.elapsed_ms
+            cached_plan.metrics["router_ms"] = 0
+            return cached_plan
+    except Exception:
+        logger.debug("RouteCache check skipped", exc_info=True)
+
     # Шаг 0: определить режим ответа
     mode = await classify_mode(user_text)
     plan.response_mode = mode.value
@@ -114,6 +127,11 @@ async def make_plan(
         plan.tasks = []
         plan.elapsed_ms = int((time.monotonic() - start) * 1000)
         plan.metrics["total_ms"] = plan.elapsed_ms
+        # S2-T1: кэшируем INSTANT-планы (самые частые хиты)
+        try:
+            await _route_cache.set(user_text, telegram_id, plan)
+        except Exception:
+            logger.debug("RouteCache set skipped for INSTANT", exc_info=True)
         return plan
 
     risk = await classify_risk(user_text)
@@ -310,6 +328,11 @@ async def make_plan(
         plan.tasks.append(task)
         plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
         plan.elapsed_ms = plan.metrics["router_ms"]
+        # S2-T1: кэшируем приветствия
+        try:
+            await _route_cache.set(user_text, telegram_id, plan)
+        except Exception:
+            logger.debug("RouteCache set skipped for GREETING", exc_info=True)
         return plan
 
     # ---------- Слой 4: Contact-aware routing ----------
@@ -610,4 +633,12 @@ async def make_plan(
     plan.tasks.append(task)
     plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
     plan.elapsed_ms = plan.metrics["router_ms"]
+
+    # ── S2-T1: Сохраняем план в RouteCache (если не deep и без prefetch) ──
+    try:
+        if plan.response_mode != "maestro" and not _prefetched_used:
+            await _route_cache.set(user_text, telegram_id, plan)
+    except Exception:
+        logger.debug("RouteCache set skipped", exc_info=True)
+
     return plan

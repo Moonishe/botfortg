@@ -284,6 +284,7 @@ async def recall(
     Единый recall-сервис памяти.
 
     Приоритет:
+    0. shallow — только pinned (3) + recent (5), без семантического поиска (~10ms)
     1. pinned-факты (всегда первые)
     2. task-context (привязанные к активным обязательствам)
     3. Qdrant-semantic (похожие на query)
@@ -293,7 +294,7 @@ async def recall(
     7. contact-факты (связанные с конкретным контактом)
     8. deep — tier 2-3 префетч + BFS по MemoryLink графу (опционально)
 
-    mode: MemoryMode enum (Phase 2) или строка ("light"/"normal"/"deep").
+    mode: MemoryMode enum (Phase 2) или строка ("shallow"/"light"/"normal"/"deep").
            None / неизвестное значение → MemoryMode.DEEP.
 
     offset: смещение для пагинации (0 — первая страница).
@@ -336,6 +337,103 @@ async def recall(
     now = _utc_now()
     seen_ids: set[int] = set()
     ranked: list[RecalledFact] = []
+
+    # ── S2-T3: Shallow recall — сверхлёгкий режим (~10ms) ──────────────
+    # Только pinned (limit 3) + recent (limit 5).
+    # Без семантического поиска, без deep-DB, без кэша версий.
+    if mode.is_shallow:
+        _shallow_session = session
+        _close_shallow = _shallow_session is None
+        _shallow_cm = None
+        if _shallow_session is None:
+            _shallow_cm = get_session()
+            _shallow_session = await _shallow_cm.__aenter__()
+        try:
+            from src.db.models import Memory
+            from sqlalchemy import select, or_
+
+            owner = await get_or_create_user(_shallow_session, telegram_id)
+            shallow_now = _utc_now()
+
+            # Pinned — до 3
+            pinned_q = (
+                select(Memory)
+                .where(
+                    Memory.user_id == owner.id,
+                    Memory.is_active,
+                    Memory.pinned.is_(True),
+                    or_(Memory.expires_at.is_(None), Memory.expires_at > shallow_now),
+                )
+                .order_by(Memory.created_at.desc())
+                .limit(3)
+            )
+            pinned_result = await _shallow_session.execute(pinned_q)
+            pinned_facts: list[Memory] = list(pinned_result.scalars().all())
+
+            # Recent — до 5 (не-pinned)
+            recent_q = (
+                select(Memory)
+                .where(
+                    Memory.user_id == owner.id,
+                    Memory.is_active,
+                    Memory.pinned.is_(False),
+                    or_(Memory.expires_at.is_(None), Memory.expires_at > shallow_now),
+                )
+                .order_by(Memory.created_at.desc())
+                .limit(5)
+            )
+            recent_result = await _shallow_session.execute(recent_q)
+            recent_facts: list[Memory] = list(recent_result.scalars().all())
+
+            shallow_facts: list[RecalledFact] = []
+
+            # Pinned first
+            for m in pinned_facts:
+                shallow_facts.append(
+                    RecalledFact(
+                        fact=m.fact,
+                        reason="📌 закреплён",
+                        confidence=m.confidence or 0.5,
+                        memory_id=m.id,
+                        contact_id=m.contact_id,
+                        layer=m.temporal_layer or "recent",
+                        retention=compute_retention(m, shallow_now),
+                    )
+                )
+
+            # Recent
+            for m in recent_facts:
+                shallow_facts.append(
+                    RecalledFact(
+                        fact=m.fact,
+                        reason="🕐 недавнее",
+                        confidence=m.confidence or 0.5,
+                        memory_id=m.id,
+                        contact_id=m.contact_id,
+                        layer=m.temporal_layer or "recent",
+                        retention=compute_retention(m, shallow_now),
+                    )
+                )
+
+            result.facts = shallow_facts[:5]  # максимум 5 фактов
+            result.meta = {
+                "mode": mode,
+                "total_active": len(pinned_facts) + len(recent_facts),
+                "returned": len(result.facts),
+                "reasons_used": ["📌 закреплён", "🕐 недавнее"],
+            }
+
+            # Кэшируем shallow-результаты
+            await _recall_cache.set(_cache_key, result, ttl=_RECALL_CACHE_RESULT_TTL)
+            prefetch_tracker.record_access("recall", _cache_key)
+
+            recalled_ids = [f.memory_id for f in result.facts if f.memory_id]
+            if recalled_ids:
+                track_ff(asyncio.create_task(_bump_use_counts(recalled_ids)))
+            return result
+        finally:
+            if _close_shallow and _shallow_cm is not None:
+                await _shallow_cm.__aexit__(*sys.exc_info())
 
     _close_session = session is None
     _session_cm = None

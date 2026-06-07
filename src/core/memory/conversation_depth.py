@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from src.core.memory import conversation_context as ctx_store
 
 
-RecallMode = str  # "light" | "normal" | "deep"
+RecallMode = str  # "shallow" | "light" | "normal" | "deep"
 
 
 DEEP_HINTS = (
@@ -71,6 +71,9 @@ def message_weight(text: str) -> float:
 
 def get_recall_mode(depth: int, weight: float, text: str = "") -> RecallMode:
     t = (text or "").lower()
+    # S2-T3: SHALLOW — сверхлёгкий режим для тривиальных сообщений
+    if weight < 0.3 and len(t) < 50 and depth <= 1:
+        return "shallow"
     if any(hint in t for hint in DEEP_HINTS):
         return "deep"
     if weight < 0.5 and depth <= 2:

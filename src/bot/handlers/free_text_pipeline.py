@@ -1279,7 +1279,11 @@ async def execute_instant(
     turn_started: float,
     tz_name: str | None = None,
 ) -> bool:
-    """Выполняет INSTANT-ответ (персонализированный). Возвращает True."""
+    """Выполняет INSTANT-ответ (персонализированный). Возвращает True.
+
+    S2-T5: если план пришёл из RouteCache (plan.metrics["route_cache_hit"]),
+    пропускаем recall() и DB-тяжёлые операции — сразу pre-gate → humanize → send.
+    """
     try:
         from src.core.infra.hooks import hooks
 
@@ -1296,6 +1300,13 @@ async def execute_instant(
     from src.core.scheduling.session_logger import log_user_message
 
     asyncio.ensure_future(log_user_message(message.from_user.id, raw))
+
+    # ── S2-T5: RouteCache hit — быстрый путь без recall/DB ───────────
+    _route_cache_hit = (
+        plan.metrics.get("route_cache_hit", False)
+        if hasattr(plan, "metrics")
+        else False
+    )
 
     # ✨ Pre-LLM gate: handle greetings/farewells without LLM
     gate_response = check_pre_gate(raw)
@@ -1317,6 +1328,35 @@ async def execute_instant(
         )
         await _post_turn_optimize(owner_telegram_id, raw, response)
         # Log assistant response to session
+        from src.core.scheduling.session_logger import log_assistant_response
+
+        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
+        return True
+
+    # ── S2-T5 быстрый путь: кэш-hit → пропускаем recall, сразу humanize ──
+    if _route_cache_hit and plan.final_response:
+        context_hint = _detect_context_hint(
+            raw, plan_purpose=plan.tasks[0].purpose.value if plan.tasks else None
+        )
+        response = await _humanize_assistant_response(
+            plan.final_response,
+            owner_telegram_id=owner_telegram_id,
+            context_hint=context_hint,
+            source="free_text_pipeline.execute_instant.cached",
+        )
+        _cache_last_humanized(owner_telegram_id, response)
+        await safe_answer(message, sanitize_html(response))
+        await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="instant_cached",
+            intent_json={"intent": "chat"},
+            response_text=response,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        await _post_turn_optimize(owner_telegram_id, raw, response)
         from src.core.scheduling.session_logger import log_assistant_response
 
         asyncio.ensure_future(log_assistant_response(message.from_user.id, response))

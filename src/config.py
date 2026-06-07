@@ -372,6 +372,12 @@ class Settings(BaseSettings):
         10.0, description="Seconds before dropping voice msg"
     )
 
+    # ── Route Cache (S2-T1) ──
+    route_cache_enabled: bool = Field(
+        True,
+        description="Кэшировать маршрутные решения RouterPlan (S2-T1 Pattern Cache)",
+    )
+
     # ── LLM Response Cache ──
     response_cache_enabled: bool = Field(
         True, description="Кэшировать ответы LLM (SmartCache)"

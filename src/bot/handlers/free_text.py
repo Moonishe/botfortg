@@ -1403,6 +1403,24 @@ async def _process_text(
             t0.need_agents or "—",
         )
 
+    # ── S2-T5: FAST_ROUTE shortcut — кэш-hit пропускает полный пайплайн ──
+    _route_cache_hit = plan.metrics.get("route_cache_hit", False)
+    if _route_cache_hit and plan.response_mode in ("instant", "fast_route"):
+        logger.debug(
+            "S2-T5 FAST_ROUTE shortcut: cache hit, mode=%s, skipping provider",
+            plan.response_mode,
+        )
+        if plan.response_mode == "instant":
+            await execute_instant(
+                plan, message, raw, owner_telegram_id, turn_started, tz_name=tz_name
+            )
+        else:
+            # FAST_ROUTE cache hit: pre_gate + humanize → send
+            await execute_instant(
+                plan, message, raw, owner_telegram_id, turn_started, tz_name=tz_name
+            )
+        return
+
     # Stage 5: INSTANT mode
     if plan.response_mode == "instant" and plan.final_response:
         await execute_instant(
