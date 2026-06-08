@@ -49,3 +49,6 @@ test_proxy*.py
 test_greenlet.py
 AGENTS.md
 SOUL.md
+
+DB_LAYER_SUMMARY.md
+explorer_output.json
