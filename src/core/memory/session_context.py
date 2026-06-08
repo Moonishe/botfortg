@@ -79,7 +79,7 @@ async def save_session_context(
                 ctx.active_tasks = json.dumps(active_tasks, ensure_ascii=False)
 
             # ── Лёгкое LLM-сжатие (best-effort, не блокирует сохранение) ──
-            summary = await _summarize_messages(messages, telegram_id)
+            summary = await _summarize_messages(messages, telegram_id, session=session)
             if summary:
                 ctx.context_summary = summary
 
@@ -208,11 +208,17 @@ async def resume_session(telegram_id: int) -> str | None:
 async def _summarize_messages(
     messages: list[str],
     telegram_id: int,
+    session=None,
 ) -> str | None:
     """Лёгкое LLM-сжатие диалога (1-2 предложения).
 
     Использует лёгкую модель через background purpose.
     Не бросает исключений — в случае ошибки возвращает None.
+
+    Args:
+        messages: Список сообщений для сжатия.
+        telegram_id: Telegram user ID владельца.
+        session: Опциональная существующая сессия БД (избегает double-session).
     """
     if not messages:
         return None
@@ -225,7 +231,7 @@ async def _summarize_messages(
     try:
         from src.llm.router import build_provider
 
-        async with get_session() as session:
+        if session is not None:
             owner = await get_or_create_user(session, telegram_id)
             provider = await build_provider(
                 session, owner, purpose="background", task_type=TaskType.SUMMARIZE
@@ -245,6 +251,26 @@ async def _summarize_messages(
             )
             summary = (result or "").strip()[:300]
             return summary if summary else None
+        else:
+            async with get_session() as _session:
+                owner = await get_or_create_user(_session, telegram_id)
+                provider = await build_provider(
+                    _session, owner, purpose="background", task_type=TaskType.SUMMARIZE
+                )
+                if provider is None:
+                    provider = await build_provider(
+                        _session, owner, purpose="main", task_type=TaskType.SUMMARIZE
+                    )
+                if provider is None:
+                    return None
+
+                prompt = _SUMMARY_PROMPT.format(messages=dialog)
+                result = await provider.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    task_type=TaskType.SUMMARIZE,
+                )
+                summary = (result or "").strip()[:300]
+                return summary if summary else None
     except Exception:
         logger.debug(
             "LLM summary failed for user %d session context",

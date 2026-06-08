@@ -119,6 +119,7 @@ async def update_memory_text(
     new_memory_type: str | None = None,
     new_decay_rate: float | None = None,
     request_version: datetime | None = None,
+    edit_reason: str | None = None,
 ) -> Memory | None:
     """In-place update of fact text + optional type/decay.
 
@@ -153,7 +154,9 @@ async def update_memory_text(
     # Сохраняем версию в аудит-трейл
     from src.db.repos.memory_repo import save_memory_version
 
-    await save_memory_version(session, memory_id, new_fact, edited_by="user")
+    await save_memory_version(
+        session, memory_id, new_fact, edited_by="user", reason=edit_reason
+    )
 
     if new_memory_type is not None and new_memory_type in ALLOWED_MEMORY_TYPES:
         mem.memory_type = new_memory_type

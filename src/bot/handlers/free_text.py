@@ -210,6 +210,13 @@ async def _pop_singalong_search(key: int) -> list | None:
 # ── Session Context helpers (P2) ──────────────────────────────────────
 
 
+def _now_utc() -> datetime:
+    """Текущее UTC-время (для вычисления gap между сообщениями)."""
+    from datetime import timezone as _tz
+
+    return datetime.now(_tz.utc)
+
+
 async def _check_session_resume(user_id: int) -> str | None:
     """Проверяет, вернулся ли пользователь после перерыва >30 мин.
     Возвращает текст приветствия или None."""
@@ -234,13 +241,6 @@ async def _check_session_resume(user_id: int) -> str | None:
     except Exception:
         logger.debug("Session resume check failed for user %d", user_id, exc_info=True)
     return None
-
-
-def _now_utc() -> datetime:
-    """Текущее UTC-время (для вычисления gap между сообщениями)."""
-    from datetime import timezone as _tz
-
-    return datetime.now(_tz.utc)
 
 
 async def _save_session_context_ff(telegram_id: int, messages: list[str]) -> None:

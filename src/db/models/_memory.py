@@ -126,6 +126,9 @@ class MemoryVersion(Base):
     """Аудит-трейл правок памяти — who changed what, when, and why."""
 
     __tablename__ = "memory_versions"
+    __table_args__ = (
+        Index("ix_mv_memory_version", "memory_id", "version", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     memory_id: Mapped[int] = mapped_column(
@@ -242,6 +245,10 @@ class WorkingMemory(Base):
     для промежуточных результатов внутри задачи. Автоочистка через 1 час."""
 
     __tablename__ = "working_memory"
+    __table_args__ = (
+        Index("ix_wm_user_key", "user_id", "key", unique=True),
+        Index("ix_wm_expires", "expires_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
