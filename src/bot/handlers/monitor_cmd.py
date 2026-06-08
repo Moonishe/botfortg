@@ -397,11 +397,33 @@ async def _handle_remove(message: Message, args: list[str]) -> None:
 
     async with get_session() as session:
         owner = await get_or_create_user(session, settings.owner_telegram_id)
+
+        # Удаляем orphan-записи ПЕРЕД удалением источника
+        # 1. Алерты для сообщений этого источника
+        await session.execute(
+            delete(MonitoredAlert).where(
+                MonitoredAlert.message_id.in_(
+                    select(MonitoredMessage.id).where(
+                        MonitoredMessage.source_id == source_id
+                    )
+                )
+            )
+        )
+        # 2. Сообщения этого источника
+        await session.execute(
+            delete(MonitoredMessage).where(MonitoredMessage.source_id == source_id)
+        )
+        # 3. Правила этого источника
+        await session.execute(
+            delete(MonitorRule).where(MonitorRule.source_id == source_id)
+        )
+        # 4. Сам источник
         stmt = delete(MonitoredSource).where(
             MonitoredSource.id == source_id,
             MonitoredSource.user_id == owner.id,
         )
         result = await session.execute(stmt)
+        await session.commit()
 
     if result.rowcount:
         await message.answer(f"🗑 Источник #{source_id} и все связанные данные удалены.")

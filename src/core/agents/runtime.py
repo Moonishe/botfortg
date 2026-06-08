@@ -44,8 +44,10 @@ class AgentCheckpoint:
 
     @property
     def checkpoint_id(self) -> str:
-        """Уникальный идентификатор чекпоинта (хеш от timestamp + step)."""
-        return f"cp_{self.step_index}_{int(self.timestamp.timestamp())}"
+        """Уникальный идентификатор чекпоинта (timestamp + step + object id)."""
+        return (
+            f"cp_{self.step_index}_{int(self.timestamp.timestamp())}-{id(self) % 1000}"
+        )
 
 
 @dataclass
@@ -71,7 +73,7 @@ class TokenBudget:
             True если лимит превышен после расхода, False иначе.
         """
         self.used += tokens
-        if self.used >= self.max_total:
+        if self.used > self.max_total:
             self.exceeded = True
         return self.exceeded
 
@@ -441,7 +443,11 @@ class AgentRuntime:
                     # Lazy import — избегаем циклических зависимостей
                     from src.core.actions.tool_registry import tool_registry
 
-                    return await tool_registry.execute(tool_name, **params)
+                    # Защита от bypass: _confirmed НЕ должен приходить из params
+                    params.pop("_confirmed", None)
+                    return await tool_registry.execute(
+                        tool_name, _confirmed=False, **params
+                    )
                 except Exception as exc:
                     logger.exception(
                         "AgentRuntime._execute_step: tool %s рухнул",

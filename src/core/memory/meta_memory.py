@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import func, select, update as sa_update
 
 from src.config import settings
 from src.db.models._memory import Memory
@@ -47,10 +47,12 @@ def calculate_importance(
     now = reference_time or datetime.now(timezone.utc)
 
     # Уверенность (0.0–1.0)
-    confidence = float(getattr(memory, "confidence", None) or 0.5)
+    confidence = 0.5 if (c := getattr(memory, "confidence", None)) is None else float(c)
 
     # Качество источника (0.0–1.0)
-    source_quality = float(getattr(memory, "source_quality", None) or 0.5)
+    source_quality = (
+        0.5 if (s := getattr(memory, "source_quality", None)) is None else float(s)
+    )
 
     # Бонус за подтверждения: каждый corroboration даёт +0.2 до максимума 1.0
     corr_count = int(getattr(memory, "corroboration_count", None) or 0)
@@ -102,7 +104,7 @@ async def boost_confidence(
                 sa_update(Memory)
                 .where(Memory.id == memory_id)
                 .values(
-                    confidence=Memory.confidence + boost,
+                    confidence=func.least(1.0, Memory.confidence + boost),
                     corroboration_count=Memory.corroboration_count + 1,
                     last_corroborated_at=now,
                     updated_at=now,
@@ -157,7 +159,7 @@ async def reduce_confidence(
                 sa_update(Memory)
                 .where(Memory.id == memory_id)
                 .values(
-                    confidence=Memory.confidence - decay,
+                    confidence=func.greatest(0.0, Memory.confidence - decay),
                     updated_at=now,
                 )
             )

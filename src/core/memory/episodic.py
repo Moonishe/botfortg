@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -195,7 +196,9 @@ async def create_episode(
                     )
                     session.add(ec)
 
-            # Emit episode completed event
+            await session.commit()  # коммитим ДО эмита события
+
+            # Emit episode completed event (AFTER commit — subscribers видят данные)
             from src.core.events.event_bus import event_bus, EPISODE_COMPLETED
 
             await event_bus.emit(
@@ -449,26 +452,30 @@ async def _reflect_single_episode(
 # Счётчик сообщений для батчинга (in-memory, теряется при рестарте — OK для MVP)
 _message_counter: dict[int, int] = {}
 _message_buffer: dict[int, list[str]] = {}
+_counter_lock = asyncio.Lock()
 
 
-def should_create_episode(user_id: int) -> bool:
+async def should_create_episode(user_id: int) -> bool:
     """Проверить, пора ли создавать эпизод (каждые N сообщений)."""
-    count = _message_counter.get(user_id, 0)
+    async with _counter_lock:
+        count = _message_counter.get(user_id, 0)
     return count >= settings.episodic_batch_size
 
 
-def track_message(user_id: int, text: str) -> None:
+async def track_message(user_id: int, text: str) -> None:
     """Учесть сообщение в счётчике и буфере."""
-    _message_counter[user_id] = _message_counter.get(user_id, 0) + 1
-    buf = _message_buffer.setdefault(user_id, [])
-    buf.append(text)
-    # Держим буфер в рамках 2x batch_size
-    if len(buf) > settings.episodic_batch_size * 2:
-        buf[:] = buf[-settings.episodic_batch_size :]
+    async with _counter_lock:
+        _message_counter[user_id] = _message_counter.get(user_id, 0) + 1
+        buf = _message_buffer.setdefault(user_id, [])
+        buf.append(text)
+        # Держим буфер в рамках 2x batch_size
+        if len(buf) > settings.episodic_batch_size * 2:
+            buf[:] = buf[-settings.episodic_batch_size :]
 
 
-def reset_counter(user_id: int) -> list[str]:
+async def reset_counter(user_id: int) -> list[str]:
     """Сбросить счётчик и вернуть накопленные сообщения для создания эпизода."""
-    _message_counter[user_id] = 0
-    buf = _message_buffer.pop(user_id, [])
+    async with _counter_lock:
+        _message_counter[user_id] = 0
+        buf = _message_buffer.pop(user_id, [])
     return buf[-settings.episodic_batch_size :]

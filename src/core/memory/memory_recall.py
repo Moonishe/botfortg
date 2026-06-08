@@ -593,6 +593,7 @@ async def recall(
                 provider = await build_provider(
                     session, owner, task_type=TaskType.SEARCH
                 )
+                embedding: list[float] = []
                 if provider:
                     embedding = await provider.embed(query_text[:300])
 

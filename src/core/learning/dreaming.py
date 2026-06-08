@@ -186,7 +186,7 @@ class DreamingConsolidator:
         for pattern in all_patterns:
             if pattern.confidence >= self.PATTERN_CONFIDENCE_THRESHOLD:
                 try:
-                    integrated = await self._integrate_pattern(pattern)
+                    integrated = await self._integrate_pattern(pattern, user)
                     if integrated:
                         summary["integrated"] += 1
                 except Exception:
@@ -199,7 +199,7 @@ class DreamingConsolidator:
         # ── 4. Генерация инсайтов ──
         try:
             insights = await self._generate_insights(user_id, candidates, session, user)
-            stored = await self._store_insights(insights)
+            stored = await self._store_insights(insights, user)
             summary["insights"] = stored
         except Exception:
             logger.exception("DreamingConsolidator: ошибка генерации инсайтов")
@@ -233,9 +233,13 @@ class DreamingConsolidator:
         - Сгруппированы по cluster_topic
         - Приоритет: самые важные (importance DESC)
         """
+        from datetime import timedelta
+
         from sqlalchemy import desc, select
 
         from src.db.models._memory import Memory
+
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
 
         # Получаем группы по cluster_topic
         result = await session.execute(
@@ -249,6 +253,7 @@ class DreamingConsolidator:
             .where(
                 Memory.user_id == user.id,
                 Memory.is_active == True,
+                Memory.created_at >= cutoff_date,
             )
             .order_by(desc(Memory.importance))
             .limit(50)
@@ -435,7 +440,7 @@ class DreamingConsolidator:
 
         return patterns
 
-    async def _integrate_pattern(self, pattern: AbstractedPattern) -> bool:
+    async def _integrate_pattern(self, pattern: AbstractedPattern, user) -> bool:
         """Интегрировать надёжный паттерн в процедурную память.
 
         Сохраняет паттерн как memory-факт типа 'preference' с высоким confidence.
@@ -452,7 +457,7 @@ class DreamingConsolidator:
                 # Проверяем, нет ли уже похожего факта
                 from src.db.repo import get_or_create_user
 
-                owner = await get_or_create_user(session, settings.owner_telegram_id)
+                owner = await get_or_create_user(session, user.telegram_id)
                 if owner is None:
                     return False
 
@@ -586,7 +591,7 @@ class DreamingConsolidator:
 
         return insights
 
-    async def _store_insights(self, insights: list[Insight]) -> int:
+    async def _store_insights(self, insights: list[Insight], user) -> int:
         """Сохранить инсайты в БД как memory-факты и отправить в notification_queue.
 
         Возвращает количество сохранённых инсайтов.
@@ -601,9 +606,7 @@ class DreamingConsolidator:
                 from sqlalchemy import select
 
                 async with get_session() as session:
-                    owner = await get_or_create_user(
-                        session, settings.owner_telegram_id
-                    )
+                    owner = await get_or_create_user(session, user.telegram_id)
                     if owner is None:
                         continue
 

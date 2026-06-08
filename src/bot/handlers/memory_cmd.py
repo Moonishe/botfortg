@@ -107,7 +107,9 @@ async def _cmd_memory_inbox(message: Message) -> None:
     if not candidates:
         await message.answer("📭 Входящих фактов на подтверждение нет.")
         return
-    lines = ["📬 <b>Входящие факты (Memory Inbox):</b>", ""]
+    # Отправляем заголовок отдельным сообщением
+    await message.answer("📬 <b>Входящие факты (Memory Inbox):</b>")
+    # Каждый кандидат — отдельное сообщение со своей клавиатурой
     for i, c in enumerate(candidates, 1):
         sent_emoji = {
             "positive": "🟢",
@@ -115,7 +117,7 @@ async def _cmd_memory_inbox(message: Message) -> None:
             "neutral": "⚪",
         }.get(c.sentiment or "", "⚪")
         mem_type = f" ({c.memory_type})" if c.memory_type else ""
-        lines.append(
+        text = (
             f"{i}. {sent_emoji} <i>{sanitize_html(c.fact)}</i>{mem_type}\n"
             f"   важность={c.importance}, затухание={c.decay_rate}, источник={c.source}"
         )
@@ -149,7 +151,7 @@ async def _cmd_memory_inbox(message: Message) -> None:
                 ],
             ]
         )
-        await message.answer(lines[-1], reply_markup=kb)
+        await message.answer(text, reply_markup=kb)
 
 
 # ─── Режим: --forget-sweep ──────────────────────────────────────────

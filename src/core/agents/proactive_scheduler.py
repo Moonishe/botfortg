@@ -115,8 +115,13 @@ def _parse_frequency(freq: str) -> timedelta | None:
 
         current_day = now.weekday()  # Monday=0, Sunday=6
         days_ahead = target_day - current_day
-        if days_ahead <= 0:
+        if days_ahead < 0:
             days_ahead += 7
+        elif days_ahead == 0:
+            # Тот же день — проверяем, не прошло ли уже запланированное время
+            target_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if now >= target_time:
+                days_ahead += 7  # Уже прошло — переносим на следующую неделю
 
         next_run = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
             days=days_ahead

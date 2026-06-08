@@ -48,3 +48,19 @@ class MistralProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
             messages=self._fmt_messages(messages),
         )
         return resp.choices[0].message.content or ""
+
+    async def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> AsyncGenerator[str, None]:
+        model = self._resolve_model(heavy)
+        fmt = self._fmt_messages(messages)
+        stream = await self._client.chat.completions.create(
+            model=model, messages=fmt, stream=True
+        )
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
