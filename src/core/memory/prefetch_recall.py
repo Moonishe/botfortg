@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from src.config import settings
+from src.core.events.event_bus import event_bus, MEMORY_MUTATED
 
 # ── Module-level prefetch cache ───────────────────────────────────────
 # _prefetch_cache: dict[int, tuple[float, RecallResult]]
@@ -119,3 +120,10 @@ async def clear_prefetch(user_id: int) -> None:
     чтобы prefetch не возвращал stale-результаты после add/delete/update."""
     async with _prefetch_lock:
         _prefetch_cache.pop(user_id, None)
+
+
+# ── Event Bus subscriber ────────────────────────────────────────────────
+@event_bus.on(MEMORY_MUTATED)
+async def _on_memory_mutated(user_id: int, action: str):
+    """Сбросить prefetch-кэш при мутации памяти."""
+    await clear_prefetch(user_id)

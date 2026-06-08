@@ -475,6 +475,14 @@ async def check_contradiction_response(
 
                         await link_session.commit()
                         await bump_recall_version(link_owner.telegram_id)
+                        # Emit memory mutation event
+                        from src.core.events.event_bus import event_bus, MEMORY_MUTATED
+
+                        await event_bus.emit(
+                            MEMORY_MUTATED,
+                            user_id=link_owner.telegram_id,
+                            action="contradiction_resolved",
+                        )
                         # B6: инвалидируем stats-кэш после деактивации противоречащего факта
                         from src.core.actions.stats_cache import invalidate
 

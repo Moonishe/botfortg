@@ -1668,6 +1668,16 @@ async def _process_text(
         await message.answer(_get_waiting_message())
         return
 
+    # ── Event Bus: emit user message received ──────────────────────────
+    try:
+        from src.core.events.event_bus import event_bus, USER_MESSAGE_RECEIVED
+
+        await event_bus.emit(
+            USER_MESSAGE_RECEIVED, user_id=owner_telegram_id, text_len=len(raw)
+        )
+    except Exception:
+        logger.debug("EventBus emit failed for USER_MESSAGE_RECEIVED", exc_info=True)
+
     # Stage 9: Fallback — route_intent → _dispatch
     await _process_text_fallback(
         raw,

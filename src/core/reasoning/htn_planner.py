@@ -791,12 +791,9 @@ class HTNPlanner:
         decoder = json.JSONDecoder()
         for match in re.finditer(r"\[", text):
             try:
-                value, _ = decoder.raw_decode(text[match.start() :])
+                value, end = decoder.raw_decode(text[match.start() :])
                 if isinstance(value, (list, dict)):
-                    return text[
-                        match.start() : match.start()
-                        + len(json.dumps(value, ensure_ascii=False))
-                    ]
+                    return text[match.start() : match.start() + end]
             except json.JSONDecodeError:
                 continue
 

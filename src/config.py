@@ -461,6 +461,9 @@ class Settings(BaseSettings):
         description="Кэшировать маршрутные решения RouterPlan (S2-T1 Pattern Cache)",
     )
 
+    # ── Event Bus ──
+    event_bus_enabled: bool = Field(True, description="Enable unified event bus")
+
     # ── LLM Response Cache ──
     response_cache_enabled: bool = Field(
         True, description="Кэшировать ответы LLM (SmartCache)"
@@ -594,6 +597,28 @@ class Settings(BaseSettings):
     plan_complexity_threshold: float = Field(
         0.6,
         description="Порог сложности запроса для предложения плана (0.0–1.0)",
+    )
+
+    # ── Agent Runtime (Phase 3a) ──
+    agent_runtime_enabled: bool = Field(
+        True, description="Включить автономный Agent Runtime с чекпоинтингом"
+    )
+    agent_max_steps: int = Field(
+        20,
+        description="Жёсткий лимит шагов для AgentRuntime (защита от бесконечного цикла)",
+    )
+    agent_token_budget: int = Field(
+        50000, description="Бюджет токенов для одного запуска агента"
+    )
+
+    # ── Skills → Procedures Bridge + Agent Registry (Phase 3b) ──
+    procedural_memory_enabled: bool = Field(
+        True,
+        description="Включить процедурную память (конвертация навыков в исполняемые процедуры)",
+    )
+    agent_registry_enabled: bool = Field(
+        True,
+        description="Включить реестр специализированных агентов (researcher, coder, planner, analyst)",
     )
 
     # Agent/task-specific model overrides (из .env)

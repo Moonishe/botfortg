@@ -82,8 +82,8 @@ def get_recall_version(telegram_id: int) -> int:
 async def bump_recall_version(telegram_id: int) -> None:
     """Increment the per-user recall cache version after a memory mutation.
 
-    Также сбрасывает prefetch-кэш для пользователя, чтобы после add/delete/update
-    не возвращались stale-результаты (B1: prefetch не проверял версию — TTL до 5с).
+    Кэш-инвалидация (prefetch + route cache) теперь через Event Bus:
+    subscribes на MEMORY_MUTATED в prefetch_recall и pattern_cache.
 
     Safe to call from any async context; uses its own asyncio.Lock to protect
     the dict write.  Non-blocking: a missed bump is far worse than a deadlock,
@@ -92,21 +92,10 @@ async def bump_recall_version(telegram_id: int) -> None:
     try:
         async with _get_version_lock():
             _rec_version[telegram_id] = _rec_version.get(telegram_id, 0) + 1
-        # B1: сбросить prefetch-кэш — иначе 5с после мутации возвращается старый результат
-        from src.core.memory.prefetch_recall import clear_prefetch
+        # Emit event — subscribers (prefetch_recall, pattern_cache) handle invalidation
+        from src.core.events.event_bus import event_bus, MEMORY_MUTATED
 
-        await clear_prefetch(telegram_id)
-        # B2: инвалидировать RouteCache — после мутации памяти маршруты могут измениться
-        try:
-            from src.core.intelligence.routing.pattern_cache import route_cache
-
-            await route_cache.invalidate_user(telegram_id)
-        except Exception:
-            logger.debug(
-                "RouteCache invalidation failed in bump_recall_version(%s)",
-                telegram_id,
-                exc_info=True,
-            )
+        await event_bus.emit(MEMORY_MUTATED, user_id=telegram_id, action="bump_version")
     except Exception:
         logger.warning(
             "bump_recall_version: cache invalidation failed for user %d",

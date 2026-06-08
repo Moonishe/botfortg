@@ -168,6 +168,7 @@ async def update_memory_text(
     # Инвалидация кэша: сбрасываем recall-кэш и stats-кэш владельца
     from src.core.actions.stats_cache import invalidate
     from src.core.memory.memory_recall import bump_recall_version
+    from src.core.events.event_bus import event_bus, MEMORY_MUTATED
     from src.db.models._base import User
 
     user_result = await session.execute(
@@ -177,6 +178,9 @@ async def update_memory_text(
     if owner_telegram_id is not None:
         await invalidate("mem_")
         await bump_recall_version(owner_telegram_id)
+        await event_bus.emit(
+            MEMORY_MUTATED, user_id=owner_telegram_id, action="update_text"
+        )
 
     logger.info("Updated memory %d → new text len=%d", memory_id, len(new_fact))
     return mem

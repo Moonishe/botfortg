@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from src.core.cache.manager import ManagedCache, cache_manager
 from src.config import settings
+from src.core.events.event_bus import event_bus, MEMORY_MUTATED
 
 if TYPE_CHECKING:
     from .planner import RouterPlan
@@ -153,3 +154,10 @@ class RouteCache:
 
 # Глобальный синглтон
 route_cache = RouteCache(max_size=1000, ttl=300.0)
+
+
+# ── Event Bus subscriber ────────────────────────────────────────────────
+@event_bus.on(MEMORY_MUTATED)
+async def _on_memory_mutated(user_id: int, action: str):
+    """Инвалидировать RouteCache при мутации памяти."""
+    await route_cache.invalidate_user(user_id)

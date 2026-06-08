@@ -195,6 +195,13 @@ async def create_episode(
                     )
                     session.add(ec)
 
+            # Emit episode completed event
+            from src.core.events.event_bus import event_bus, EPISODE_COMPLETED
+
+            await event_bus.emit(
+                EPISODE_COMPLETED, user_id=user_id, episode_id=episode.id
+            )
+
             logger.info(
                 "Episode created: id=%d user=%d msgs=%d valence=%s importance=%.2f",
                 episode.id,
