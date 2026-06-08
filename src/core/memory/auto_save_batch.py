@@ -149,6 +149,73 @@ def _parse_batch_facts(raw_json: str) -> list[tuple[int, list[dict[str, str]]]]:
     return parsed
 
 
+def _score_extraction_clarity(fact_text: str) -> tuple[float, float]:
+    """Оценивает качество извлечения факта: насколько это прямое утверждение.
+
+    Прямые утверждения («Мне 30 лет», «Я работаю в X») → высокое качество.
+    Намёки/неуверенные («наверное, я люблю кофе») → низкое качество.
+
+    Returns:
+        (extraction_quality, confidence) — оба 0.0–1.0.
+    """
+    text_lower = fact_text.lower()
+    quality = 0.5  # базовое качество
+
+    # Признаки прямого утверждения (уверенные формулировки)
+    direct_markers = (
+        "работает в",
+        "работаю в",
+        "живёт в",
+        "живу в",
+        "зовут",
+        "года",
+        "лет",
+        "день рождения",
+        "работает",
+        "работаю",
+        "учится",
+        "учусь",
+        "любит",
+        "люблю",
+        "не любит",
+        "не люблю",
+        "хочет",
+        "хочу",
+    )
+    # Признаки неуверенности / намёка
+    uncertain_markers = (
+        "наверное",
+        "возможно",
+        "может быть",
+        "кажется",
+        "вроде",
+        "скорее всего",
+        "думаю",
+        "по-моему",
+        "не уверен",
+        "не знаю",
+    )
+
+    direct_count = sum(1 for m in direct_markers if m in text_lower)
+    uncertain_count = sum(1 for m in uncertain_markers if m in text_lower)
+
+    if direct_count > 0:
+        quality += 0.2 * min(direct_count, 2)
+    if uncertain_count > 0:
+        quality -= 0.15 * min(uncertain_count, 2)
+
+    # Длина факта: короткие (3–6 слов) чаще прямые утверждения
+    word_count = len(fact_text.split())
+    if 3 <= word_count <= 8:
+        quality += 0.1
+
+    # Clamp
+    quality = max(0.2, min(1.0, quality))
+    # Консервативно: confidence чуть ниже extraction_quality для auto-фактов
+    confidence = max(0.3, quality - 0.1)
+    return round(quality, 2), round(confidence, 2)
+
+
 async def _save_facts_to_db(
     telegram_id: int,
     facts: list[dict[str, str]],
@@ -167,6 +234,11 @@ async def _save_facts_to_db(
             sentiment = f.get("sentiment", "neutral")
             if sentiment not in ("positive", "negative", "neutral"):
                 sentiment = "neutral"
+            # Meta-Memory: оцениваем качество извлечения
+            extraction_quality, initial_confidence = _score_extraction_clarity(
+                fact_text
+            )
+            # source_quality для auto-извлечения = 0.4 (ниже чем chat/user)
             await add_memory(
                 session,
                 owner,
@@ -174,6 +246,9 @@ async def _save_facts_to_db(
                 contact_id=None,
                 sentiment=sentiment,
                 source="auto",
+                confidence=initial_confidence,
+                source_quality=0.4,
+                extraction_quality=extraction_quality,
             )
             stored += 1
     if stored:

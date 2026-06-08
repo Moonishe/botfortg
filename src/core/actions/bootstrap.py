@@ -68,6 +68,7 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_pubmed",
     "src.core.actions.mcp_working_memory",
     "src.core.actions.mcp_memory_edit",
+    "src.core.actions.mcp_episodic",
 )
 
 _BUILTINS_REGISTERED = False

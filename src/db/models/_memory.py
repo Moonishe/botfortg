@@ -48,6 +48,18 @@ class Memory(Base):
     times_mentioned: Mapped[int] = mapped_column(
         Integer, default=1
     )  # сколько раз подтверждён
+    source_quality: Mapped[float] = mapped_column(
+        Float, default=0.5
+    )  # 0.0–1.0 надёжность источника (chat < user < auto)
+    corroboration_count: Mapped[int] = mapped_column(
+        Integer, default=0
+    )  # сколько раз факт подтверждён другими источниками
+    last_corroborated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )  # когда последний раз подтверждён
+    extraction_quality: Mapped[float] = mapped_column(
+        Float, default=0.5
+    )  # 0.0–1.0 качество самого извлечения (прямое утверждение > намёк)
     message_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True
     )  # исходное сообщение
@@ -243,3 +255,56 @@ class WorkingMemory(Base):
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )  # автоочистка через 1 час
+
+
+# ── P3: Episodic Memory ──────────────────────────────────────────────────
+
+
+class Episode(Base):
+    """Эпизод — событие или разговор с полным контекстом.
+
+    В отличие от Memory (которая хранит отдельные факты), Episode
+    сохраняет целостный контекст взаимодействия: кто участвовал, когда,
+    эмоциональный тон, итог.  Используется для ночной рефлексии и
+    извлечения фактов, которые smart_extractor пропустил при первом проходе.
+    """
+
+    __tablename__ = "episodes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    summary: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # LLM-саммари эпизода
+    raw_sample: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # первые ~500 символов диалога
+    emotional_valence: Mapped[float | None] = mapped_column(
+        nullable=True
+    )  # -1.0 (негатив) … 1.0 (позитив)
+    importance: Mapped[float] = mapped_column(default=0.5)  # 0.0–1.0
+    memory_ids: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON: [1,2,3] — ID связанных фактов Memory
+
+
+class EpisodeContact(Base):
+    """Связь эпизода с контактами — многие-ко-многим."""
+
+    __tablename__ = "episode_contacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True
+    )
+    contact_id: Mapped[int] = mapped_column(BigInteger)
+    contact_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    role: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )  # "participant", "mentioned"

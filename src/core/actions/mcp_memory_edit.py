@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
         "Пример: action='rollback', memory_id=42, version=1"
     ),
     category="memory",
-    risk="medium",
+    risk="high",
     params={
         "action": "str — 'edit', 'history' или 'rollback'",
         "memory_id": "int — ID факта памяти",

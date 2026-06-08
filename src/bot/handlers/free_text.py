@@ -1958,6 +1958,35 @@ async def free_text(
     # ── P2: сохраняем контекст сессии (fire-and-forget) ──
     await _save_session_context_ff(uid, [raw[:500]])
 
+    # ── P3: Episodic Memory — авто-создание эпизодов (fire-and-forget) ──
+    if settings.episodic_memory_enabled:
+        try:
+            from src.core.memory.episodic import (
+                should_create_episode,
+                track_message,
+                reset_counter,
+                create_episode,
+            )
+
+            track_message(uid, raw[:500])
+
+            if should_create_episode(uid):
+                messages_batch = reset_counter(uid)
+
+                async def _create_episode_ff():
+                    try:
+                        await create_episode(uid, messages_batch)
+                    except Exception:
+                        logger.debug(
+                            "Fire-and-forget episode creation failed for user %d",
+                            uid,
+                            exc_info=True,
+                        )
+
+                track_ff(asyncio.create_task(_create_episode_ff()))
+        except Exception:
+            logger.debug("Episodic memory tracking failed", exc_info=True)
+
     # ── Session recording (non-blocking, best-effort) ─────────────────
     try:
         from src.core.memory.session_recorder import record_turn

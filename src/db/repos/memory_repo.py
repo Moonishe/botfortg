@@ -392,6 +392,8 @@ async def add_memory(
     pinned: bool = False,
     expires_at: datetime | None = None,
     use_count: int = 0,
+    source_quality: float = 0.5,
+    extraction_quality: float = 0.5,
 ) -> Memory | None:
     """
     Добавляет факт в память с дедупликацией.
@@ -452,6 +454,9 @@ async def add_memory(
             if existing:
                 existing.times_mentioned = (existing.times_mentioned or 1) + 1
                 existing.confidence = min(1.0, existing.confidence + source_weight)
+                # Meta-Memory: corroboration — факт подтверждён повторно
+                existing.corroboration_count = (existing.corroboration_count or 0) + 1
+                existing.last_corroborated_at = datetime.now(timezone.utc)
                 existing.updated_at = datetime.now(timezone.utc)
                 if sentiment and existing.sentiment != sentiment:
                     existing.sentiment = "contradictory"  # маркируем противоречие
@@ -499,6 +504,11 @@ async def add_memory(
                             existing.confidence = min(
                                 1.0, existing.confidence + source_weight
                             )
+                            # Meta-Memory: corroboration — факт подтверждён повторно
+                            existing.corroboration_count = (
+                                existing.corroboration_count or 0
+                            ) + 1
+                            existing.last_corroborated_at = now
                             existing.updated_at = now
                             if sentiment and existing.sentiment != sentiment:
                                 existing.sentiment = "contradictory"
@@ -531,6 +541,8 @@ async def add_memory(
             pinned=pinned,
             expires_at=expires_at,
             use_count=use_count,
+            source_quality=source_quality,
+            extraction_quality=extraction_quality,
         )
         session.add(mem)
         await session.flush()

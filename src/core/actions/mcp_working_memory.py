@@ -50,7 +50,7 @@ def _resolve_user_id(kwargs: dict[str, Any]) -> int | None:
         "Ключ и значение — строки. По умолчанию TTL = 60 минут."
     ),
     category="memory",
-    risk="low",
+    risk="medium",
     params={
         "key": "str — уникальный ключ для сохранения",
         "value": "str — сохраняемое значение",
@@ -210,8 +210,8 @@ async def list_working_memory(
         "иначе удаляет все записи пользователя."
     ),
     category="memory",
-    risk="medium",
-    requires_confirmation=False,
+    risk="high",
+    requires_confirmation=True,
     params={
         "key": "str|None — конкретный ключ для удаления (опционально)",
     },

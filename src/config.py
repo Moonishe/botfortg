@@ -167,6 +167,15 @@ class Settings(BaseSettings):
         24, description="Максимальный возраст контекста сессии до истечения (часы)"
     )
 
+    # ── P3: Episodic Memory ──
+    episodic_memory_enabled: bool = Field(
+        True, description="Включить эпизодическую память (запись событий/разговоров)"
+    )
+    episodic_batch_size: int = Field(10, description="Сообщений на один эпизод")
+    episodic_reflect_enabled: bool = Field(
+        True, description="Включить ночную рефлексию эпизодов (извлечение новых фактов)"
+    )
+
     # ── Prefetch recall ──
     prefetch_recall_enabled: bool = Field(
         True, description="Включить оптимистичный prefetch memory recall (S1-T1)"
@@ -397,6 +406,20 @@ class Settings(BaseSettings):
     otel_enabled: bool = Field(False, description="Enable OpenTelemetry tracing")
     otel_exporter_endpoint: str = Field(
         "", description="OTLP exporter endpoint (e.g. http://localhost:4318/v1/traces)"
+    )
+
+    # ── Meta-Memory ──
+    meta_memory_enabled: bool = Field(
+        True, description="Включить Meta-Memory: confidence/importance scoring фактов"
+    )
+    meta_memory_confidence_boost: float = Field(
+        0.15, description="На сколько повышать confidence при corroboration"
+    )
+    meta_memory_confidence_decay: float = Field(
+        0.2, description="На сколько снижать confidence при contradiction"
+    )
+    meta_memory_recalculate_interval_hours: int = Field(
+        24, description="Интервал пересчёта importance всех фактов (часы)"
     )
 
     # ── Limits & timeouts ──

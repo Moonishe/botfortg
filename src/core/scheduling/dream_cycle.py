@@ -54,6 +54,9 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         "dsm": 0,
         "auto_forgotten": 0,
         "stale_closed": 0,
+        "reflected_episodes": 0,
+        "reflected_facts": 0,
+        "meta_memory_updated": 0,
     }
 
     from src.db.repo import get_or_create_user
@@ -235,6 +238,55 @@ async def dream_cycle(owner_telegram_id: int) -> None:
             logger.exception("Dream cycle: phase 8 (stale sessions) failed")
             summary["stale_closed"] = 0
 
+        # ── Phase 9: P3 Episodic Memory — Episode Reflection ──────────────
+        # Перечитывает старые эпизоды и извлекает новые факты,
+        # которые smart_extractor пропустил при первом проходе.
+        if settings.episodic_memory_enabled and settings.episodic_reflect_enabled:
+            try:
+                from src.core.memory.episodic import reflect_on_episodes
+
+                reflection_results = await reflect_on_episodes(owner_telegram_id)
+                summary["reflected_episodes"] = len(reflection_results)
+                summary["reflected_facts"] = sum(
+                    r.get("new_facts", 0) for r in reflection_results
+                )
+                if reflection_results:
+                    logger.info(
+                        "Dream cycle: phase 9 (episode reflection) — "
+                        "%d episodes, %d new facts",
+                        summary["reflected_episodes"],
+                        summary["reflected_facts"],
+                    )
+                else:
+                    logger.info(
+                        "Dream cycle: phase 9 (episode reflection) — no new facts found"
+                    )
+            except Exception:
+                logger.exception("Dream cycle: phase 9 (episode reflection) failed")
+                summary["reflected_episodes"] = 0
+                summary["reflected_facts"] = 0
+        else:
+            summary["reflected_episodes"] = 0
+            summary["reflected_facts"] = 0
+
+        # ── Phase 10: Meta-Memory — пересчёт importance ──────────────────
+        # Ночной пересчёт importance всех фактов с учётом
+        # confidence, source_quality, corroboration и времени.
+        try:
+            if getattr(settings, "meta_memory_enabled", True):
+                from src.core.memory.meta_memory import recalculate_all_importance
+
+                mm_updated = await recalculate_all_importance(owner.id)
+                summary["meta_memory_updated"] = mm_updated
+                if mm_updated:
+                    logger.info(
+                        "Dream cycle: phase 10 (meta-memory) — %d importance scores updated",
+                        mm_updated,
+                    )
+        except Exception:
+            logger.exception("Dream cycle: phase 10 (meta-memory) failed")
+            summary["meta_memory_updated"] = 0
+
         # ── Graph statistics ──────────────────────────────────────────────
         try:
             from src.db.repos.memory_repo import get_graph_stats
@@ -297,6 +349,15 @@ async def dream_cycle(owner_telegram_id: int) -> None:
             if stale_closed > 0:
                 summary_lines.append(f"• закрыто сессий: {stale_closed}")
 
+            # Episode reflection (P3)
+            reflected_episodes = summary.get("reflected_episodes", 0)
+            reflected_facts = summary.get("reflected_facts", 0)
+            if reflected_facts > 0:
+                summary_lines.append(
+                    f"• 📖 Рефлексия эпизодов: {reflected_facts} новых фактов "
+                    f"из {reflected_episodes} эпизодов"
+                )
+
             # Auto-forget
             auto_forgotten = summary.get("auto_forgotten", 0)
             if auto_forgotten > 0:
@@ -333,6 +394,13 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                     f"• удержание: 🔒 strong {rb['strong']}, "
                     f"⏳ fading {rb['fading']}, "
                     f"📦 weak {rb['weak']}"
+                )
+
+            # Meta-Memory importance recalculation
+            mm_updated = summary.get("meta_memory_updated", 0)
+            if mm_updated > 0:
+                summary_lines.append(
+                    f"• 📊 Meta-Memory: пересчитана важность {mm_updated} фактов"
                 )
 
             # Graph stats

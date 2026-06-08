@@ -471,6 +471,7 @@ async def recall(
             .where(*base_conditions)
             .order_by(
                 Memory.pinned.desc(),
+                Memory.importance.desc(),  # Meta-Memory: важные факты выше
                 Memory.created_at.desc(),
                 Memory.confidence.desc(),
             )
@@ -747,7 +748,7 @@ async def recall(
             and (m.confidence or 0) >= 0.5
             and (m.contact_id == contact_id if contact_id else True)
         ]
-        fresh.sort(key=lambda m: m.confidence or 0, reverse=True)
+        fresh.sort(key=lambda m: (m.confidence or 0, m.importance or 0), reverse=True)
         for m in fresh[:3]:
             ranked.append(
                 RecalledFact(
@@ -770,7 +771,7 @@ async def recall(
             and (m.use_count or 0) >= 3
             and (m.contact_id == contact_id if contact_id else True)
         ]
-        freq.sort(key=lambda m: m.use_count or 0, reverse=True)
+        freq.sort(key=lambda m: (m.use_count or 0, m.importance or 0), reverse=True)
         for m in freq[:2]:
             ranked.append(
                 RecalledFact(
@@ -790,7 +791,9 @@ async def recall(
             self_facts = [
                 m for m in all_facts if m.id not in seen_ids and m.contact_id is None
             ]
-            self_facts.sort(key=lambda m: m.confidence or 0, reverse=True)
+            self_facts.sort(
+                key=lambda m: (m.confidence or 0, m.importance or 0), reverse=True
+            )
             for m in self_facts[:2]:
                 ranked.append(
                     RecalledFact(
@@ -812,7 +815,9 @@ async def recall(
                 for m in all_facts
                 if m.id not in seen_ids and m.contact_id == contact_id
             ]
-            contact_facts.sort(key=lambda m: m.confidence or 0, reverse=True)
+            contact_facts.sort(
+                key=lambda m: (m.confidence or 0, m.importance or 0), reverse=True
+            )
             for m in contact_facts[:5]:
                 ranked.append(
                     RecalledFact(

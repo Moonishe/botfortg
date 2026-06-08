@@ -29,6 +29,8 @@ from src.db.models._messaging import (
     ScheduledMessage,
 )
 from src.db.models._memory import (
+    Episode,
+    EpisodeContact,
     Memory,
     MemoryLink,
     MemoryCluster,
@@ -88,6 +90,8 @@ __all__ = [
     "Folder",
     "ConversationSummary",
     "ScheduledMessage",
+    "Episode",
+    "EpisodeContact",
     "Memory",
     "MemoryLink",
     "MemoryCluster",

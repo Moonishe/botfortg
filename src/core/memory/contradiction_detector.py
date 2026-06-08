@@ -377,6 +377,20 @@ async def check_contradiction_response(
                         old_mem.sentiment = "contradictory"
                         old_mem.is_active = False
 
+                        # Meta-Memory: снижаем confidence противоречащего факта
+                        try:
+                            from src.core.memory.meta_memory import reduce_confidence
+
+                            await reduce_confidence(
+                                old_mem.id,
+                                reason="contradiction_confirmed",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "reduce_confidence failed for contradiction",
+                                exc_info=True,
+                            )
+
                         # Сохраняем версию в аудит-трейл перед деактивацией
                         from src.db.repos.memory_repo import save_memory_version
 
