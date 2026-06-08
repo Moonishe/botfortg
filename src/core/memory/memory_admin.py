@@ -149,6 +149,12 @@ async def update_memory_text(
 
     mem.fact = new_fact
     mem.embedding_hash = hashlib.sha256(new_fact.lower().encode()).hexdigest()[:16]
+
+    # Сохраняем версию в аудит-трейл
+    from src.db.repos.memory_repo import save_memory_version
+
+    await save_memory_version(session, memory_id, new_fact, edited_by="user")
+
     if new_memory_type is not None and new_memory_type in ALLOWED_MEMORY_TYPES:
         mem.memory_type = new_memory_type
     if new_decay_rate is not None:

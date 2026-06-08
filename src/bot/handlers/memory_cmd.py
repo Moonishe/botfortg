@@ -88,6 +88,9 @@ async def cmd_memory(
     if "--story" in raw:
         name = raw.replace("--story", "", 1).strip()
         return await _cmd_memory_story(message, userbot_manager, name)
+    if "--history" in raw:
+        memory_id_str = raw.replace("--history", "", 1).strip()
+        return await _cmd_memory_history(message, memory_id_str)
 
     # default = view
     return await _cmd_memory_view(message, userbot_manager, raw)
@@ -730,6 +733,78 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
 # ─── /cancel: global handler lives in login.cmd_cancel — clears ANY FSM
 # state including MemoryCorrectionStates.waiting_new_text. No need for a
 # dedicated /cancel_pending here.
+
+# ─── Режим: --history <id> ──────────────────────────────────────────
+
+
+async def _cmd_memory_history(message: Message, memory_id_str: str) -> None:
+    """Показать историю версий факта памяти (аудит-трейл).
+
+    Использование: ``/memory --history <id>``
+    Пример: ``/memory --history 42``
+    """
+    if not memory_id_str or not memory_id_str.isdigit():
+        await message.answer(
+            "Использование: <code>/memory --history &lt;id&gt;</code>\n"
+            "Пример: <code>/memory --history 42</code>"
+        )
+        return
+
+    memory_id = int(memory_id_str)
+
+    from src.db.repos.memory_repo import get_memory_history
+    from src.db.models._memory import Memory
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        mem = await session.get(Memory, memory_id)
+        if not mem or mem.user_id != owner.id:
+            await message.answer(f"❌ Факт #{memory_id} не найден.")
+            return
+
+        current_fact = mem.fact
+        versions = await get_memory_history(session, memory_id)
+
+    if not versions:
+        await message.answer(
+            f"📋 <b>История факта #{memory_id}</b>\n\n"
+            f"<i>{sanitize_html(current_fact)}</i>\n\n"
+            f"ℹ️ История правок пуста — факт ни разу не редактировался."
+        )
+        return
+
+    lines = [
+        f"📋 <b>История факта #{memory_id}</b>",
+        f"📝 <b>Текущий текст:</b> <i>{sanitize_html(current_fact)}</i>",
+        "",
+        f"📚 <b>Версии ({len(versions)}):</b>",
+    ]
+
+    for v in versions:
+        edited_at_str = (
+            v.edited_at.strftime("%d.%m.%Y %H:%M") if v.edited_at else "неизвестно"
+        )
+        editor_label = {
+            "user": "👤 пользователь",
+            "system": "🤖 система",
+            "agent": "🧠 агент",
+        }.get(v.edited_by, f"❓ {v.edited_by}")
+
+        reason_str = f" — {v.reason}" if v.reason else ""
+        lines.append(
+            f"\n<b>v{v.version}</b> [{edited_at_str}] {editor_label}{reason_str}\n"
+            f"  «{sanitize_html(v.fact_text[:200])}»"
+        )
+
+    # Добавляем подсказку про откат
+    lines.append(
+        "\n💡 <i>Для отката используйте: "
+        f"/memory --correct {memory_id} "
+        "и напишите старый текст вручную.</i>"
+    )
+
+    await message.answer("\n".join(lines))
+
 
 # ── Timeline format ───────────────────────────────────────────────────
 

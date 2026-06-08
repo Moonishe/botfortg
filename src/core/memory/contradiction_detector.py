@@ -377,6 +377,17 @@ async def check_contradiction_response(
                         old_mem.sentiment = "contradictory"
                         old_mem.is_active = False
 
+                        # Сохраняем версию в аудит-трейл перед деактивацией
+                        from src.db.repos.memory_repo import save_memory_version
+
+                        await save_memory_version(
+                            link_session,
+                            old_mem.id,
+                            old_mem.fact,
+                            edited_by="system",
+                            reason="contradiction",
+                        )
+
                         # ── Phase 1A: link supersedes evolution chain ────
                         # Ищем факт, который только что был извлечён из raw text
                         # пользователя (через enqueue в free_text._process_text)

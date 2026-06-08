@@ -53,6 +53,14 @@ from .free_text_common import (
 )
 from src.core.intelligence.character_evolution import maybe_evolve_after_turn
 
+# ── Session Context (P2) ──────────────────────────────────────────────
+from src.core.memory.session_context import (
+    save_session_context,
+    load_session_context,
+    resume_session,
+)
+from src.config import settings as _settings
+
 from .free_text_pipeline import (
     _dispatch,
     _save_intent_context,
@@ -197,6 +205,60 @@ async def _pop_singalong_search(key: int) -> list | None:
     if val is not None:
         await _singalong_search_cache.invalidate(key)
     return val
+
+
+# ── Session Context helpers (P2) ──────────────────────────────────────
+
+
+async def _check_session_resume(user_id: int) -> str | None:
+    """Проверяет, вернулся ли пользователь после перерыва >30 мин.
+    Возвращает текст приветствия или None."""
+    if not _settings.session_context_enabled:
+        return None
+    try:
+        from src.db.models._session import SessionContext
+        from src.db.repos.session_repo import get_or_create_user
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, user_id)
+            db_uid = owner.id
+            result = await session.execute(
+                select(SessionContext).where(SessionContext.user_id == db_uid)
+            )
+            ctx = result.scalar_one_or_none()
+            if ctx is not None and ctx.last_active_at is not None:
+                gap = (_now_utc() - ctx.last_active_at).total_seconds()
+                gap_minutes = _settings.session_context_gap_minutes
+                if gap > gap_minutes * 60:
+                    return await resume_session(user_id)
+    except Exception:
+        logger.debug("Session resume check failed for user %d", user_id, exc_info=True)
+    return None
+
+
+def _now_utc() -> datetime:
+    """Текущее UTC-время (для вычисления gap между сообщениями)."""
+    from datetime import timezone as _tz
+
+    return datetime.now(_tz.utc)
+
+
+async def _save_session_context_ff(telegram_id: int, messages: list[str]) -> None:
+    """Fire-and-forget: сохранить контекст сессии (не блокирует ответ)."""
+    if not _settings.session_context_enabled:
+        return
+
+    async def _do_save():
+        try:
+            await save_session_context(telegram_id, messages)
+        except Exception:
+            logger.debug(
+                "Fire-and-forget session save failed for user %d",
+                telegram_id,
+                exc_info=True,
+            )
+
+    track_ff(asyncio.create_task(_do_save()))
 
 
 # ── Contact prefetch helpers ──────────────────────────────────────────
@@ -1699,6 +1761,7 @@ async def free_text(
             "В любой момент можно изменить в /settings → 🎭 Личность.",
             reply_markup=kb,
         )
+        await _save_session_context_ff(uid, [raw[:500]])
         return
 
     if len(raw) > 2000:
@@ -1788,6 +1851,8 @@ async def free_text(
                 f"🕐 {send_at_str}"
             )
         )
+        # ── P2: сохраняем контекст сессии ──
+        await _save_session_context_ff(uid, [raw[:500]])
         return
 
     # ── URL detection ──
@@ -1801,6 +1866,7 @@ async def free_text(
             cached = await _get_cached_url_summary(url)
             if cached:
                 await message.answer(sanitize_html(f"📄 {cached}\n\n🔗 {url}"))
+                await _save_session_context_ff(uid, [raw[:500]])
                 return
 
             try:
@@ -1838,7 +1904,14 @@ async def free_text(
                     await message.answer(f"❌ Не удалось загрузить {url}")
                 except Exception:
                     logger.debug("Failed to send URL error notification", exc_info=True)
+            # ── P2: сохраняем контекст сессии ──
+            await _save_session_context_ff(uid, [raw[:500]])
             return
+
+    # Session resume check (P2): вернулся ли пользователь после перерыва
+    resume_msg = await _check_session_resume(uid)
+    if resume_msg:
+        await message.answer(sanitize_html(resume_msg))
 
     # Priority preemption: if a heavy task is running, cancel it for the new request
     uid = message.from_user.id
@@ -1881,6 +1954,9 @@ async def free_text(
                 "free_text hooks.emit failed", exc_info=True
             )  # hooks are optional, never break core flow
         raise
+
+    # ── P2: сохраняем контекст сессии (fire-and-forget) ──
+    await _save_session_context_ff(uid, [raw[:500]])
 
     # ── Session recording (non-blocking, best-effort) ─────────────────
     try:

@@ -156,6 +156,17 @@ class Settings(BaseSettings):
     habit_tracker_interval_sec: int = Field(
         3600, description="Интервал трекера привычек"
     )
+    # ── Сross-Session Continuity (P2) ──
+    session_context_enabled: bool = Field(
+        True, description="Сохранять/восстанавливать контекст между сессиями"
+    )
+    session_context_gap_minutes: int = Field(
+        30, description="Минут неактивности для определения новой сессии"
+    )
+    session_context_max_age_hours: int = Field(
+        24, description="Максимальный возраст контекста сессии до истечения (часы)"
+    )
+
     # ── Prefetch recall ──
     prefetch_recall_enabled: bool = Field(
         True, description="Включить оптимистичный prefetch memory recall (S1-T1)"

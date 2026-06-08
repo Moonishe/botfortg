@@ -315,6 +315,16 @@ async def apply_reval_result(
         # Шаг 1: деактивация — в savepoint для атомарности
         try:
             async with session.begin_nested() as sp:
+                # Сохраняем версию в аудит-трейл перед деактивацией
+                from src.db.repos.memory_repo import save_memory_version
+
+                await save_memory_version(
+                    session,
+                    fact.id,
+                    fact.fact,
+                    edited_by="agent",
+                    reason="reval_invalid",
+                )
                 await deactivate_memory(session, fact.id, reason="reval_invalid")
         except Exception as exc:
             base.error = f"deactivate failed: {exc}"
@@ -377,6 +387,16 @@ async def apply_reval_result(
                     new_id=new_mem.id,
                 )
                 base.new_memory_id = new_mem.id
+                # Сохраняем версию в аудит-трейл перед деактивацией старого факта
+                from src.db.repos.memory_repo import save_memory_version
+
+                await save_memory_version(
+                    session,
+                    fact.id,
+                    fact.fact,
+                    edited_by="agent",
+                    reason="superseded_by_reval",
+                )
                 # Deactivate old fact to keep recall clean
                 await deactivate_memory(session, fact.id, reason="superseded_by_reval")
             elif new_mem and new_mem.id == fact.id:

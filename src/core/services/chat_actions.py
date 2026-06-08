@@ -402,6 +402,57 @@ async def ask_chat_action(
     )
 
 
+# ── Working Memory context loader ──────────────────────────────────────
+
+
+async def load_working_memory_context(telegram_id: int) -> str:
+    """Загружает рабочую память (scratchpad) пользователя для инжекции в промпт.
+
+    Используется внутри чат-действий чтобы LLM видел сохранённые
+    промежуточные результаты из предыдущих шагов.
+
+    Возвращает форматированную строку или пустую строку если записей нет.
+    """
+    try:
+        from datetime import datetime, timezone
+
+        from sqlalchemy import select
+
+        from src.db.models._memory import WorkingMemory
+        from src.db.repo import get_or_create_user
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            if owner is None:
+                return ""
+            now = datetime.now(timezone.utc)
+            result = await session.execute(
+                select(WorkingMemory).where(
+                    WorkingMemory.user_id == owner.id,
+                )
+            )
+            entries = result.scalars().all()
+            active = [e for e in entries if e.expires_at is None or e.expires_at >= now]
+            if not active:
+                return ""
+            lines = ["<working_memory>"]
+            for e in active:
+                expires = (
+                    f" (истекает через {round((e.expires_at - now).total_seconds() / 60, 1)} мин)"
+                    if e.expires_at
+                    else ""
+                )
+                lines.append(
+                    f"• {_sanitize_html(e.key)} = {_sanitize_html(e.value[:200])}{expires}"
+                )
+            lines.append("</working_memory>")
+            return "\n".join(lines)
+    except Exception:
+        logger.warning("Failed to load working memory context", exc_info=True)
+        return ""
+
+
 # ── Shared keyboard ─────────────────────────────────────────────────────
 
 

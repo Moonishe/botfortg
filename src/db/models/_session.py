@@ -33,3 +33,29 @@ class AgentSessionMessage(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+
+
+class SessionContext(Base):
+    """Контекст между сессиями — чтобы бот помнил о чём говорили."""
+
+    __tablename__ = "session_contexts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    context_summary: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # LLM-сжатие последнего диалога
+    active_tasks: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON: ["отпуск в Сочи", "бюджет"]
+    pending_questions: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON: вопросы которые бот задал но не получил ответ
+    raw_last_messages: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # последние 3 сообщения для контекста / JSON

@@ -66,6 +66,8 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_self_audit",
     "src.core.actions.mcp_search_docs",
     "src.core.actions.mcp_pubmed",
+    "src.core.actions.mcp_working_memory",
+    "src.core.actions.mcp_memory_edit",
 )
 
 _BUILTINS_REGISTERED = False

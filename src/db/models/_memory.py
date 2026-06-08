@@ -110,6 +110,27 @@ class Memory(Base):
     )  # cause, effect, contradicts, supports, continues, example_of
 
 
+class MemoryVersion(Base):
+    """Аудит-трейл правок памяти — who changed what, when, and why."""
+
+    __tablename__ = "memory_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    memory_id: Mapped[int] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(default=1, index=True)
+    fact_text: Mapped[str] = mapped_column(Text)
+    edited_by: Mapped[str] = mapped_column(
+        String(32), default="user"
+    )  # "user" | "system" | "agent"
+    edited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class MemoryLink(Base):
     """Many-to-many связи между фактами памяти с весами."""
 
@@ -202,3 +223,23 @@ class MemoryCandidate(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+
+
+class WorkingMemory(Base):
+    """Рабочая память (scratchpad) — LLM-доступный key-value store
+    для промежуточных результатов внутри задачи. Автоочистка через 1 час."""
+
+    __tablename__ = "working_memory"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    key: Mapped[str] = mapped_column(String(64))
+    value: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )  # автоочистка через 1 час

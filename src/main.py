@@ -218,6 +218,31 @@ async def main() -> None:
                             )
                 except Exception:
                     logger.debug("pending_action cleanup failed", exc_info=True)
+            # Очистка истёкшей рабочей памяти (scratchpad) — каждые 5 минут
+            if _tick == 0:
+                try:
+                    from datetime import datetime, timezone
+
+                    from sqlalchemy import delete
+
+                    from src.db.models._memory import WorkingMemory
+                    from src.db.session import get_session
+
+                    async with get_session() as _wm_sess:
+                        now = datetime.now(timezone.utc)
+                        result = await _wm_sess.execute(
+                            delete(WorkingMemory).where(
+                                WorkingMemory.expires_at.isnot(None),
+                                WorkingMemory.expires_at < now,
+                            )
+                        )
+                        removed_wm = result.rowcount
+                        if removed_wm:
+                            logger.info(
+                                "WorkingMemory cleanup: removed %d expired", removed_wm
+                            )
+                except Exception:
+                    logger.debug("working_memory cleanup failed", exc_info=True)
 
     _cleanup_task = asyncio.create_task(_cleanup_global_state())
     _update_check_task = asyncio.create_task(check_and_notify_update())

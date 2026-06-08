@@ -34,6 +34,8 @@ from src.db.models._memory import (
     MemoryCluster,
     MemoryClusterMember,
     MemoryCandidate,
+    MemoryVersion,
+    WorkingMemory,
 )
 from src.db.models._cache import SmartCacheEntry
 from src.db.models._avito import AvitoListing, AvitoPriceHistory, AvitoWatch
@@ -58,6 +60,7 @@ from src.db.models._learning import (
 from src.db.models._session import (
     AgentSession,
     AgentSessionMessage,
+    SessionContext,
 )
 from src.db.models._encryption import EncryptionKey
 
@@ -90,6 +93,8 @@ __all__ = [
     "MemoryCluster",
     "MemoryClusterMember",
     "MemoryCandidate",
+    "WorkingMemory",
+    "MemoryVersion",
     "SmartCacheEntry",
     "AgentCache",
     "SelfProfile",
@@ -110,5 +115,6 @@ __all__ = [
     "MonitoredAlert",
     "AgentSession",
     "AgentSessionMessage",
+    "SessionContext",
     "EncryptionKey",
 ]
