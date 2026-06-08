@@ -209,11 +209,9 @@ class ProceduralMemory:
                 # Пытаемся найти пользователя; если нет — fallback
                 owner = None
                 try:
-                    from src.db.repo import get_or_create_user
+                    from src.db.repo import get_or_create_user as _get_or_create
 
-                    owner = await get_or_create_user(
-                        session, getattr(User, "telegram_id", 0)
-                    )
+                    owner = await _get_or_create(session, 0)  # fallback: guest user
                 except Exception:
                     pass
 
