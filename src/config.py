@@ -288,6 +288,24 @@ class Settings(BaseSettings):
         description="Включить умный выбор лёгкой/тяжёлой модели по сложности запроса",
     )
 
+    # ── Specialized Router (Phase 5.2) ──
+    specialized_router_enabled: bool = Field(
+        True,
+        description="Включить эвристический роутер задач (классификация без LLM)",
+    )
+
+    # ── Ambient Intelligence (Phase 6) ──
+    ambient_intelligence_enabled: bool = Field(
+        True,
+        description="Утренний брифинг + проактивные уведомления при изменении контекста",
+    )
+
+    # ── NL Programming (Phase 6) ──
+    nl_programming_enabled: bool = Field(
+        True,
+        description="Включить парсинг естественного языка в фоновые задачи (BackgroundGoal)",
+    )
+
     # ── Smart Extract Optimization ──
     smart_extract_optimized: bool = Field(
         True,
@@ -619,6 +637,19 @@ class Settings(BaseSettings):
     agent_registry_enabled: bool = Field(
         True,
         description="Включить реестр специализированных агентов (researcher, coder, planner, analyst)",
+    )
+
+    # ── Phase 4: Proactive Scheduler + Preference Learning + Dreaming ──
+    proactive_scheduler_enabled: bool = Field(
+        True, description="Включить Proactive Scheduler (фоновые цели по расписанию)"
+    )
+    preference_learning_enabled: bool = Field(
+        True,
+        description="Включить Preference Learning (обучение на сигналах пользователя)",
+    )
+    dreaming_consolidation_enabled: bool = Field(
+        True,
+        description="Включить Dreaming Consolidator (ночное закрепление: контрфактуалы, паттерны, инсайты)",
     )
 
     # Agent/task-specific model overrides (из .env)

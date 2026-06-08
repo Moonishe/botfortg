@@ -57,6 +57,12 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         "reflected_episodes": 0,
         "reflected_facts": 0,
         "meta_memory_updated": 0,
+        "dreaming_candidates": 0,
+        "dreaming_counterfactuals": 0,
+        "dreaming_patterns": 0,
+        "dreaming_integrated": 0,
+        "dreaming_insights": 0,
+        "dreaming_forgotten": 0,
     }
 
     from src.db.repo import get_or_create_user
@@ -287,6 +293,39 @@ async def dream_cycle(owner_telegram_id: int) -> None:
             logger.exception("Dream cycle: phase 10 (meta-memory) failed")
             summary["meta_memory_updated"] = 0
 
+        # ── Phase 11: Dreaming Consolidator ───────────────────────────────
+        # Ночное закрепление: контрфактуалы, абстракция паттернов,
+        # генерация инсайтов, forgetting sweep.
+        if settings.dreaming_consolidation_enabled:
+            try:
+                from src.core.learning.dreaming import dreaming_consolidator
+
+                dc_result = await dreaming_consolidator.nightly_cycle(
+                    owner_telegram_id, session, owner
+                )
+                summary["dreaming_candidates"] = dc_result.get("candidates", 0)
+                summary["dreaming_counterfactuals"] = dc_result.get(
+                    "counterfactuals", 0
+                )
+                summary["dreaming_patterns"] = dc_result.get("patterns", 0)
+                summary["dreaming_integrated"] = dc_result.get("integrated", 0)
+                summary["dreaming_insights"] = dc_result.get("insights", 0)
+                summary["dreaming_forgotten"] = dc_result.get("forgotten", 0)
+                if any(v > 0 for v in dc_result.values() if isinstance(v, int)):
+                    logger.info(
+                        "Dream cycle: phase 11 (dreaming) — "
+                        "candidates=%d counterfactuals=%d patterns=%d "
+                        "integrated=%d insights=%d forgotten=%d",
+                        summary["dreaming_candidates"],
+                        summary["dreaming_counterfactuals"],
+                        summary["dreaming_patterns"],
+                        summary["dreaming_integrated"],
+                        summary["dreaming_insights"],
+                        summary["dreaming_forgotten"],
+                    )
+            except Exception:
+                logger.exception("Dream cycle: phase 11 (dreaming) failed")
+
         # ── Graph statistics ──────────────────────────────────────────────
         try:
             from src.db.repos.memory_repo import get_graph_stats
@@ -402,6 +441,28 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 summary_lines.append(
                     f"• 📊 Meta-Memory: пересчитана важность {mm_updated} фактов"
                 )
+
+            # Dreaming Consolidator (Phase 11)
+            dreaming_insights = summary.get("dreaming_insights", 0)
+            dreaming_patterns = summary.get("dreaming_patterns", 0)
+            dreaming_integrated = summary.get("dreaming_integrated", 0)
+            dreaming_forgotten = summary.get("dreaming_forgotten", 0)
+            if (
+                dreaming_insights > 0
+                or dreaming_patterns > 0
+                or dreaming_integrated > 0
+            ):
+                parts = []
+                if dreaming_patterns > 0:
+                    parts.append(f"абстрагировано {dreaming_patterns} паттернов")
+                if dreaming_integrated > 0:
+                    parts.append(f"интегрировано {dreaming_integrated}")
+                if dreaming_insights > 0:
+                    parts.append(f"{dreaming_insights} инсайтов")
+                if dreaming_forgotten > 0:
+                    parts.append(f"забыто {dreaming_forgotten} малоценных")
+                if parts:
+                    summary_lines.append(f"• 🌌 Dreaming: {', '.join(parts)}")
 
             # Graph stats
             if graph_stats:
