@@ -1981,11 +1981,18 @@ async def free_text(
             track_message(uid, raw[:500])
 
             if should_create_episode(uid):
-                messages_batch = reset_counter(uid)
+                # Снимок буфера без сброса счётчика (чтобы не терять данные при ошибке)
+                from src.core.memory.episodic import _message_buffer
+
+                buf = _message_buffer.get(uid, [])
+                messages_batch = list(buf[-settings.episodic_batch_size :])
 
                 async def _create_episode_ff():
                     try:
                         await create_episode(uid, messages_batch)
+                        await reset_counter(
+                            uid
+                        )  # Сброс только после успешного создания
                     except Exception:
                         logger.debug(
                             "Fire-and-forget episode creation failed for user %d",

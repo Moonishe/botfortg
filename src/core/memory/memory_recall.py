@@ -492,7 +492,9 @@ async def recall(
                 if m.pinned
                 and m.id not in seen_ids
                 and (
-                    not contact_id or m.contact_id is None or m.contact_id == contact_id
+                    contact_id is None
+                    or m.contact_id is None
+                    or m.contact_id == contact_id
                 )
             ]
             for m in pinned:
@@ -736,7 +738,7 @@ async def recall(
             and (ca := _ensure_utc(m.created_at))
             and ca >= cutoff_7d
             and (m.confidence or 0) >= 0.5
-            and (m.contact_id == contact_id if contact_id else True)
+            and (m.contact_id == contact_id if contact_id is not None else True)
         ]
         fresh.sort(key=lambda m: (m.confidence or 0, m.importance or 0), reverse=True)
         for m in fresh[:3]:
@@ -759,7 +761,7 @@ async def recall(
             for m in all_facts
             if m.id not in seen_ids
             and (m.use_count or 0) >= 3
-            and (m.contact_id == contact_id if contact_id else True)
+            and (m.contact_id == contact_id if contact_id is not None else True)
         ]
         freq.sort(key=lambda m: (m.use_count or 0, m.importance or 0), reverse=True)
         for m in freq[:2]:

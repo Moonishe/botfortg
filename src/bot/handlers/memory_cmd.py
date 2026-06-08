@@ -308,10 +308,7 @@ async def _cmd_memory_graph_export(message: Message) -> None:
             for r in edges_result.all()
         ]
     payload = {"nodes": nodes, "edges": edges}
-    text = json.dumps(payload, ensure_ascii=False, indent=2)
-    # Telegram message limit ~4000 chars for safety
-    if len(text) > 3900:
-        text = text[:3900] + "\n...]}"  # truncated
+    text = json.dumps(payload, ensure_ascii=False)[:3900]
     await message.answer(f"<b>📊 Graph export:</b>\n<pre>{sanitize_html(text)}</pre>")
 
 

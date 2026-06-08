@@ -236,6 +236,9 @@ class ProceduralMemory:
             logger.exception("_induce_from_episodes: LLM call failed")
             return None
 
+        if response is None:
+            return None
+
         json_str = _extract_json_from_response(response)
         try:
             data = _json.loads(json_str)

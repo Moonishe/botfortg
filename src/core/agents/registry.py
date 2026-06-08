@@ -89,7 +89,7 @@ class AgentRegistry:
         return list(cls.AGENTS.values())
 
     @classmethod
-    async def classify_and_delegate(
+    def classify_and_delegate(
         cls,
         task: str,
         context: dict | None = None,

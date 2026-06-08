@@ -329,6 +329,10 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
         # Сохраняем сообщения и алерты
         alerts_created = 0
         async with get_session() as session:
+            # Обновляем last_fetched_at для источника
+            source = await session.merge(source)
+            source.last_fetched_at = datetime.now(timezone.utc)
+
             for msg_dict, matched_rules in matched_pairs:
                 # Сохраняем сообщение (пропускаем, если уже есть — concurrent fetch)
                 try:
@@ -654,15 +658,6 @@ async def _handle_rule_add(message: Message, args: list[str]) -> None:
             "keywords": keywords,
             "exclude_keywords": [],
         }
-        regex_pattern = conditions.get("regex")
-        if regex_pattern:
-            try:
-                re.compile(regex_pattern)
-            except re.error as e:
-                await message.answer(
-                    f"❌ Некорректное регулярное выражение: {sanitize_html(str(e))}"
-                )
-                return
 
         rule = MonitorRule(
             user_id=owner.id,

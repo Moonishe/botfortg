@@ -397,6 +397,9 @@ class DreamingConsolidator:
             logger.exception("DreamingConsolidator: ошибка LLM паттернов")
             return []
 
+        if not response:
+            return []
+
         patterns: list[AbstractedPattern] = []
         for line in response.strip().split("\n"):
             line = line.strip()
@@ -462,7 +465,9 @@ class DreamingConsolidator:
                     return False
 
                 # Проверка на дубликат (по первым 100 символам)
-                prefix = pattern.description[:100]
+                prefix = (
+                    pattern.description[:100].replace("%", "\\%").replace("_", "\\_")
+                )
                 result = await session.execute(
                     select(Memory.id).where(
                         Memory.user_id == owner.id,
