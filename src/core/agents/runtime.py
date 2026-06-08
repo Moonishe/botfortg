@@ -358,15 +358,15 @@ class AgentRuntime:
         # Восстанавливаем working memory из снапшота
         context["working_memory"] = dict(target_cp.working_memory_snapshot)
 
+        resume_from = target_cp.step_index + 1  # resume from NEXT step after checkpoint
         logger.info(
             "AgentRuntime.resume: возобновление с шага %d, checkpoint_id=%s",
-            target_cp.step_index,
+            resume_from,
             checkpoint_id,
         )
-
         return {
             "ok": True,
-            "resume_step": target_cp.step_index,
+            "resume_step": resume_from,
             "checkpoint": self._checkpoint_to_dict(target_cp),
             "agent_state": dict(target_cp.agent_state),
             "message": (
