@@ -832,6 +832,32 @@ async def process(
 from src.core.intelligence.agent_dispatcher import _agent_result_as_text
 
 
+def _estimate_plan_suggestion(user_text: str) -> tuple[float, bool]:
+    """Оценивает сложность запроса и необходимость HTN-планирования.
+
+    Returns:
+        (complexity_score, suggest_plan) — оценка 0.0–1.0 и флаг предложения плана.
+    """
+    if not settings.htn_planner_enabled:
+        return 0.0, False
+
+    try:
+        from src.core.reasoning.htn_planner import HTNPlanner
+
+        score = HTNPlanner.estimate_complexity(user_text)
+        threshold = getattr(settings, "plan_complexity_threshold", 0.6)
+        suggest = score > threshold
+        logger.debug(
+            "HTN complexity: score=%.2f threshold=%.2f suggest=%s",
+            score,
+            threshold,
+            suggest,
+        )
+        return score, suggest
+    except Exception:
+        return 0.0, False
+
+
 async def run_pipeline(
     provider,
     user_text: str,
@@ -883,43 +909,58 @@ async def run_pipeline(
         userbot_manager=userbot_manager,
     )
 
-    used_agents = []
-    agent_errors = []
+    # ── Оценка сложности для HTN-планировщика ──
+    _complexity, _suggest = _estimate_plan_suggestion(user_text)
+
+    def _wrap(result: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет complexity_score и suggest_plan в результат."""
+        result["complexity_score"] = _complexity
+        result["suggest_plan"] = _suggest
+        return result
+
+    used_agents: list[str] = []
+    agent_errors: list[str] = []
 
     # Если Maestro хочет уточнить — показываем вопрос и ждём ответа
     clarification = plan.get("needs_clarification")
     if clarification:
-        return {
-            "final_response": sanitize_html(f"🤔 {clarification}"),
-            "plan": plan.get("plan", []),
-            "used_agents": [],
-            "agent_errors": [],
-            "is_clarification": True,
-        }
+        return _wrap(
+            {
+                "final_response": sanitize_html(f"🤔 {clarification}"),
+                "plan": plan.get("plan", []),
+                "used_agents": [],
+                "agent_errors": [],
+                "is_clarification": True,
+            }
+        )
 
     # Если Maestro ответил сам и агенты не нужны — возвращаем сразу
     agents_to_call = plan.get("agents_to_call", [])
     if plan.get("final_response") and not agents_to_call:
-        return {
-            "final_response": sanitize_html(plan["final_response"]),
-            "plan": plan.get("plan", []),
-            "used_agents": [],
-            "agent_errors": [],
-        }
+        return _wrap(
+            {
+                "final_response": sanitize_html(plan["final_response"]),
+                "plan": plan.get("plan", []),
+                "used_agents": [],
+                "agent_errors": [],
+            }
+        )
 
     # --- Шаг 2: Запустить агентов ---
     if not agents_to_call:
         # Нет агентов и нет ответа — показываем понятные подсказки
-        return {
-            "final_response": sanitize_html(
-                plan.get("final_response")
-                or plan.get("needs_clarification")
-                or FALLBACK_HINTS
-            ),
-            "plan": plan.get("plan", []),
-            "used_agents": [],
-            "agent_errors": [],
-        }
+        return _wrap(
+            {
+                "final_response": sanitize_html(
+                    plan.get("final_response")
+                    or plan.get("needs_clarification")
+                    or FALLBACK_HINTS
+                ),
+                "plan": plan.get("plan", []),
+                "used_agents": [],
+                "agent_errors": [],
+            }
+        )
 
     # --- Шаг 2: Запустить агентов через оркестратор ---
     # Оркестратор обеспечивает: per-agent timeout, кеш, health-check,
@@ -966,71 +1007,71 @@ async def run_pipeline(
             pass
 
         if stream is not None:
-            return {
+            return _wrap({
                 "_stream": stream,
                 "final_response": "",
                 "plan": plan.get("plan", []),
                 "used_agents": [],
                 "agent_errors": agent_errors,
-            }
+            })
 
         try:
             raw = await asyncio.wait_for(
                 provider.chat(fallback_messages, task_type=TaskType.MAESTRO),
                 timeout=60.0,
             )
-            return {
+            return _wrap({
                 "final_response": sanitize_html(raw.strip()),
                 "plan": plan.get("plan", []),
                 "used_agents": [],
                 "agent_errors": agent_errors,
-            }
+            })
         except ExhaustedError:
             logger.warning("maestro fallback_request ExhaustedError")
-            return {
+            return _wrap({
                 "final_response": sanitize_html(
                     "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ..."
                 ),
                 "plan": [],
                 "used_agents": [],
                 "agent_errors": agent_errors,
-            }
+            })
         except asyncio.TimeoutError:
             logger.warning("maestro fallback_request TimeoutError")
-            return {
+            return _wrap({
                 "final_response": sanitize_html(
                     "⏱️ Ответ занял слишком много времени. Попробуй короче."
                 ),
                 "plan": [],
                 "used_agents": [],
                 "agent_errors": agent_errors,
-            }
+            })
         except (RequestError, HTTPStatusError) as e:
             if (
                 "context_length" in safe_str(e).lower()
                 or "token" in safe_str(e).lower()
             ):
                 logger.warning("maestro fallback_request context overflow: %s", e)
-                return {
+                return _wrap({
                     "final_response": sanitize_html(
                         "📏 Контекст переполнен. Упрости запрос или уменьши историю."
                     ),
                     "plan": [],
                     "used_agents": [],
                     "agent_errors": agent_errors,
-                }
+                })
             if "rate" in safe_str(e).lower():
                 logger.warning("maestro fallback_request rate limit: %s", e)
-                return {
+                return _wrap({
                     "final_response": sanitize_html(
                         "🚦 Превышен лимит запросов. Подожди минуту."
                     ),
                     "plan": [],
                     "used_agents": [],
                     "agent_errors": agent_errors,
-                }
+                })
             logger.exception("maestro fallback_request failed")
-            return {
+            return _wrap({
                 "final_response": sanitize_html(
                     plan.get("final_response")
                     or "Извини, что-то пошло не так. Попробуй ещё раз."
@@ -1038,7 +1079,7 @@ async def run_pipeline(
                 "plan": [],
                 "used_agents": [],
                 "agent_errors": agent_errors,
-            }
+            })
 
     # --- Шаг 4: Агенты сработали — просим Maestro сформулировать ответ ---
     if agent_texts:
@@ -1059,13 +1100,13 @@ async def run_pipeline(
             pass
 
         if stream is not None:
-            return {
+            return _wrap({
                 "_stream": stream,
                 "final_response": "",
                 "plan": plan.get("plan", []),
                 "used_agents": used_agents,
                 "agent_errors": agent_errors,
-            }
+            })
 
         try:
             raw = await asyncio.wait_for(
@@ -1078,35 +1119,35 @@ async def run_pipeline(
                 raw = re.sub(r"\n?\s*```\s*$", "", raw)
             parsed = _extract_json_object(raw)
             if parsed is not None:
-                return {
+                return _wrap({
                     "final_response": sanitize_html(parsed.get("final_response", raw)),
                     "plan": plan.get("plan", []),
                     "used_agents": used_agents,
                     "agent_errors": agent_errors,
-                }
-            return {
+                })
+            return _wrap({
                 "final_response": sanitize_html(raw),
                 "plan": plan.get("plan", []),
                 "used_agents": used_agents,
                 "agent_errors": agent_errors,
-            }
+            })
         except (RequestError, HTTPStatusError):
             logger.exception("maestro agent synthesis failed")
             # Если LLM не может сформулировать — возвращаем сырые данные агентов
             summary = "\n\n".join(agent_texts)
-            return {
+            return _wrap({
                 "final_response": sanitize_html(
                     f"Вот что я выяснил:\n\n{summary[:1500]}"
                 ),
                 "plan": plan.get("plan", []),
                 "used_agents": used_agents,
                 "agent_errors": agent_errors,
-            }
+            })
 
     # --- Ни один агент не дал результатов ---
-    return {
+    return _wrap({
         "final_response": sanitize_html(plan.get("final_response") or FALLBACK_HINTS),
         "plan": plan.get("plan", []),
         "used_agents": used_agents,
         "agent_errors": agent_errors,
-    }
+    })

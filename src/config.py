@@ -156,6 +156,17 @@ class Settings(BaseSettings):
     habit_tracker_interval_sec: int = Field(
         3600, description="Интервал трекера привычек"
     )
+    # ── CoT Engine (P2) ──
+    cot_engine_enabled: bool = Field(
+        True, description="Включить Chain-of-Thought движок с самокоррекцией"
+    )
+    cot_max_iterations: int = Field(
+        8, description="Макс. итераций CoT-рассуждения (жёсткий лимит)"
+    )
+    cot_max_tool_calls: int = Field(
+        12, description="Макс. вызовов инструментов в CoT-цикле (жёсткий лимит)"
+    )
+
     # ── Сross-Session Continuity (P2) ──
     session_context_enabled: bool = Field(
         True, description="Сохранять/восстанавливать контекст между сессиями"
@@ -422,6 +433,20 @@ class Settings(BaseSettings):
         24, description="Интервал пересчёта importance всех фактов (часы)"
     )
 
+    # ── Meta-Reasoner (Phase 2) ──
+    meta_reasoner_enabled: bool = Field(
+        True, description="Включить Meta-Reasoner: оценка качества рассуждений"
+    )
+    meta_delegation_threshold: float = Field(
+        0.4, description="Порог confidence для делегирования агенту (0.0–1.0)"
+    )
+    meta_consult_threshold: float = Field(
+        0.3, description="Порог confidence для запроса пользователю (0.0–1.0)"
+    )
+    meta_abort_threshold: float = Field(
+        0.1, description="Порог confidence для прерывания задачи (0.0–1.0)"
+    )
+
     # ── Limits & timeouts ──
     max_message_length: int = Field(4096, description="Telegram max message length")
     safe_message_length: int = Field(4000, description="Buffer before Telegram limit")
@@ -556,6 +581,19 @@ class Settings(BaseSettings):
     # ── Skill seeding ──
     skill_seed_on_startup: bool = Field(
         True, description="Auto-seed skills from skills/*/SKILL.md on startup"
+    )
+
+    # ── HTN Planner ──
+    htn_planner_enabled: bool = Field(
+        True, description="Включить HTN-планировщик (декомпозиция сложных задач)"
+    )
+    htn_planner_model: str = Field(
+        "", description="Модель для HTN-планирования (пустая = auto)"
+    )
+    plan_max_steps: int = Field(10, description="Максимальное количество шагов в плане")
+    plan_complexity_threshold: float = Field(
+        0.6,
+        description="Порог сложности запроса для предложения плана (0.0–1.0)",
     )
 
     # Agent/task-specific model overrides (из .env)
