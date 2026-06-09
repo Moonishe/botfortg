@@ -205,8 +205,11 @@ class MultiKeyProvider:
                 if self._slot_ids and idx < len(self._slot_ids)
                 else (self.provider_name, key)
             )
-            async with _CIRCUIT_BREAKERS_LOCK:
-                cb = _CIRCUIT_BREAKERS.get(cache_key)
+            if _CIRCUIT_BREAKERS_LOCK is not None:
+                async with _CIRCUIT_BREAKERS_LOCK:
+                    cb = _CIRCUIT_BREAKERS.get(cache_key)
+            else:
+                cb = None
             if cb is not None and not cb.is_ready(now):
                 # asyncio single-threaded: состояние cb читается/модифицируется атомарно без отдельного лока
                 _ = cb.try_half_open(now)
@@ -264,12 +267,13 @@ class MultiKeyProvider:
                         else:
                             raise
                     else:
-                        async with _CIRCUIT_BREAKERS_LOCK:
-                            cb = _CIRCUIT_BREAKERS.get(cache_key)
-                            if cb:
-                                cb.record_success()
-                                if cb.state == _CircuitState.CLOSED:
-                                    _CIRCUIT_BREAKERS.pop(cache_key, None)
+                        if _CIRCUIT_BREAKERS_LOCK is not None:
+                            async with _CIRCUIT_BREAKERS_LOCK:
+                                cb = _CIRCUIT_BREAKERS.get(cache_key)
+                                if cb:
+                                    cb.record_success()
+                                    if cb.state == _CircuitState.CLOSED:
+                                        _CIRCUIT_BREAKERS.pop(cache_key, None)
                         # DB: отметить успешное использование (fresh session)
                         if self._slot_ids:
                             try:
@@ -295,10 +299,11 @@ class MultiKeyProvider:
                         return result
             except Exception as exc:
                 if _is_retryable_llm_error(exc):
-                    async with _CIRCUIT_BREAKERS_LOCK:
-                        if cache_key not in _CIRCUIT_BREAKERS:
-                            _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
-                        _CIRCUIT_BREAKERS[cache_key].record_failure(now)
+                    if _CIRCUIT_BREAKERS_LOCK is not None:
+                        async with _CIRCUIT_BREAKERS_LOCK:
+                            if cache_key not in _CIRCUIT_BREAKERS:
+                                _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
+                            _CIRCUIT_BREAKERS[cache_key].record_failure(now)
                     last_error = exc
                     logger.warning(
                         "LLM %s key %s temporarily failed, rotating: %s",
@@ -422,8 +427,11 @@ class MultiKeyProvider:
                         else (self.provider_name, key)
                     )
                     # Circuit breaker check — skip keys in cooldown
-                    async with _CIRCUIT_BREAKERS_LOCK:
-                        cb = _CIRCUIT_BREAKERS.get(cache_key)
+                    if _CIRCUIT_BREAKERS_LOCK is not None:
+                        async with _CIRCUIT_BREAKERS_LOCK:
+                            cb = _CIRCUIT_BREAKERS.get(cache_key)
+                    else:
+                        cb = None
                     if cb is not None:
                         now = asyncio.get_running_loop().time()
                         _ = cb.try_half_open(now)
@@ -460,12 +468,13 @@ class MultiKeyProvider:
                                 yield token
                         # Stream completed successfully — record metrics
                         # Circuit breaker: record success
-                        async with _CIRCUIT_BREAKERS_LOCK:
-                            cb = _CIRCUIT_BREAKERS.get(cache_key)
-                            if cb:
-                                cb.record_success()
-                                if cb.state == _CircuitState.CLOSED:
-                                    _CIRCUIT_BREAKERS.pop(cache_key, None)
+                        if _CIRCUIT_BREAKERS_LOCK is not None:
+                            async with _CIRCUIT_BREAKERS_LOCK:
+                                cb = _CIRCUIT_BREAKERS.get(cache_key)
+                                if cb:
+                                    cb.record_success()
+                                    if cb.state == _CircuitState.CLOSED:
+                                        _CIRCUIT_BREAKERS.pop(cache_key, None)
                         # DB: mark key as used (fresh session)
                         if self._slot_ids:
                             try:
@@ -493,12 +502,15 @@ class MultiKeyProvider:
                     except Exception as e:
                         if _is_retryable_llm_error(e):
                             # Circuit breaker: record failure
-                            async with _CIRCUIT_BREAKERS_LOCK:
-                                if cache_key not in _CIRCUIT_BREAKERS:
-                                    _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
-                                _CIRCUIT_BREAKERS[cache_key].record_failure(
-                                    asyncio.get_running_loop().time()
-                                )
+                            if _CIRCUIT_BREAKERS_LOCK is not None:
+                                async with _CIRCUIT_BREAKERS_LOCK:
+                                    if cache_key not in _CIRCUIT_BREAKERS:
+                                        _CIRCUIT_BREAKERS[cache_key] = (
+                                            _KeyCircuitBreaker()
+                                        )
+                                    _CIRCUIT_BREAKERS[cache_key].record_failure(
+                                        asyncio.get_running_loop().time()
+                                    )
                             last_error = e
                             logger.warning(
                                 "Stream key %s failed: %s",

@@ -1,6 +1,7 @@
 """Auto-logs agent-owner conversations to AgentSession table."""
 
 from __future__ import annotations
+import asyncio
 import logging
 from datetime import datetime, timezone
 from src.db.session import get_session
@@ -10,6 +11,7 @@ from src.db.models._session import AgentSession, AgentSessionMessage
 
 logger = logging.getLogger(__name__)
 _active_sessions: dict[int, int] = {}  # telegram_id → session_id
+_active_sessions_lock = asyncio.Lock()
 
 
 async def log_user_message(telegram_id: int, text: str) -> None:
@@ -17,13 +19,14 @@ async def log_user_message(telegram_id: int, text: str) -> None:
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, telegram_id)
-            sid = _active_sessions.get(telegram_id)
-            if sid is None:
-                new_sess = AgentSession(user_id=owner.id, session_type="chat")
-                session.add(new_sess)
-                await session.flush()
-                sid = new_sess.id
-                _active_sessions[telegram_id] = sid
+            async with _active_sessions_lock:
+                sid = _active_sessions.get(telegram_id)
+                if sid is None:
+                    new_sess = AgentSession(user_id=owner.id, session_type="chat")
+                    session.add(new_sess)
+                    await session.flush()
+                    sid = new_sess.id
+                    _active_sessions[telegram_id] = sid
             msg = AgentSessionMessage(session_id=sid, role="user", content=text[:2000])
             session.add(msg)
             # Update turn count
@@ -40,13 +43,14 @@ async def log_assistant_response(telegram_id: int, text: str) -> None:
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, telegram_id)
-            sid = _active_sessions.get(telegram_id)
-            if sid is None:
-                new_sess = AgentSession(user_id=owner.id, session_type="chat")
-                session.add(new_sess)
-                await session.flush()
-                sid = new_sess.id
-                _active_sessions[telegram_id] = sid
+            async with _active_sessions_lock:
+                sid = _active_sessions.get(telegram_id)
+                if sid is None:
+                    new_sess = AgentSession(user_id=owner.id, session_type="chat")
+                    session.add(new_sess)
+                    await session.flush()
+                    sid = new_sess.id
+                    _active_sessions[telegram_id] = sid
             msg = AgentSessionMessage(
                 session_id=sid, role="assistant", content=text[:2000]
             )
@@ -73,7 +77,8 @@ async def log_assistant_response(telegram_id: int, text: str) -> None:
 
 async def end_session(telegram_id: int) -> None:
     """Mark current session as ended."""
-    sid = _active_sessions.pop(telegram_id, None)
+    async with _active_sessions_lock:
+        sid = _active_sessions.pop(telegram_id, None)
     if sid:
         try:
             async with get_session() as session:

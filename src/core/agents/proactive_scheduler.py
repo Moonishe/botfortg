@@ -196,7 +196,22 @@ class ProactiveScheduler:
         Возвращает список словарей с результатами исполнения:
             [{"goal_id": str, "success": bool, "output": str}, ...]
         """
-        due = await self.get_due_goals()
+        # Atomically fetch AND advance due goals under lock
+        # to prevent concurrent run_due() from double-executing the same goal.
+        now = datetime.now(timezone.utc)
+        async with self._lock:
+            due = [
+                g
+                for g in self._goals.values()
+                if g.enabled and g.next_run is not None and g.next_run <= now
+            ]
+            for g in due:
+                delta = _parse_frequency(g.frequency)
+                if delta is not None:
+                    g.next_run = now + delta
+                else:
+                    g.enabled = False
+
         if not due:
             return []
 
@@ -212,15 +227,10 @@ class ProactiveScheduler:
                     goal.id,
                     output[:100] if output else "(empty)",
                 )
-                # Обновить тайминг только при успешном выполнении
+                # Обновить last_run только при успешном выполнении
+                # (next_run уже продвинут атомарно при получении due-списка)
                 async with self._lock:
                     goal.last_run = datetime.now(timezone.utc)
-                    delta = _parse_frequency(goal.frequency)
-                    if delta is not None:
-                        goal.next_run = goal.last_run + delta
-                    else:
-                        # Без частоты цель выполняется один раз — отключаем
-                        goal.enabled = False
             except Exception:
                 logger.exception(
                     "ProactiveScheduler: ошибка выполнения цели %r", goal.id

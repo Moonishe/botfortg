@@ -134,6 +134,7 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                         elif new_conf < mem.confidence * 0.7:  # значительно затух
                             mem.confidence = new_conf
                             decayed_count += 1
+                            continue  # skip time-based decay — already decayed by Ebbinghaus
 
                 # --- Time-based confidence decay (Feature 2) ---
                 # Facts that haven't been recalled slowly lose confidence

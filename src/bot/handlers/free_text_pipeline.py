@@ -653,7 +653,7 @@ async def _maybe_auto_save_facts(
                     except Exception:
                         logger.debug("Failed to cache extraction result", exc_info=True)
         except asyncio.CancelledError:
-            pass
+            raise
         except (RequestError, HTTPStatusError, SQLAlchemyError, json.JSONDecodeError):
             logger.debug("Auto-save facts skipped", exc_info=True)
 
