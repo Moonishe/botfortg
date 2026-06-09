@@ -2288,7 +2288,9 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
 
 @router.message(F.video_note | F.video)
 async def handle_video(message: Message) -> None:
-    """Заглушка для видео — берём первый кадр и анализируем как фото (TBD)."""
+    """Видео — отправка первого кадра на анализ. Требует vision-модель и извлечение кадра (ffmpeg)."""
+    # NOTE: Video analysis requires: ffmpeg frame extraction + vision model API call.
+    # Currently not implemented. For now, suggest photo.
     await message.answer("🎬 Видео пока не анализируются. Отправь фото.")
 
 
