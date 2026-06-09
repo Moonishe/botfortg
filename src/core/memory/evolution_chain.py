@@ -293,7 +293,7 @@ async def _build_single_chain(
     nodes.sort(
         key=lambda x: (
             x[1],
-            str(mem_map.get(x[0]).created_at if mem_map.get(x[0]) else ""),
+            str(mem_map[x[0]].created_at) if x[0] in mem_map else "",
         )
     )
 

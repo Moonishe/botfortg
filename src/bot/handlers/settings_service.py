@@ -130,6 +130,9 @@ async def _apply_import_config(telegram_id: int, config: dict) -> dict:
                 category=key_data.get("category", "llm"),
                 label=key_data.get("label"),
                 priority=key_data.get("priority", 0),
+                # NOTE: key_enc импортируется как есть, без перешифрования.
+                # Если мастер-ключ изменился, старые ключи не будут расшифрованы.
+                # Перешифрование всех ключей — отдельная операция (вне скоупа импорта).
                 key_enc=key_data["key_enc"],
             )
             session.add(slot)

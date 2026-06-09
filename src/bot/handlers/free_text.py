@@ -95,30 +95,32 @@ _URL_RE = re.compile(r'https?://[^\s<>"]+')
 
 def _is_safe_url(url: str) -> bool:
     """Проверяет что URL не ведёт на localhost/private IP."""
+    host = urlparse(url).hostname
+    if not host:
+        return False
     try:
-        host = urlparse(url).hostname
-        if not host:
-            return False
         addr = ipaddress.ip_address(host)
         if addr.is_loopback or addr.is_private or addr.is_link_local:
             return False
         return True
     except ValueError:
-        pass  # невалидный IP — вероятно домен, разрешаем, но ниже проверим DNS
+        # Невалидный IP — вероятно домен, проверяем DNS
+        import socket as _socket
 
-    # DNS-проверка для доменов: не резолвится ли домен в приватный IP
-    import socket as _socket
-
-    try:
-        addrinfo = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC)
-        for family, _, _, _, sockaddr in addrinfo:
-            ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
-                return False  # DNS resolves to internal IP — SSRF
-    except (_socket.gaierror, OSError):
-        pass  # DNS failure — let httpx handle it
-
-    return True
+        try:
+            addrinfo = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC)
+            for family, _, _, _, sockaddr in addrinfo:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_reserved
+                    or ip.is_link_local
+                ):
+                    return False  # DNS resolves to internal IP — SSRF
+        except (_socket.gaierror, OSError):
+            pass  # DNS failure — let httpx handle it
+        return True
 
 
 # ── URL summary cache (Adaptive TTL — hot URLs grow to 1h) ───────────

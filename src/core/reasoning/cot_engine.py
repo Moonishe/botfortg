@@ -294,6 +294,9 @@ class CoTEngine:
             params = tc.get("params", {})
             async with sem:
                 try:
+                    # Защита от конфликта ключей: params не должны переопределять session/user
+                    params.pop("session", None)
+                    params.pop("user", None)
                     result = await tool_registry.execute(
                         tool_name,
                         _confirmed=False,

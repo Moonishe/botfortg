@@ -245,6 +245,8 @@ def invalidate_contact(user_id: int) -> None:
     """Invalidate cache for this user (called on contact add/update).
 
     Synchronous — safe to call from any context without awaiting.
+    NOTE: dict.pop атомарен под GIL, поэтому отсутствие _CACHE_LOCK здесь —
+    осознанный компромисс. Гонка бенигна: читатель получит cache miss.
     """
     try:
         _contact_cache.pop(user_id, None)

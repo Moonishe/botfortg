@@ -222,8 +222,7 @@ async def smart_extract_after_sync(
 
         async with get_session() as session:
             contact = await get_contact(session, owner, peer_id)
-
-        contact_name = contact.display_name if contact else str(peer_id)
+            contact_name = contact.display_name if contact else str(peer_id)
 
         # --- progress: processing ---
         if progress_callback:

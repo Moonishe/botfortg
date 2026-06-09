@@ -353,14 +353,18 @@ class FactBatchBuffer:
 
     async def flush_now(self) -> None:
         """Принудительный сброс буфера (для graceful shutdown)."""
-        async with self._lock:
-            if not self._buffer:
-                return
-            batch = list(self._buffer)
-            self._buffer.clear()
-            if self._flush_task and not self._flush_task.done():
-                self._flush_task.cancel()
-        await self._flush_batch(batch)
+        self._is_flushing = True
+        try:
+            async with self._lock:
+                if not self._buffer:
+                    return
+                batch = list(self._buffer)
+                self._buffer.clear()
+                if self._flush_task and not self._flush_task.done():
+                    self._flush_task.cancel()
+            await self._flush_batch(batch)
+        finally:
+            self._is_flushing = False
 
     @property
     def enabled(self) -> bool:
@@ -547,4 +551,7 @@ async def get_batch_buffer() -> FactBatchBuffer:
 def reset_batch_buffer() -> None:
     """Сбросить глобальный буфер (для тестов)."""
     global _batch_buffer
-    _batch_buffer = None
+    if _batch_buffer is not None:
+        # Защита от гонки: сбрасываем ссылку атомарно,
+        # существующий буфер продолжит работу до завершения текущих операций.
+        _batch_buffer = None

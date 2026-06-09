@@ -31,6 +31,14 @@ _RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
 _CONFIRMATION_RISKS = frozenset({"high", "critical"})
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    """Безопасное приведение к int с fallback-значением."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return default
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Data Classes
 # ══════════════════════════════════════════════════════════════════════════
@@ -614,7 +622,7 @@ class HTNPlanner:
                     ],
                     risk_level=risk,
                     is_checkpoint=bool(raw.get("is_checkpoint", False)),
-                    estimated_tokens=raw.get("estimated_tokens", 100),
+                    estimated_tokens=_safe_int(raw.get("estimated_tokens", 100), 100),
                 )
             )
 

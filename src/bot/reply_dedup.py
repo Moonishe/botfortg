@@ -26,9 +26,10 @@ class ReplyDedup:
         key = f"{chat_id}:{digest}"
         async with self._lock:
             now = time.monotonic()
-            # Evict stale entries
-            while self._cache and next(iter(self._cache.values())) < now - self._ttl:
-                self._cache.popitem(last=False)
+            # Evict all stale entries (older than TTL)
+            stale = [k for k, v in self._cache.items() if v < now - self._ttl]
+            for k in stale:
+                del self._cache[k]
             if key in self._cache:
                 return True
             # Evict oldest if at capacity

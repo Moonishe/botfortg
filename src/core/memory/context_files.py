@@ -226,8 +226,10 @@ def append_to_context(key: str, text: str, max_lines: int = 500) -> None:
             existing = header
             existing_lowered = header.lower()
 
-        # Dedup — skip if same text already exists
-        if line.lower() in existing_lowered:
+        # Dedup — skip if all words already exist (word-level, not substring)
+        line_words = set(line.lower().split())
+        existing_words = set(existing_lowered.split())
+        if line_words.issubset(existing_words):
             return
 
         # Append with timestamp

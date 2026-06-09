@@ -197,6 +197,10 @@ async def conflict_predictor_loop(owner_id: int) -> None:
 from functools import partial
 from src.core.infra.task_manager import task_manager
 
-task_manager.register(
-    "conflict-predictor", partial(conflict_predictor_loop, settings.owner_telegram_id)
-)
+try:
+    task_manager.register(
+        "conflict-predictor",
+        partial(conflict_predictor_loop, settings.owner_telegram_id),
+    )
+except Exception:
+    logger.exception("Failed to register conflict-predictor task")

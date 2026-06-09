@@ -27,7 +27,7 @@ from src.db.repo import get_or_create_user
 logger = logging.getLogger(__name__)
 
 # In-memory cache of active sessions: {telegram_id: (session_id, started_at)}
-_active_sessions: dict[int, tuple[int, datetime]] = {}
+_active_sessions: dict[int, tuple[int, datetime, datetime]] = {}
 _active_sessions_lock: asyncio.Lock = asyncio.Lock()
 
 SESSION_INACTIVITY_TIMEOUT = timedelta(minutes=30)
@@ -66,9 +66,18 @@ async def record_turn(
         if session_id is not None:
             # Check inactivity from cached timestamp (no DB query needed)
             cached_started = cached[1] if cached else None
+            cached_last_active = (
+                cached[2] if cached and len(cached) > 2 else cached_started
+            )
             if cached_started:
-                elapsed = datetime.now(timezone.utc) - cached_started
-                if elapsed > SESSION_INACTIVITY_TIMEOUT:
+                gap = datetime.now(timezone.utc) - cached_started
+                inactivity = datetime.now(timezone.utc) - (
+                    cached_last_active or cached_started
+                )
+                if (
+                    gap > SESSION_INACTIVITY_TIMEOUT
+                    and inactivity > SESSION_INACTIVITY_TIMEOUT
+                ):
                     # Auto-close stale session via DB
                     result = await db_session.execute(
                         select(AgentSession).where(AgentSession.id == session_id)
@@ -91,7 +100,21 @@ async def record_turn(
             db_session.add(agent_session)
             await db_session.flush()
             session_id = agent_session.id
-            _active_sessions[telegram_id] = (session_id, agent_session.started_at)
+            _active_sessions[telegram_id] = (
+                session_id,
+                agent_session.started_at,
+                datetime.now(timezone.utc),
+            )
+
+    # Update last_active timestamp for the active session
+    async with _active_sessions_lock:
+        existing = _active_sessions.get(telegram_id)
+        if existing and existing[0] == session_id:
+            _active_sessions[telegram_id] = (
+                existing[0],
+                existing[1],
+                datetime.now(timezone.utc),
+            )
 
     # Record the message
     msg = AgentSessionMessage(

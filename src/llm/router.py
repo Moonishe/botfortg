@@ -451,6 +451,7 @@ class MultiKeyProvider:
                             provider_kwargs["model"] = per_slot[0]
                     if self._embed_model:
                         provider_kwargs["embed_model"] = self._embed_model
+                    provider = None
                     try:
                         provider = self._provider_class(key, **provider_kwargs)
                         total_text = ""
