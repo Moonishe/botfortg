@@ -61,12 +61,14 @@ async def traverse(
 
             # 1. Найти стартовую сущность (LIKE-поиск)
             start_result = await session.execute(
-                select(Entity).where(
+                select(Entity)
+                .where(
                     and_(
                         Entity.user_id == owner.id,
                         Entity.name.ilike(f"%{start_entity}%"),
                     )
                 )
+                .order_by(Entity.created_at.desc())
             )
             start_entities = start_result.scalars().all()
 

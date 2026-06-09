@@ -47,6 +47,7 @@ def _handler_accepts_kwarg(handler: Callable[..., Awaitable[dict]], name: str) -
         for param in signature.parameters.values()
     )
 
+
 # ── ToolSpec ─────────────────────────────────────────────────────────────
 
 
@@ -122,7 +123,11 @@ class ToolSpec:
 
     def effective_risk(self, action: Any = None) -> str:
         metadata = self.get_action_metadata(action)
-        return (metadata.risk if metadata and metadata.risk is not None else self.risk).strip().lower()
+        return (
+            (metadata.risk if metadata and metadata.risk is not None else self.risk)
+            .strip()
+            .lower()
+        )
 
     def effective_requires_confirmation(self, action: Any = None) -> bool:
         metadata = self.get_action_metadata(action)
@@ -134,7 +139,9 @@ class ToolSpec:
         metadata = self.get_action_metadata(action)
         if metadata and metadata.read_only is not None:
             return metadata.read_only
-        return self.effective_risk(action) == "low" and not self.effective_requires_confirmation(action)
+        return self.effective_risk(
+            action
+        ) == "low" and not self.effective_requires_confirmation(action)
 
     def effective_destructive(self, action: Any = None) -> bool:
         metadata = self.get_action_metadata(action)
@@ -159,6 +166,7 @@ class ToolSpec:
         if metadata and metadata.user_content is not None:
             return metadata.user_content
         return True
+
     actions: dict[str, ToolActionSpec] = field(default_factory=dict)
 
     def action_spec(self, action: Any) -> ToolActionSpec | None:
@@ -244,21 +252,19 @@ class ToolRegistry:
             lines.append("")
         return "\n".join(lines).rstrip()
 
-    def format_tools_with_schemas(self) -> str:
-        """Generate a compact text description of each tool with its JSON schemas.
+    def _format_tools_for_categories(self, categories: set[str] | None = None) -> str:
+        """Format tool descriptions grouped by category.
 
-        The output is designed for LLM prompt injection — it describes what
-        each tool returns (output schema) and expects as input (input schema).
-
-        Example::
-
-            recall_memory (memory):
-              input:  {"query": "str", "limit": "int (default 8)", "mode": "normal|light|deep"}
-              output: {"ok": bool, "facts": [{fact, confidence, reason}], "found": int}
+        Args:
+            categories: If provided, only format tools from these categories.
+                        If None, format all tools.
         """
         lines: list[str] = []
-        for category, tools in sorted(self.list_by_category().items()):
-            lines.append(f"## {category}")
+        all_cats = sorted(self.list_by_category().items())
+        for cat_name, tools in all_cats:
+            if categories is not None and cat_name not in categories:
+                continue
+            lines.append(f"## {cat_name}")
             for spec in sorted(tools, key=lambda s: s.name):
                 confirm = " ⚠️ confirmation" if spec.requires_confirmation else ""
                 lines.append(
@@ -313,6 +319,136 @@ class ToolRegistry:
                         lines.extend(out_descs)
                 lines.append("")
         return "\n".join(lines).rstrip()
+
+    def format_tools_with_schemas(self) -> str:
+        """Generate a compact text description of each tool with its JSON schemas.
+
+        The output is designed for LLM prompt injection — it describes what
+        each tool returns (output schema) and expects as input (input schema).
+
+        Example::
+
+            recall_memory (memory):
+              input:  {"query": "str", "limit": "int (default 8)", "mode": "normal|light|deep"}
+              output: {"ok": bool, "facts": [{fact, confidence, reason}], "found": int}
+        """
+        return self._format_tools_for_categories()
+
+    # ── Keyword → category mapping для format_tools_for_task ──
+    _TASK_KEYWORD_MAP: dict[str, list[str]] = {
+        "memory": [
+            "память",
+            "memory",
+            "запомни",
+            "вспомни",
+            "факт",
+            "fact",
+            "контекст",
+            "context",
+        ],
+        "search": [
+            "поиск",
+            "search",
+            "найди",
+            "google",
+            "гугл",
+            "ищи",
+            "погода",
+            "weather",
+            "новости",
+            "news",
+        ],
+        "web": ["веб", "web", "сайт", "браузер", "browser", "url"],
+        "chat": [
+            "чат",
+            "chat",
+            "ответь",
+            "напиши",
+            "сообщение",
+            "message",
+            "reply",
+            "draft",
+            "ответ",
+        ],
+        "messaging": ["telegram", "телеграм", "отправь", "send"],
+        "reminder": ["напомни", "remind", "напоминание", "дедлайн", "deadline"],
+        "contacts": ["контакт", "contact", "человек", "люди", "профиль"],
+        "reasoning": [
+            "почему",
+            "причина",
+            "reason",
+            "логика",
+            "думай",
+            "анализ",
+            "analyse",
+            "analyze",
+        ],
+        "utility": [
+            "код",
+            "code",
+            "файл",
+            "file",
+            "скрипт",
+            "script",
+            "перевод",
+            "translate",
+            "архив",
+            "zip",
+        ],
+        "system": [
+            "система",
+            "system",
+            "гит",
+            "git",
+            "shell",
+            "процесс",
+            "process",
+            "логи",
+            "log",
+        ],
+        "agent": ["агент", "agent", "делегируй"],
+        "research": ["исследова", "research", "глубокий", "deep"],
+        "vision": ["картинк", "фото", "изображени", "image", "picture", "photo"],
+        "productivity": ["задача", "task", "todo", "план", "plan"],
+        "knowledge": ["документация", "docs", "знание", "документ"],
+    }
+
+    def _infer_categories(self, task_context: str) -> set[str]:
+        """Determine relevant tool categories from task text via keyword matching."""
+        task_lower = task_context.lower()
+        matched: set[str] = set()
+        for category, keywords in self._TASK_KEYWORD_MAP.items():
+            for kw in keywords:
+                if kw in task_lower:
+                    matched.add(category)
+                    break
+        return matched
+
+    def format_tools_for_task(self, task_context: str) -> str:
+        """Return formatted tools relevant to the current task context.
+
+        Фильтрует инструменты по категориям на основе ключевых слов в задаче.
+        Всегда включает категорию 'memory' (write_memory, read_memory, recall_memory).
+        Если категории не определены — возвращает все инструменты.
+
+        Args:
+            task_context: Текст задачи пользователя (используется для keyword matching).
+        """
+        categories = self._infer_categories(task_context)
+
+        # Всегда включаем memory — рабочая память и recall нужны в любом диалоге
+        categories.add("memory")
+
+        if not categories or len(categories) <= 1:
+            # Только memory (или ничего) — недостаточно фильтрации, возвращаем всё
+            return self._format_tools_for_categories()
+
+        # Формируем комментарий о выбранных категориях
+        header = (
+            f"# Релевантные категории инструментов: {', '.join(sorted(categories))}\n"
+            f"# (отфильтровано по задаче: «{task_context[:120]}»)\n\n"
+        )
+        return header + self._format_tools_for_categories(categories=categories)
 
     # ------------------------------------------------------------------
     # Execution

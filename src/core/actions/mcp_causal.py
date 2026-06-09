@@ -76,6 +76,16 @@ async def tool_analyze_causes(
     session = _resolve_session(kwargs)
     user_obj = _resolve_user_obj(kwargs)
 
+    # Проверяем доступность сессии и пользователя для LLM-вызова
+    if session is None or user_obj is None:
+        return {
+            "ok": False,
+            "error": (
+                "Для анализа причин требуется активная сессия и пользователь. "
+                "Убедитесь, что вы авторизованы и повторите запрос."
+            ),
+        }
+
     try:
         from src.core.reasoning.causal import analyze_causes
 
@@ -125,6 +135,16 @@ async def tool_analyze_counterfactual(
 
     session = _resolve_session(kwargs)
     user_obj = _resolve_user_obj(kwargs)
+
+    # Проверяем доступность сессии и пользователя для LLM-вызова
+    if session is None or user_obj is None:
+        return {
+            "ok": False,
+            "error": (
+                "Для контрфактуального анализа требуется активная сессия и пользователь. "
+                "Убедитесь, что вы авторизованы и повторите запрос."
+            ),
+        }
 
     try:
         from src.core.reasoning.causal import analyze_counterfactual

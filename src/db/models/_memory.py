@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -328,7 +329,10 @@ class Entity(Base):
     """
 
     __tablename__ = "entities"
-    __table_args__ = (Index("ix_entity_user_type", "user_id", "type"),)
+    __table_args__ = (
+        Index("ix_entity_user_type", "user_id", "type"),
+        UniqueConstraint("user_id", "name", "type", name="uq_entity_user_name_type"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -360,6 +364,13 @@ class EntityRelation(Base):
     __tablename__ = "entity_relations"
     __table_args__ = (
         Index("ix_er_user_relation", "user_id", "source_id", "target_id"),
+        UniqueConstraint(
+            "user_id",
+            "source_id",
+            "target_id",
+            "relation",
+            name="uq_er_user_src_tgt_rel",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

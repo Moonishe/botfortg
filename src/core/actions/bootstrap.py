@@ -73,6 +73,7 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_reasoning",
     "src.core.actions.mcp_agent",
     "src.core.actions.mcp_deep_research",
+    "src.core.actions.mcp_fact_crud",
     "src.core.actions.mcp_causal",
     "src.core.actions.mcp_knowledge_graph",
 )

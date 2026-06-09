@@ -53,8 +53,6 @@ def _parse_entity_json(text: str | None) -> dict:
     # Убираем markdown-обёртки если есть
     if text.startswith("```"):
         text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
-        if text.lower().startswith("json"):
-            text = text[4:].strip()
 
     # Ищем первый JSON-объект
     decoder = json.JSONDecoder()
@@ -179,9 +177,6 @@ async def save_entities(
     Returns:
         (entities_saved, relations_saved) — количество новых записей.
     """
-    if not entities:
-        return 0, 0
-
     from src.db.models._memory import Entity, EntityRelation
     from src.db.repo import get_or_create_user
     from src.db.session import get_session
@@ -217,7 +212,7 @@ async def save_entities(
                 existing = result.scalar_one_or_none()
 
                 if existing is not None:
-                    entity_name_to_id[name] = existing.id
+                    entity_name_to_id[f"{name}:{etype}"] = existing.id
                     # Обновляем metadata если передана
                     meta = e.get("metadata_json")
                     if meta and not existing.metadata_json:
@@ -231,7 +226,7 @@ async def save_entities(
                     )
                     session.add(new_entity)
                     await session.flush()
-                    entity_name_to_id[name] = new_entity.id
+                    entity_name_to_id[f"{name}:{etype}"] = new_entity.id
                     entities_saved += 1
 
             # ── Сохраняем связи ──
@@ -240,19 +235,34 @@ async def save_entities(
                 target_name = (r.get("target") or "").strip()[:128]
                 relation = (r.get("relation") or "related_to").strip()[:64]
                 weight = float(r.get("weight", 1.0))
-                source_label = (r.get("source") or "extraction").strip()[:64]
+                source_label = "extraction"
 
                 if not source_name or not target_name:
                     continue
 
-                src_id = entity_name_to_id.get(source_name)
-                tgt_id = entity_name_to_id.get(target_name)
+                # Поиск сущности по имени с учётом typed-ключа
+                src_id = next(
+                    (
+                        eid
+                        for key, eid in entity_name_to_id.items()
+                        if key.startswith(f"{source_name}:")
+                    ),
+                    None,
+                )
+                tgt_id = next(
+                    (
+                        eid
+                        for key, eid in entity_name_to_id.items()
+                        if key.startswith(f"{target_name}:")
+                    ),
+                    None,
+                )
 
                 if src_id is None or tgt_id is None:
                     # Сущность не была в этом батче — ищем в БД
                     if src_id is None:
                         res = await session.execute(
-                            select(Entity.id).where(
+                            select(Entity.id, Entity.type).where(
                                 and_(
                                     Entity.user_id == owner.id,
                                     Entity.name == source_name,
@@ -262,11 +272,11 @@ async def save_entities(
                         row = res.first()
                         if row:
                             src_id = row[0]
-                            entity_name_to_id[source_name] = src_id
+                            entity_name_to_id[f"{source_name}:{row[1]}"] = src_id
 
                     if tgt_id is None:
                         res = await session.execute(
-                            select(Entity.id).where(
+                            select(Entity.id, Entity.type).where(
                                 and_(
                                     Entity.user_id == owner.id,
                                     Entity.name == target_name,
@@ -276,7 +286,7 @@ async def save_entities(
                         row = res.first()
                         if row:
                             tgt_id = row[0]
-                            entity_name_to_id[target_name] = tgt_id
+                            entity_name_to_id[f"{target_name}:{row[1]}"] = tgt_id
 
                 if src_id is None or tgt_id is None:
                     continue
@@ -348,8 +358,6 @@ async def extract_and_save_entities(
         extracted = await extract_entities(user_id, facts, provider=provider)
         entities = extracted.get("entities", [])
         relations = extracted.get("relations", [])
-        if not entities:
-            return 0, 0
         return await save_entities(user_id, entities, relations)
     except Exception:
         logger.debug(
