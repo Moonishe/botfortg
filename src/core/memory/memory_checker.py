@@ -138,10 +138,12 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
 
                 # --- Time-based confidence decay (Feature 2) ---
                 # Facts that haven't been recalled slowly lose confidence
-                now_aware = datetime.now(timezone.utc)
+                now_aware = utcnow_naive()
                 ref_date = mem.last_used_at or mem.created_at
                 if ref_date is not None:
-                    days_since_use = (now_aware - ref_date).total_seconds() / 86400
+                    days_since_use = (
+                        now_aware - utc_naive(ref_date)
+                    ).total_seconds() / 86400
                 else:
                     days_since_use = 0
 

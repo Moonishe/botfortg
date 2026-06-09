@@ -817,33 +817,36 @@ class HTNPlanner:
 # Простое хранилище планов в памяти (для демонстрации).
 # В production следует заменить на БД (plans table).
 _plan_store: dict[str, Plan] = {}
+_plan_store_lock = asyncio.Lock()
 
 
 def _plan_key(owner_id: int | None) -> str:
-    """Генерирует ключ для хранения плана."""
-    return f"plan:{owner_id or 0}"
+    """Генерирует ключ для хранения плана. None → отдельный sentinel."""
+    return f"plan:{owner_id}" if owner_id is not None else "plan:none"
 
 
-def store_plan(owner_id: int | None, plan: Plan) -> str:
+async def store_plan(owner_id: int | None, plan: Plan) -> str:
     """Сохраняет план в in-memory хранилище. Возвращает ключ."""
     key = _plan_key(owner_id)
-    _plan_store[key] = plan
+    async with _plan_store_lock:
+        _plan_store[key] = plan
     logger.debug("HTNPlanner: stored plan for owner_id=%s", owner_id)
     return key
 
 
-def get_plan(owner_id: int | None) -> Plan | None:
+async def get_plan(owner_id: int | None) -> Plan | None:
     """Извлекает план из in-memory хранилища."""
-    return _plan_store.get(_plan_key(owner_id))
+    async with _plan_store_lock:
+        return _plan_store.get(_plan_key(owner_id))
 
 
-def update_plan_step(
+async def update_plan_step(
     owner_id: int | None,
     step_index: int,
     new_description: str,
 ) -> Plan | None:
     """Обновляет описание шага в существующем плане."""
-    plan = get_plan(owner_id)
+    plan = await get_plan(owner_id)
     if plan is None:
         return None
     if step_index < 0 or step_index >= len(plan.steps):

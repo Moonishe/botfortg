@@ -17,6 +17,8 @@ class PairingManager:
     def __init__(self) -> None:
         self._pending: dict[int, str] = {}  # sender_id → code
         self._allowlist: set[int] = set()
+        # NOTE: threading.Lock is intentional — sync methods called from asyncio
+        # but never yield. Safe under single-threaded event loop.
         self._lock = threading.Lock()
 
     async def is_allowed(self, sender_id: int) -> bool:

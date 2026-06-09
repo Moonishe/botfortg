@@ -11,7 +11,7 @@ from src.config import settings
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.models import Notification
-from src.core.infra.timeutil import fmt_local, now_in_tz
+from src.core.infra.timeutil import ensure_utc, fmt_local, now_in_tz
 from src.db.models import AutoReplyLog, Commitment, Message, User
 from src.db.repo import get_or_create_user, list_open_commitments
 from src.db.session import get_session
@@ -121,9 +121,15 @@ async def _gather_payload(owner: User) -> dict:
     def _hot(items: list[Commitment]) -> list[Commitment]:
         out = []
         for c in items:
-            if c.deadline_at and (c.deadline_at < now or c.deadline_at <= soon):
+            deadline_at = ensure_utc(c.deadline_at)
+            created_at = ensure_utc(c.created_at)
+            if deadline_at and (deadline_at < now or deadline_at <= soon):
                 out.append(c)
-            elif c.deadline_at is None and (now - c.created_at) > timedelta(days=2):
+            elif (
+                deadline_at is None
+                and created_at
+                and (now - created_at) > timedelta(days=2)
+            ):
                 out.append(c)
         return out
 

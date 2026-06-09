@@ -99,7 +99,9 @@ async def mcp_reasoning(
             from src.core.reasoning.htn_planner import get_plan as _get_plan
             from src.db.repo import get_or_create_user
 
-            plan_store = _get_plan(owner_id=user.id if hasattr(user, "id") else user)
+            plan_store = await _get_plan(
+                owner_id=user.id if hasattr(user, "id") else user
+            )
         except Exception:
             logger.debug("Не удалось загрузить план %s, продолжаем без плана", plan_id)
             plan = None

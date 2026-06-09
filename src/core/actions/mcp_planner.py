@@ -107,7 +107,7 @@ async def mcp_plan_task(
 
         # Сохраняем план
         owner_id = getattr(user, "telegram_id", None) if user is not None else None
-        store_plan(owner_id, plan)
+        await store_plan(owner_id, plan)
 
         result = _plan_to_dict(plan)
         logger.info(
@@ -148,7 +148,7 @@ async def mcp_get_plan_status(
         dict с текущим планом или сообщением об отсутствии.
     """
     owner_id = getattr(user, "telegram_id", None) if user is not None else None
-    plan = get_plan(owner_id)
+    plan = await get_plan(owner_id)
 
     if plan is None:
         return {
@@ -198,7 +198,7 @@ async def mcp_modify_plan(
         return {"ok": False, "error": "HTN Planner отключён в настройках"}
 
     owner_id = getattr(user, "telegram_id", None) if user is not None else None
-    plan = update_plan_step(owner_id, step_index, new_description)
+    plan = await update_plan_step(owner_id, step_index, new_description)
 
     if plan is None:
         return {"ok": False, "error": "План не найден или неверный индекс шага"}

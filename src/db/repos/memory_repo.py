@@ -437,6 +437,9 @@ async def add_memory(
     has_temporal_marker = any(m in fact.lower() for m in temporal_markers)
 
     # Per-user lock to prevent concurrent dedup+insert race
+    # NOTE: Per-user lock serializes execution but does not prevent
+    # cross-transaction duplicates. DB-level UNIQUE constraint handles
+    # this for SQLite.
     lock = _get_user_lock(user.id)
 
     async with lock:

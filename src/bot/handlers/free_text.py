@@ -1514,7 +1514,9 @@ async def _process_text(
         return
 
     # Stage 6: Build provider (Single session per request optimization)
-    purpose = plan.tasks[0].purpose.value if plan.tasks else "main"
+    purpose = (
+        plan.tasks[0].purpose.value if plan.tasks and plan.tasks[0].purpose else "main"
+    )
     if session is None:
         async with get_session() as session:
             owner_db = await get_or_create_user(session, owner_telegram_id)

@@ -574,10 +574,12 @@ async def _scan_contradictions_batch(
                 common = words1 & words2
                 if common and len(common) >= 2:
                     has_neg1 = any(
-                        neg in f1 for neg in ("не ", "нет ", "никогда ", "больше не ")
+                        re.search(r"\b" + re.escape(neg) + r"\b", f1)
+                        for neg in ("не ", "нет ", "никогда ", "больше не ")
                     )
                     has_neg2 = any(
-                        neg in f2 for neg in ("не ", "нет ", "никогда ", "больше не ")
+                        re.search(r"\b" + re.escape(neg) + r"\b", f2)
+                        for neg in ("не ", "нет ", "никогда ", "больше не ")
                     )
                     if has_neg1 != has_neg2:
                         found += 1

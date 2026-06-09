@@ -14,8 +14,11 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import (
     User as TgUser,
+    UserStatusLastMonth,
+    UserStatusLastWeek,
     UserStatusOffline,
     UserStatusOnline,
+    UserStatusRecently,
 )
 
 from src.core.contacts.auto_reply_decision import (
@@ -83,6 +86,13 @@ async def _check_and_track_offline(
             if owner.absence_status in ("sleeping", "away", "soon_back"):
                 owner.absence_status = None
                 owner.absence_message = None
+            await session.flush()
+            return False
+        if isinstance(
+            status, (UserStatusRecently, UserStatusLastWeek, UserStatusLastMonth)
+        ):
+            # Owner was recently online — not definitely offline, do not auto-reply
+            owner.last_seen_online = datetime.now(timezone.utc).replace(tzinfo=None)
             await session.flush()
             return False
         if isinstance(status, UserStatusOffline):
