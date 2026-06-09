@@ -77,7 +77,10 @@ async def process_reaction(reaction_data: dict[str, Any]) -> None:
         return
 
     # Определить тип сигнала и фактор
-    signal_type, factor = REACTION_SIGNALS.get(reaction_emoji, _DEFAULT_SIGNAL)
+    signal_type, base_factor = REACTION_SIGNALS.get(reaction_emoji, _DEFAULT_SIGNAL)
+    # Применить feedback_weight (1.0 = реакция на сообщение бота, 0.5 = на сообщение контакта)
+    weight = reaction_data.get("feedback_weight", 1.0)
+    factor = base_factor * weight
 
     # Построить контекст для PreferenceLearner
     # Ищем факты, связанные с этим чатом и сообщением

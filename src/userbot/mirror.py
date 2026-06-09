@@ -203,9 +203,37 @@ async def _save_and_process_reaction(
                 is_bot_message=is_bot_message,
             )
 
-        # Если реакция на сообщение бота — корректируем confidence памяти
+        # Всегда обрабатываем реакцию как сигнал для памяти:
+        # - На сообщение бота → полный вес (1.0)
+        # - На сообщение контакта → пониженный вес (0.5)
+        # - На любое другое → только сохраняем в БД
         if is_bot_message:
+            reaction_data["feedback_weight"] = 1.0
             await process_reaction_feedback(reaction_data)
+        else:
+            # Проверяем, от известного ли контакта сообщение
+            try:
+                result = await session.execute(
+                    select(MessageModel).where(
+                        MessageModel.user_id == owner.id,
+                        MessageModel.peer_id == chat_id,
+                        MessageModel.message_id == message_id,
+                    )
+                )
+                msg = result.scalar_one_or_none()
+                if msg is not None and msg.sender_id:
+                    # Сообщение от известного контакта — слабый сигнал
+                    reaction_data["feedback_weight"] = 0.5
+                    from src.core.memory.reaction_feedback import (
+                        process_reaction_feedback,
+                    )
+
+                    await process_reaction_feedback(reaction_data)
+            except Exception:
+                logger.debug(
+                    "Не удалось проверить автора сообщения %d для реакции",
+                    message_id,
+                )
 
     except Exception:
         logger.exception(
