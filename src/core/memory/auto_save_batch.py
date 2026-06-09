@@ -492,8 +492,9 @@ class FactBatchBuffer:
 
             except asyncio.CancelledError:
                 logger.warning(
-                    "Batch flush cancelled with %d facts — данные могут быть утеряны",
+                    "Batch flush cancelled with %d facts — данные могут быть утеряны, msg_ids=%s",
                     len(batch),
+                    [m.get("telegram_id") for m in batch],
                 )
                 raise
             except (

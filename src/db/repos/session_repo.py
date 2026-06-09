@@ -62,6 +62,9 @@ async def get_or_create_user(
                 User, cached, options=[selectinload(User.key_slots)]
             )
             if user is not None:
+                if user.settings is None:
+                    user.settings = UserSettings(user_id=user.id)
+                    session.add(user.settings)
                 return user
     lock = _get_user_lock(
         -telegram_id

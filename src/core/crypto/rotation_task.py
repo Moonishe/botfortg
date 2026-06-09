@@ -72,7 +72,6 @@ async def _rotate_keys_async() -> None:
                             e,
                         )
 
-            await session.commit()
             logger.info(
                 "Перешифрование завершено: %d ключей, %d ошибок",
                 re_encrypted,

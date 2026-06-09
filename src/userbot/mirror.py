@@ -112,6 +112,8 @@ async def _process_incoming_bg(
                 _im_provider = await build_provider(
                     _im_session, _im_owner, task_type=TaskType.CLASSIFY
                 )
+                if _im_provider is None:
+                    return
                 decision = await process_incoming(
                     message_text=text,
                     sender_name=sender_name,
