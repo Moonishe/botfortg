@@ -7,6 +7,8 @@
 import asyncio
 import logging
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from src.core.memory._queue_core import MemoryJob, _queue, enqueue  # noqa: F401
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -238,7 +240,7 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
             # возвращая session в чистое состояние для следующего факта.
             await session.commit()
             tagged += 1
-        except (ValueError, AttributeError, ConnectionError, OSError):
+        except (ValueError, AttributeError, ConnectionError, OSError, SQLAlchemyError):
             await session.rollback()
             logger.exception("Tagging failed for memory %d", mem.id)
     logger.debug(

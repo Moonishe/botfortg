@@ -333,12 +333,13 @@ class FactBatchBuffer:
                         # новый flush запустится после завершения текущего
                         return
                 batch = list(self._buffer)
-                self._buffer.clear()
-                self._created_at = None
-                # Запустить фоновую обработку
+                # Запустить фоновую обработку ДО очистки буфера —
+                # если asyncio.create_task упадёт, сообщение останется в буфере
                 self._flush_task = asyncio.create_task(
                     self._flush_batch(batch), name="auto-save-flush-batch"
                 )
+                self._buffer.clear()
+                self._created_at = None
             else:
                 # Запустить/перезапустить таймер — сброс после паузы
                 if self._is_flushing:
@@ -400,14 +401,14 @@ class FactBatchBuffer:
                         elapsed,
                     )
             batch = list(self._buffer)
+            # Создаём задачу ДО очистки буфера: если create_task упадёт,
+            # данные останутся в буфере и не будут потеряны
+            task = asyncio.create_task(
+                self._flush_batch(batch), name="auto-save-flush-timeout-batch"
+            )
+            track_ff(task)
             self._buffer.clear()
             self._created_at = None
-            # Используем track_ff чтобы задача не потерялась при shutdown
-            track_ff(
-                asyncio.create_task(
-                    self._flush_batch(batch), name="auto-save-flush-timeout-batch"
-                )
-            )
 
     async def _flush_batch(self, batch: list[dict[str, Any]]) -> None:
         """Обработать накопленный батч: LLM → парсинг → сохранение в БД.
@@ -458,10 +459,12 @@ class FactBatchBuffer:
                     )
                     break
                 except Exception:
-                    logger.exception(
-                        "Unexpected error in batch flush: %d facts lost", len(batch)
+                    logger.error(
+                        "Unexpected error in batch flush (non-retryable): %d facts lost",
+                        len(batch),
+                        exc_info=True,
                     )
-                    break
+                    raise
 
             if raw_json is None:
                 return  # все попытки исчерпаны или не-retryable ошибка

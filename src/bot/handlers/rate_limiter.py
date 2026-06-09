@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,8 @@ logger = logging.getLogger(__name__)
 _last_request: dict[int, tuple[float, asyncio.Lock]] = {}
 # Скользящее окно: {telegram_id: [timestamp, ...]}
 _request_history: dict[int, list[float]] = {}
-_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_locks: dict[int, asyncio.Lock] = {}
+_lock_init_lock: asyncio.Lock = asyncio.Lock()
 _counter_lock: asyncio.Lock = asyncio.Lock()
 _MIN_INTERVAL: float = 3.0  # секунд между запросами одного пользователя
 _CLEANUP_TTL: float = 60.0  # удаляем записи старше 1 минуты
@@ -29,6 +29,21 @@ _HARD_TTL: float = 3600.0  # жёсткий лимит — удаляем зап
 _LOCK_CLEANUP_INTERVAL: int = 1000  # каждые N вызовов check_rate_limit чистим _locks
 _check_call_counter: int = 0
 _last_cleanup: float = 0.0  # время последнего _cleanup_stale (для троттлинга)
+
+
+async def _get_user_lock(telegram_id: int) -> asyncio.Lock:
+    """Атомарно получить или создать блокировку для пользователя.
+
+    Использует double-check с _lock_init_lock для защиты от гонки:
+    два сопрограммы не могут одновременно создать два разных asyncio.Lock
+    для одного uid (что сломало бы взаимное исключение).
+    """
+    if telegram_id in _locks:
+        return _locks[telegram_id]
+    async with _lock_init_lock:
+        if telegram_id not in _locks:
+            _locks[telegram_id] = asyncio.Lock()
+    return _locks[telegram_id]
 
 
 async def check_rate_limit(
@@ -52,13 +67,13 @@ async def check_rate_limit(
     """
     global _check_call_counter, _last_cleanup
     now = time.monotonic()
-    lock = _locks[telegram_id]
+    lock = await _get_user_lock(telegram_id)
 
     async with lock:
         # Периодическая очистка устаревших записей (не чаще раза в минуту)
         if now - _last_cleanup > 60.0:
             _last_cleanup = now
-            _cleanup_stale(now)
+            await _cleanup_stale(now)
 
         # Периодическая очистка _locks от неактивных блокировок
         _check_call_counter += 1
@@ -91,7 +106,7 @@ async def check_rate_limit(
         return True
 
 
-def _cleanup_stale(now: float) -> None:
+async def _cleanup_stale(now: float) -> None:
     """Удалить записи старше _CLEANUP_TTL (+ чистит _locks и 1-hour hard TTL)."""
     for uid in list(_last_request.keys()):
         t, _ = _last_request[uid]
@@ -112,12 +127,15 @@ def _cleanup_stale(now: float) -> None:
                 _locks.pop(uid, None)
 
     # Cleanup _request_history: remove entries with no recent timestamps
-    for uid in list(_request_history.keys()):
-        history = _request_history[uid]
-        # Remove timestamps older than hard TTL
-        _request_history[uid] = [t for t in history if now - t < _HARD_TTL]
-        if not _request_history[uid]:
-            del _request_history[uid]
+    # Защищено _counter_lock — concurrent sliding-window операции не увидят
+    # частично очищенный history
+    async with _counter_lock:
+        for uid in list(_request_history.keys()):
+            history = _request_history[uid]
+            # Remove timestamps older than hard TTL
+            _request_history[uid] = [t for t in history if now - t < _HARD_TTL]
+            if not _request_history[uid]:
+                del _request_history[uid]
 
 
 def _cleanup_locks(now: float) -> None:

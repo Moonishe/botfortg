@@ -42,7 +42,7 @@ _ctx_cleanup_ts: float = 0.0
 
 
 def _cleanup_stale_contexts() -> None:
-    """Удаляет контексты, где created_at старше _STALE_CTX_TTL."""
+    """Удаляет контексты, где created_at старше _STALE_CTX_TTL, и связанные блокировки."""
     now = time()
     stale = [
         uid
@@ -51,6 +51,7 @@ def _cleanup_stale_contexts() -> None:
     ]
     for uid in stale:
         del _STORE[uid]
+        _user_locks.pop(uid, None)  # предотвращает неограниченный рост _user_locks
 
 
 async def _get(user_id: int) -> _Ctx:
