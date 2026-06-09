@@ -73,6 +73,9 @@ async def index_chat(
             batch_points: list[dict] = []
             for (idx, m), vec in zip(valid_msg_map, vecs):
                 if vec is None:
+                    ids_done.append(
+                        m.id
+                    )  # prevent infinite loop on persistent embed failures
                     continue
                 text = _msg_text_for_embed(m)
                 batch_points.append(

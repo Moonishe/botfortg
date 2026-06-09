@@ -111,4 +111,7 @@ class AmbientIntelligence:
         if last_active is None:
             return True  # Первое сообщение — считаем новым днём
         now = datetime.now(timezone.utc)
+        # NOTE: UTC date comparison — ignores user timezone.
+        # Acceptable tradeoff for single-user bot; multi-user would need
+        # per-user timezone-aware "start of day" logic.
         return last_active.date() < now.date()

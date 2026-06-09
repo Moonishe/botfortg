@@ -175,10 +175,6 @@ class MultiKeyProvider:
             self._idx = (self._idx + 1) % len(self._keys)
             return start_idx
 
-    async def _advance_idx_after_success(self, idx: int) -> None:
-        async with self._idx_lock:
-            self._idx = (idx + 1) % len(self._keys)
-
     async def _try_with_retry(
         self,
         operation,
@@ -294,8 +290,8 @@ class MultiKeyProvider:
                                 "Failed to record provider success metric for %s",
                                 self.provider_name,
                             )
-                        # Round-robin: advance to the next key for load distribution
-                        await self._advance_idx_after_success(idx)
+                        # _reserve_start_idx already advanced the round-robin index;
+                        # no separate advance needed — avoids double-increment race.
                         return result
             except Exception as exc:
                 if _is_retryable_llm_error(exc):
@@ -489,7 +485,8 @@ class MultiKeyProvider:
                                 "Failed to record provider success metric for %s",
                                 self.provider_name,
                             )
-                        await self._advance_idx_after_success(idx)
+                        # _reserve_start_idx already advanced the round-robin index;
+                        # no separate advance needed — avoids double-increment race.
                         return
                     except (AttributeError, NotImplementedError):
                         continue

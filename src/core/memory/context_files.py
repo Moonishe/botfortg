@@ -315,7 +315,7 @@ async def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
     for md_file in CONTEXTS_DIR.iterdir():
         if md_file.suffix != ".md":
             continue
-        content = safe_read_context_file(str(md_file))
+        content = safe_read_context_file(str(md_file), max_chars=_MAX_CONTEXT_CHARS)
         if content is None:
             continue
         pos = content.lower().find(ql)

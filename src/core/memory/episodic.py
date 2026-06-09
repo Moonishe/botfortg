@@ -144,14 +144,17 @@ async def create_episode(
     # Определяем важность: длинные/эмоциональные разговоры важнее
     importance = min(1.0, 0.3 + len(combined) / 5000 + (abs(valence or 0) * 0.3))
 
-    # Ищем связанные Memory-факты
+    # Получаем owner (User.id, не telegram_id) для FK в Memory и Episode
+    from src.db.repo import get_or_create_user
+
     memory_ids: list[int] = []
     try:
         async with get_session() as session:
+            owner = await get_or_create_user(session, user_id)
             result = await session.execute(
                 select(Memory)
                 .where(
-                    Memory.user_id == user_id,
+                    Memory.user_id == owner.id,
                     Memory.is_active == True,
                 )
                 .order_by(desc(Memory.importance))
@@ -172,8 +175,9 @@ async def create_episode(
 
     try:
         async with get_session() as session:
+            owner = await get_or_create_user(session, user_id)
             episode = Episode(
-                user_id=user_id,
+                user_id=owner.id,
                 started_at=_now_utc(),
                 ended_at=_now_utc(),
                 summary=summary,
@@ -418,7 +422,7 @@ async def _reflect_single_episode(
         for fact_text in facts[:5]:  # не больше 5 новых фактов за эпизод
             try:
                 memory = MemoryModel(
-                    user_id=user_id,
+                    user_id=owner.id,
                     fact=fact_text,
                     source="auto",
                     memory_type="personal",

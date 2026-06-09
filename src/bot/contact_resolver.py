@@ -60,7 +60,7 @@ async def resolve_contact_fast(
     Returns:
         List of ContactCandidate matching the query (empty if no match).
     """
-    uid = user_id if user_id is not None else owner.id
+    uid = user_id if user_id is not None else owner.telegram_id
 
     # 1. Try prefetch cache
     cached = await get_cached_contact(uid, query, min_score=min_score, limit=limit)

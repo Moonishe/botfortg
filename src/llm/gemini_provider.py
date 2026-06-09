@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from collections.abc import AsyncGenerator
 
 import httpx
 from google import genai
@@ -91,6 +93,65 @@ class GeminiProvider(BaseLLMProvider):
         return await asyncio.wait_for(
             asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
         )
+
+    async def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat output token by token using Gemini's streaming API."""
+        import queue as sync_queue
+
+        model = self._resolve_model(heavy)
+        system, contents = _to_gemini_contents(messages)
+        config = {"system_instruction": system} if system else None
+
+        # Try async client first (available in google-genai >= 1.0)
+        aio_client = getattr(self._client, "aio", None)
+        if aio_client is not None:
+            try:
+                stream = await aio_client.models.generate_content_stream(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+                async for chunk in stream:
+                    if chunk.text:
+                        yield chunk.text
+                return
+            except Exception:
+                pass  # fall through to thread-based streaming
+
+        # Thread-based streaming fallback for sync-only client
+        token_queue: sync_queue.Queue = sync_queue.Queue()
+
+        def _stream_sync() -> None:
+            try:
+                _config = {"system_instruction": system} if system else None
+                for chunk in self._client.models.generate_content_stream(
+                    model=model,
+                    contents=contents,
+                    config=_config,
+                ):
+                    if chunk.text:
+                        token_queue.put(chunk.text)
+            except Exception as exc:
+                token_queue.put(exc)
+            finally:
+                token_queue.put(None)  # sentinel
+
+        thread = threading.Thread(target=_stream_sync, daemon=True)
+        thread.start()
+
+        while True:
+            item = await asyncio.to_thread(token_queue.get)
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
     async def embed(self, text: str) -> list[float]:
         from src.core.actions.embedding_cache import aget, aset

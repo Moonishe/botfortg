@@ -497,7 +497,9 @@ async def _post_turn_optimize(
                     user_message=user_message,
                     assistant_response=assistant_response,
                 )
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
+            raise  # must propagate for proper task cancellation
+        except Exception:
             logger.debug("post_turn_optimize skipped", exc_info=True)
 
     async with _get_post_turn_lock():

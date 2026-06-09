@@ -107,9 +107,19 @@ def _extract_keywords(text: str) -> set[str]:
 
 
 def _has_negation(text: str) -> bool:
-    """Check if text contains negation words."""
+    """Check if text contains negation words (word-boundary match)."""
     text_lower = text.lower()
-    return any(neg in text_lower for neg in _NEGATION_WORDS)
+    words = set(text_lower.split())
+    # Multi-word negation phrases need substring check; single-word
+    # negations use word-boundary via split() to avoid false positives
+    # like "не" matching "неделя".
+    for neg in _NEGATION_WORDS:
+        if " " in neg:
+            if neg in text_lower:
+                return True
+        elif neg in words:
+            return True
+    return False
 
 
 def _check_opposite_categories(user_text: str, fact_text: str) -> bool:
