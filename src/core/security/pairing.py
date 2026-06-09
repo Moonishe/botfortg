@@ -46,7 +46,7 @@ class PairingManager:
 
     def start_pairing(self, sender_id: int) -> str:
         """Generate a pairing code for a new contact."""
-        code = secrets.token_hex(3)  # 6-char hex, e.g. "a1b2c3"
+        code = secrets.token_hex(16)  # 32-char hex, 128 bits — bruteforce-resistant
         with self._lock:
             self._pending[sender_id] = code
         logger.info("Pairing started for sender %d", sender_id)
