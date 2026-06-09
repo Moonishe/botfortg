@@ -15,6 +15,7 @@ class ReplyDedup:
         self._cache: OrderedDict[str, float] = OrderedDict()
         self._max_size = max_size
         self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
 
     async def is_duplicate(self, chat_id: int, text: str) -> bool:
         loop = asyncio.get_running_loop()
@@ -23,17 +24,18 @@ class ReplyDedup:
             lambda: sha256(text.encode(), usedforsecurity=False).hexdigest()[:16],
         )
         key = f"{chat_id}:{digest}"
-        now = time.monotonic()
-        # Evict stale entries
-        while self._cache and next(iter(self._cache.values())) < now - self._ttl:
-            self._cache.popitem(last=False)
-        if key in self._cache:
-            return True
-        # Evict oldest if at capacity
-        if len(self._cache) >= self._max_size:
-            self._cache.popitem(last=False)
-        self._cache[key] = now
-        return False
+        async with self._lock:
+            now = time.monotonic()
+            # Evict stale entries
+            while self._cache and next(iter(self._cache.values())) < now - self._ttl:
+                self._cache.popitem(last=False)
+            if key in self._cache:
+                return True
+            # Evict oldest if at capacity
+            if len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+            self._cache[key] = now
+            return False
 
 
 dedup = ReplyDedup()

@@ -1,5 +1,9 @@
 """Часовой пояс пользователя. В БД храним naive UTC, при показе и сравнении
-с расписаниями (digest_time, news_digest_time) переводим в TZ владельца."""
+с расписаниями (digest_time, news_digest_time) переводим в TZ владельца.
+
+# NOTE: DST transitions (spring-forward/fall-back) can cause ±1 hour ambiguity.
+# All timestamps use UTC internally; local conversions are for display only.
+"""
 
 from __future__ import annotations
 

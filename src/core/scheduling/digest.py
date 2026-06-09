@@ -203,7 +203,11 @@ from src.core.infra.task_manager import task_manager
 @task_manager.task("digest-scheduler")
 async def digest_scheduler_loop() -> None:
     """Каждую минуту проверяет, пора ли отправлять дайджест.
-    Сравнение времени — в TZ владельца (UserSettings.timezone)."""
+    Сравнение времени — в TZ владельца (UserSettings.timezone).
+
+    NOTE: get_or_create_user() вызывается каждый тик (~1 раз в минуту)
+    для получения свежих настроек. Для single-user бота это лёгкий SELECT.
+    """
     import asyncio
 
     last_sent: dict[int, str] = {}  # telegram_id -> "YYYY-MM-DD"

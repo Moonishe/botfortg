@@ -9,6 +9,9 @@ import time
 from datetime import datetime, timezone
 
 from aiogram import F, Router
+
+# ── Module constants ─────────────────────────────────────────────────────
+_FETCH_MODELS_TIMEOUT = 15.0  # секунд — таймаут запроса списка моделей
 from aiogram.filters import BaseFilter, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -606,7 +609,9 @@ async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
         provider = provider_cls(api_key=api_key)
 
     try:
-        models = await asyncio.wait_for(provider.list_models(), timeout=15.0)
+        models = await asyncio.wait_for(
+            provider.list_models(), timeout=_FETCH_MODELS_TIMEOUT
+        )
         return sorted(models), None
     except NotImplementedError:
         return [], f"{slot.provider} не поддерживает список моделей"

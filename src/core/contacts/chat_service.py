@@ -9,7 +9,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.core.infra.documents import extract_text, is_supported
+from src.core.infra.documents import extract_text, is_safe_document, is_supported
 from src.core.infra.transcription import transcription_service
 from src.db.models import Message, User, UserSettings
 from src.db.repo import (
@@ -118,7 +118,15 @@ async def _process_one(
         raw_name = getattr(msg.file, "name", None) or f"{msg.id}.bin"
         # Sanitize: strip directory components, dangerous chars, limit length
         filename = Path(raw_name).name[:128].replace("\\", "_").replace("\0", "_")
-        if is_supported(filename):
+        # MIME-проверка: блокируем исполняемые файлы перед скачиванием
+        doc_mime = getattr(msg.file, "mime_type", None) or None
+        if not is_safe_document(filename, doc_mime):
+            logger.warning(
+                "Blocked document download: unsafe type %s (mime=%s)",
+                filename,
+                doc_mime,
+            )
+        elif is_supported(filename):
             try:
                 target = media_root / f"{peer_id}_{msg.id}_{filename}"
                 await msg.download_media(file=str(target))

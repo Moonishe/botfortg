@@ -48,8 +48,9 @@ class WebhookTransport:
         self._port = port
 
     async def serve(self, bot: Bot, dp: Dispatcher, **kwargs: object) -> None:
-        logger.info("Starting webhook transport on %s:%d\u2026", self._host, self._port)
-        # TODO: full webhook implementation \u2014 set_webhook + aiohttp server
+        logger.info("Starting webhook transport on %s:%d…", self._host, self._port)
+        # ACTION (feature): полноценная webhook-реализация —
+        # set_webhook + aiohttp server. Пока используем long-polling.
         raise NotImplementedError(
             "WebhookTransport is a skeleton \u2014 implement aiohttp server"
         )

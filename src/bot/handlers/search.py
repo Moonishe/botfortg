@@ -167,7 +167,7 @@ async def cmd_search(
         # векторный fallback
         try:
             vec = await provider.embed(query)
-            vec_hits = await get_vector_store().search(
+            vec_hits = await (await get_vector_store()).search(
                 user_id=owner.id, embedding=vec, limit=8
             )
             for h in vec_hits:

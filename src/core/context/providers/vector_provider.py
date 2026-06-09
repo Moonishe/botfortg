@@ -17,7 +17,8 @@ class VectorProvider:
     async def get_context(self, query, *, telegram_id, contact_id=None, limit=8):
         from src.core.memory.memory_recall import recall as _recall
 
-        # TODO: switch to mode="vector_only" when recall() supports it
+        # ACTION (enhancement): переключить на mode="vector_only" когда recall()
+        # будет поддерживать чисто-векторный режим (сейчас используем mode="deep").
         result = await _recall(
             telegram_id=telegram_id,
             contact_id=contact_id,

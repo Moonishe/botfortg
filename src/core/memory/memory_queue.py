@@ -62,7 +62,11 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
     saved_by_index: dict[int, object] = {}
     for i, fact_data in enumerate(facts):
         try:
+            # savepoint: изолирует каждый факт — ошибка в одном не откатывает другие
             async with session.begin_nested():
+                _vector_store = (
+                    await get_vector_store() if fact_data.get("embedding") else None
+                )
                 mem = await add_memory(
                     session,
                     owner,
@@ -74,9 +78,7 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
                     decay_rate=fact_data.get("decay_rate", 0.07),
                     memory_type=fact_data.get("memory_type"),
                     embedding=fact_data.get("embedding"),
-                    vector_store_obj=get_vector_store()
-                    if fact_data.get("embedding")
-                    else None,
+                    vector_store_obj=_vector_store,
                 )
             if mem:
                 saved_by_index[i] = mem
@@ -103,6 +105,7 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
             target_memory = saved_by_index.get(target_idx)
             if target_memory is not None:
                 try:
+                    # savepoint: изолирует link — ошибка в одной связи не откатывает другие
                     async with session.begin_nested():
                         await link_memories(
                             session,

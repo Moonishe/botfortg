@@ -39,14 +39,22 @@ class DocumentStore:
         self._client = None
 
     def _get_client(self):
-        """Lazy init Qdrant client."""
+        """Lazy init Qdrant client.
+
+        NOTE: Создаёт собственный QdrantClient вместо заимствования у VectorStore
+        синглтона. Это позволяет избежать async-зависимости от get_vector_store()
+        и гарантирует независимую инициализацию.
+        """
         if self._client is not None:
             return self._client
 
-        from src.core.actions.vector_store import get_vector_store
+        from src.config import settings
 
-        vs = get_vector_store()
-        self._client = vs._client  # reuse existing Qdrant client
+        path = settings.data_dir / "qdrant"
+        path.mkdir(parents=True, exist_ok=True)
+        from qdrant_client import QdrantClient
+
+        self._client = QdrantClient(path=str(path))
         return self._client
 
     def _ensure_collection(self, dim: int = 1536) -> None:

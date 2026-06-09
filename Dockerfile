@@ -66,6 +66,9 @@ RUN mkdir -p /app/data \
     && useradd -m appuser
 
 # Install Playwright Chromium browser + system deps (must be in /app for appuser access)
+# NOTE: Chromium for Playwright adds ~300MB to the image size.
+# Consider using a slim base image or installing only the needed browser:
+#   `playwright install chromium --with-deps`
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/data/playwright-browsers
 RUN playwright install-deps chromium \
     && playwright install chromium \

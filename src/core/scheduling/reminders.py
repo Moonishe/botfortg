@@ -107,6 +107,12 @@ from src.core.infra.task_manager import task_manager
 
 @task_manager.task("reminders-loop")
 async def reminders_loop() -> None:
+    """Фоновый цикл напоминаний — проверка каждые 5 минут.
+
+    NOTE: get_or_create_user() на каждом тике — намеренно. Настройки
+    (reminders_enabled, reminder_lead_hours) могут измениться между тиками,
+    поэтому перезапрашиваем User объект в новой сессии.
+    """
     while True:
         if _overlap_guard.locked():
             await asyncio.sleep(REMINDER_TICK_SECONDS)

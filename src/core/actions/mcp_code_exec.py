@@ -24,6 +24,7 @@ _SANDBOX_BLACKLIST = frozenset(
         "__init__",
         "__globals__",
         "__code__",
+        "__closure__",
         "__builtins__",
         "__getattribute__",
         "__getattr__",
@@ -49,6 +50,9 @@ _SANDBOX_BLACKLIST = frozenset(
         "delattr",
         "type",
         "object",
+        "gc",
+        "issubclass",
+        "isinstance",
     }
 )
 
@@ -115,6 +119,20 @@ def _check_sandbox_safety(code: str) -> str | None:
         # Check attribute blacklist
         if isinstance(node, ast.Attribute) and node.attr in _SANDBOX_BLACKLIST:
             return f"Access to attribute '.{node.attr}' is not allowed in sandbox"
+
+        # Block any call through gc (gc.get_objects(), gc.get_referents(), etc.)
+        if isinstance(node, ast.Call):
+            func = node.func
+            # gc.something(...)
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "gc"
+            ):
+                return "Access to gc module is not allowed in sandbox"
+            # gc(...)
+            if isinstance(func, ast.Name) and func.id == "gc":
+                return "Access to gc module is not allowed in sandbox"
 
     return None
 

@@ -110,6 +110,7 @@ async def rollback_reval_history(owner_telegram_id: int, *, limit: int = 20) -> 
         # деактивацию нового, чтобы избежать ситуации «оба неактивны».
         for new_fact in new_facts:
             try:
+                # savepoint: атомарная пара деактивация нового + реактивация старого
                 async with session.begin_nested() as sp:
                     new_fact.is_active = False
                     new_fact.updated_at = datetime.now(timezone.utc)

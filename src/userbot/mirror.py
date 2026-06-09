@@ -152,7 +152,21 @@ async def _process_incoming_bg(
             logger.exception("Background inbox processing failed for peer %s", peer_id)
 
 
+# Защита от утечки обработчиков при переподключении.
+# При повторном вызове attach_mirror на том же клиенте — не дублируем обработчик.
+_attached_mirror_clients: set[int] = set()
+
+
 def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
+    client_id = id(client)
+    if client_id in _attached_mirror_clients:
+        logger.debug(
+            "Mirror handler already attached for client %s — skipping duplicate",
+            client_id,
+        )
+        return
+    _attached_mirror_clients.add(client_id)
+
     async def on_message(event: events.NewMessage.Event) -> None:
         try:
             msg: TgMessage = event.message
@@ -173,20 +187,20 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                 logger.exception("onboarding phase check failed; mirroring only")
                 should_process_inbox = False
 
-            # Проверка watched_peers — фильтрация чатов
-            async with get_session() as _w_session:
-                _w_owner = await get_or_create_user(_w_session, owner_telegram_id)
-                _watched = await get_watched_peers(_w_session, _w_owner)
-                if _watched and peer_id not in _watched:
-                    should_process_inbox = False
-
             kind = _classify(msg)
             text = msg.text or msg.message or None
             sender_name = await _sender_label(msg)
 
-            # ===== SESSION 1: только быстрые DB-операции =====
+            # ===== SESSION: объединённая сессия для всех DB-операций =====
+            # Раньше было две сессии: _w_session (watched_peers) и session (mirror).
+            # Объединены в одну для уменьшения накладных расходов на connect/begin/commit.
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_telegram_id)
+
+                # Проверка watched_peers — фильтрация чатов (было отдельной сессией)
+                _watched = await get_watched_peers(session, owner)
+                if _watched and peer_id not in _watched:
+                    should_process_inbox = False
 
                 # сброс статуса отсутствия при любом исходящем
                 if msg.out and owner.absence_status is not None:

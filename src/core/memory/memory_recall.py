@@ -608,7 +608,7 @@ async def recall(
                     }.get(mode, 10)
 
                     # Параллельный запуск: векторный + ключевой поиск
-                    vector_task = get_vector_store().search_similar_memories(
+                    vector_task = (await get_vector_store()).search_similar_memories(
                         user_id=owner.id,
                         embedding=embedding,
                         threshold=semantic_threshold,

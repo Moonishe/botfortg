@@ -314,6 +314,7 @@ async def apply_reval_result(
     if action == "invalid":
         # Шаг 1: деактивация — в savepoint для атомарности
         try:
+            # savepoint: атомарная деактивация + аудит-трейл факта
             async with session.begin_nested() as sp:
                 # Сохраняем версию в аудит-трейл перед деактивацией
                 from src.db.repos.memory_repo import save_memory_version
@@ -362,6 +363,7 @@ async def apply_reval_result(
     new_decay = new_decay_raw if new_decay_raw is not None else 0.02
 
     try:
+        # savepoint: атомарное создание нового факта + supersedes-связь + деактивация старого
         async with session.begin_nested() as savepoint:
             from src.db.repos.memory_repo import add_memory
 

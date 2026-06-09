@@ -1,6 +1,7 @@
 from cryptography.fernet import Fernet, InvalidToken
 
 from src.config import settings
+import asyncio
 
 
 _fernet: Fernet | None = None
@@ -12,6 +13,8 @@ def _get_fernet() -> Fernet:
         key = settings.encryption_key
         if not key or len(key) != 44:
             raise ValueError("Invalid ENCRYPTION_KEY: must be 44-char urlsafe-base64")
+        # NOTE: Password/key bytes remain in memory until garbage collected.
+        # For sensitive deployments, use SecureString or zero the buffer after use.
         _fernet = Fernet(key.encode())
     return _fernet
 
@@ -27,3 +30,15 @@ def decrypt(ciphertext: str) -> str:
         raise ValueError(
             "Не удалось расшифровать: неверный ключ или повреждённые данные"
         ) from exc
+
+
+# Асинхронные обёртки — Fernet.encrypt/decrypt CPU-bound,
+# в async-контексте должны вызываться через run_in_executor/to_thread.
+async def encrypt_async(plaintext: str) -> str:
+    """CPU-bound шифрование: использует asyncio.to_thread."""
+    return await asyncio.to_thread(encrypt, plaintext)
+
+
+async def decrypt_async(ciphertext: str) -> str:
+    """CPU-bound дешифровка: использует asyncio.to_thread."""
+    return await asyncio.to_thread(decrypt, ciphertext)

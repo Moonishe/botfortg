@@ -46,7 +46,7 @@ async def get_neighbors(owner_id: int, memory_id: int, limit: int = 3) -> list[d
             return []
 
         # Ищем похожие факты в Qdrant (+1 чтобы потом исключить сам факт)
-        neighbors = await get_vector_store().search_similar_memories(
+        neighbors = await (await get_vector_store()).search_similar_memories(
             user_id=owner.id,
             embedding=embedding,
             threshold=0.65,
@@ -124,7 +124,7 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
             except Exception:
                 continue
 
-            neighbors = await get_vector_store().search_similar_memories(
+            neighbors = await (await get_vector_store()).search_similar_memories(
                 user_id=owner.id,
                 embedding=emb,
                 threshold=0.75,

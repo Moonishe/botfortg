@@ -200,6 +200,10 @@ def size() -> int:
 
 
 # ── Async wrappers (thin — just delegate to the async base functions) ───────
+# NOTE: Все операции с embedding_cache полностью асинхронны (aiosqlite).
+# get() и set() используют aiosqlite для неблокирующего доступа к L2-кэшу.
+# aget()/aset() — тонкие обёртки для обратной совместимости.
+# Синхронных sqlite3-вызовов из async-путей нет.
 
 
 async def aget(text: str, model: str = "") -> list[float] | None:

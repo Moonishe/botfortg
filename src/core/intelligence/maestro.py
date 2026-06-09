@@ -344,7 +344,10 @@ async def process(
 
         # ── Phase 5: Terminal assemble ──
         system = prompt_assembler.assemble(ctx)
-    except Exception:  # TODO: specify exceptions — assembly involves many subsystems
+    except (
+        Exception
+    ):  # NOTE: assembly involves many subsystems (prompt_assembler, rag, memory).
+        # Fallback к legacy-сборке при любой ошибке — безопасно.
         # Fallback: старая сборка (обратная совместимость)
         logger.debug("Prompt assembler failed, using legacy assembly", exc_info=True)
         system = MAESTRO_SYSTEM
@@ -795,7 +798,8 @@ async def process(
                     final_response, modified = apply_guard(
                         final_response, verify_result, confidence
                     )
-            except Exception:  # TODO: specify exceptions — verify_claims/apply_guard involve complex AI logic
+            except Exception:  # NOTE: verify_claims/apply_guard используют LLM-вызовы
+                # и сложную AI-логику. Best-effort: ошибка не должна ломать ответ.
                 pass  # best-effort
 
             return {
@@ -1007,79 +1011,93 @@ async def run_pipeline(
             pass
 
         if stream is not None:
-            return _wrap({
-                "_stream": stream,
-                "final_response": "",
-                "plan": plan.get("plan", []),
-                "used_agents": [],
-                "agent_errors": agent_errors,
-            })
+            return _wrap(
+                {
+                    "_stream": stream,
+                    "final_response": "",
+                    "plan": plan.get("plan", []),
+                    "used_agents": [],
+                    "agent_errors": agent_errors,
+                }
+            )
 
         try:
             raw = await asyncio.wait_for(
                 provider.chat(fallback_messages, task_type=TaskType.MAESTRO),
                 timeout=60.0,
             )
-            return _wrap({
-                "final_response": sanitize_html(raw.strip()),
-                "plan": plan.get("plan", []),
-                "used_agents": [],
-                "agent_errors": agent_errors,
-            })
+            return _wrap(
+                {
+                    "final_response": sanitize_html(raw.strip()),
+                    "plan": plan.get("plan", []),
+                    "used_agents": [],
+                    "agent_errors": agent_errors,
+                }
+            )
         except ExhaustedError:
             logger.warning("maestro fallback_request ExhaustedError")
-            return _wrap({
-                "final_response": sanitize_html(
-                    "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ..."
-                ),
-                "plan": [],
-                "used_agents": [],
-                "agent_errors": agent_errors,
-            })
+            return _wrap(
+                {
+                    "final_response": sanitize_html(
+                        "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ..."
+                    ),
+                    "plan": [],
+                    "used_agents": [],
+                    "agent_errors": agent_errors,
+                }
+            )
         except asyncio.TimeoutError:
             logger.warning("maestro fallback_request TimeoutError")
-            return _wrap({
-                "final_response": sanitize_html(
-                    "⏱️ Ответ занял слишком много времени. Попробуй короче."
-                ),
-                "plan": [],
-                "used_agents": [],
-                "agent_errors": agent_errors,
-            })
+            return _wrap(
+                {
+                    "final_response": sanitize_html(
+                        "⏱️ Ответ занял слишком много времени. Попробуй короче."
+                    ),
+                    "plan": [],
+                    "used_agents": [],
+                    "agent_errors": agent_errors,
+                }
+            )
         except (RequestError, HTTPStatusError) as e:
             if (
                 "context_length" in safe_str(e).lower()
                 or "token" in safe_str(e).lower()
             ):
                 logger.warning("maestro fallback_request context overflow: %s", e)
-                return _wrap({
-                    "final_response": sanitize_html(
-                        "📏 Контекст переполнен. Упрости запрос или уменьши историю."
-                    ),
-                    "plan": [],
-                    "used_agents": [],
-                    "agent_errors": agent_errors,
-                })
+                return _wrap(
+                    {
+                        "final_response": sanitize_html(
+                            "📏 Контекст переполнен. Упрости запрос или уменьши историю."
+                        ),
+                        "plan": [],
+                        "used_agents": [],
+                        "agent_errors": agent_errors,
+                    }
+                )
             if "rate" in safe_str(e).lower():
                 logger.warning("maestro fallback_request rate limit: %s", e)
-                return _wrap({
+                return _wrap(
+                    {
+                        "final_response": sanitize_html(
+                            "🚦 Превышен лимит запросов. Подожди минуту."
+                        ),
+                        "plan": [],
+                        "used_agents": [],
+                        "agent_errors": agent_errors,
+                    }
+                )
+            logger.exception("maestro fallback_request failed")
+            return _wrap(
+                {
                     "final_response": sanitize_html(
-                        "🚦 Превышен лимит запросов. Подожди минуту."
+                        plan.get("final_response")
+                        or "Извини, что-то пошло не так. Попробуй ещё раз."
                     ),
                     "plan": [],
                     "used_agents": [],
                     "agent_errors": agent_errors,
-                })
-            logger.exception("maestro fallback_request failed")
-            return _wrap({
-                "final_response": sanitize_html(
-                    plan.get("final_response")
-                    or "Извини, что-то пошло не так. Попробуй ещё раз."
-                ),
-                "plan": [],
-                "used_agents": [],
-                "agent_errors": agent_errors,
-            })
+                }
+            )
 
     # --- Шаг 4: Агенты сработали — просим Maestro сформулировать ответ ---
     if agent_texts:
@@ -1100,13 +1118,15 @@ async def run_pipeline(
             pass
 
         if stream is not None:
-            return _wrap({
-                "_stream": stream,
-                "final_response": "",
-                "plan": plan.get("plan", []),
-                "used_agents": used_agents,
-                "agent_errors": agent_errors,
-            })
+            return _wrap(
+                {
+                    "_stream": stream,
+                    "final_response": "",
+                    "plan": plan.get("plan", []),
+                    "used_agents": used_agents,
+                    "agent_errors": agent_errors,
+                }
+            )
 
         try:
             raw = await asyncio.wait_for(
@@ -1119,35 +1139,47 @@ async def run_pipeline(
                 raw = re.sub(r"\n?\s*```\s*$", "", raw)
             parsed = _extract_json_object(raw)
             if parsed is not None:
-                return _wrap({
-                    "final_response": sanitize_html(parsed.get("final_response", raw)),
+                return _wrap(
+                    {
+                        "final_response": sanitize_html(
+                            parsed.get("final_response", raw)
+                        ),
+                        "plan": plan.get("plan", []),
+                        "used_agents": used_agents,
+                        "agent_errors": agent_errors,
+                    }
+                )
+            return _wrap(
+                {
+                    "final_response": sanitize_html(raw),
                     "plan": plan.get("plan", []),
                     "used_agents": used_agents,
                     "agent_errors": agent_errors,
-                })
-            return _wrap({
-                "final_response": sanitize_html(raw),
-                "plan": plan.get("plan", []),
-                "used_agents": used_agents,
-                "agent_errors": agent_errors,
-            })
+                }
+            )
         except (RequestError, HTTPStatusError):
             logger.exception("maestro agent synthesis failed")
             # Если LLM не может сформулировать — возвращаем сырые данные агентов
             summary = "\n\n".join(agent_texts)
-            return _wrap({
-                "final_response": sanitize_html(
-                    f"Вот что я выяснил:\n\n{summary[:1500]}"
-                ),
-                "plan": plan.get("plan", []),
-                "used_agents": used_agents,
-                "agent_errors": agent_errors,
-            })
+            return _wrap(
+                {
+                    "final_response": sanitize_html(
+                        f"Вот что я выяснил:\n\n{summary[:1500]}"
+                    ),
+                    "plan": plan.get("plan", []),
+                    "used_agents": used_agents,
+                    "agent_errors": agent_errors,
+                }
+            )
 
     # --- Ни один агент не дал результатов ---
-    return _wrap({
-        "final_response": sanitize_html(plan.get("final_response") or FALLBACK_HINTS),
-        "plan": plan.get("plan", []),
-        "used_agents": used_agents,
-        "agent_errors": agent_errors,
-    })
+    return _wrap(
+        {
+            "final_response": sanitize_html(
+                plan.get("final_response") or FALLBACK_HINTS
+            ),
+            "plan": plan.get("plan", []),
+            "used_agents": used_agents,
+            "agent_errors": agent_errors,
+        }
+    )

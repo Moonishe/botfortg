@@ -68,10 +68,15 @@ class Settings(BaseSettings):
     @field_validator("avito_proxy_list", mode="after")
     @classmethod
     def _validate_avito_proxy_list(cls, v: str) -> str:
-        """Validate AVITO_PROXY_LIST is valid JSON or empty."""
+        """Validate AVITO_PROXY_LIST is valid JSON or empty, with size limit."""
         if v and v.strip():
             import json
 
+            # Размерная защита: предотвращаем гигантские JSON-строки из .env
+            if len(v) > 10_000:
+                raise ValueError(
+                    f"AVITO_PROXY_LIST too large: {len(v)} chars (max 10_000)"
+                )
             try:
                 parsed = json.loads(v)
                 if not isinstance(parsed, list):

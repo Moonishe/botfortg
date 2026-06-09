@@ -1,4 +1,5 @@
 import logging
+import time
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -35,6 +36,28 @@ router.message.filter(OwnerOnly())
 
 
 CANCEL_HINT = "В любой момент можно отменить командой /cancel."
+
+# TTL для FSM состояний логина: 10 минут неактивности → сброс
+_FSM_LOGIN_TTL_SEC: float = 600.0
+
+
+async def _check_login_ttl(state: FSMContext) -> bool:
+    """Проверить TTL FSM-состояния логина. Возвращает True если просрочено."""
+    data = await state.get_data()
+    started_at = data.get("_login_started_at")
+    if started_at is None:
+        return False
+    elapsed = time.monotonic() - float(started_at)
+    return elapsed > _FSM_LOGIN_TTL_SEC
+
+
+async def _clear_login_and_prompt(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+) -> None:
+    """Очистить FSM-состояние логина и запросить перезапуск."""
+    await userbot_manager.cancel_pending(message.from_user.id)
+    await state.clear()
+    await message.answer("⏰ Время ожидания истекло (10 минут). Запусти /login заново.")
 
 
 # Global /cancel handler — сбрасывает ЛЮБОЕ FSM-состояние, не только login.
@@ -97,7 +120,11 @@ async def cmd_login(
         )
         return
 
-    await state.update_data(api_id=settings.api_id, api_hash=settings.api_hash)
+    await state.update_data(
+        api_id=settings.api_id,
+        api_hash=settings.api_hash,
+        _login_started_at=time.monotonic(),
+    )
     await state.set_state(LoginStates.phone)
     await message.answer("📞 Введи номер телефона Telegram")
 
@@ -110,6 +137,9 @@ async def cmd_login(
 async def step_phone(
     message: Message, state: FSMContext, userbot_manager: UserbotManager
 ) -> None:
+    if await _check_login_ttl(state):
+        await _clear_login_and_prompt(message, state, userbot_manager)
+        return
     phone = (message.text or "").strip().replace(" ", "")
     if not phone.startswith("+") or not phone[1:].isdigit() or len(phone) < 8:
         await message.answer(
@@ -166,6 +196,9 @@ async def step_phone(
 async def step_code(
     message: Message, state: FSMContext, userbot_manager: UserbotManager
 ) -> None:
+    if await _check_login_ttl(state):
+        await _clear_login_and_prompt(message, state, userbot_manager)
+        return
     raw = (message.text or "").strip()
     code = "".join(ch for ch in raw if ch.isdigit())
     if not code:
@@ -213,6 +246,9 @@ async def step_code(
 async def step_2fa(
     message: Message, state: FSMContext, userbot_manager: UserbotManager
 ) -> None:
+    if await _check_login_ttl(state):
+        await _clear_login_and_prompt(message, state, userbot_manager)
+        return
     password = (message.text or "").strip()
     if not password:
         await message.answer("Пустой пароль. Введи 2FA-пароль или /cancel.")

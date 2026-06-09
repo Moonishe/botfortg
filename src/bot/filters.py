@@ -20,6 +20,9 @@ class OwnerOnly(BaseFilter):
     """
 
     async def __call__(self, event: Message | CallbackQuery) -> bool:
+        # Канальные посты приходят с from_user=None — явно отклоняем
+        if event.from_user is None:
+            return False
         owner_id = settings.owner_telegram_id
         if owner_id <= 0:
             logger.critical(
@@ -29,5 +32,4 @@ class OwnerOnly(BaseFilter):
                 owner_id,
             )
             return False
-        user = event.from_user
-        return user is not None and user.id == owner_id
+        return event.from_user.id == owner_id

@@ -74,7 +74,7 @@ async def summarize_chat(
     if owner_id is not None:
         try:
             query_vec = await provider.embed(contact.display_name)
-            hits = await get_vector_store().search(
+            hits = await (await get_vector_store()).search(
                 user_id=owner_id, embedding=query_vec, limit=3
             )
             if hits:
@@ -130,7 +130,7 @@ async def draft_reply(
     if owner_id is not None:
         try:
             query_vec = await provider.embed(contact.display_name)
-            hits = await get_vector_store().search(
+            hits = await (await get_vector_store()).search(
                 user_id=owner_id, embedding=query_vec, limit=3
             )
             if hits:
@@ -194,7 +194,7 @@ async def catchup(
     if owner_id is not None:
         try:
             query_vec = await provider.embed(contact.display_name)
-            hits = await get_vector_store().search(
+            hits = await (await get_vector_store()).search(
                 user_id=owner_id, embedding=query_vec, limit=3
             )
             if hits:
@@ -273,7 +273,7 @@ async def ask_chat(
     if owner_id is not None:
         try:
             query_vec = await provider.embed(contact.display_name)
-            hits = await get_vector_store().search(
+            hits = await (await get_vector_store()).search(
                 user_id=owner_id, embedding=query_vec, limit=3
             )
             if hits:

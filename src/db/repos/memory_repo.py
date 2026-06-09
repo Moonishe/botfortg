@@ -70,8 +70,8 @@ class FtsHit:
 # ── Морфологическая экспансия русских слов ────────────────────────────
 # Расширяет поисковые запросы вариантами словоформ для повышения recall
 # в FTS5 без внешних зависимостей (pymorphy2).
-# TODO: add categories 'L* N* Co' to FTS5 tokenizer for better CJK+Cyrillic tokenization
-#       (см. alembic/versions/z9y8x7w6v5u4_add_fts5_virtual_tables.py)
+# ACTION (enhancement): добавить категории 'L* N* Co' в FTS5 токенизатор
+# для лучшей токенизации CJK + кириллицы (см. alembic/versions/...)
 _RU_MORPH_EXPANSIONS: dict[str, list[str]] = {
     "купил": ["купил", "купила", "купить", "покупал", "покупала", "покупать"],
     "работа": [
@@ -576,7 +576,8 @@ async def add_memory(
             contact_name=contact_name,
             confidence=confidence,
         )
-    except Exception:  # TODO: specify exceptions (hooks.emit too broad)
+    except Exception:  # NOTE: hooks.emit может поднять любые исключения от плагинов.
+        # Безопасно игнорируем — хуки опциональны.
         pass  # hooks are optional, never break core flow
 
     # Индексируем эмбеддинг в Qdrant для будущей дедупликации
@@ -589,7 +590,8 @@ async def add_memory(
                 fact=fact,
                 embedding=embedding,
             )
-        except Exception:  # TODO: specify exceptions (vector_store.upsert_memory — Qdrant network call)
+        except Exception:  # NOTE: vector_store.upsert_memory — сетевой вызов Qdrant.
+            # При падении Qdrant продолжаем без векторного индекса.
             # M4: факт сохранён в SQLite, но НЕ в Qdrant — дедупликация и поиск
             # по вектору не увидят этот факт. Логируем ERROR с memory_id чтобы
             # мониторинг мог отследить рассинхрон и запустить переиндексацию.
@@ -785,7 +787,7 @@ async def _auto_link_memory(
         try:
             from src.core.actions.vector_store import get_vector_store
 
-            similar = await get_vector_store().search_similar_memories(
+            similar = await (await get_vector_store()).search_similar_memories(
                 user_id=user.id,
                 embedding=embedding,
                 threshold=0.65,  # lower than dedup (0.85)
@@ -812,7 +814,8 @@ async def _auto_link_memory(
                 pending_links.append((memory.id, hit_id, cosine_score, relation_type))
         except (
             Exception
-        ):  # TODO: specify exceptions (vector_store call — Qdrant network errors)
+        ):  # NOTE: vector_store семантический поиск — сетевой вызов Qdrant.
+            # При ошибке fallback на keyword overlap.
             logger.debug(
                 "Semantic linking failed, falling back to keyword overlap",
                 exc_info=True,

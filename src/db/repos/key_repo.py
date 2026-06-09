@@ -13,7 +13,7 @@ from src.db.models import (
     LlmKeySlot,
     LlmKeySlotModel,
 )
-from src.crypto import decrypt, encrypt
+from src.crypto import decrypt_async, encrypt_async
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ async def upsert_api_key(session: AsyncSession, user, provider: str, key: str) -
         select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == provider)
     )
     existing = result.scalar_one_or_none()
-    enc = encrypt(normalized)
+    enc = await encrypt_async(normalized)
     if existing is None:
         session.add(ApiKey(user_id=user.id, provider=provider, key_enc=enc))
     else:
@@ -40,7 +40,7 @@ async def upsert_api_key(session: AsyncSession, user, provider: str, key: str) -
     existing_keys: set[str] = set()
     for s in existing_slots:
         try:
-            existing_keys.add(decrypt(s.key_enc))
+            existing_keys.add(await decrypt_async(s.key_enc))
         except Exception:
             continue
 
@@ -51,7 +51,7 @@ async def upsert_api_key(session: AsyncSession, user, provider: str, key: str) -
                 provider=provider,
                 purpose="main",
                 label=f"{provider}/main",
-                key_enc=encrypt(single_key),
+                key_enc=await encrypt_async(single_key),
                 priority=i,
             )
             session.add(slot)
@@ -68,7 +68,7 @@ async def get_api_key(session: AsyncSession, user, provider: str) -> str | None:
         select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == provider)
     )
     row = result.scalar_one_or_none()
-    return decrypt(row.key_enc) if row is not None else None
+    return await decrypt_async(row.key_enc) if row is not None else None
 
 
 async def get_api_keys(session: AsyncSession, user, provider: str) -> list[str]:
@@ -109,7 +109,7 @@ async def add_key_slot(
         )
         for existing in existing_slots:
             try:
-                existing_key = decrypt(existing.key_enc)
+                existing_key = await decrypt_async(existing.key_enc)
                 if existing_key == key:
                     return existing, False
             except Exception:
@@ -123,7 +123,7 @@ async def add_key_slot(
             endpoint=endpoint,
             model=model,
             category=category,
-            key_enc=encrypt(key),
+            key_enc=await encrypt_async(key),
             priority=priority,
         )
         session.add(slot)

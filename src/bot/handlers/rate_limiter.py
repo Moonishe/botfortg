@@ -4,6 +4,8 @@
 Поддерживает два режима:
 - Базовый: 1 запрос в 3 секунды на пользователя (без аргументов).
 - Sliding-window: N запросов за T секунд (с аргументами window/max_requests).
+
+# NOTE: in-memory rate limits reset on restart. Acceptable for single-user bot.
 """
 
 from __future__ import annotations

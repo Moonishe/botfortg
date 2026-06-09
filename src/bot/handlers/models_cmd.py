@@ -13,6 +13,9 @@ import logging
 import time
 
 from aiogram import F, Router
+
+# ── Module constants ─────────────────────────────────────────────────────
+_FETCH_MODELS_TIMEOUT = 15.0  # секунд — таймаут запроса списка моделей
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
@@ -101,7 +104,9 @@ async def _fetch_models(slot: LlmKeySlot) -> tuple[list[str], str | None]:
             provider = provider_cls(api_key=api_key)
 
         try:
-            models = await asyncio.wait_for(provider.list_models(), timeout=15.0)
+            models = await asyncio.wait_for(
+                provider.list_models(), timeout=_FETCH_MODELS_TIMEOUT
+            )
             return models, None
         finally:
             await provider.close()

@@ -540,7 +540,21 @@ async def generate_smart_reply(
         return None
 
 
+# Защита от утечки обработчиков при переподключении.
+# При повторном вызове attach_auto_reply на том же клиенте — не дублируем обработчик.
+_attached_auto_reply_clients: set[int] = set()
+
+
 def attach_auto_reply(client: TelegramClient, owner_telegram_id: int) -> None:
+    client_id = id(client)
+    if client_id in _attached_auto_reply_clients:
+        logger.debug(
+            "Auto-reply handler already attached for client %s — skipping duplicate",
+            client_id,
+        )
+        return
+    _attached_auto_reply_clients.add(client_id)
+
     _handler_cache = None
 
     async def _wrapper(event):

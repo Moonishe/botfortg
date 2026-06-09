@@ -1,4 +1,10 @@
-"""Pipeline stages for _process_text — extracted from free_text.py."""
+"""Pipeline stages for _process_text — extracted from free_text.py.
+
+Architecture note: pipeline stages are intentionally sequential. Each stage depends
+on the previous one's result (pre-gate → followup → persona → contact rules →
+instructions → routing → dispatch). Parallelization is at the tool-execution level
+(maestro, agent runtime, DAG dispatch for multi-intent).
+"""
 
 import asyncio
 import json
@@ -7,6 +13,10 @@ import re
 import sys
 import time
 import uuid
+
+# ── Module constants ─────────────────────────────────────────────────────
+_DEFAULT_SEARCH_LIMIT = 5  # элементов — лимит deep recall по умолчанию
+_DEFAULT_CONTACT_LIMIT = 3  # контактов — лимит разрешения контакта
 
 from httpx import RequestError, HTTPStatusError
 
@@ -862,7 +872,8 @@ async def _dag_dispatch(
                 await _dispatch(sub, message, state, userbot_manager, tz_name=tz_name)
             except (
                 Exception
-            ):  # TODO: specify exceptions (_dispatch can raise many types)
+            ):  # NOTE: _dispatch может поднять SQLAlchemyError, TelegramAPIError,
+                # RequestError, HTTPStatusError — все они безопасно логируются здесь.
                 logger.exception(
                     "DAG fallback: sub-intent %s failed", sub.get("intent", "?")
                 )
@@ -1072,7 +1083,7 @@ async def check_contact_rules(
                 return False
 
             candidates = await resolve(
-                client, owner, contact_name, limit=3, min_score=60
+                client, owner, contact_name, limit=_DEFAULT_CONTACT_LIMIT, min_score=60
             )
             if candidates and candidates[0].score >= 60:
                 contact = candidates[0]
@@ -1380,7 +1391,9 @@ async def execute_instant(
         async with get_session() as session:
             owner = await get_or_create_user(session, owner_telegram_id)
             memories = await recall(
-                telegram_id=owner_telegram_id, limit=1, mode="normal"
+                telegram_id=owner_telegram_id,
+                limit=1,
+                mode="normal",  # минимальная проверка наличия памяти
             )
             has_memory = bool(memories and memories.facts)
             has_session = owner.session is not None
@@ -1680,7 +1693,7 @@ async def execute_maestro(
             _deep = await recall(
                 telegram_id=owner_telegram_id,
                 query=raw,
-                limit=5,
+                limit=_DEFAULT_SEARCH_LIMIT,
                 mode="deep",
                 include_deep=True,
             )

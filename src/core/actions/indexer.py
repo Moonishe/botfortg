@@ -90,7 +90,7 @@ async def index_chat(
                 indexed += 1
 
             if batch_points:
-                await get_vector_store().upsert_batch(points=batch_points)
+                await (await get_vector_store()).upsert_batch(points=batch_points)
 
         if ids_done:
             async with get_session() as session:

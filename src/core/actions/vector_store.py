@@ -5,7 +5,6 @@
 import asyncio
 import hashlib
 import logging
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -483,6 +482,11 @@ class VectorStore:
 
         WARNING: Recovery destroys ALL vector data. Only triggered for
         persistent corruption (not transient failures).
+
+        NOTE: Полная очистка векторных данных при неисправимом повреждении —
+        by design. Векторы можно переиндексировать через /index команду.
+        Исходные данные (сообщения) хранятся в SQLite и не теряются.
+        Повреждение векторов не затрагивает БД сообщений.
         """
         try:
             self._client.get_collections()
@@ -555,13 +559,19 @@ class VectorStore:
 
 
 _vector_store: VectorStore | None = None
-_vector_store_lock = threading.Lock()
+_vector_store_lock = asyncio.Lock()  # async-безопасная блокировка инициализации
 
 
-def get_vector_store() -> VectorStore:
+async def get_vector_store() -> VectorStore:
+    """Возвращает синглтон VectorStore с async-безопасной инициализацией.
+
+    Использует double-checked locking с asyncio.Lock() для предотвращения
+    создания двух экземпляров QdrantClient при параллельных вызовах.
+    """
     global _vector_store
-    if _vector_store is None:
-        with _vector_store_lock:
-            if _vector_store is None:  # double-checked locking
-                _vector_store = VectorStore()
+    if _vector_store is not None:
+        return _vector_store
+    async with _vector_store_lock:
+        if _vector_store is None:  # double-checked locking
+            _vector_store = VectorStore()
     return _vector_store

@@ -1,5 +1,9 @@
 """Shared mixins for OpenAI-compatible providers.
 
+NOTE: Используется openai>=1.0.0 API (AsyncOpenAI). Устаревший API
+(openai.Completion, openai.Embedding) не используется. Все вызовы —
+через client.chat.completions.create() и client.embeddings.create().
+
 Hierarchy:
     OpenAICompatBaseMixin  — validate_key, list_models, close
         └── OpenAICompatEmbedMixin  — embed, embed_batch (requires _embed_model)

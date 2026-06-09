@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import os
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -14,8 +16,47 @@ from src.config import PROJECT_ROOT, settings
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
+# ── Module constants ─────────────────────────────────────────────────────
+_SHUTDOWN_TASK_TIMEOUT = 5.0  # секунд — таймаут отмены одной фоновой задачи
+_SHUTDOWN_STEP_TIMEOUT = 15.0  # секунд — таймаут одного шага graceful shutdown
+_SHUTDOWN_BROWSER_TIMEOUT = 5.0  # секунд — таймаут закрытия Playwright браузера
+_SHUTDOWN_FF_TIMEOUT = 10.0  # секунд — таймаут fire-and-forget задач
+_SHUTDOWN_VECTOR_TIMEOUT = 10.0  # секунд — таймаут отключения векторного хранилища
+_CLEANUP_INTERVAL = 60  # секунд — интервал цикла очистки состояния
+_CLEANUP_TICK_INTERVAL = 5  # тактов — интервал между тяжёлыми очистками (5 * 60 = 300s)
+_CACHE_CLEANUP_INTERVAL = 60.0  # секунд — интервал фоновой очистки TTL кэша
+_PREFETCH_TOP_N = 5  # элементов — количество контактов для предзагрузки
+_PREFETCH_RECALL_TOP_N = 3  # элементов — количество recall-паттернов для предзагрузки
+_PREFETCH_RECALL_LIMIT = 10  # фактов — лимит recall при cold-start прогреве
+
 
 logger = logging.getLogger(__name__)
+
+
+def _setup_json_logging() -> None:
+    """Настраивает JSON-формат для логов (агрегация в ELK/Loki/CloudWatch)."""
+
+    class JsonFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            return json.dumps(
+                {
+                    "timestamp": self.formatTime(record),
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "message": record.getMessage(),
+                    "module": record.module,
+                    "lineno": record.lineno,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(JsonFormatter())
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
 
 
 def _register_background_tasks() -> None:
@@ -62,6 +103,11 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
     )
+    # NOTE: Для агрегации логов в production — установите LOG_FORMAT=json
+    # в .env. Тогда логи будут выводиться в JSON-формате (ключи: timestamp,
+    # level, logger, message, module, lineno).
+    if os.getenv("LOG_FORMAT", "").lower() == "json":
+        _setup_json_logging()
     logger.info("Starting TelegramAssistant")
 
     # --- Обработчики сигналов для graceful shutdown ---
@@ -183,15 +229,15 @@ async def main() -> None:
     from src.core.cache.manager import cache_manager
 
     # Start proactive TTL cleanup for all registered ManagedCache instances
-    await cache_manager.start_background_cleanup(interval=60.0)
+    await cache_manager.start_background_cleanup(interval=_CACHE_CLEANUP_INTERVAL)
 
     async def _cleanup_global_state():
         _tick = 0
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(_CLEANUP_INTERVAL)
             # Cleanup stale circuit breakers every 300s (5 min)
             _tick += 1
-            if _tick >= 5:
+            if _tick >= _CLEANUP_TICK_INTERVAL:
                 _tick = 0
                 try:
                     from src.llm.router import cleanup_circuit_breakers
@@ -249,7 +295,7 @@ async def main() -> None:
 
     from src.core.actions.vector_store import get_vector_store
 
-    await get_vector_store().check_health_and_recover()
+    await (await get_vector_store()).check_health_and_recover()
 
     userbot_manager = UserbotManager()
     await userbot_manager.restore_all()
@@ -296,7 +342,9 @@ async def main() -> None:
             prefetch_tracker.register_warmup("contact_digest", _warmup_contact_digest)
 
             # Check if we have prior access history
-            top_contacts = prefetch_tracker.get_top_keys("contact_digest", top_n=5)
+            top_contacts = prefetch_tracker.get_top_keys(
+                "contact_digest", top_n=_PREFETCH_TOP_N
+            )
 
             if not top_contacts:
                 # Cold start: query DB for most active contacts
@@ -309,7 +357,7 @@ async def main() -> None:
                             select(Contact.peer_id)
                             .where(Contact.user_id == owner.id)
                             .order_by(desc(Contact.id))
-                            .limit(5)
+                            .limit(_PREFETCH_TOP_N)
                         )
                         top_contacts = [row[0] for row in result.fetchall()]
                         logger.info(
@@ -320,7 +368,7 @@ async def main() -> None:
             # Prefetch contact digests (top-5)
             if top_contacts:
                 prefetched = await prefetch_tracker.prefetch_predictions(
-                    "contact_digest", top_n=5
+                    "contact_digest", top_n=_PREFETCH_TOP_N
                 )
                 logger.info("Startup prefetch: %d contact digests warmed", prefetched)
 
@@ -348,7 +396,7 @@ async def main() -> None:
                             await recall(
                                 settings.owner_telegram_id,
                                 query="",
-                                limit=10,
+                                limit=_PREFETCH_RECALL_LIMIT,
                                 include_self=False,
                                 include_pinned=True,
                                 include_tasks=False,
@@ -363,10 +411,12 @@ async def main() -> None:
             prefetch_tracker.register_warmup("recall", _warmup_recall)
 
             # Prefetch recent memory patterns (top-3)
-            recent_recalls = prefetch_tracker.get_top_keys("recall", top_n=3)
+            recent_recalls = prefetch_tracker.get_top_keys(
+                "recall", top_n=_PREFETCH_RECALL_TOP_N
+            )
             if recent_recalls:
                 prefetched = await prefetch_tracker.prefetch_predictions(
-                    "recall", top_n=3
+                    "recall", top_n=_PREFETCH_RECALL_TOP_N
                 )
                 logger.info("Startup prefetch: %d recall patterns warmed", prefetched)
             else:
@@ -377,7 +427,7 @@ async def main() -> None:
                     await recall(
                         settings.owner_telegram_id,
                         query="",
-                        limit=5,
+                        limit=_PREFETCH_TOP_N,
                         include_self=False,
                         include_pinned=True,
                         include_tasks=False,
@@ -408,7 +458,7 @@ async def main() -> None:
         ]:
             _t.cancel()
             try:
-                await asyncio.wait_for(_t, timeout=5.0)
+                await asyncio.wait_for(_t, timeout=_SHUTDOWN_TASK_TIMEOUT)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
             except Exception:
@@ -424,7 +474,7 @@ async def main() -> None:
         ]:
             try:
                 logger.debug("Stopping %s…", step)
-                await asyncio.wait_for(coro, timeout=15.0)
+                await asyncio.wait_for(coro, timeout=_SHUTDOWN_STEP_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("%s shutdown timed out — forcing", step)
             except Exception:
@@ -433,7 +483,7 @@ async def main() -> None:
         # Give fire-and-forget tasks (fact saves, trajectory, inbox) a chance
         # to finish so in-flight DB writes are not lost.
         try:
-            await asyncio.wait_for(stop_ff_tasks(), timeout=10.0)
+            await asyncio.wait_for(stop_ff_tasks(), timeout=_SHUTDOWN_FF_TIMEOUT)
         except asyncio.TimeoutError:
             logger.warning("fire-and-forget tasks shutdown timed out")
         except Exception:
@@ -442,7 +492,9 @@ async def main() -> None:
         try:
             from src.core.actions.vector_store import get_vector_store
 
-            await asyncio.wait_for(get_vector_store().shutdown(), timeout=10.0)
+            await asyncio.wait_for(
+                (await get_vector_store()).shutdown(), timeout=_SHUTDOWN_VECTOR_TIMEOUT
+            )
         except asyncio.TimeoutError:
             logger.warning("vector_store shutdown timed out")
         except Exception:
@@ -454,7 +506,9 @@ async def main() -> None:
         try:
             from src.core.actions.mcp_playwright import _browser_manager
 
-            await asyncio.wait_for(_browser_manager.close(), timeout=5.0)
+            await asyncio.wait_for(
+                _browser_manager.close(), timeout=_SHUTDOWN_BROWSER_TIMEOUT
+            )
         except asyncio.TimeoutError:
             logger.warning("playwright browser shutdown timed out")
         except Exception:
@@ -479,7 +533,10 @@ def run() -> None:
     sys.stderr.write("=== run() START ===\n")
     sys.stderr.flush()
 
-    # --- Schema migrations (Alembic — with 30s timeout on Railway) ---
+    # --- Schema migrations (Alembic — with 120s timeout) ---
+    # NOTE: Alembic миграции выполняются синхронно при старте. Если они занимают
+    # >120s, стартап падает. При больших миграциях рекомендуется запускать их
+    # перед деплоем нового контейнера (pre-deploy migration).
     import alembic.command
     import alembic.config
     from alembic.script import ScriptDirectory

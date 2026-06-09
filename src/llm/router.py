@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 # is respected when callers don't explicitly specify heavy/light.
 _UNSET = object()
 
+# ── Module constants ─────────────────────────────────────────────────────
+_DEFAULT_LLM_TIMEOUT = 90.0  # секунд — таймаут одного LLM-вызова (включая retries)
+
 
 class ExhaustedError(Exception):
     """Все API-ключи провайдера исчерпаны (колдаун/отключены)."""
@@ -244,7 +247,8 @@ class MultiKeyProvider:
                 for retry in range(MAX_RETRIES_PER_KEY):
                     try:
                         result = await asyncio.wait_for(
-                            operation(provider, *args, **kwargs), timeout=90.0
+                            operation(provider, *args, **kwargs),
+                            timeout=_DEFAULT_LLM_TIMEOUT,
                         )
                     except Exception as exc:
                         if not _is_retryable_llm_error(exc):
@@ -571,7 +575,8 @@ class MultiKeyProvider:
         # model_override не передаётся — проверяется только сам факт доступа к API.
         try:
             return await self._try_with_retry(lambda p: p.validate_key())
-        except Exception:  # TODO: specify exceptions
+        except Exception:  # NOTE: validate_key может поднять сетевые ошибки (httpx),
+            # ошибки аутентификации (401/403) или таймауты. Все → False.
             return False
 
     async def close(self) -> None:

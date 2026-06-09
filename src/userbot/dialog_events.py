@@ -15,9 +15,23 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 
 
+# Защита от утечки обработчиков при переподключении.
+# При повторном вызове attach_dialog_event_handlers на том же клиенте — не дублируем обработчик.
+_attached_dialog_event_clients: set[int] = set()
+
+
 def attach_dialog_event_handlers(
     client: TelegramClient, owner_telegram_id: int
 ) -> None:
+    client_id = id(client)
+    if client_id in _attached_dialog_event_clients:
+        logger.debug(
+            "Dialog event handler already attached for client %s — skipping duplicate",
+            client_id,
+        )
+        return
+    _attached_dialog_event_clients.add(client_id)
+
     async def on_folder_peers(update: UpdateFolderPeers) -> None:
         try:
             async with get_session() as session:

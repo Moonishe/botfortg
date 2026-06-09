@@ -38,7 +38,7 @@ async def _fetch_rag(
                 from src.core.actions.vector_store import get_vector_store
 
                 query_vec = await provider.embed(user_text)
-                hits = await get_vector_store().search(
+                hits = await (await get_vector_store()).search(
                     user_id=_owner_db_id, embedding=query_vec, limit=5
                 )
             else:

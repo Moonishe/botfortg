@@ -78,6 +78,9 @@ from src.bot.classifier import classify_message as _classify_message
 from src.core.security.prompt_injection_scanner import scan_content
 from httpx import RequestError, HTTPStatusError
 from aiogram.exceptions import TelegramAPIError
+
+# ── Module constants ─────────────────────────────────────────────────────
+_FETCH_URL_TIMEOUT = 15.0  # секунд — таймаут HTTP-запроса для извлечения контента URL
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -155,7 +158,9 @@ async def _fetch_url_content(url: str) -> str | None:
     try:
         import httpx
 
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=_FETCH_URL_TIMEOUT, follow_redirects=False
+        ) as client:
             resp = await client.get(url, headers={"User-Agent": "TelegramHelper/1.0"})
             if resp.status_code != 200:
                 return None
@@ -525,6 +530,24 @@ async def _voice_worker() -> None:
                             )
 
                         try:
+                            # Scan transcribed text for prompt injection (M-33)
+                            _voice_scan = scan_content(
+                                text, f"voice:{message.from_user.id}"
+                            )
+                            if _voice_scan.blocked:
+                                logger.warning(
+                                    "Prompt injection blocked in voice transcription from user %d: %s",
+                                    message.from_user.id,
+                                    _voice_scan.category,
+                                )
+                                try:
+                                    await message.answer(
+                                        "⚠️ Распознанный текст содержит потенциально опасные конструкции и был заблокирован."
+                                    )
+                                except TelegramAPIError:
+                                    pass
+                                continue
+
                             # State is stale in background worker — pass None.
                             # Any code needing FSMContext methods will log a warning and skip.
                             _vuid = (

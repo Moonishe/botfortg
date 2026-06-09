@@ -4,6 +4,55 @@ from pathlib import Path
 
 _TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".log", ".json", ".yaml", ".yml"}
 
+# Расширения исполняемых файлов — блокируются для предотвращения
+# сохранения вредоносных бинарников в data/media/
+_DANGEROUS_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".exe",
+        ".dll",
+        ".so",
+        ".sh",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".vbs",
+        ".msi",
+        ".scr",
+        ".pif",
+        ".com",
+        ".cpl",
+        ".jar",
+        ".app",
+    }
+)
+
+# MIME-типы исполняемых файлов — блокируются на уровне Telegram file metadata
+_DANGEROUS_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/x-msdownload",
+        "application/x-msdos-program",
+        "application/x-msi",
+        "application/x-sh",
+        "application/x-bat",
+        "application/x-shellscript",
+        "application/x-executable",
+        "application/x-elf",
+        "application/x-mach-binary",
+        "application/x-dosexec",
+        "application/octet-stream",  # бинарный блоб без уточнения — блокируем
+    }
+)
+
+
+def is_safe_document(filename: str, mime_type: str | None = None) -> bool:
+    """Проверить, безопасен ли документ для скачивания по расширению и MIME-типу."""
+    suffix = Path(filename).suffix.lower()
+    if suffix in _DANGEROUS_EXTENSIONS:
+        return False
+    if mime_type and mime_type.lower() in _DANGEROUS_MIME_TYPES:
+        return False
+    return True
+
 
 def _read_pdf(path: Path) -> str:
     from pypdf import PdfReader

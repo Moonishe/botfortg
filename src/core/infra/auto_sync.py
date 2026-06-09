@@ -1,4 +1,10 @@
-"""Авто-синхронизация контактов и архивного статуса.Настраивается в /settings."""
+"""Авто-синхронизация контактов и архивного статуса. Настраивается в /settings.
+
+NOTE: get_or_create_user() вызывается при каждом тике цикла для получения
+актуальных настроек. Для single-user бота это лёгкий SELECT — накладные расходы
+минимальны. Повторный вызов get_or_create_user внутри одного тика устранён —
+используется результат первого запроса.
+"""
 
 import asyncio
 import logging
@@ -28,17 +34,19 @@ async def auto_sync_loop() -> None:
                 interval_sec = max(
                     30, getattr(owner.settings, "auto_sync_interval_sec", 7200)
                 )
+                # Сохраняем данные до выхода из сессии — повторный get_or_create_user
+                # не требуется, используем атрибуты из уже загруженного owner.
+                owner_tg_id = owner.telegram_id
 
             if not enabled:
                 await asyncio.sleep(settings.auto_sync_fallback_sec)
                 continue
 
-            client = get_userbot_gateway().get_client(settings.owner_telegram_id)
+            client = get_userbot_gateway().get_client(owner_tg_id)
             if client is not None:
-                async with get_session() as session:
-                    owner = await get_or_create_user(
-                        session, settings.owner_telegram_id
-                    )
+                # NOTE: owner передан из первого get_or_create_user — без повторного
+                # fetch'а. sync_dialogs принимает detached User (использует только
+                # .id и .telegram_id — простые атрибуты, доступные вне сессии).
                 stats = await get_userbot_gateway().sync_dialogs(
                     client, owner, limit=500
                 )

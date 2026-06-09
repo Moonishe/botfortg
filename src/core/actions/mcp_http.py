@@ -181,6 +181,8 @@ async def _do_request(
                 timeout=_HTTP_TIMEOUT,
                 allow_redirects=False,
                 stream=True,  # M-30: стриминговое чтение вместо resp.text
+                # NOTE: verify=True по умолчанию — SSL/TLS сертификаты проверяются.
+                # Не отключать без крайней необходимости (MITM-риск).
             )
         except requests.ConnectionError as exc:
             logger.warning("Connection error for %s %s: %s", method, url, exc)

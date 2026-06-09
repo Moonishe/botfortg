@@ -2,6 +2,8 @@
 # Policy: each package is pinned to its latest stable minor version
 # as of May 2026. Use `pip install -r requirements.txt` to install.
 # To upgrade, bump the minor version after testing.
+# NOTE: Consider pinning transitive deps with `pip freeze > requirements.lock`
+# for reproducible builds in production environments.
 
 aiogram==3.16.0
 telethon==1.39.0

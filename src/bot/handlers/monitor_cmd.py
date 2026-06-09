@@ -336,6 +336,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
             for msg_dict, matched_rules in matched_pairs:
                 # Сохраняем сообщение (пропускаем, если уже есть — concurrent fetch)
                 try:
+                    # savepoint: изолирует вставку сообщения — дубликат не ломает batch
                     async with session.begin_nested():
                         db_msg = MonitoredMessage(
                             source_id=source.id,

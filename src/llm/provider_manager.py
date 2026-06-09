@@ -29,7 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
-from src.crypto import decrypt
+from src.crypto import decrypt_async
 from src.db.models import User
 from src.db.repo import get_active_keys, get_api_keys
 from src.llm.base import LLMProvider, TaskType
@@ -244,6 +244,11 @@ PROVIDER_ORDER = (
 KEY_COOLDOWN_SECONDS = 90.0
 MAX_RETRIES_PER_KEY = 3
 RETRY_BASE_DELAY = 1.0  # seconds
+
+# NOTE: Circuit breaker состояние хранится только в памяти и сбрасывается при рестарте.
+# Ключи, которые были в cooldown на момент останова, будут повторно запрошены после
+# перезапуска. _restore_cooldowns() частично восстанавливает состояние из DB-поля
+# cooldown_until, но экспоненциальный backoff-счётчик (_tripped_count) обнуляется.
 _CIRCUIT_BREAKERS: dict[tuple[str, str], _KeyCircuitBreaker] = {}
 _CIRCUIT_BREAKERS_LOCK: asyncio.Lock | None = (
     None  # initialized via ensure_locks_initialized() at startup
@@ -806,7 +811,7 @@ async def build_provider(
             slots = await get_active_keys(session, user, name, purpose)
             if not slots:
                 continue
-            keys = [decrypt(s.key_enc) for s in slots]
+            keys = [await decrypt_async(s.key_enc) for s in slots]
             slot_ids = [s.id for s in slots]
             endpoints = [s.endpoint for s in slots]
             # Читаем мульти-модели из LlmKeySlotModel; fallback на s.model

@@ -17,7 +17,7 @@ from src.db.models import (
     User,
     UserSettings,
 )
-from src.crypto import decrypt, encrypt
+from src.crypto import decrypt_async, encrypt_async
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +103,8 @@ async def save_telegram_session(
     payload = TelegramSession(
         user_id=user.id,
         api_id=api_id,
-        api_hash_enc=encrypt(api_hash),
-        session_string_enc=encrypt(session_string),
+        api_hash_enc=await encrypt_async(api_hash),
+        session_string_enc=await encrypt_async(session_string),
         phone=phone,
         account_label=account_label,
     )
@@ -117,7 +117,11 @@ async def load_telegram_session(
     row = await session.get(TelegramSession, user.id)
     if row is None:
         return None
-    return row.api_id, decrypt(row.api_hash_enc), decrypt(row.session_string_enc)
+    return (
+        row.api_id,
+        await decrypt_async(row.api_hash_enc),
+        await decrypt_async(row.session_string_enc),
+    )
 
 
 async def delete_telegram_session(session: AsyncSession, user: User) -> None:

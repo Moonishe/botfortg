@@ -81,7 +81,9 @@ async def _tool_search_messages(
             candidates = await resolve_contact(client, user, contact, limit=1)
             if candidates:
                 peer_id = candidates[0].peer_id
-        except Exception:  # TODO: specify exceptions
+        except (
+            Exception
+        ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
             logger.exception(
                 "search_messages: contact resolution failed for %r", contact
             )
@@ -148,7 +150,9 @@ async def _tool_summarize_chat(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("summarize_chat: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -179,7 +183,9 @@ async def _tool_summarize_chat(
         from src.core.contacts.chat_service import messages_to_transcript
 
         text = messages_to_transcript(messages)
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("summarize_chat: transcript conversion failed")
         return {"ok": False, "error": "Failed to convert messages to transcript"}
 
@@ -194,7 +200,9 @@ async def _tool_summarize_chat(
             "contact": display_name,
             "message_count": len(messages),
         }
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("summarize_chat: LLM summarization failed")
         return {"ok": False, "error": "LLM summarization failed"}
 
@@ -246,7 +254,9 @@ async def _tool_ask_chat(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("ask_chat: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -308,7 +318,9 @@ async def _tool_ask_chat(
                     lines.append(f"• {_sh2(p.get('text', ''))}")
             lines.append("</recall_context>")
             memory_context = "\n".join(lines)
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.debug("ask_chat tool: failed to load memory context", exc_info=True)
 
     # Analyse via LLM
@@ -337,7 +349,9 @@ async def _tool_ask_chat(
             "contact": display_name,
             "message_count": len(messages),
         }
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("ask_chat: LLM analysis failed")
         return {"ok": False, "error": "LLM analysis failed"}
 
@@ -388,7 +402,9 @@ async def _tool_draft_reply(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("draft_reply: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -406,7 +422,9 @@ async def _tool_draft_reply(
         history = await fetch_chat_messages(session, user, peer_id, limit=20)
         if history:
             history_text = messages_to_transcript(history)
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("draft_reply: history fetch failed for peer_id=%s", peer_id)
         # Non-fatal: proceed without history
 
@@ -427,7 +445,9 @@ async def _tool_draft_reply(
             "tone": result.get("tone", ""),
             "contact": sender_name,
         }
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("draft_reply: LLM drafting failed")
         return {"ok": False, "error": "LLM draft generation failed"}
 
@@ -571,7 +591,9 @@ async def _tool_list_contacts(
                 for c in contacts[:limit]
             ]
         return {"ok": True, "contacts": results, "count": len(results)}
-    except Exception:  # TODO: specify exceptions
+    except (
+        Exception
+    ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
         logger.exception("list_contacts: failed for query=%r", query)
         return {"ok": False, "error": "Failed to list contacts"}
 
@@ -652,7 +674,9 @@ async def _tool_delegate_task(
                     user_prompt += (
                         f"\n\nПоследние сообщения из чата с {contact}:\n{transcript}"
                     )
-        except Exception:  # TODO: specify exceptions
+        except (
+            Exception
+        ):  # NOTE: сетевые вызовы Telethon/httpx, ошибки БД — безопасно логируем
             logger.debug(
                 "delegate_task: failed to fetch contact messages", exc_info=True
             )

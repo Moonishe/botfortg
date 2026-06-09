@@ -427,7 +427,7 @@ async def route_intent(
                     _owner_db_id = owner_db.id if owner_db else None
                 if _owner_db_id is not None:
                     query_vec = await provider.embed(user_text)
-                    hits = await get_vector_store().search(
+                    hits = await (await get_vector_store()).search(
                         user_id=_owner_db_id, embedding=query_vec, limit=3
                     )
                 else:

@@ -11,6 +11,8 @@ from src.llm.base import ChatMessage
 GEMINI_CHAT_LIGHT = "gemini-3-flash"
 GEMINI_CHAT_HEAVY = "gemini-3.1-pro"
 
+_GEMINI_REQUEST_TIMEOUT = 90.0  # секунд — таймаут синхронного вызова Gemini API
+
 
 def _to_gemini_contents(messages: list[ChatMessage]) -> tuple[str | None, list[dict]]:
     """Возвращает (system_instruction, contents) для google-genai."""
@@ -86,7 +88,9 @@ class GeminiProvider(BaseLLMProvider):
             )
             return resp.text or ""
 
-        return await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
+        return await asyncio.wait_for(
+            asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
+        )
 
     async def embed(self, text: str) -> list[float]:
         from src.core.actions.embedding_cache import aget, aset
@@ -102,7 +106,9 @@ class GeminiProvider(BaseLLMProvider):
             )
             return list(resp.embeddings[0].values)
 
-        result = await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
+        )
         await aset(text, result, self._embed_model)
         return result
 
@@ -149,7 +155,9 @@ class GeminiProvider(BaseLLMProvider):
                     return [list(e.values) for e in resp.embeddings]
 
                 api_results.extend(
-                    await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
+                    )
                 )
 
             for idx, emb in zip(uncached_indices, api_results):
