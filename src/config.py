@@ -96,6 +96,26 @@ class Settings(BaseSettings):
             raise ValueError(f"RECALL_MAX_PREFETCH must be > 0, got {v}")
         return v
 
+    @field_validator(
+        "recall_semantic_threshold",
+        "recall_mmr_lambda",
+        "ebbinghaus_decay_base",
+        "ebbinghaus_access_weight",
+        "auto_forget_threshold",
+        "meta_memory_confidence_boost",
+        "meta_memory_confidence_decay",
+        "dreaming_reval_confidence_threshold",
+        "plan_complexity_threshold",
+        "meta_delegation_threshold",
+        "meta_consult_threshold",
+        "meta_abort_threshold",
+    )
+    @classmethod
+    def _validate_range_0_1(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"Value must be 0.0–1.0, got {v}")
+        return v
+
     @field_validator("bot_token", mode="after")
     @classmethod
     def _validate_bot_token(cls, v: str) -> str:
@@ -156,10 +176,6 @@ class Settings(BaseSettings):
     habit_tracker_interval_sec: int = Field(
         3600, description="Интервал трекера привычек"
     )
-    # ── CoT Engine (P2) ──
-    cot_engine_enabled: bool = Field(
-        True, description="Включить Chain-of-Thought движок с самокоррекцией"
-    )
     cot_max_iterations: int = Field(
         8, description="Макс. итераций CoT-рассуждения (жёсткий лимит)"
     )
@@ -212,18 +228,11 @@ class Settings(BaseSettings):
         "",
         description='JSON-список прокси: [{"url":"...","type":"mobile","change_ip_url":"..."}]',
     )
-    avito_fetch_details: bool = Field(
-        False, description="Загружать полные описания с карточек объявлений"
-    )
-    avito_detail_fetch_limit: int = Field(
-        10, description="Максимум карточек для загрузки полных описаний за один скан"
-    )
     avito_llm_analysis: bool = Field(
         False,
         description="Анализировать объявления через LLM (требует полные описания)",
     )
     sleep_tracker_check_sec: int = Field(900, description="Интервал трекера сна")
-    sleep_tracker_fallback_sec: int = Field(600, description="Fallback трекера сна")
     memory_patterns_interval_sec: int = Field(
         600, description="Интервал поиска паттернов памяти"
     )
@@ -286,12 +295,6 @@ class Settings(BaseSettings):
     smart_routing_enabled: bool = Field(
         True,
         description="Включить умный выбор лёгкой/тяжёлой модели по сложности запроса",
-    )
-
-    # ── Specialized Router (Phase 5.2) ──
-    specialized_router_enabled: bool = Field(
-        True,
-        description="Включить эвристический роутер задач (классификация без LLM)",
     )
 
     # ── Ambient Intelligence (Phase 6) ──
@@ -359,7 +362,6 @@ class Settings(BaseSettings):
     disk_monitor_interval_sec: int = Field(600, description="Интервал проверки диска")
 
     # Memory
-    # TODO: implement or remove — max_recall_cache_size was deleted (duplicate of recall_cache_max_size)
     memory_consolidation_interval_sec: int = Field(
         21600, description="Интервал консолидации памяти (6 часов)"
     )
@@ -372,7 +374,6 @@ class Settings(BaseSettings):
 
     # ── Recall defaults ──
     recall_default_limit: int = Field(8, description="Default recall limit")
-    recall_max_limit: int = Field(20, description="Max recall limit")
     recall_max_prefetch: int = Field(
         500,
         description="Hard ceiling on pre-fetch query rows "
@@ -431,12 +432,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ── OpenTelemetry ──
-    otel_enabled: bool = Field(False, description="Enable OpenTelemetry tracing")
-    otel_exporter_endpoint: str = Field(
-        "", description="OTLP exporter endpoint (e.g. http://localhost:4318/v1/traces)"
-    )
-
     # ── Meta-Memory ──
     meta_memory_enabled: bool = Field(
         True, description="Включить Meta-Memory: confidence/importance scoring фактов"
@@ -447,14 +442,7 @@ class Settings(BaseSettings):
     meta_memory_confidence_decay: float = Field(
         0.2, description="На сколько снижать confidence при contradiction"
     )
-    meta_memory_recalculate_interval_hours: int = Field(
-        24, description="Интервал пересчёта importance всех фактов (часы)"
-    )
-
     # ── Meta-Reasoner (Phase 2) ──
-    meta_reasoner_enabled: bool = Field(
-        True, description="Включить Meta-Reasoner: оценка качества рассуждений"
-    )
     meta_delegation_threshold: float = Field(
         0.4, description="Порог confidence для делегирования агенту (0.0–1.0)"
     )
@@ -466,7 +454,6 @@ class Settings(BaseSettings):
     )
 
     # ── Limits & timeouts ──
-    max_message_length: int = Field(4096, description="Telegram max message length")
     safe_message_length: int = Field(4000, description="Buffer before Telegram limit")
     max_voice_queue_size: int = Field(20, description="Max voice messages in queue")
     voice_queue_timeout: float = Field(
@@ -479,9 +466,6 @@ class Settings(BaseSettings):
         description="Кэшировать маршрутные решения RouterPlan (S2-T1 Pattern Cache)",
     )
 
-    # ── Event Bus ──
-    event_bus_enabled: bool = Field(True, description="Enable unified event bus")
-
     # ── LLM Response Cache ──
     response_cache_enabled: bool = Field(
         True, description="Кэшировать ответы LLM (SmartCache)"
@@ -491,10 +475,6 @@ class Settings(BaseSettings):
     )
 
     # ── Caching ──
-    context_cache_max_size: int = Field(2000, description="Max context cache entries")
-    contact_digest_cache_max: int = Field(
-        500, description="Max contact digest cache entries"
-    )
     recall_cache_max_size: int = Field(1000, description="Max recall cache entries")
     recall_cache_result_ttl: float = Field(
         30.0, description="Recall cache TTL with facts (sec)"
@@ -515,10 +495,6 @@ class Settings(BaseSettings):
     humanizer_deep_min_length: int = Field(
         100, description="Минимальная длина текста для deep humanizer"
     )
-    humanizer_deep_min_score: float = Field(
-        0.3, description="Минимальный AI-score для deep humanizer"
-    )
-
     # Tool loop
     max_tool_iterations: int = Field(
         5, description="Макс. итераций tool-calling в Maestro"
@@ -534,18 +510,9 @@ class Settings(BaseSettings):
         description="Модель для оптимизации навыков (пустая = использовать heavy). "
         "Формат: 'provider/model' или 'model_name'",
     )
-    skill_target_model: str = Field(
-        "",
-        description="Целевая модель для исполнения навыков (пустая = использовать light). "
-        "Формат: 'provider/model' или 'model_name'",
-    )
     skill_validation_enabled: bool = Field(
         True,
         description="Включить validation gate для обновлений навыков",
-    )
-    skill_auto_edit_enabled: bool = Field(
-        True,
-        description="Разрешить автоматические bounded edits вместо полной замены навыков",
     )
     skill_edit_cooldown_sec: int = Field(
         60,
@@ -608,9 +575,6 @@ class Settings(BaseSettings):
     htn_planner_enabled: bool = Field(
         True, description="Включить HTN-планировщик (декомпозиция сложных задач)"
     )
-    htn_planner_model: str = Field(
-        "", description="Модель для HTN-планирования (пустая = auto)"
-    )
     plan_max_steps: int = Field(10, description="Максимальное количество шагов в плане")
     plan_complexity_threshold: float = Field(
         0.6,
@@ -629,20 +593,7 @@ class Settings(BaseSettings):
         50000, description="Бюджет токенов для одного запуска агента"
     )
 
-    # ── Skills → Procedures Bridge + Agent Registry (Phase 3b) ──
-    procedural_memory_enabled: bool = Field(
-        True,
-        description="Включить процедурную память (конвертация навыков в исполняемые процедуры)",
-    )
-    agent_registry_enabled: bool = Field(
-        True,
-        description="Включить реестр специализированных агентов (researcher, coder, planner, analyst)",
-    )
-
-    # ── Phase 4: Proactive Scheduler + Preference Learning + Dreaming ──
-    proactive_scheduler_enabled: bool = Field(
-        True, description="Включить Proactive Scheduler (фоновые цели по расписанию)"
-    )
+    # ── Phase 4: Preference Learning + Dreaming ──
     preference_learning_enabled: bool = Field(
         True,
         description="Включить Preference Learning (обучение на сигналах пользователя)",
@@ -663,6 +614,7 @@ class Settings(BaseSettings):
     skills_model: str = Field("", description="Model override for skills agent")
     background_model: str = Field("", description="Model override for background tasks")
     vision_model: str = Field("", description="Model override for vision tasks")
+    stt_model: str = Field("", description="STT model override")
 
     @property
     def data_dir(self) -> Path:

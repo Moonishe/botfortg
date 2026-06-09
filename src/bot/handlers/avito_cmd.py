@@ -31,11 +31,18 @@ router.callback_query.filter(OwnerOnly())
 # Persisted query cache for callback_data (query_hash → query_string)
 # Uses SQLite so cache survives bot restart.
 _QUERY_CACHE: dict[str, str] = {}
+# threading.Lock: sync-функции с блокирующим SQLite не могут использовать asyncio.Lock.
+# В asyncio single-threaded модели этот lock защищает от гипотетических гонок
+# при будущем переходе на многопоточный executor для SQLite.
+import threading as _threading
+
+_cache_lock = _threading.Lock()
 
 
 def _cache_put_query(hash_str: str, query: str) -> None:
     """Сохраняет маппинг хэша в SQLite и in-memory."""
-    _QUERY_CACHE[hash_str] = query
+    with _cache_lock:
+        _QUERY_CACHE[hash_str] = query
     try:
         conn = sqlite3.connect(str(_get_db_path()))
         conn.execute(
@@ -55,9 +62,10 @@ def _cache_put_query(hash_str: str, query: str) -> None:
 
 def _cache_get_query(hash_str: str) -> str | None:
     """Извлекает запрос из in-memory или SQLite по хэшу."""
-    cached = _QUERY_CACHE.get(hash_str)
-    if cached is not None:
-        return cached
+    with _cache_lock:
+        cached = _QUERY_CACHE.get(hash_str)
+        if cached is not None:
+            return cached
     try:
         conn = sqlite3.connect(str(_get_db_path()))
         row = conn.execute(
@@ -65,7 +73,8 @@ def _cache_get_query(hash_str: str) -> str | None:
         ).fetchone()
         conn.close()
         if row:
-            _QUERY_CACHE[hash_str] = row[0]  # warm in-memory
+            with _cache_lock:
+                _QUERY_CACHE[hash_str] = row[0]  # warm in-memory
             return row[0]
     except Exception:
         logger.exception("_cache_get_query failed for hash=%s", hash_str)
@@ -106,6 +115,7 @@ def _cb_query(hash_str: str) -> str | None:
 
 ITEMS_PER_PAGE = 5
 
+# Безопасен под asyncio: read-only константа, инициализируется при загрузке модуля.
 _GRADE_DISPLAY: dict[str, str] = {
     "A": "🏆 Отличная сделка",
     "B": "✅ Хорошая цена",
@@ -114,6 +124,7 @@ _GRADE_DISPLAY: dict[str, str] = {
     "F": "❌ Не стоит",
 }
 
+# Безопасен под asyncio: read-only константа, инициализируется при загрузке модуля.
 _RISK_DISPLAY: dict[str, str] = {
     "low": "🟢 Низкий",
     "medium": "🟡 Средний",

@@ -20,6 +20,10 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
+    # NOTE: User.id is implicitly Integer (SQLAlchemy default).
+    # FK references in other tables use BigInteger.
+    # SQLite is type-flexible and this doesn't cause errors.
+    # For PostgreSQL migration: change to BigInteger explicitly.
     id: Mapped[int] = mapped_column(
         primary_key=True
     )  # Integer — SQLite autoincrement requires INTEGER

@@ -46,7 +46,7 @@ class Message(Base):
     is_outgoing: Mapped[bool] = mapped_column(Boolean, default=False)
     date: Mapped[datetime] = mapped_column(DateTime, index=True)
     kind: Mapped[str] = mapped_column(
-        String(16), default="text"
+        String(16), default="text", index=True
     )  # text | voice | audio | document | photo | other
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -76,7 +76,7 @@ class Commitment(Base):
     direction: Mapped[str] = mapped_column(String(8))  # mine | theirs
     text: Mapped[str] = mapped_column(Text)
     deadline_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True), nullable=True, index=True
     )
     status: Mapped[str] = mapped_column(
         String(16), default="open"
@@ -149,13 +149,17 @@ class PendingAction(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    kind: Mapped[str] = mapped_column(String(32))  # send_message | catchup_reply | ...
+    kind: Mapped[str] = mapped_column(
+        String(32), index=True
+    )  # send_message | catchup_reply | ...
     payload: Mapped[str] = mapped_column(Text)  # JSON
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
     # Безопасность: TTL + HMAC-подпись (nullable для обратной совместимости)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, index=True
+    )
     hmac_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
@@ -163,6 +167,7 @@ class NewsTopic(Base):
     """Темы-фавориты для авто-новостей. Каждая утром собирается отдельным дайджестом."""
 
     __tablename__ = "news_topics"
+    __table_args__ = (UniqueConstraint("user_id", "topic", name="uq_news_user_topic"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(

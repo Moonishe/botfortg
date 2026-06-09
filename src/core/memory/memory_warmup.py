@@ -11,12 +11,17 @@ matching the TencentDB-Agent-Memory warmup pattern.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 logger = logging.getLogger(__name__)
 
 # { telegram_id: (last_extraction_at_monotonic, extraction_count) }
 _warmup_state: dict[int, tuple[float, int]] = {}
+# threading.Lock: sync-функции модуля вызываются из async-контекста,
+# но без await между чтением и записью — гонок нет. Lock добавлен
+# для защиты от гипотетической многопоточной нагрузки в будущем.
+_warmup_lock = threading.Lock()
 
 
 def should_full_extract(telegram_id: int, *, idle_timeout_sec: int = 86400) -> bool:
@@ -27,42 +32,45 @@ def should_full_extract(telegram_id: int, *, idle_timeout_sec: int = 86400) -> b
     After that, returns to normal (False).
     """
     now = time.monotonic()
-    state = _warmup_state.get(telegram_id)
+    with _warmup_lock:
+        state = _warmup_state.get(telegram_id)
 
-    if state is None:
-        # First extraction ever — warmup phase
-        _warmup_state[telegram_id] = (now, 1)
-        logger.debug("Warmup started for user %d (first extraction)", telegram_id)
-        return True
+        if state is None:
+            # First extraction ever — warmup phase
+            _warmup_state[telegram_id] = (now, 1)
+            logger.debug("Warmup started for user %d (first extraction)", telegram_id)
+            return True
 
-    last_ts, count = state
-    elapsed = now - last_ts
+        last_ts, count = state
+        elapsed = now - last_ts
 
-    if elapsed > idle_timeout_sec:
-        # Idle timeout — reset to warmup
-        _warmup_state[telegram_id] = (now, 1)
-        logger.debug(
-            "Warmup reset for user %d (idle %.0fs > timeout)",
-            telegram_id,
-            elapsed,
-        )
-        return True
+        if elapsed > idle_timeout_sec:
+            # Idle timeout — reset to warmup
+            _warmup_state[telegram_id] = (now, 1)
+            logger.debug(
+                "Warmup reset for user %d (idle %.0fs > timeout)",
+                telegram_id,
+                elapsed,
+            )
+            return True
 
-    # Normal operation — no warmup needed
-    _warmup_state[telegram_id] = (now, count + 1)
-    return False
+        # Normal operation — no warmup needed
+        _warmup_state[telegram_id] = (now, count + 1)
+        return False
 
 
 def reset_warmup(telegram_id: int) -> None:
     """Force reset warmup state for a user (e.g., after manual full extract)."""
-    _warmup_state.pop(telegram_id, None)
+    with _warmup_lock:
+        _warmup_state.pop(telegram_id, None)
     logger.debug("Warmup forcibly reset for user %d", telegram_id)
 
 
 def get_warmup_count(telegram_id: int) -> int:
     """Return current warmup extraction count (0 if never extracted)."""
-    state = _warmup_state.get(telegram_id)
-    return state[1] if state else 0
+    with _warmup_lock:
+        state = _warmup_state.get(telegram_id)
+        return state[1] if state else 0
 
 
 __all__ = [

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # ── Rate limiting for skill edits ──
 # Key: (owner_id, skill_name_lower), Value: last edit timestamp
 _edit_cooldowns: dict[tuple[int, str], datetime] = {}
+_cooldown_lock = asyncio.Lock()
 EDIT_COOLDOWN_SECONDS = 60  # Minimum 60 seconds between edits to the same skill
 _COOLDOWN_TTL_SECONDS = 3600  # Evict entries older than 1 hour
 MIN_USAGE_FOR_CALIBRATION = 5  # less than 5 uses → raw confidence only
@@ -332,27 +333,28 @@ async def apply_skill_edit(
     cooldown_key = (owner_id, skill_name.lower())
     now = datetime.now(timezone.utc)
 
-    # TTL eviction: remove stale entries to prevent unbounded growth
-    stale_keys = [
-        k
-        for k, ts in _edit_cooldowns.items()
-        if (now - ts).total_seconds() > _COOLDOWN_TTL_SECONDS
-    ]
-    for k in stale_keys:
-        del _edit_cooldowns[k]
+    async with _cooldown_lock:
+        # TTL eviction: remove stale entries to prevent unbounded growth
+        stale_keys = [
+            k
+            for k, ts in _edit_cooldowns.items()
+            if (now - ts).total_seconds() > _COOLDOWN_TTL_SECONDS
+        ]
+        for k in stale_keys:
+            del _edit_cooldowns[k]
 
-    last_edit = _edit_cooldowns.get(cooldown_key)
-    if last_edit is not None:
-        elapsed = (now - last_edit).total_seconds()
-        cooldown_sec = settings.skill_edit_cooldown_sec
-        if elapsed < cooldown_sec:
-            remaining = int(cooldown_sec - elapsed)
-            return {
-                "success": False,
-                "error": f"Rate limited: wait {remaining}s before editing {skill_name!r} again",
-                "cooldown_remaining": remaining,
-            }
-    _edit_cooldowns[cooldown_key] = now
+        last_edit = _edit_cooldowns.get(cooldown_key)
+        if last_edit is not None:
+            elapsed = (now - last_edit).total_seconds()
+            cooldown_sec = settings.skill_edit_cooldown_sec
+            if elapsed < cooldown_sec:
+                remaining = int(cooldown_sec - elapsed)
+                return {
+                    "success": False,
+                    "error": f"Rate limited: wait {remaining}s before editing {skill_name!r} again",
+                    "cooldown_remaining": remaining,
+                }
+        _edit_cooldowns[cooldown_key] = now
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)

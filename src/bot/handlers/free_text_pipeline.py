@@ -182,7 +182,7 @@ async def _humanize_assistant_response(
     mode: str | None = None,
 ) -> str:
     mode = mode or await _get_anti_ai_mode(owner_telegram_id)
-    return apply_anti_ai_mode(
+    return await apply_anti_ai_mode(
         text,
         mode=mode,
         context_hint=context_hint,

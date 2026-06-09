@@ -443,7 +443,8 @@ def ht_adapter(fn):
 # InstructionOptimizer integration — post-turn LLM review
 # ---------------------------------------------------------------------------
 
-# Rate-limit для post_turn_optimize: не чаще 1 раза в 5 минут на пользователя
+# Rate-limit для post_turn_optimize: не чаще 1 раза в 5 минут на пользователя.
+# Безопасен под asyncio: защищён _post_turn_lock, доступ только внутри async with.
 _post_turn_last_call: dict[int, float] = {}
 _post_turn_lock: "asyncio.Lock | None" = None
 _post_turn_tasks: "dict[int, asyncio.Task]" = {}
@@ -499,7 +500,8 @@ async def _post_turn_optimize(
         except (Exception, asyncio.CancelledError):
             logger.debug("post_turn_optimize skipped", exc_info=True)
 
-    existing = _post_turn_tasks.get(telegram_id)
-    if existing and not existing.done():
-        existing.cancel()
-    _post_turn_tasks[telegram_id] = asyncio.create_task(_do_optimize())
+    async with _get_post_turn_lock():
+        existing = _post_turn_tasks.get(telegram_id)
+        if existing and not existing.done():
+            existing.cancel()
+        _post_turn_tasks[telegram_id] = asyncio.create_task(_do_optimize())

@@ -39,22 +39,29 @@ router.callback_query.filter(OwnerOnly())
 
 # in-memory store: draft_hash -> (timestamp, full draft text)
 _draft_texts: dict[str, tuple[float, str]] = {}
+_draft_lock = asyncio.Lock()
 
 # variant_groups: hash -> (timestamp, peer_id, contact_name, incoming_text, variant_dicts)
+# Безопасен под asyncio: доступ только внутри async-хендлеров без interleaving-записи.
 _variant_groups: dict[str, tuple[float, int, str, str, list[dict]]] = {}
 DRAFT_TTL_SECONDS = 30 * 60  # 30 минут
 
 
-def _draft_cleanup() -> None:
+async def _draft_cleanup() -> None:
     """Удаляет черновики старше DRAFT_TTL_SECONDS."""
-    now = time.time()
-    stale = [k for k, (ts, _) in _draft_texts.items() if now - ts > DRAFT_TTL_SECONDS]
-    for k in stale:
-        del _draft_texts[k]
-    # Clean variant groups too
-    stale_v = [k for k, v in _variant_groups.items() if now - v[0] > DRAFT_TTL_SECONDS]
-    for k in stale_v:
-        del _variant_groups[k]
+    async with _draft_lock:
+        now = time.time()
+        stale = [
+            k for k, (ts, _) in _draft_texts.items() if now - ts > DRAFT_TTL_SECONDS
+        ]
+        for k in stale:
+            del _draft_texts[k]
+        # Clean variant groups too
+        stale_v = [
+            k for k, v in _variant_groups.items() if now - v[0] > DRAFT_TTL_SECONDS
+        ]
+        for k in stale_v:
+            del _variant_groups[k]
 
 
 async def store_draft(draft_text: str) -> str:
@@ -68,8 +75,9 @@ async def store_draft(draft_text: str) -> str:
             ).hexdigest(),
         )
     )[:8]
-    _draft_texts[draft_hash] = (time.time(), draft_text)
-    _draft_cleanup()
+    async with _draft_lock:
+        _draft_texts[draft_hash] = (time.time(), draft_text)
+    await _draft_cleanup()
     return draft_hash
 
 
@@ -109,7 +117,8 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
     peer_id = int(parts[2])
     draft_hash = parts[3]
 
-    draft_data = _draft_texts.pop(draft_hash, None)
+    async with _draft_lock:
+        draft_data = _draft_texts.pop(draft_hash, None)
     if draft_data is None:
         await callback.answer("Черновик устарел или не найден", show_alert=True)
         return
@@ -164,7 +173,8 @@ async def cb_draft_ignore(callback: CallbackQuery) -> None:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
     draft_hash = parts[3]
-    _draft_texts.pop(draft_hash, None)
+    async with _draft_lock:
+        _draft_texts.pop(draft_hash, None)
     if callback.message:
         await callback.message.edit_text("🗑 Пропущено")
     await callback.answer()
@@ -259,7 +269,7 @@ async def store_variant_group(
         incoming_text,
         variants,
     )
-    _draft_cleanup()
+    await _draft_cleanup()
     return group_hash
 
 

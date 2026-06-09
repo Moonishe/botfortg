@@ -28,6 +28,7 @@ class Memory(Base):
         Index("ix_mem_active_contact", "is_active", "contact_id"),
         Index("ix_mem_user_active", "user_id", "is_active"),
         Index("ix_memories_user_type_active", "user_id", "memory_type", "is_active"),
+        Index("ix_memory_tags", "tags"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

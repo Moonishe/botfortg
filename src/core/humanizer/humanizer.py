@@ -3,6 +3,7 @@
 import logging
 import random
 import re
+import threading
 import time
 
 from src.config import settings
@@ -212,45 +213,56 @@ _last_response_cache: dict[int, str] = {}
 _FEEDBACK_TTL: float = 86400.0  # 24 часа
 _RESPONSE_CACHE_TTL: float = 3600.0  # 1 час
 _RESPONSE_CACHE_MAX: int = 500
+# Безопасен под asyncio: доступ только под _cache_lock (RLock),
+# без await-точек между чтением и записью.
 _feedback_last_cleanup: float = 0.0
 _response_cache_times: dict[int, float] = {}  # user_id → timestamp
+
+# Единый lock для _feedback_store, _last_response_cache, _response_cache_times.
+# threading.RLock (реентерабельный): _maybe_cleanup_caches вызывается изнутри
+# функций, которые уже держат lock, поэтому нужен reentrant lock.
+# sync-функции humanizer'а вызываются без await-точек между чтением и записью —
+# гонок в asyncio нет. Lock добавлен для защиты от гипотетической многопоточной
+# нагрузки и для документирования намерений.
+_cache_lock = threading.RLock()
 
 
 def _maybe_cleanup_caches() -> None:
     """Periodic cleanup of in-memory caches. Called lazily on write."""
-    global _feedback_last_cleanup
-    now = time.time()
+    with _cache_lock:
+        global _feedback_last_cleanup
+        now = time.time()
 
-    # Cleanup feedback store (every 10 minutes)
-    if now - _feedback_last_cleanup > 600:
-        _feedback_last_cleanup = now
-        cutoff = now - _FEEDBACK_TTL
-        stale_users = [
+        # Cleanup feedback store (every 10 minutes)
+        if now - _feedback_last_cleanup > 600:
+            _feedback_last_cleanup = now
+            cutoff = now - _FEEDBACK_TTL
+            stale_users = [
+                uid
+                for uid, entries in list(_feedback_store.items())
+                if not entries or entries[-1].get("time", 0) < cutoff
+            ]
+            for uid in stale_users:
+                del _feedback_store[uid]
+
+        # Cleanup response cache (evict oldest when over max, or expired)
+        if len(_last_response_cache) > _RESPONSE_CACHE_MAX:
+            # Evict 20% oldest
+            evict_count = max(1, len(_last_response_cache) // 5)
+            oldest = sorted(_response_cache_times.items(), key=lambda x: x[1])
+            for uid, _ in oldest[:evict_count]:
+                _last_response_cache.pop(uid, None)
+                _response_cache_times.pop(uid, None)
+
+        # TTL-based cleanup for response cache
+        expired = [
             uid
-            for uid, entries in list(_feedback_store.items())
-            if not entries or entries[-1].get("time", 0) < cutoff
+            for uid, ts in list(_response_cache_times.items())
+            if now - ts > _RESPONSE_CACHE_TTL
         ]
-        for uid in stale_users:
-            del _feedback_store[uid]
-
-    # Cleanup response cache (evict oldest when over max, or expired)
-    if len(_last_response_cache) > _RESPONSE_CACHE_MAX:
-        # Evict 20% oldest
-        evict_count = max(1, len(_last_response_cache) // 5)
-        oldest = sorted(_response_cache_times.items(), key=lambda x: x[1])
-        for uid, _ in oldest[:evict_count]:
+        for uid in expired:
             _last_response_cache.pop(uid, None)
             _response_cache_times.pop(uid, None)
-
-    # TTL-based cleanup for response cache
-    expired = [
-        uid
-        for uid, ts in list(_response_cache_times.items())
-        if now - ts > _RESPONSE_CACHE_TTL
-    ]
-    for uid in expired:
-        _last_response_cache.pop(uid, None)
-        _response_cache_times.pop(uid, None)
 
 
 def _get_humanize_threshold(text_len: int) -> float:
@@ -414,7 +426,7 @@ def normalize_anti_ai_mode(mode: str | None, *, enabled: bool | None = None) -> 
     return "off"
 
 
-def apply_anti_ai_mode(
+async def apply_anti_ai_mode(
     text: str,
     *,
     mode: str | None,
@@ -435,7 +447,7 @@ def apply_anti_ai_mode(
     score_before, breakdown = analyze_ai_score(text, user_slots=user_slots)
 
     if normalized_mode == "off":
-        record_check(score_before, score_before, False)
+        await record_check(score_before, score_before, False)
         return text
 
     if normalized_mode == "log":
@@ -446,7 +458,7 @@ def apply_anti_ai_mode(
             breakdown.get("markers", []),
             breakdown.get("patterns", []),
         )
-        record_check(score_before, score_before, False)
+        await record_check(score_before, score_before, False)
         return text
 
     fixed = humanize_response(
@@ -458,7 +470,7 @@ def apply_anti_ai_mode(
     )
     score_after, _ = analyze_ai_score(fixed, user_slots=user_slots)
     changed = fixed != text
-    record_check(score_before, score_after, changed)
+    await record_check(score_before, score_after, changed)
     if changed:
         logger.debug(
             "Anti-AI fix source=%s score %.3f -> %.3f",
@@ -729,16 +741,17 @@ async def humanize_deep(
 
 def store_feedback(user_id: int, original: str, corrected: str) -> None:
     """Сохраняет пользовательское исправление для обучения humanizer."""
-    entry = {
-        "original": original[:300],
-        "corrected": corrected[:300],
-        "accepted": False,
-        "time": time.time(),
-    }
-    _feedback_store.setdefault(user_id, []).append(entry)
-    # Ограничиваем 100 записей на пользователя
-    if len(_feedback_store[user_id]) > 100:
-        _feedback_store[user_id] = _feedback_store[user_id][-50:]
+    with _cache_lock:
+        entry = {
+            "original": original[:300],
+            "corrected": corrected[:300],
+            "accepted": False,
+            "time": time.time(),
+        }
+        _feedback_store.setdefault(user_id, []).append(entry)
+        # Ограничиваем 100 записей на пользователя
+        if len(_feedback_store[user_id]) > 100:
+            _feedback_store[user_id] = _feedback_store[user_id][-50:]
 
 
 def record_humanizer_feedback(
@@ -755,18 +768,19 @@ def record_humanizer_feedback(
 
     Хранит последние 50 записей на пользователя в in-memory dict.
     """
-    _feedback_store.setdefault(user_id, []).append(
-        {
-            "original": original[:200],
-            "corrected": corrected[:200],
-            "accepted": accepted,
-            "time": time.time(),
-        }
-    )
-    # Keep last 50 entries
-    if len(_feedback_store[user_id]) > 50:
-        _feedback_store[user_id] = _feedback_store[user_id][-50:]
-    _maybe_cleanup_caches()
+    with _cache_lock:
+        _feedback_store.setdefault(user_id, []).append(
+            {
+                "original": original[:200],
+                "corrected": corrected[:200],
+                "accepted": accepted,
+                "time": time.time(),
+            }
+        )
+        # Keep last 50 entries
+        if len(_feedback_store[user_id]) > 50:
+            _feedback_store[user_id] = _feedback_store[user_id][-50:]
+        _maybe_cleanup_caches()
 
 
 def _cache_last_humanized(user_id: int, text: str) -> None:
@@ -776,15 +790,17 @@ def _cache_last_humanized(user_id: int, text: str) -> None:
     что именно бот сказал до этого.
     """
     if text:
-        _last_response_cache[user_id] = text
-        _response_cache_times[user_id] = time.time()
-        _maybe_cleanup_caches()
+        with _cache_lock:
+            _last_response_cache[user_id] = text
+            _response_cache_times[user_id] = time.time()
+            _maybe_cleanup_caches()
 
 
 def _pop_last_humanized(user_id: int) -> str | None:
     """Возвращает и удаляет последний humanized-ответ из кеша."""
-    _response_cache_times.pop(user_id, None)
-    return _last_response_cache.pop(user_id, None)
+    with _cache_lock:
+        _response_cache_times.pop(user_id, None)
+        return _last_response_cache.pop(user_id, None)
 
 
 def _get_learned_replacements(user_id: int) -> dict[str, str]:
@@ -796,17 +812,18 @@ def _get_learned_replacements(user_id: int) -> dict[str, str]:
     Кешируется на 5 минут через обычный dict / cache.
     """
     replacements: dict[str, str] = {}
-    entries = _feedback_store.get(user_id, [])
-    for entry in entries:
-        if entry.get("accepted") is True:
-            continue  # только rejected
-        original_words = set(entry.get("original", "").lower().split())
-        corrected_words = set(entry.get("corrected", "").lower().split())
-        # Слова, которые были в original, но убраны/изменены в corrected
-        removed = original_words - corrected_words
-        for word in removed:
-            if len(word) > 2:  # не трогаем короткие слова/союзы
-                replacements[word] = ""
+    with _cache_lock:
+        entries = _feedback_store.get(user_id, [])
+        for entry in entries:
+            if entry.get("accepted") is True:
+                continue  # только rejected
+            original_words = set(entry.get("original", "").lower().split())
+            corrected_words = set(entry.get("corrected", "").lower().split())
+            # Слова, которые были в original, но убраны/изменены в corrected
+            removed = original_words - corrected_words
+            for word in removed:
+                if len(word) > 2:  # не трогаем короткие слова/союзы
+                    replacements[word] = ""
     return replacements
 
 
@@ -819,17 +836,20 @@ def get_few_shot_examples(user_id: int) -> str:
     Returns:
         Отформатированный блок примеров (до 3) или пустая строка.
     """
-    feedbacks = _feedback_store.get(user_id, [])[-10:]
-    rejected = [
-        f
-        for f in feedbacks
-        if f.get("accepted") is not True and f.get("original") and f.get("corrected")
-    ]
-    if not rejected:
-        return ""
-    examples = []
-    for fb in rejected[-3:]:
-        examples.append(
-            f"- Было: «{fb['original'][:100]}»\n  Стало: «{fb['corrected'][:100]}»"
-        )
-    return "Примеры того как НЕ надо отвечать:\n" + "\n".join(examples)
+    with _cache_lock:
+        feedbacks = _feedback_store.get(user_id, [])[-10:]
+        rejected = [
+            f
+            for f in feedbacks
+            if f.get("accepted") is not True
+            and f.get("original")
+            and f.get("corrected")
+        ]
+        if not rejected:
+            return ""
+        examples = []
+        for fb in rejected[-3:]:
+            examples.append(
+                f"- Было: «{fb['original'][:100]}»\n  Стало: «{fb['corrected'][:100]}»"
+            )
+        return "Примеры того как НЕ надо отвечать:\n" + "\n".join(examples)
