@@ -59,9 +59,33 @@ async def cmd_memory(
 
     Режимы (сохранены один-в-один из исходной god-function):
       --inbox, --forget-sweep, --reval, --correct, --graph:export, --graph,
-      --impact, --tag, --timeline, --story, (default = view)
+      --impact, --tag, --timeline, --story, --history, (default = view)
+
+    Подкоманды (первое слово после /memory):
+      card <id> — карточка факта памяти с кнопками действий
+      episodes <query> — поиск по прошлым эпизодам (разговорам)
     """
     raw = (message.text or "").replace("/memory", "").strip()
+
+    # Подкоманда: card <id>
+    if raw.startswith("card "):
+        return await _cmd_memory_card(message, raw[5:].strip())
+    if raw == "card":
+        await message.answer(
+            "Использование: <code>/memory card &lt;id&gt;</code>\n"
+            "Пример: <code>/memory card 42</code>"
+        )
+        return
+
+    # Подкоманда: episodes <query>
+    if raw.startswith("episodes "):
+        return await _cmd_memory_episodes(message, raw[9:].strip())
+    if raw == "episodes":
+        await message.answer(
+            "Использование: <code>/memory episodes &lt;поисковый запрос&gt;</code>\n"
+            "Пример: <code>/memory episodes встреча с клиентом</code>"
+        )
+        return
 
     if "--inbox" in raw:
         return await _cmd_memory_inbox(message)
@@ -805,7 +829,316 @@ async def _cmd_memory_history(message: Message, memory_id_str: str) -> None:
     await message.answer("\n".join(lines))
 
 
-# ── Timeline format ───────────────────────────────────────────────────
+# ─── Режим: card <id> ────────────────────────────────────────────────
+
+
+async def _cmd_memory_card(message: Message, args: str) -> None:
+    """Показать карточку факта памяти с кнопками действий.
+
+    Использование: ``/memory card <id>``
+    Пример: ``/memory card 42``
+
+    Показывает: текст факта, дату создания, confidence, sentiment, source.
+    Inline-клавиатура: ✏️ Исправить, 🗑 Удалить, 📋 История, 🔗 Связи.
+    """
+    if not args or not args.isdigit():
+        await message.answer(
+            "Использование: <code>/memory card &lt;id&gt;</code>\n"
+            "Пример: <code>/memory card 42</code>"
+        )
+        return
+
+    memory_id = int(args)
+
+    from src.db.repos.memory_repo import get_linked_memories
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        mem = await session.get(Memory, memory_id)
+        if not mem or mem.user_id != owner.id:
+            await message.answer(f"❌ Факт #{memory_id} не найден.")
+            return
+
+        # Загружаем связанные факты
+        linked = await get_linked_memories(session, owner, memory_id, limit=5)
+
+    created_str = mem.created_at.strftime("%d.%m.%Y %H:%M") if mem.created_at else "—"
+    updated_str = mem.updated_at.strftime("%d.%m.%Y %H:%M") if mem.updated_at else "—"
+
+    sent_emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
+        mem.sentiment or "", "⚪"
+    )
+    conf_pct = int((mem.confidence or 0) * 100)
+
+    lines = [
+        f"🃏 <b>Карточка факта #{memory_id}</b>",
+        "",
+        f"📝 <b>Факт:</b> <i>{sanitize_html(mem.fact)}</i>",
+        f"{sent_emoji} <b>Тональность:</b> {mem.sentiment or '—'}",
+        f"🎯 <b>Уверенность:</b> {conf_pct}%",
+        f"📂 <b>Источник:</b> {mem.source or '—'}",
+        f"📅 <b>Создан:</b> {created_str}",
+        f"🔄 <b>Обновлён:</b> {updated_str}",
+        f"🔁 <b>Упоминаний:</b> {mem.times_mentioned or 0}",
+    ]
+
+    if mem.tags:
+        lines.append(f"🏷 <b>Теги:</b> {mem.tags}")
+    if mem.memory_type:
+        lines.append(f"📌 <b>Тип:</b> {mem.memory_type}")
+    if mem.importance:
+        imp_pct = int((mem.importance or 0) * 100)
+        lines.append(f"⭐ <b>Важность:</b> {imp_pct}%")
+
+    if linked:
+        lines.append("")
+        lines.append(f"🔗 <b>Связанные факты ({len(linked)}):</b>")
+        for item in linked[:5]:
+            lm = item["memory"]
+            snippet = sanitize_html((lm.fact or "")[:60])
+            rel = item.get("relation_type") or "связан"
+            lines.append(f"  • #{lm.id} [{rel}] «{snippet}»")
+
+    # Inline-клавиатура с действиями
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✏️ Исправить",
+                    callback_data=f"memreval:confirm:{memory_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"memreval:reject:{memory_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 История",
+                    callback_data=f"memcard:history:{memory_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🔗 Связи",
+                    callback_data=f"mem:neighbors:{memory_id}",
+                ),
+            ],
+        ]
+    )
+
+    await message.answer("\n".join(lines), reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("memcard:history:"))
+async def cb_memcard_history(callback: CallbackQuery) -> None:
+    """Показать историю версий факта (из карточки памяти)."""
+    memory_id = int(callback.data.split(":")[2])
+
+    from src.db.repos.memory_repo import get_memory_history
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        mem = await session.get(Memory, memory_id)
+        if not mem or mem.user_id != owner.id:
+            await callback.answer("Факт не найден", show_alert=True)
+            return
+
+        current_fact = mem.fact
+        versions = await get_memory_history(session, memory_id)
+
+    if not versions:
+        await callback.answer("История пуста — факт не редактировался", show_alert=True)
+        return
+
+    lines = [
+        f"📋 <b>История факта #{memory_id}</b>",
+        f"📝 <b>Текущий:</b> <i>{sanitize_html(current_fact[:100])}</i>",
+        "",
+    ]
+    for v in versions[:5]:
+        ts = v.edited_at.strftime("%d.%m.%y %H:%M") if v.edited_at else "?"
+        lines.append(
+            f"<b>v{v.version}</b> [{ts}] — {v.edited_by}\n"
+            f"  «{sanitize_html(v.fact_text[:80])}»"
+        )
+
+    if callback.message:
+        await callback.message.answer("\n".join(lines))
+    await callback.answer()
+
+
+# ─── Режим: episodes <query> ─────────────────────────────────────────
+
+
+async def _cmd_memory_episodes(message: Message, query: str) -> None:
+    """Поиск по прошлым эпизодам (разговорам) — «А что я говорил про...».
+
+    Использование: ``/memory episodes <поисковый запрос>``
+    Пример: ``/memory episodes встреча с клиентом``
+
+    Показывает: саммари эпизода, дату, участников.
+    Inline-клавиатура: 📖 Подробнее, 🔗 Связанные факты.
+    """
+    if not query.strip():
+        await message.answer(
+            "Использование: <code>/memory episodes &lt;поисковый запрос&gt;</code>\n"
+            "Пример: <code>/memory episodes встреча с клиентом</code>"
+        )
+        return
+
+    from src.core.memory.episodic import search_episodes
+    from src.db.models._memory import Episode
+
+    episodes = await search_episodes(message.from_user.id, query.strip(), limit=5)
+
+    if not episodes:
+        await message.answer(
+            f"🔍 Ничего не найдено по запросу «{sanitize_html(query[:100])}»."
+        )
+        return
+
+    lines = [
+        f"🔍 <b>Эпизоды по запросу:</b> «{sanitize_html(query[:80])}»",
+        f"Найдено: {len(episodes)}",
+        "",
+    ]
+
+    for i, ep in enumerate(episodes, 1):
+        date_str = ep.started_at.strftime("%d.%m.%Y") if ep.started_at else "—"
+        summary = ep.summary or "(без описания)"
+        valence_str = ""
+        if ep.emotional_valence is not None:
+            if ep.emotional_valence > 0.3:
+                valence_str = " 🟢"
+            elif ep.emotional_valence < -0.3:
+                valence_str = " 🔴"
+            else:
+                valence_str = " ⚪"
+
+        lines.append(
+            f"<b>{i}.</b> [{date_str}]{valence_str}\n   {sanitize_html(summary[:150])}"
+        )
+
+        # Кнопки для эпизода
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📖 Подробнее",
+                        callback_data=f"episode:detail:{ep.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🔗 Связанные факты",
+                        callback_data=f"episode:facts:{ep.id}",
+                    ),
+                ],
+            ]
+        )
+        await message.answer(
+            f"{i}. [{date_str}]{valence_str}\n{sanitize_html(summary[:300])}",
+            reply_markup=kb,
+        )
+
+    await message.answer("\n".join(lines[:2]))  # заголовок + количество
+
+
+@router.callback_query(F.data.startswith("episode:detail:"))
+async def cb_episode_detail(callback: CallbackQuery) -> None:
+    """Показать подробности эпизода."""
+    ep_id = int(callback.data.split(":")[2])
+
+    from src.db.models._memory import Episode
+
+    async with get_session() as session:
+        ep = await session.get(Episode, ep_id)
+        if not ep or ep.user_id != callback.from_user.id:
+            await callback.answer("Эпизод не найден", show_alert=True)
+            return
+
+    date_str = ep.started_at.strftime("%d.%m.%Y %H:%M") if ep.started_at else "—"
+    end_str = ep.ended_at.strftime("%d.%m.%Y %H:%M") if ep.ended_at else "—"
+    valence = (
+        f"{ep.emotional_valence:+.2f}" if ep.emotional_valence is not None else "—"
+    )
+    importance = int((ep.importance or 0) * 100)
+
+    lines = [
+        f"📖 <b>Эпизод #{ep_id}</b>",
+        "",
+        f"📅 <b>Начат:</b> {date_str}",
+        f"📅 <b>Завершён:</b> {end_str}",
+        f"😐 <b>Эмоц. окрас:</b> {valence}",
+        f"⭐ <b>Важность:</b> {importance}%",
+    ]
+
+    if ep.summary:
+        lines.extend(["", f"📝 <b>Саммари:</b>\n{sanitize_html(ep.summary)}"])
+    if ep.raw_sample:
+        lines.extend(
+            ["", f"💬 <b>Фрагмент:</b>\n<i>{sanitize_html(ep.raw_sample[:500])}</i>"]
+        )
+
+    if callback.message:
+        await callback.message.answer("\n".join(lines))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("episode:facts:"))
+async def cb_episode_facts(callback: CallbackQuery) -> None:
+    """Показать связанные факты памяти для эпизода."""
+    import json
+
+    ep_id = int(callback.data.split(":")[2])
+
+    from src.db.models._memory import Episode
+
+    async with get_session() as session:
+        ep = await session.get(Episode, ep_id)
+        if not ep or ep.user_id != callback.from_user.id:
+            await callback.answer("Эпизод не найден", show_alert=True)
+            return
+
+        # Парсим memory_ids (JSON-список) и загружаем факты
+        mem_ids: list[int] = []
+        if ep.memory_ids:
+            try:
+                mem_ids = json.loads(ep.memory_ids)
+            except (json.JSONDecodeError, TypeError):
+                mem_ids = []
+
+        if not mem_ids:
+            await callback.answer("Нет связанных фактов", show_alert=True)
+            return
+
+        memories = (
+            (
+                await session.execute(
+                    select(Memory).where(
+                        Memory.id.in_(mem_ids),
+                        Memory.is_active.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    if not memories:
+        await callback.answer("Связанные факты не найдены", show_alert=True)
+        return
+
+    lines = [f"🔗 <b>Факты эпизода #{ep_id}</b>", ""]
+    for m in memories[:10]:
+        sent = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
+            m.sentiment or "", "⚪"
+        )
+        lines.append(f"{sent} #{m.id} {sanitize_html(m.fact[:100])}")
+
+    if callback.message:
+        await callback.message.answer("\n".join(lines))
+    await callback.answer()
+
+
+# ─── Timeline format ───────────────────────────────────────────────────
 
 
 def _format_timeline(

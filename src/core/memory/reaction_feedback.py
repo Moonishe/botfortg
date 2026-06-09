@@ -9,6 +9,9 @@
 - 👎 → reject: decay confidence связанных фактов
 - 🤔 → question: нейтрально, но фиксируем неуверенность
 - 👀 → acknowledge: лёгкое повышение (пользователь видел)
+
+Некоторые реакции (🤔, 👎, 🤨) также генерируют проактивный follow-up —
+бот отправляет уточняющее сообщение через очередь уведомлений.
 """
 
 from __future__ import annotations
@@ -38,12 +41,22 @@ REACTION_SIGNALS: dict[str, tuple[str, float]] = {
 # Дефолтный сигнал для неизвестных реакций
 _DEFAULT_SIGNAL: tuple[str, float] = ("acknowledge", 0.05)
 
+# ── Smart follow-up: реакции → текст проактивного уточнения ────────────────
+_SMART_FOLLOWUP_REACTIONS: dict[str, str] = {
+    "🤔": "Что не так? Я могу уточнить или исправить?",
+    "👎": "Понял, учту. Что именно не так?",
+    "🤨": "Есть сомнения? Могу перепроверить информацию.",
+}
+
 
 async def process_reaction(reaction_data: dict[str, Any]) -> None:
     """Обработать реакцию пользователя на сообщение бота → скорректировать память.
 
     Находит факты, активные в диалоге когда бот отправил это сообщение,
     и повышает/понижает их confidence на основе типа реакции.
+
+    Для smart-followup реакций (🤔, 👎, 🤨) также ставит в очередь
+    проактивное уточняющее сообщение через notification_queue.
 
     Args:
         reaction_data: Словарь с ключами:
@@ -106,6 +119,37 @@ async def process_reaction(reaction_data: dict[str, Any]) -> None:
             reaction_emoji,
             reactor_id,
         )
+
+    # Проактивный follow-up для smart-реакций
+    _followup_text = _SMART_FOLLOWUP_REACTIONS.get(reaction_emoji)
+    if _followup_text is not None:
+        try:
+            from src.core.scheduling.notification_queue import notification_queue
+            from src.db.models import Notification as _NotifModel
+
+            chat_id = reaction_data.get("chat_id", "?")
+            msg_id = reaction_data.get("message_id", "?")
+            await notification_queue.enqueue(
+                topic="reaction_followup",
+                text=(
+                    f"💬 Реакция {reaction_emoji} на сообщение бота "
+                    f"(чат {chat_id}, сообщение {msg_id})\n"
+                    f"→ {_followup_text}"
+                ),
+                priority=_NotifModel.PRIORITY_MEDIUM,
+                category="smart_followup",
+            )
+            logger.debug(
+                "Smart followup enqueued: reaction=%s chat=%s msg=%s",
+                reaction_emoji,
+                chat_id,
+                msg_id,
+            )
+        except Exception:
+            logger.exception(
+                "Не удалось поставить smart-followup в очередь: reaction=%s",
+                reaction_emoji,
+            )
 
 
 async def process_reaction_feedback(reaction_data: dict[str, Any]) -> None:
