@@ -70,8 +70,8 @@ class FtsHit:
 # ── Морфологическая экспансия русских слов ────────────────────────────
 # Расширяет поисковые запросы вариантами словоформ для повышения recall
 # в FTS5 без внешних зависимостей (pymorphy2).
-# ACTION (enhancement): добавить категории 'L* N* Co' в FTS5 токенизатор
-# для лучшей токенизации CJK + кириллицы (см. alembic/versions/...)
+# ACTION: add FTS5 tokenizer for CJK (Chinese/Japanese/Korean) — requires ICU extension or separate index.
+# Текущая токенизация CJK + кириллицы через 'L* N* Co' категории (см. alembic/versions/...)
 _RU_MORPH_EXPANSIONS: dict[str, list[str]] = {
     "купил": ["купил", "купила", "купить", "покупал", "покупала", "покупать"],
     "работа": [
@@ -576,7 +576,7 @@ async def add_memory(
             contact_name=contact_name,
             confidence=confidence,
         )
-    except Exception:  # NOTE: hooks.emit может поднять любые исключения от плагинов.
+    except Exception:  # ACTION: narrow exception class — hooks.emit может поднять любые исключения от плагинов.
         # Безопасно игнорируем — хуки опциональны.
         pass  # hooks are optional, never break core flow
 
@@ -590,7 +590,9 @@ async def add_memory(
                 fact=fact,
                 embedding=embedding,
             )
-        except Exception:  # NOTE: vector_store.upsert_memory — сетевой вызов Qdrant.
+        except (
+            Exception
+        ):  # ACTION: narrow to Qdrant-specific exception — сетевой вызов Qdrant.
             # При падении Qdrant продолжаем без векторного индекса.
             # M4: факт сохранён в SQLite, но НЕ в Qdrant — дедупликация и поиск
             # по вектору не увидят этот факт. Логируем ERROR с memory_id чтобы
@@ -814,7 +816,7 @@ async def _auto_link_memory(
                 pending_links.append((memory.id, hit_id, cosine_score, relation_type))
         except (
             Exception
-        ):  # NOTE: vector_store семантический поиск — сетевой вызов Qdrant.
+        ):  # ACTION: narrow to Qdrant-specific exception — сетевой вызов Qdrant.
             # При ошибке fallback на keyword overlap.
             logger.debug(
                 "Semantic linking failed, falling back to keyword overlap",

@@ -141,12 +141,15 @@ class BaseLLMProvider(ABC):
 
     async def embed(self, text: str) -> list[float]:
         """Embedding одного текста (если поддерживается)."""
+        # NOTE: Not all providers support embedding. Router handles this via try/except.
         raise NotImplementedError(f"{self.name} does not support embeddings")
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embedding батча текстов (если поддерживается)."""
+        # NOTE: Not all providers support embedding. Router handles this via try/except.
         raise NotImplementedError(f"{self.name} does not support embeddings")
 
     async def list_models(self) -> list[str]:
         """Список доступных моделей (если поддерживается)."""
+        # NOTE: Not all providers expose model listing. Router handles this via try/except.
         raise NotImplementedError(f"{self.name} does not expose model listing")

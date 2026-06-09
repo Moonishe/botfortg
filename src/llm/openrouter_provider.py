@@ -94,12 +94,14 @@ class OpenRouterProvider(OpenAICompatBaseMixin, BaseLLMProvider):
                 yield chunk.choices[0].delta.content
 
     async def embed(self, text: str) -> list[float]:
+        # NOTE: Not all providers support embedding. Router handles this via try/except.
         raise NotImplementedError(
             "OpenRouter free tier не поддерживает embeddings. "
             "Используй OpenAI или другой провайдер для эмбеддингов."
         )
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        # NOTE: Not all providers support embedding. Router handles this via try/except.
         raise NotImplementedError(
             "OpenRouter free tier не поддерживает embeddings. "
             "Используй OpenAI или другой провайдер для эмбеддингов."

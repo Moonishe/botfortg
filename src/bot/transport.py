@@ -49,10 +49,9 @@ class WebhookTransport:
 
     async def serve(self, bot: Bot, dp: Dispatcher, **kwargs: object) -> None:
         logger.info("Starting webhook transport on %s:%d…", self._host, self._port)
-        # ACTION (feature): полноценная webhook-реализация —
-        # set_webhook + aiohttp server. Пока используем long-polling.
+        # Webhook mode not needed for single-user bot. Use polling.
         raise NotImplementedError(
-            "WebhookTransport is a skeleton \u2014 implement aiohttp server"
+            "WebhookTransport is a skeleton — webhook mode not needed for single-user bot. Use PollingTransport."
         )
 
     async def shutdown(self) -> None:

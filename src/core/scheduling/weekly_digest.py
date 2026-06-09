@@ -285,7 +285,7 @@ class WeeklyDigestBuilder:
             stats.fuel_level = (fueled - critical) / total
             stats.fuel_level = max(0.0, min(1.0, stats.fuel_level))
         except Exception:
-            stats.fuel_level = 0.85  # заглушка
+            stats.fuel_level = stats.fuel_level if hasattr(stats, "fuel_level") else 0.5
 
         # === Habits (from habit_tracker) ===
         try:

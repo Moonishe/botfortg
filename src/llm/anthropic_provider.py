@@ -101,12 +101,15 @@ class AnthropicProvider(BaseLLMProvider):
                     yield event.delta.text
 
     async def embed(self, text: str) -> list[float]:
+        # NOTE: Not all providers support embedding/model listing. Router handles this via try/except.
         raise NotImplementedError("Anthropic does not support embeddings")
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        # NOTE: Not all providers support embedding/model listing. Router handles this via try/except.
         raise NotImplementedError("Anthropic does not support embeddings")
 
     async def list_models(self) -> list[str]:
+        # NOTE: Not all providers support embedding/model listing. Router handles this via try/except.
         raise NotImplementedError("Anthropic does not expose model listing API")
 
     async def close(self) -> None:

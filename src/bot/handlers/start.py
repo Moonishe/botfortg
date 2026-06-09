@@ -397,13 +397,8 @@ async def _send_llm_key_step(chat_id: int, bot) -> None:
             text="🔗 OpenRouter", callback_data=OnboardingCB.provider("openrouter")
         ),
     )
-    # Row 6: TTS providers (collapsed)
-    kb.row(
-        InlineKeyboardButton(
-            text="🔊 TTS (озвучка)", callback_data=OnboardingCB.category("tts")
-        ),
-    )
-    # Row 7: STT providers (transcription)
+    # Row 6: STT providers (transcription)
+    # TTS row removed — requires additional setup (API key + model), not available in this deployment.
     kb.row(
         InlineKeyboardButton(
             text="🎙️ STT (транскрипция)", callback_data=OnboardingCB.category("stt")
@@ -801,8 +796,12 @@ async def on_stt_key_message(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith(OnboardingCB.tts("")))
 async def cb_onboarding_tts_pick(call: CallbackQuery) -> None:
-    """TTS провайдеры — заглушка, будут доступны позже."""
-    await call.answer("🔊 TTS будет доступен в следующем обновлении", show_alert=True)
+    """TTS провайдеры — требуется дополнительная настройка (API-ключ + модель)."""
+    # TTS requires additional setup (API key + model). Not available in this deployment.
+    await call.answer(
+        "🔊 TTS требует API-ключ и модель. Недоступно в этом деплойменте.",
+        show_alert=True,
+    )
 
 
 @router.callback_query(F.data == OnboardingCB.back_extra("provider_select"))

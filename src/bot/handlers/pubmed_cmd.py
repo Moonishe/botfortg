@@ -173,8 +173,10 @@ async def cmd_pubmed_abstract(message: types.Message) -> None:
 @router.message(Command("pubmed_full"))
 async def cmd_pubmed_full(message: types.Message) -> None:
     """Получить полный текст статьи (заглушка, в разработке)."""
+    # NOTE: PubMed full-text requires external API key (NCBI E-utilities / PMC).
+    # Not implemented for MVP — needs PMC OA subset access.
     await message.answer(
         "🔧 Полный текст доступен только для статей в PMC (PubMed Central).\n"
-        "Команда в разработке.",
+        "Команда в разработке — требуется API-ключ NCBI.",
         parse_mode=ParseMode.HTML,
     )

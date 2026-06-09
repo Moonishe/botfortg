@@ -33,7 +33,7 @@ def _extract_json_from_response(text: str) -> str:
 class ProceduralMemory:
     """Хранилище усвоенных процедур с поддержкой обучения и адаптации.
 
-    In-memory хранилище (TODO: персистентность в БД через таблицу procedures).
+    # NOTE: In-memory storage. Data lost on restart. DB persistence planned for Phase 7.
     Поддерживает:
     - Поиск существующей процедуры по Jaccard-сходству цели.
     - Индукцию новой процедуры из эпизодов через LLM.

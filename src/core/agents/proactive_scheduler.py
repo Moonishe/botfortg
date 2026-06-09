@@ -143,7 +143,7 @@ class ProactiveScheduler:
     Хранит цели в памяти. При вызове run_due() находит все цели,
     время которых наступило, и последовательно исполняет их через LLM.
 
-    TODO: DB-backed persistence для сохранения целей между перезапусками.
+    # NOTE: In-memory storage. Data lost on restart. DB persistence planned for Phase 7.
     """
 
     def __init__(self) -> None:

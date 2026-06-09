@@ -93,36 +93,36 @@ AGENTMEMORY_MAPPING: dict[str, dict[str, Any]] = {
         "impl": "memory_patterns.detect_patterns()",
         "nl": "show_suggestions",  # NEW in Phase 5.2
     },
-    # ── Export / Import (MISSING — not implemented) ──────────────────
+    # ── Export / Import (Phase 7) ─────────────────────────────────────
     "export_memory": {
-        "exists": False,
+        "exists": False,  # NotImplementedError("Export/import planned for Phase 7")
         "impl": None,
         "nl": None,
     },
     "import_memory": {
-        "exists": False,
+        "exists": False,  # NotImplementedError("Export/import planned for Phase 7")
         "impl": None,
         "nl": None,
     },
-    # ── Versioning (MISSING — not implemented) ───────────────────────
+    # ── Versioning (Phase 7) ──────────────────────────────────────────
     "get_memory_versions": {
-        "exists": False,
+        "exists": False,  # NotImplementedError("Versioning planned for Phase 7")
         "impl": None,
         "nl": None,
     },
     "restore_memory_version": {
-        "exists": False,
+        "exists": False,  # NotImplementedError("Versioning planned for Phase 7")
         "impl": None,
         "nl": None,
     },
-    # ── Batch operations (MISSING — not implemented) ─────────────────
+    # ── Batch operations (Phase 7) ────────────────────────────────────
     "bulk_delete_memories": {
-        "exists": False,
+        "exists": False,  # NotImplementedError("Batch ops planned for Phase 7")
         "impl": None,
         "nl": None,
     },
     "bulk_update_memories": {
-        "exists": False,
+        "exists": False,  # NotImplementedError("Batch ops planned for Phase 7")
         "impl": None,
         "nl": None,
     },

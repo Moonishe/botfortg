@@ -1,10 +1,14 @@
-"""Dream cycle — unified nightly memory maintenance.
+"""Dream cycle — unified nightly memory maintenance (Phase 5.6).
 
-Replaces four separate background tasks with a single orchestrated job:
+Replaces separate background tasks with a single orchestrated job:
   1. Decay + tier promotion/demotion (was memory_checker @ 03:00)
   2. Duplicate consolidation (was memory_consolidator @ every 6h)
-  3. Contradiction detection (was ad-hoc, per-message)
+  3. Contradiction detection (batch scan, was ad-hoc per-message)
+  3.5. Dreaming V3 — LLM semantic re-evaluation of temporary facts
   4. Digest rebuild for top 20 active contacts (was on-access)
+  5. DSM feed generation (auto-generated insights for user)
+  6. Auto-forgetting / stale-closure of inactive facts
+  7. Episodic reflection — meta-memory from recent interactions
 
 Runs once per day at 03:00 UTC and sends a single summary notification.
 """
