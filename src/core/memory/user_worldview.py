@@ -26,7 +26,8 @@ from sqlalchemy import func, select
 from src.db.models import Memory, MemoryLink
 from src.db.repo import get_or_create_user, list_memories
 from src.db.session import get_session
-from src.core.memory.memory_chain import follow_supersedes_chain, RELATION_WORD
+from src.core.memory.memory_chain import follow_supersedes_chain
+from src.core.memory.relation_types import RelationType
 
 logger = logging.getLogger(__name__)
 
@@ -258,11 +259,9 @@ async def build_worldview(owner_id: int) -> UserWorldview:
         worldview.inactive_facts = len(inactive)
 
         # 2. Поиск supersedes-связей
-        from sqlalchemy import or_
-
         link_query = select(MemoryLink).where(
             MemoryLink.user_id == owner.id,
-            MemoryLink.relation_type == "supersedes",
+            MemoryLink.relation_type == RelationType.SUPERSEDES,
         )
         link_result = await session.execute(link_query)
         supersedes_links: list[MemoryLink] = list(link_result.scalars().all())
@@ -328,7 +327,7 @@ async def build_worldview(owner_id: int) -> UserWorldview:
         contradict_links = await session.execute(
             select(MemoryLink).where(
                 MemoryLink.user_id == owner.id,
-                MemoryLink.relation_type == "contradicts",
+                MemoryLink.relation_type == RelationType.CONTRADICTS,
             )
         )
         contradict_list = contradict_links.scalars().all()
@@ -402,7 +401,11 @@ def get_top_categories(worldview, top_n=3) -> list[str]:
     """Top-N категорий по количеству фактов."""
     if not worldview or not worldview.categories:
         return []
-    scored = [(cat, len(facts)) for cat, facts in worldview.categories.items() if facts]
+    scored = [
+        (cat, facts.fact_count)
+        for cat, facts in worldview.categories.items()
+        if facts.fact_count > 0
+    ]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [cat for cat, _ in scored[:top_n]]
 
