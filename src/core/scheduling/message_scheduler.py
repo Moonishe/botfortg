@@ -3,6 +3,8 @@
 import asyncio
 import logging
 
+from telethon.errors import FloodWaitError
+
 from src.core.infra.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,26 @@ async def _check_once(client=None) -> None:
 
                 await asyncio.sleep(1)  # Пауза между сообщениями
 
+            except FloodWaitError as e:
+                logger.warning(
+                    "FloodWait for %ds on message %s — waiting and retrying once",
+                    e.seconds,
+                    msg.id,
+                )
+                await asyncio.sleep(e.seconds)
+                try:
+                    # Повторно получаем target (на случай если FloodWait
+                    # случился на get_input_entity и target не определён)
+                    target = await client.get_input_entity(entity)  # type: ignore[arg-type]
+                    await client.send_message(target, msg.text)
+                    await mark_sent(session, msg.id)
+                except Exception as retry_exc:
+                    await mark_failed(session, msg.id, str(retry_exc)[:500])
+                    logger.warning(
+                        "Retry after FloodWait failed for message %s: %s",
+                        msg.id,
+                        retry_exc,
+                    )
             except Exception as e:
                 await mark_failed(session, msg.id, str(e)[:500])
                 logger.warning("Failed to send scheduled message %s: %s", msg.id, e)

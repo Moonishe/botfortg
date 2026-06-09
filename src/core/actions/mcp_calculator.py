@@ -256,12 +256,22 @@ async def mcp_calculator(
 def _safe_eval(expr: str) -> Any:
     """Parse, validate, and evaluate a mathematical expression.
 
-    Uses AST whitelisting (same approach as mcp_calc.py) to block dangerous
-    constructs.  Supports ``^`` as power (rewritten to ``**`` before parse).
+    Безопасность: AST-валидация (whitelist узлов) ПЕРЕД eval().
+    eval() вызывается ТОЛЬКО после проверки всех узлов через _SAFE_NODE_TYPES,
+    с __builtins__={} и ограниченным namespace (_MATH_CONSTANTS + _MATH_FUNCS).
+    AST-подход блокирует: доступ к атрибутам, произвольные имена, импорты,
+    comprehensions, лямбды, f-строки, walrus-оператор.
+
+    Supports ``^`` as power (rewritten to ``**`` before parse).
 
     Raises:
-        ValueError: If the expression contains disallowed constructs.
+        ValueError: If the expression contains disallowed constructs
+                    or exceeds length limit.
     """
+    # ── DoS-защита: лимит длины выражения ────────────────────────────────
+    if len(expr) > 500:
+        raise ValueError(f"Expression too long ({len(expr)} chars). Maximum is 500.")
+
     # Replace ^ with ** (power operator) before parsing
     expr = expr.replace("^", "**")
 
@@ -333,6 +343,8 @@ def _safe_eval(expr: str) -> Any:
 
     try:
         compiled = compile(tree, "<string>", "eval")
+        # Безопасно: AST проверен выше (whitelist узлов), __builtins__={},
+        # namespace содержит только математические функции и константы.
         return eval(compiled, namespace)
     except Exception as exc:
         raise ValueError(f"Evaluation error: {exc}") from exc

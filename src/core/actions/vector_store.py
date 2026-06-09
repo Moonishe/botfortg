@@ -39,6 +39,10 @@ class VectorStore:
         path.mkdir(parents=True, exist_ok=True)
         self._client = QdrantClient(path=str(path))
         self._lock = asyncio.Lock()
+        # NOTE: Embedded Qdrant использует файловую блокировку (file lock).
+        # Для горизонтального масштабирования необходимо мигрировать на
+        # Qdrant server mode (отдельный контейнер).
+        # Single-instance deployment достаточен для персонального использования.
         self._dim: int | None = None
         self._memory_dim: int | None = None
         self._reindex_required: bool = False

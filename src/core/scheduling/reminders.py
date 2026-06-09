@@ -65,6 +65,9 @@ async def _check_once(owner_telegram_id: int) -> None:
         if not to_remind:
             return
 
+        # Собираем тексты напоминаний, но НЕ отправляем до сохранения меток времени.
+        # Это исключает дубликаты: если commit упадёт, уведомления не будут отправлены.
+        reminder_texts: list[tuple[str, str]] = []  # (text, reason)
         for commitment, reason in to_remind:
             who = (
                 "Я"
@@ -78,17 +81,25 @@ async def _check_once(owner_telegram_id: int) -> None:
                 text = (
                     f"⏳ <b>Скоро дедлайн</b>\n<b>{who}</b>: {commitment.text}\nДо: {d}"
                 )
+            reminder_texts.append((text, reason))
+
+        # Сначала сохраняем метки времени в транзакции
+        for c, _ in to_remind:
+            c.last_reminded_at = datetime.now(timezone.utc)
+        try:
+            await session.commit()
+        except Exception:
+            logger.exception("Failed to commit reminder timestamps — skipping send")
+            return  # уведомления не отправлены, повторим в следующем тике
+
+        # Затем отправляем уведомления (вне транзакции, идемпотентно)
+        for text, reason in reminder_texts:
             await notification_queue.enqueue(
                 topic="reminders",
                 text=text,
                 priority=Notification.PRIORITY_HIGH,
                 category=reason,  # "overdue" или "lead"
             )
-
-        # помечаем когда отправили напоминание (не меняем status!)
-        for c, _ in to_remind:
-            c.last_reminded_at = datetime.now(timezone.utc)
-        await session.commit()
 
 
 from src.core.infra.task_manager import task_manager

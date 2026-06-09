@@ -89,15 +89,30 @@ class NotificationQueue:
         Возвращает количество обработанных.
         """
         async with SessionLocal() as session:
+            # SQLite не поддерживает SELECT ... FOR UPDATE.
+            # Вместо этого: атомарно резервируем pending-уведомления
+            # через UPDATE с уникальным batch_id, затем SELECT зарезервированных.
+            # asyncio.Lock (_notification_queue_guard) обеспечивает сериализацию
+            # на уровне приложения (single-instance deployment).
+            batch_id = uuid.uuid4().hex[:12]
+
+            # Шаг 1: атомарно пометить все pending-уведомления текущим batch_id
+            await session.execute(
+                update(Notification)
+                .where(Notification.flushed_at.is_(None))
+                .values(batch_id=batch_id)
+            )
+
+            # Шаг 2: выбрать только зарезервированные в этом тике
             result = await session.execute(
                 select(Notification)
                 .where(
                     Notification.flushed_at.is_(None),
+                    Notification.batch_id == batch_id,
                 )
                 .order_by(
                     Notification.topic, Notification.priority, Notification.created_at
                 )
-                .with_for_update()
             )
             pending = list(result.scalars().all())
 
@@ -128,7 +143,6 @@ class NotificationQueue:
                 key = f"{n.topic}:stale_{n.id}"
                 groups[key] = [n]
 
-            batch_id = uuid.uuid4().hex[:12]
             total_flushed = 0
 
             for key, group in groups.items():
@@ -143,19 +157,20 @@ class NotificationQueue:
                     logger.exception("Failed to send batch for topic %s", topic)
                     continue
 
-                # Помечаем отправленные как flushed (в той же транзакции, что и SELECT FOR UPDATE)
+                # Помечаем отправленные как flushed.
+                # batch_id уже установлен атомарным UPDATE выше — здесь только flushed_at.
                 ids = [n.id for n in batch]
                 await session.execute(
                     update(Notification)
                     .where(Notification.id.in_(ids))
                     .values(
                         flushed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-                        batch_id=batch_id,
                     )
                 )
 
-                # Остаток (>max_batch_size) — оставляем на следующий flush
-                # (они остаются с flushed_at=NULL и будут обработаны в следующей итерации)
+                # Остаток (>max_batch_size) — оставляем на следующий flush.
+                # batch_id останется от этого тика, но flushed_at=NULL —
+                # в следующем тике атомарный UPDATE перезапишет batch_id.
 
             await session.commit()
             return total_flushed

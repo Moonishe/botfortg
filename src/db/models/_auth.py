@@ -122,6 +122,9 @@ class TelegramSession(Base):
     api_id: Mapped[int] = mapped_column(BigInteger)
     api_hash_enc: Mapped[str] = mapped_column(Text)
     session_string_enc: Mapped[str] = mapped_column(Text)
+    # NOTE: Сессии не имеют TTL. Telethon-сессии остаются валидными
+    # неограниченное время. Если безопасность аккаунта скомпрометирована —
+    # выполните ротацию через /login.
     phone: Mapped[str] = mapped_column(String(32))
     account_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
