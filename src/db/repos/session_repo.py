@@ -44,7 +44,9 @@ def _get_user_lock(user_id: int) -> asyncio.Lock:
     _lock_cleanup_counter += 1
     if _lock_cleanup_counter % 1000 == 0:
         for k in list(_user_locks.keys()):
-            if not _user_locks[k].locked():
+            # Пропускаем ключ, созданный в текущем вызове —
+            # иначе только что созданный lock будет удалён до возврата.
+            if k != user_id and not _user_locks[k].locked():
                 del _user_locks[k]
     return _user_locks[user_id]
 

@@ -553,11 +553,9 @@ def run() -> None:
     sys.stderr.flush()
 
     executor = ThreadPoolExecutor(max_workers=1)
-    alembic_ok = False
     try:
         future = executor.submit(alembic.command.upgrade, _cfg, "head")
         future.result(timeout=120)
-        alembic_ok = True
         sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
         sys.stderr.flush()
     except FutureTimeoutError:
@@ -586,7 +584,14 @@ def run() -> None:
             "run() called while event loop is already running. "
             "Scheduling main() as a background task."
         )
-        _loop.create_task(main())
+        try:
+            _loop.create_task(main())
+        except Exception:
+            logger.critical(
+                "Failed to schedule main() in existing event loop",
+                exc_info=True,
+            )
+            raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

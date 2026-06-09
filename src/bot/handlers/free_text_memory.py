@@ -500,9 +500,9 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
         memories = await list_memories(session, owner)
         for m in memories:
             if m.id == mid:
+                # Гарантируем, что объект отслеживается сессией перед модификацией
+                session.add(m)
                 m.sentiment = "neutral"
-        # Явный commit: хотя get_session() коммитит при выходе из контекста,
-        # изменения на in-memory объектах могут не отслеживаться без flush.
         await session.commit()
     await bump_recall_version(callback.from_user.id)
     # B6: инвалидируем stats-кэш после подтверждения актуальности факта

@@ -264,12 +264,13 @@ async def cb_toggle(callback: CallbackQuery) -> None:
             owner = await get_or_create_user(session, callback.from_user.id)
             p = await get_persona(session, owner)
             p.adaptive_mode_enabled = not p.adaptive_mode_enabled
-            await session.flush()
+            new_value = p.adaptive_mode_enabled  # захватываем до выхода из сессии
+        # Примечание: commit делает контекстный менеджер get_session()
         from src.core.context_cache import invalidate
 
         await invalidate(f"persona:{callback.from_user.id}")
         await callback.answer(
-            f"Адаптивный режим {'✅ ВКЛ' if p.adaptive_mode_enabled else '❌ ВЫКЛ'}"
+            f"Адаптивный режим {'✅ ВКЛ' if new_value else '❌ ВЫКЛ'}"
         )
         await _refresh_section(callback, "personality")
         return

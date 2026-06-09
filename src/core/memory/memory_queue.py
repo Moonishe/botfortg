@@ -9,7 +9,7 @@ import logging
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.core.memory._queue_core import MemoryJob, _queue, enqueue  # noqa: F401
+from src.core.memory._queue_core import MemoryJob, MemoryQueueFullError, _queue, enqueue  # noqa: F401
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import TaskType

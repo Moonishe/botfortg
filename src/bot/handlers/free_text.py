@@ -1755,7 +1755,8 @@ async def free_text(
         owner = await get_or_create_user(session, uid)
 
         # Atomically: UPDATE ... SET total_interactions=1 WHERE total_interactions=0
-        # If rowcount==1, this is a new user (no race condition possible)
+        # If rowcount==1, this is a new user (no race condition possible).
+        # Если строки нет вообще — создаём новую запись AdaptivePersona.
         from src.db.models._learning import AdaptivePersona
         from sqlalchemy import update as sa_update
 
@@ -1765,7 +1766,18 @@ async def free_text(
             .where(AdaptivePersona.total_interactions == 0)
             .values(total_interactions=1)
         )
-        is_new = result.rowcount > 0  # type: ignore[attr-defined]
+        if result.rowcount > 0:  # type: ignore[attr-defined]
+            is_new = True
+        else:
+            # Проверяем, существует ли запись вообще
+            from sqlalchemy import select as sa_select
+
+            row_exists = await session.execute(
+                sa_select(AdaptivePersona.id).where(AdaptivePersona.user_id == owner.id)
+            )
+            if row_exists.first() is None:
+                session.add(AdaptivePersona(user_id=owner.id, total_interactions=1))
+                is_new = True
 
     if is_new:
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -1805,12 +1817,18 @@ async def free_text(
             _contact_hint = _extract_contact_hint(message)
             if _contact_hint is not None:
                 # Fire-and-forget: prefetch contact data in background
-                asyncio.create_task(
-                    _do_prefetch_contact(uid, _contact_hint, userbot_manager)
+                track_ff(
+                    asyncio.create_task(
+                        _do_prefetch_contact(uid, _contact_hint, userbot_manager)
+                    )
                 )
             else:
                 # No hint found — prefetch the user's contact list anyway
-                asyncio.create_task(_do_prefetch_contact(uid, None, userbot_manager))
+                track_ff(
+                    asyncio.create_task(
+                        _do_prefetch_contact(uid, None, userbot_manager)
+                    )
+                )
         except Exception:
             logger.debug(
                 "Contact prefetch failed", exc_info=True
@@ -1824,7 +1842,7 @@ async def free_text(
         try:
             from src.core.memory.prefetch_recall import prefetch_recall as _pf_recall
 
-            asyncio.create_task(_pf_recall(uid, raw))
+            track_ff(asyncio.create_task(_pf_recall(uid, raw)))
         except Exception:
             logger.debug(
                 "Prefetch recall task creation failed", exc_info=True

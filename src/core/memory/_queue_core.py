@@ -14,6 +14,12 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 
+class MemoryQueueFullError(Exception):
+    """Очередь памяти переполнена — задание не может быть добавлено."""
+
+    pass
+
+
 @dataclass
 class MemoryJob:
     """Задача на фоновую обработку памяти.
@@ -49,7 +55,6 @@ async def enqueue(job: MemoryJob) -> None:
     try:
         await asyncio.wait_for(_queue.put(job), timeout=timeout)
     except asyncio.TimeoutError:
-        logger.warning("Queue full, dropping job: %s", job)
         logger.error(
             "Queue full (size=%d, max=%d), dropping job %s after %.0fs timeout",
             _queue.qsize(),
@@ -57,3 +62,8 @@ async def enqueue(job: MemoryJob) -> None:
             job.job_type,
             timeout,
         )
+        raise MemoryQueueFullError(
+            f"Очередь памяти переполнена (size={_queue.qsize()}, "
+            f"max={_queue.maxsize}), задание {job.job_type} отброшено "
+            f"после {timeout:.0f}s таймаута"
+        ) from None

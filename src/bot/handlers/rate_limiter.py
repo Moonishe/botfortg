@@ -139,7 +139,12 @@ async def _cleanup_stale(now: float) -> None:
 
 
 def _cleanup_locks(now: float) -> None:
-    """Удалить блокировки, которые никто не держит и не использовались давно."""
+    """Удалить блокировки, которые никто не держит и не использовались давно.
+
+    NOTE: TOCTOU между lock.locked() и del бенигна в asyncio —
+    функция синхронная (без await), поэтому между проверкой и удалением
+    не может выполниться другой coroutine.
+    """
     for uid in list(_locks.keys()):
         lock = _locks[uid]
         if not lock.locked():

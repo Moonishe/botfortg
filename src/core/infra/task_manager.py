@@ -304,6 +304,11 @@ def track_ff(task: asyncio.Task) -> asyncio.Task:
 
         track_ff(asyncio.create_task(some_coroutine()))
     """
+    # Если задача уже завершена — не добавляем в _ff_tasks:
+    # add_done_callback вызовется немедленно, но discard на пустом
+    # множестве — no-op, и задача осталась бы висеть в tracking set.
+    if task.done():
+        return task
     _ff_tasks.add(task)
     task.add_done_callback(_ff_tasks.discard)
     return task

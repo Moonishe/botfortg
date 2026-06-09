@@ -343,8 +343,13 @@ class MultiKeyProvider:
                 )
             raise ExhaustedError(
                 f"Все {len(self._keys)} ключей {self.provider_name} недоступны "
-                f"(последняя ошибка: {last_error})"
+                f"(последняя ошибка: {last_error}, "
+                f"пропущено по кулдауну: {skipped})"
             )
+        # Все ключи пропущены по кулдауну — ни один не был опробован
+        assert skipped == len(self._keys), (
+            f"BUG: skipped={skipped} != total_keys={len(self._keys)} but last_error is None"
+        )
         try:
             await _record_provider_failure(self.provider_name)
         except Exception:
