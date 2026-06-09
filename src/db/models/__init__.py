@@ -27,6 +27,7 @@ from src.db.models._messaging import (
     Folder,
     ConversationSummary,
     ScheduledMessage,
+    MessageReaction,
 )
 from src.db.models._memory import (
     Entity,
@@ -92,6 +93,7 @@ __all__ = [
     "Folder",
     "ConversationSummary",
     "ScheduledMessage",
+    "MessageReaction",
     "Entity",
     "EntityRelation",
     "Episode",

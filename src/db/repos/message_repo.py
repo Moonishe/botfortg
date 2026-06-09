@@ -12,6 +12,7 @@ from src.db.models import (
     AutoReplyLog,
     ConversationState,
     Message,
+    MessageReaction,
     TranscriptionCache,
 )
 
@@ -264,3 +265,31 @@ async def get_conversation_state(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def save_reaction(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    chat_id: int,
+    message_id: int,
+    reactor_id: int,
+    reaction: str,
+    is_bot_message: bool = False,
+) -> None:
+    """Сохранить реакцию на сообщение в БД.
+
+    Используется для отслеживания реакций пользователей на сообщения,
+    в том числе на сообщения бота (для feedback в память).
+    """
+    session.add(
+        MessageReaction(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            reactor_id=reactor_id,
+            reaction=reaction,
+            is_bot_message=is_bot_message,
+        )
+    )
+    await session.flush()

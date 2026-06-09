@@ -76,6 +76,7 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_fact_crud",
     "src.core.actions.mcp_causal",
     "src.core.actions.mcp_knowledge_graph",
+    "src.core.actions.mcp_reactions",
 )
 
 _BUILTINS_REGISTERED = False

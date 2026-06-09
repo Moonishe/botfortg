@@ -282,3 +282,25 @@ class ScheduledMessage(Base):
     )
 
     user: Mapped["User"] = relationship("User", back_populates="scheduled_messages")
+
+
+class MessageReaction(Base):
+    """Реакции пользователей на сообщения (в том числе на сообщения бота)."""
+
+    __tablename__ = "message_reactions"
+    __table_args__ = (Index("ix_reactions_msg", "chat_id", "message_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    reactor_id: Mapped[int] = mapped_column(BigInteger)
+    reaction: Mapped[str] = mapped_column(String(16))
+    is_bot_message: Mapped[bool] = mapped_column(
+        default=False
+    )  # реакция на сообщение бота?
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )

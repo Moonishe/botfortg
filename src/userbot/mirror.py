@@ -1,5 +1,6 @@
 """Зеркало всех сообщений (входящих и исходящих) в БД и FTS5 в реальном времени.
-Транскрипция голоса и парсинг документов — лениво в момент анализа."""
+Транскрипция голоса и парсинг документов — лениво в момент анализа.
+Также отслеживает реакции пользователей на сообщения (включая сообщения бота)."""
 
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from src.db.repo import (
     get_contact,
     get_or_create_user,
     get_watched_peers,
+    save_reaction,
     upsert_contact,
     upsert_conversation_state,
     upsert_message,
@@ -152,6 +154,64 @@ async def _process_incoming_bg(
             # SILENT_LOG / IGNORE — только сохранили в БД, ничего не делаем
         except Exception:
             logger.exception("Background inbox processing failed for peer %s", peer_id)
+
+
+async def _save_and_process_reaction(
+    owner_telegram_id: int,
+    reaction_data: dict,
+) -> None:
+    """Сохранить реакцию в БД и обработать как feedback для памяти (fire-and-forget).
+
+    Не роняет основной поток при ошибках — все исключения перехватываются.
+    """
+    try:
+        from src.core.memory.reaction_feedback import process_reaction_feedback
+        from src.db.models import Message as MessageModel
+        from sqlalchemy import select
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_telegram_id)
+            chat_id = reaction_data["chat_id"]
+            message_id = reaction_data["message_id"]
+
+            # Проверяем, является ли это сообщение исходящим сообщением бота
+            is_bot_message = False
+            try:
+                result = await session.execute(
+                    select(MessageModel).where(
+                        MessageModel.user_id == owner.id,
+                        MessageModel.peer_id == chat_id,
+                        MessageModel.message_id == message_id,
+                        MessageModel.is_outgoing.is_(True),
+                    )
+                )
+                if result.scalar_one_or_none() is not None:
+                    is_bot_message = True
+            except Exception:
+                logger.debug(
+                    "Не удалось проверить принадлежность сообщения %d боту",
+                    message_id,
+                )
+
+            await save_reaction(
+                session,
+                user_id=owner.id,
+                chat_id=chat_id,
+                message_id=message_id,
+                reactor_id=reaction_data["reactor_id"],
+                reaction=reaction_data["reaction"],
+                is_bot_message=is_bot_message,
+            )
+
+        # Если реакция на сообщение бота — корректируем confidence памяти
+        if is_bot_message:
+            await process_reaction_feedback(reaction_data)
+
+    except Exception:
+        logger.exception(
+            "Ошибка сохранения/обработки реакции для сообщения %d",
+            reaction_data.get("message_id", 0),
+        )
 
 
 # Защита от утечки обработчиков при переподключении.
@@ -306,5 +366,66 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
         except Exception:
             logger.exception("mirror handler failed")
 
+    async def _on_message_edited(event: events.MessageEdited.Event) -> None:
+        """Обработка редактирования сообщения — детекция реакций пользователей.
+
+        Когда пользователь ставит реакцию на сообщение, Telegram отправляет
+        событие MessageEdited с обновлённым списком реакций.
+        Извлекаем recent_reactions и сохраняем в БД (fire-and-forget).
+        """
+        try:
+            msg: TgMessage = event.message
+            # Проверяем, есть ли реакции на сообщении
+            if not hasattr(msg, "reactions") or not msg.reactions:
+                return
+
+            peer_id = _peer_id_of(msg)
+            if not peer_id:
+                return
+
+            reactions_obj = msg.reactions
+            # recent_reactions — список MessagePeerReaction (кто какую реакцию поставил)
+            recent = getattr(reactions_obj, "recent_reactions", None) or []
+
+            if not recent:
+                return
+
+            for r in recent:
+                try:
+                    reactor_id = getattr(r, "peer_id", None)
+                    reaction_emoji = None
+                    if hasattr(r, "reaction"):
+                        r_obj = r.reaction
+                        if hasattr(r_obj, "emoticon"):
+                            reaction_emoji = r_obj.emoticon
+
+                    if reactor_id is None or reaction_emoji is None:
+                        continue
+
+                    reaction_data = {
+                        "message_id": msg.id,
+                        "chat_id": peer_id,
+                        "reactor_id": reactor_id,
+                        "reaction": str(reaction_emoji),
+                        "timestamp": datetime.now(timezone.utc),
+                    }
+
+                    # Fire-and-forget: не блокируем обработку сообщений
+                    track_ff(
+                        asyncio.create_task(
+                            _save_and_process_reaction(
+                                owner_telegram_id=owner_telegram_id,
+                                reaction_data=reaction_data,
+                            )
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "Ошибка обработки отдельной реакции в чате %d", peer_id
+                    )
+        except Exception:
+            logger.exception("reaction edited handler failed")
+
     client.add_event_handler(on_message, events.NewMessage())
+    client.add_event_handler(_on_message_edited, events.MessageEdited())
     logger.info("Mirror handler attached for user %s", owner_telegram_id)
