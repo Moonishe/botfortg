@@ -30,7 +30,7 @@ async def _check_once(owner_telegram_id: int) -> None:
             return
 
         tz_name = s.timezone
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc)
         lead_hours = max(0, int(s.reminder_lead_hours))
         soon = now + timedelta(hours=lead_hours)
 

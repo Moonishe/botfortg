@@ -203,6 +203,8 @@ def _set_env(key: str, value: str) -> dict[str, Any]:
 
     This is NOT persisted — it only affects the current process.
     """
+    # NOTE: os.environ modifications affect the current process.
+    # Acceptable for single-user admin bot.
     os.environ[key] = value
     logger.info("Environment variable %s set (session-local)", key)
     return {

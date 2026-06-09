@@ -19,47 +19,51 @@ logger = logging.getLogger(__name__)
 
 
 async def upsert_api_key(session: AsyncSession, user, provider: str, key: str) -> None:
-    # Нормализация: поддерживается несколько ключей через запятую
-    parts = [k.strip() for k in key.split(",") if k.strip()]
-    if not parts:
-        return
-    normalized = ",".join(parts)
-    result = await session.execute(
-        select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == provider)
-    )
-    existing = result.scalar_one_or_none()
-    enc = await encrypt_async(normalized)
-    if existing is None:
-        session.add(ApiKey(user_id=user.id, provider=provider, key_enc=enc))
-    else:
-        existing.key_enc = enc
+    from src.db.repos.session_repo import _get_user_lock
 
-    # Унификация: также сохраняем в LlmKeySlot (новое хранилище)
-    # Каждый ключ из списка — отдельный слот
-    existing_slots = await list_key_slots(session, user, provider=provider)
-    existing_keys: set[str] = set()
-    for s in existing_slots:
-        try:
-            existing_keys.add(await decrypt_async(s.key_enc))
-        except Exception:
-            continue
-
-    for i, single_key in enumerate(parts):
-        if single_key not in existing_keys:
-            slot = LlmKeySlot(
-                user_id=user.id,
-                provider=provider,
-                purpose="main",
-                label=f"{provider}/main",
-                key_enc=await encrypt_async(single_key),
-                priority=i,
-            )
-            session.add(slot)
+    lock = _get_user_lock(user.id)
+    async with lock:
+        # Нормализация: поддерживается несколько ключей через запятую
+        parts = [k.strip() for k in key.split(",") if k.strip()]
+        if not parts:
+            return
+        normalized = ",".join(parts)
+        result = await session.execute(
+            select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == provider)
+        )
+        existing = result.scalar_one_or_none()
+        enc = await encrypt_async(normalized)
+        if existing is None:
+            session.add(ApiKey(user_id=user.id, provider=provider, key_enc=enc))
         else:
-            # Ключ уже есть в LlmKeySlot — не дублируем
-            pass
+            existing.key_enc = enc
 
-    await session.flush()
+        # Унификация: также сохраняем в LlmKeySlot (новое хранилище)
+        # Каждый ключ из списка — отдельный слот
+        existing_slots = await list_key_slots(session, user, provider=provider)
+        existing_keys: set[str] = set()
+        for s in existing_slots:
+            try:
+                existing_keys.add(await decrypt_async(s.key_enc))
+            except Exception:
+                continue
+
+        for i, single_key in enumerate(parts):
+            if single_key not in existing_keys:
+                slot = LlmKeySlot(
+                    user_id=user.id,
+                    provider=provider,
+                    purpose="main",
+                    label=f"{provider}/main",
+                    key_enc=await encrypt_async(single_key),
+                    priority=i,
+                )
+                session.add(slot)
+            else:
+                # Ключ уже есть в LlmKeySlot — не дублируем
+                pass
+
+        await session.flush()
 
 
 async def get_api_key(session: AsyncSession, user, provider: str) -> str | None:

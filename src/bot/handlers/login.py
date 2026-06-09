@@ -215,6 +215,8 @@ async def step_code(
         await pending.client.sign_in(
             phone=pending.phone,
             code=code,
+            # NOTE: phone_code_hash in FSM is in-memory only (MemoryStorage).
+            # If migrating to persistent FSM, encrypt or avoid storing.
             phone_code_hash=pending.phone_code_hash,
         )
     except SessionPasswordNeededError:

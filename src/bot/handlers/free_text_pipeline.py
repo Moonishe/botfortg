@@ -1612,7 +1612,7 @@ async def execute_maestro(
     # Log user message to session (fire-and-forget)
     from src.core.scheduling.session_logger import log_user_message
 
-    asyncio.ensure_future(log_user_message(message.from_user.id, raw))
+    track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
 
     # ✨ Pre-LLM gate: handle greetings/farewells without LLM
     # check_pre_gate уже вызван в Stage -2 классификатора (free_text.py:757).

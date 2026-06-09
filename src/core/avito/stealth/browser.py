@@ -50,6 +50,8 @@ class StealthBrowser:
             )
             return ""
 
+        # NOTE: Fresh Chromium launch per call (~5-15s).
+        # For high-frequency use, consider browser pool reuse.
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,

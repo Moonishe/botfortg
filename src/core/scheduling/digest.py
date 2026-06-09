@@ -115,7 +115,7 @@ async def _gather_payload(owner: User) -> dict:
         )
         autoreplies = list(autoreplies_result.scalars().all())
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
 
     def _hot(items: list[Commitment]) -> list[Commitment]:

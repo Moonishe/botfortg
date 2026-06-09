@@ -33,6 +33,8 @@ _MAX_STDOUT_CHARS = 10000  # ~10 KB cap
 
 # Allowed command patterns as token tuples (checked with startswith).
 # Only commands matching these patterns (by first N tokens) are permitted.
+# NOTE: cat/type на файлах data_dir могут выдать содержимое .env, БД
+# и других чувствительных файлов. Допустимо для single-user admin-бота.
 _ALLOWED_COMMANDS: set[tuple[str, ...]] = {
     ("dir",),
     ("ls",),

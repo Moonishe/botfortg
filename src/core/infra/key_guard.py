@@ -31,6 +31,18 @@ def mask_keys(text: str) -> str:
     return text
 
 
+class KeyMaskFilter(logging.Filter):
+    """Logging-фильтр: маскирует API-ключи в каждом log-сообщении."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = mask_keys(record.msg)
+        if record.args:
+            record.args = tuple(
+                mask_keys(a) if isinstance(a, str) else a for a in record.args
+            )
+        return True
+
+
 def safe_str(exc: Exception) -> str:
     """Safe str() — masks keys."""
     return mask_keys(str(exc))

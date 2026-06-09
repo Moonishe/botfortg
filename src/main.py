@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 def _setup_json_logging() -> None:
     """Настраивает JSON-формат для логов (агрегация в ELK/Loki/CloudWatch)."""
 
+    from src.core.infra.key_guard import mask_keys
+
     class JsonFormatter(logging.Formatter):
         def format(self, record: logging.LogRecord) -> str:
             return json.dumps(
@@ -43,7 +45,7 @@ def _setup_json_logging() -> None:
                     "timestamp": self.formatTime(record),
                     "level": record.levelname,
                     "logger": record.name,
-                    "message": record.getMessage(),
+                    "message": mask_keys(record.getMessage()),
                     "module": record.module,
                     "lineno": record.lineno,
                 },
