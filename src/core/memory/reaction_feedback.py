@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.core.humanizer.humanizer import humanize_response as _humanize_response
 from src.core.learning.preference_learner import preference_learner
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,8 @@ async def process_reaction(reaction_data: dict[str, Any]) -> None:
     # Проактивный follow-up для smart-реакций
     _followup_text = _SMART_FOLLOWUP_REACTIONS.get(reaction_emoji)
     if _followup_text is not None:
+        # Применить humanizer для естественного тона
+        _followup_text = _humanize_response(_followup_text, context_hint="memory")
         try:
             from src.core.scheduling.notification_queue import notification_queue
             from src.db.models import Notification as _NotifModel

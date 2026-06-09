@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
@@ -387,14 +387,26 @@ async def _remove_all_reactions(
 @tool(
     name="find_message",
     description=(
-        "Найти сообщение от контакта по имени. "
+        "Найти сообщение по имени контакта, Telegram user_id или chat_id. "
         "Используй перед react_to_message чтобы получить chat_id и message_id. "
-        "Возвращает chat_id, message_id, текст и дату сообщения."
+        "Возвращает chat_id, message_id, текст и дату сообщения. "
+        "Обязательно указать хотя бы один из: contact_name, user_id, chat_id."
     ),
     category="chat",
     risk="low",
     params={
-        "contact_name": "str — имя контакта (например «Настя», «Вася»)",
+        "contact_name": (
+            "str — имя контакта (например «Настя», «Вася»). "
+            "Можно опустить если указан user_id или chat_id."
+        ),
+        "user_id": (
+            "int — Telegram ID пользователя. "
+            "Можно опустить если указан contact_name или chat_id."
+        ),
+        "chat_id": (
+            "int — ID чата напрямую. "
+            "Можно опустить если указан contact_name или user_id."
+        ),
         "position": (
             "str — позиция сообщения: "
             "'last' (последнее), 'first' (первое за сегодня), "
@@ -403,18 +415,22 @@ async def _remove_all_reactions(
     },
 )
 async def find_message(
-    contact_name: str,
+    contact_name: Optional[str] = None,
+    user_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
     position: str = "last",
     user: Any = None,
     **kwargs: Any,
 ) -> dict:
-    """Найти сообщение от контакта по имени.
+    """Найти сообщение по имени контакта, Telegram user_id или chat_id.
 
-    Использует contact_resolver для поиска контакта и Telethon userbot
-    для получения сообщений из чата.
+    Использует contact_resolver для поиска контакта (если указано имя)
+    и Telethon userbot для получения сообщений из чата.
 
     Args:
         contact_name: Имя контакта (например «Настя»).
+        user_id: Telegram ID пользователя (опционально).
+        chat_id: ID чата напрямую (опционально).
         position: Позиция сообщения — "last", "first", или число как строка.
         user: Telegram ID владельца (int или User ORM-объект).
 
@@ -422,6 +438,16 @@ async def find_message(
         {"chat_id": int, "message_id": int, "text": str, "date": str}
         или {"error": str} при ошибке.
     """
+    # ── Валидация: хотя бы один идентификатор обязателен ──
+    if contact_name is None and user_id is None and chat_id is None:
+        return {
+            "error": (
+                "Необходимо указать хотя бы один из: "
+                "contact_name (имя контакта), user_id (Telegram ID), "
+                "chat_id (ID чата)."
+            )
+        }
+
     # ── Нормализовать user → telegram_id и ORM-объект ──
     if user is None:
         _user_val = kwargs.get("user", 0)
@@ -449,45 +475,72 @@ async def find_message(
             )
         }
 
-    # ── Разрешить контакт через существующий contact_resolver ──
-    if user_orm is None:
-        return {
-            "error": (
-                "Не удалось получить ORM-объект пользователя для разрешения контакта."
+    # ── Разрешить chat_id по идентификатору ──
+    contact_display_name: str | None = None
+
+    if chat_id is not None:
+        # chat_id указан напрямую — используем как есть
+        logger.debug("find_message: используем chat_id=%d напрямую", chat_id)
+
+    elif user_id is not None:
+        # user_id указан — разрешаем peer через Telethon
+        try:
+            input_peer = await client.get_input_entity(user_id)
+            # Для пользователя peer-а chat_id = user_id (диалог 1-на-1)
+            chat_id = user_id
+            logger.debug("find_message: user_id=%d → chat_id=%d", user_id, chat_id)
+        except Exception as exc:
+            logger.exception("Не удалось получить entity для user_id=%d", user_id)
+            return {"error": f"Не удалось найти пользователя с ID {user_id}: {exc}"}
+
+    else:
+        # contact_name указан — существующая логика через contact_resolver
+        assert contact_name is not None  # гарантировано веткой выше
+        if user_orm is None:
+            return {
+                "error": (
+                    "Не удалось получить ORM-объект пользователя "
+                    "для разрешения контакта."
+                )
+            }
+
+        try:
+            from src.core.contacts.contact_resolver import resolve
+
+            candidates = await resolve(
+                client,
+                user_orm,
+                contact_name,
+                limit=1,
+                min_score=55,
             )
-        }
+        except Exception as exc:
+            logger.exception("Ошибка разрешения контакта %r", contact_name)
+            return {"error": f"Ошибка поиска контакта {contact_name!r}: {exc}"}
 
-    try:
-        from src.core.contacts.contact_resolver import resolve
+        if not candidates:
+            return {
+                "error": (
+                    f"Контакт {contact_name!r} не найден. "
+                    "Проверь имя или попроси пользователя уточнить."
+                )
+            }
 
-        candidates = await resolve(
-            client,
-            user_orm,
-            contact_name,
-            limit=1,
-            min_score=55,
-        )
-    except Exception as exc:
-        logger.exception("Ошибка разрешения контакта %r", contact_name)
-        return {"error": f"Ошибка поиска контакта {contact_name!r}: {exc}"}
+        contact = candidates[0]
+        chat_id = contact.peer_id
+        contact_display_name = contact.display_name
 
-    if not candidates:
-        return {
-            "error": (
-                f"Контакт {contact_name!r} не найден. "
-                "Проверь имя или попроси пользователя уточнить."
-            )
-        }
-
-    contact = candidates[0]
-    chat_id = contact.peer_id
+    # ── Человекочитаемая метка для логов и ошибок ──
+    _display_label: str = contact_display_name or (
+        f"пользователь {user_id}" if user_id is not None else f"чат {chat_id}"
+    )
 
     # ── Получить input_peer для чата ──
     try:
         input_peer = await client.get_input_entity(chat_id)
     except Exception as exc:
         logger.exception("Не удалось получить entity для chat_id=%d", chat_id)
-        return {"error": f"Не удалось получить чат контакта {contact_name!r}: {exc}"}
+        return {"error": f"Не удалось получить чат ({_display_label}): {exc}"}
 
     # ── Найти сообщение по позиции ──
     try:
@@ -498,7 +551,7 @@ async def find_message(
             result = await client.get_messages(input_peer, limit=1)
             msgs: list = list(result) if result else []  # type: ignore[arg-type]
             if not msgs:
-                return {"error": (f"В чате с {contact.display_name} нет сообщений.")}
+                return {"error": (f"В чате с {_display_label} нет сообщений.")}
             msg = msgs[0]
 
         elif position_lower == "first":
@@ -518,9 +571,7 @@ async def find_message(
                 result = await client.get_messages(input_peer, limit=1)
                 msgs = list(result) if result else []  # type: ignore[arg-type]
                 if not msgs:
-                    return {
-                        "error": (f"В чате с {contact.display_name} нет сообщений.")
-                    }
+                    return {"error": (f"В чате с {_display_label} нет сообщений.")}
             msg = msgs[0]
 
         else:
@@ -542,7 +593,7 @@ async def find_message(
             if len(msgs) < n:
                 return {
                     "error": (
-                        f"В чате с {contact.display_name} только "
+                        f"В чате с {_display_label} только "
                         f"{len(msgs)} сообщ., запрошена позиция {n}."
                     )
                 }
@@ -559,7 +610,7 @@ async def find_message(
 
         logger.info(
             "Найдено сообщение от %s (pos=%s): chat_id=%d msg_id=%d",
-            contact.display_name,
+            _display_label,
             position,
             chat_id,
             msg.id,
@@ -571,9 +622,11 @@ async def find_message(
             "message_id": msg.id,
             "text": msg_text,
             "date": msg_date,
-            "contact": contact.display_name,
+            "contact": _display_label,
         }
 
     except Exception as exc:
-        logger.exception("Ошибка поиска сообщений для контакта %r", contact_name)
+        logger.exception(
+            "Ошибка поиска сообщений для %s (chat_id=%d)", _display_label, chat_id
+        )
         return {"error": f"Ошибка получения сообщений: {exc}"}
