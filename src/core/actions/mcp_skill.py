@@ -32,6 +32,9 @@ async def use_skill(
         return {"error": "skill_name обязателен"}
 
     try:
+        # NOTE: core→bot layering tradeoff — intentionally avoids
+        # importing from src.bot.handlers. skill resolution is delegated
+        # to the registry wired at bot startup.
         # Layering fix: src/core/* must not import from src/bot/*.
         # The previous `from src.bot.handlers import skills` import was broken
         # (the target file does not exist), and `find_skill` is not defined

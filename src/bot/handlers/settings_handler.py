@@ -295,7 +295,11 @@ async def cb_choose(callback: CallbackQuery) -> None:
     if len(parts) < 4:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    _, _, key, value = parts
+    try:
+        _, _, key, value = parts
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
 
     PERSONALITY_FIELDS = {
         "base_tone",

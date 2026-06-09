@@ -30,7 +30,12 @@ logger = logging.getLogger(__name__)
 # Structure: user_id → CachedEntry(contacts, timestamp)
 # Lock protects concurrent read/write to the dict.
 
-_cache_ttl: float = float(settings.contact_cache_ttl)
+
+# NOTE: значение читается динамически, а не на этапе импорта —
+# чтобы подхватывать изменения настроек без перезапуска.
+def _get_cache_ttl() -> float:
+    return float(settings.contact_cache_ttl)
+
 
 _CACHE_LOCK = asyncio.Lock()
 
@@ -53,7 +58,7 @@ class _CachedEntry:
 
 
 def _is_expired(entry: _CachedEntry) -> bool:
-    return (time.monotonic() - entry.ts) > _cache_ttl
+    return (time.monotonic() - entry.ts) > _get_cache_ttl()
 
 
 async def _cleanup_stale() -> None:
@@ -257,7 +262,7 @@ def invalidate_all() -> None:
         pass
 
 
-# Update TTL if settings change at runtime (e.g. /settings)
+# NOTE: TTL читается динамически через _get_cache_ttl(),
+# поэтому _refresh_ttl больше не нужна — оставлена для обратной совместимости.
 def _refresh_ttl() -> None:
-    global _cache_ttl
-    _cache_ttl = float(settings.contact_cache_ttl)
+    pass

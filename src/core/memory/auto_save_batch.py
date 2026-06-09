@@ -107,7 +107,7 @@ async def _save_single(
         if facts:
             await _save_facts_to_db(telegram_id, facts)
     except asyncio.CancelledError:
-        pass
+        raise
     except (RequestError, HTTPStatusError, SQLAlchemyError, _json.JSONDecodeError):
         logger.debug("Auto-save facts skipped (single mode)", exc_info=True)
 

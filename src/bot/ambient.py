@@ -108,7 +108,7 @@ class AmbientIntelligence:
             True если last_active_at отсутствует или его дата < сегодня.
         """
         last_active = context.get("last_active_at")
-        if not last_active:
-            return False
+        if last_active is None:
+            return True  # Первое сообщение — считаем новым днём
         now = datetime.now(timezone.utc)
         return last_active.date() < now.date()

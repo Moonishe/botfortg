@@ -24,7 +24,7 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 # ── Максимальное количество шагов в плане ──
-_MAX_PLAN_STEPS = settings.plan_max_steps if hasattr(settings, "plan_max_steps") else 10
+_MAX_PLAN_STEPS = getattr(settings, "plan_max_steps", 10) or 10
 
 # ── Уровни риска ──
 _RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})

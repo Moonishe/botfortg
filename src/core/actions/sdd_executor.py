@@ -264,7 +264,10 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
         await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                lambda: exec(compile(tree, "<sdd>", "exec"), namespace),  # nosec: B102 — sandboxed via AST whitelist
+                # NOTE: exec() выполняется в основном процессе.
+                # AST проверен whitelist-ом, __builtins__ отключены.
+                # Для полноценной песочницы используйте mcp_code_exec.
+                lambda: exec(compile(tree, "<sdd>", "exec"), namespace),  # nosec: B102
             ),
             timeout=5.0,
         )

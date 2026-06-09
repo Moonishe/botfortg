@@ -560,6 +560,8 @@ def _has_factual_indicators(text: str) -> bool:
 
 def _classify_message(text: str) -> dict[str, bool] | None:
     """Lazy-классификация через MessageClassifier."""
+    # NOTE: core→bot layering tradeoff — classifier lives in bot layer
+    # for historical reasons. Lazy import prevents circular dependency.
     try:
         from src.bot.classifier import classify_message
 

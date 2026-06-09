@@ -298,6 +298,8 @@ class LLMResponseCache:
     @property
     def classifier(self):
         """Ленивый доступ к классификатору сообщений."""
+        # NOTE: core→bot layering tradeoff — classifier lives in bot layer.
+        # Lazy import prevents circular dependency.
         if self._classifier is None:
             from src.bot.classifier import get_classifier
 

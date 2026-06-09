@@ -641,7 +641,7 @@ async def _reval_run_impl(
     try:
         await provider.close()
     except Exception:
-        pass
+        logger.warning("Dreaming reval: provider close failed", exc_info=True)
 
     # Invalidate recall cache so the user sees the updated facts.
     # Done after provider.close() because the cache is independent.
@@ -652,7 +652,9 @@ async def _reval_run_impl(
         await invalidate("mem_")
         await bump_recall_version(owner.telegram_id)
     except Exception:
-        pass
+        logger.warning(
+            "Dreaming reval: recall cache invalidation failed", exc_info=True
+        )
 
     logger.info(
         "Dreaming reval: examined=%d past=%d permanent=%d invalid=%d skip=%d errors=%d",

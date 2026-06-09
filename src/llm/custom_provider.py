@@ -82,9 +82,5 @@ class CustomProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
         return await super().embed(text)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        resp = await self._client.embeddings.create(
-            model=self._embed_model, input=texts
-        )
-        return [d.embedding for d in resp.data]
+        # Используем кэш родительского класса через super().embed_batch()
+        return await super().embed_batch(texts)

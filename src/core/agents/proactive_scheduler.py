@@ -3,7 +3,8 @@
 Позволяет регистрировать повторяющиеся цели (BackgroundGoal)
 и автоматически запускать их при наступлении времени выполнения.
 
-Использует in-memory хранилище (TODO: DB-backed persistence).
+Использует in-memory хранилище.
+# NOTE: In-memory only. Goals lost on restart. DB persistence planned for Phase 8.
 Интегрируется с LLM через router.build_provider для исполнения целей.
 """
 
@@ -217,6 +218,9 @@ class ProactiveScheduler:
                     delta = _parse_frequency(goal.frequency)
                     if delta is not None:
                         goal.next_run = goal.last_run + delta
+                    else:
+                        # Без частоты цель выполняется один раз — отключаем
+                        goal.enabled = False
             except Exception:
                 logger.exception(
                     "ProactiveScheduler: ошибка выполнения цели %r", goal.id

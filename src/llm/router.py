@@ -451,8 +451,8 @@ class MultiKeyProvider:
                             provider_kwargs["model"] = per_slot[0]
                     if self._embed_model:
                         provider_kwargs["embed_model"] = self._embed_model
-                    provider = self._provider_class(key, **provider_kwargs)
                     try:
+                        provider = self._provider_class(key, **provider_kwargs)
                         total_text = ""
                         # 180s overall timeout; httpx 60s socket-level timeout per read
                         async with asyncio.timeout(180):

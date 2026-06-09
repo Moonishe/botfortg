@@ -57,7 +57,7 @@ class OpenAIVisionProvider:
         b64 = b64_bytes.decode()
         data_url = f"data:{image_mime};base64,{b64}"
         resp = await self._client.chat.completions.create(
-            model=self._model or "gpt-5.5",
+            model=self._model or "gpt-4o",
             messages=[
                 {
                     "role": "user",

@@ -43,6 +43,11 @@ _PATTERNS: dict[str, list[str]] = {
         r'<div\s+style=["\']display:\s*none["\']>[\s\S]*?</div>',
         r'<span\s+style=["\']visibility:\s*hidden["\']>[\s\S]*?</span>',
     ],
+    "markdown_fence_injection": [
+        r"```system",
+        r"<!--",
+        r"<\|im_start\|>",
+    ],
     "unicode_bypass": [
         # Zero-width characters (ZWS, ZWNJ, ZWJ, BOM, word joiner, invisible operators)
         r"[\u200B\u200C\u200D\uFEFF\u2060\u2061\u2062\u2063\u2064]",

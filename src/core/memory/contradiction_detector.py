@@ -127,9 +127,9 @@ def _check_opposite_categories(user_text: str, fact_text: str) -> bool:
         user_in_b = any(w in user_lower for w in category_b)
 
         # Contradiction: one side says A, other side says B (for explicit opposites)
-        if fact_in_a and user_in_b and category_b:
+        if fact_in_a and user_in_b:
             return True
-        if fact_in_b and user_in_a and category_b:
+        if fact_in_b and user_in_a:
             return True
 
         # Contradiction: fact says "не [category]", user uses words from [category]

@@ -93,6 +93,8 @@ async def cb_memory_clear_negative(callback: CallbackQuery) -> None:
     await callback.answer(f"Удалено {removed}")
 
 
+# NOTE: Дублирует Command("health") из health_cmd.py.
+# Оставлено для обратной совместимости; aiogram позволяет несколько хендлеров на одну команду.
 @router.message(Command("health"))
 async def cmd_health(message: Message) -> None:
     """Показать здоровье памяти — единый скоринг 0-100."""

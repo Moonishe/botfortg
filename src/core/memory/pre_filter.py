@@ -155,6 +155,8 @@ def should_extract(transcript: str, *, min_score: float = _MIN_SCORE_DEFAULT) ->
             if len(words) == 1 and words[0].lower().rstrip("!.?,") in _trivial_single:
                 return False
             # Classifier: приветствия, прощания, тривиальные
+            # NOTE: core→bot layering tradeoff — classifier lives in bot layer.
+            # Lazy import prevents circular dependency.
             try:
                 from src.bot.classifier import classify_message
 

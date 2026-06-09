@@ -15,7 +15,7 @@ router.message.filter(OwnerOnly())
 
 @router.message(Command("approve"))
 async def cmd_approve(message: Message) -> None:
-    args = message.text.split()
+    args = (message.text or "").split()
     if len(args) != 3:
         await message.answer("❌ Использование: /approve <id> <код>")
         return
@@ -33,7 +33,7 @@ async def cmd_approve(message: Message) -> None:
 
 @router.message(Command("revoke"))
 async def cmd_revoke(message: Message) -> None:
-    args = message.text.split()
+    args = (message.text or "").split()
     if len(args) != 2:
         await message.answer("❌ Использование: /revoke <id>")
         return

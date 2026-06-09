@@ -343,8 +343,9 @@ def _safe_eval(expr: str) -> Any:
 
     try:
         compiled = compile(tree, "<string>", "eval")
-        # Безопасно: AST проверен выше (whitelist узлов), __builtins__={},
-        # namespace содержит только математические функции и константы.
+        # NOTE: eval() выполняется в основном процессе с AST-валидацией.
+        # __builtins__={}, namespace — только математические функции и константы.
+        # Приемлемо для single-user admin-бота.
         return eval(compiled, namespace)
     except Exception as exc:
         raise ValueError(f"Evaluation error: {exc}") from exc

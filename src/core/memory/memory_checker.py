@@ -146,10 +146,8 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
 
                 if days_since_use > 7:
                     time_decay = 0.95**days_since_use  # 0.95^7 ≈ 0.70 after a week
-                    mem.confidence = min(
-                        mem.confidence or 0.5,
-                        (mem.confidence or 0.5) * time_decay,
-                    )
+                    conf = mem.confidence if mem.confidence is not None else 0.5
+                    mem.confidence = min(conf, conf * time_decay)
 
                 # --- Tier promotion/demotion (Feature 3) ---
                 if mem.use_count and mem.use_count >= 10:

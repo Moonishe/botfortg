@@ -69,6 +69,10 @@ class PairingManager:
                     await add_allowed_contact(session, sender_id)
             except Exception:
                 logger.exception("Failed to persist pairing")
+                # Откат in-memory состояния при ошибке БД
+                with self._lock:
+                    self._allowlist.discard(sender_id)
+                return False
             return True
         return False
 
