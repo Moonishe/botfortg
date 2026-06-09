@@ -212,10 +212,11 @@ class ProactiveScheduler:
                     output[:100] if output else "(empty)",
                 )
                 # Обновить тайминг только при успешном выполнении
-                goal.last_run = datetime.now(timezone.utc)
-                delta = _parse_frequency(goal.frequency)
-                if delta is not None:
-                    goal.next_run = goal.last_run + delta
+                async with self._lock:
+                    goal.last_run = datetime.now(timezone.utc)
+                    delta = _parse_frequency(goal.frequency)
+                    if delta is not None:
+                        goal.next_run = goal.last_run + delta
             except Exception:
                 logger.exception(
                     "ProactiveScheduler: ошибка выполнения цели %r", goal.id

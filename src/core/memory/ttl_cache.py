@@ -110,6 +110,8 @@ class TTLCache(Generic[K, V]):
         val = await self.get(key)
         if val is None:
             val = factory()
+            if asyncio.iscoroutine(val):
+                val = await val
             await self.set(key, val, ttl)
         return val
 

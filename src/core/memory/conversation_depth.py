@@ -80,12 +80,12 @@ def get_recall_mode(depth: int, weight: float, text: str = "") -> RecallMode:
         return "shallow"
     if any(hint in t for hint in DEEP_HINTS):
         return "deep"
-    if weight < 0.5 and depth <= 2:
-        return "light"
     if depth >= 9 or weight >= 2.0:
         return "deep"
     if depth >= 3 or weight >= 0.5:
         return "normal"
+    if weight < 0.5 and depth <= 2:
+        return "light"
     return "light"
 
 

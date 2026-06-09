@@ -84,20 +84,27 @@ def _get_db_path() -> Path:
 
 # Per-file locks for thread-safe append (TOCTOU prevention)
 _file_locks: dict[str, threading.Lock] = {}
+_file_locks_guard: threading.Lock = threading.Lock()
 _file_cleanup_counter = 0
 
 
 def _get_file_lock(key: str) -> threading.Lock:
+    """Get or create a threading.Lock for the given key.
+
+    Protected by a module-level threading.Lock to prevent races when
+    multiple asyncio.to_thread callers create locks for the same key.
+    """
     global _file_cleanup_counter
-    if key not in _file_locks:
-        _file_locks[key] = threading.Lock()
-    # Cleanup every 1000 accesses
-    _file_cleanup_counter += 1
-    if _file_cleanup_counter % 1000 == 0:
-        for k in list(_file_locks.keys()):
-            if not _file_locks[k].locked():
-                del _file_locks[k]
-    return _file_locks[key]
+    with _file_locks_guard:
+        if key not in _file_locks:
+            _file_locks[key] = threading.Lock()
+        # Cleanup every 1000 accesses
+        _file_cleanup_counter += 1
+        if _file_cleanup_counter % 1000 == 0:
+            for k in list(_file_locks.keys()):
+                if not _file_locks[k].locked():
+                    del _file_locks[k]
+        return _file_locks[key]
 
 
 def get_contact_context(contact_name: str) -> str | None:

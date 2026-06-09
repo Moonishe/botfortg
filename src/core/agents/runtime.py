@@ -151,7 +151,7 @@ class AgentRuntime:
         try:
             from src.config import settings
 
-            return settings.agent_max_steps
+            return max(1, settings.agent_max_steps)
         except Exception:
             return self.MAX_STEPS
 

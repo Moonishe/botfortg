@@ -274,7 +274,7 @@ class HTNPlanner:
                     ordered.append(s)
 
         # 4. Оценка рисков (LLM)
-        risk = await self._assess_risk(ordered, ctx)
+        risk = await self._assess_risk(ordered)
         # Применяем per-step риск из LLM-оценки, если доступен
         if isinstance(ctx.get("_step_risks"), dict):
             for step in ordered:
@@ -696,7 +696,7 @@ class HTNPlanner:
     # Шаг 4: Оценка рисков
     # ══════════════════════════════════════════════════════════════════════
 
-    async def _assess_risk(self, steps: list[PlanStep], context: dict[str, Any]) -> str:
+    async def _assess_risk(self, steps: list[PlanStep]) -> str:
         """LLM оценивает общий уровень риска плана.
 
         Также заполняет per-step риск в context["_step_risks"].

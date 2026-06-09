@@ -79,8 +79,7 @@ class CustomProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
                 yield chunk.choices[0].delta.content
 
     async def embed(self, text: str) -> list[float]:
-        resp = await self._client.embeddings.create(model=self._embed_model, input=text)
-        return resp.data[0].embedding
+        return await super().embed(text)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:

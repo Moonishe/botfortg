@@ -332,7 +332,12 @@ async def _do_import_keys(
                 results.append(f"  #{slot.id} — ❌ ключ повреждён")
                 continue
             prov_class = _provider_class_for(detected)
-            prov = prov_class(key, base_url=endpoint) if endpoint else prov_class(key)
+            try:
+                prov = (
+                    prov_class(key, base_url=endpoint) if endpoint else prov_class(key)
+                )
+            except TypeError:
+                prov = prov_class(key)
             valid = await prov.validate_key()
             if not valid:
                 async with get_session() as session:
@@ -604,7 +609,10 @@ async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
 
     # Создаём провайдера: с endpoint или без
     if endpoint:
-        provider = provider_cls(api_key=api_key, base_url=endpoint)
+        try:
+            provider = provider_cls(api_key=api_key, base_url=endpoint)
+        except TypeError:
+            provider = provider_cls(api_key=api_key)
     else:
         provider = provider_cls(api_key=api_key)
 
@@ -1686,9 +1694,14 @@ async def _pending_key_entry_handler(message: Message) -> None:
             await message.answer(f"  #{slot.id} — ❌ ключ повреждён")
             return
         prov_class = _provider_class_for(provider_name)
-        prov = (
-            prov_class(key_dec, base_url=endpoint) if endpoint else prov_class(key_dec)
-        )
+        try:
+            prov = (
+                prov_class(key_dec, base_url=endpoint)
+                if endpoint
+                else prov_class(key_dec)
+            )
+        except TypeError:
+            prov = prov_class(key_dec)
         valid = await prov.validate_key()
         if not valid:
             async with get_session() as session:

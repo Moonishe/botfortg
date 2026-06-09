@@ -363,7 +363,7 @@ class CoTEngine:
                             correction.observations = corr_obs
                             trace.total_tool_calls += len(correction.tool_calls)
 
-            if self._is_solved(trace):
+            if self._is_solved(trace) or step.thought.endswith("[FINAL]"):
                 trace.final_answer = step.thought
                 trace.solved = True
                 break

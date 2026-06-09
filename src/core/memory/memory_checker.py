@@ -158,7 +158,7 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                     elif mem.memory_tier == 2 and mem.use_count >= 30:
                         mem.memory_tier = 3  # promote to long-term
                 elif mem.use_count is None or mem.use_count == 0:
-                    if days_since_use > 30 and (mem.memory_tier or 1) > 0:
+                    if days_since_use > 30 and (mem.memory_tier or 0) > 0:
                         mem.memory_tier = (mem.memory_tier or 1) - 1  # demote
 
                 await session.flush()

@@ -30,11 +30,11 @@ async def _worker() -> None:
         try:
             job: MemoryJob = await _queue.get()
             await _process_job(job)
+            _queue.task_done()
         except asyncio.CancelledError:
             break
         except Exception:
             logger.exception("Memory queue worker error")
-        finally:
             _queue.task_done()
 
 

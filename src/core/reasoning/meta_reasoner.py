@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -256,7 +257,10 @@ class MetaReasoner:
                 return default
 
             messages = [ChatMessage(role="user", content=prompt)]
-            raw = await provider.chat(messages)
+            raw = await asyncio.wait_for(
+                provider.chat(messages),
+                timeout=60.0,
+            )
             return self._parse_json_list(raw)
 
         except Exception as exc:

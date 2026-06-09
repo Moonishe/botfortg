@@ -327,9 +327,12 @@ class DreamingConsolidator:
         ).format(max_cf=self.MAX_COUNTERFACTUALS)
 
         try:
-            response = await provider.chat(
-                [ChatMessage(role="user", content=prompt)],
-                task_type=TaskType.BACKGROUND,
+            response = await asyncio.wait_for(
+                provider.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    task_type=TaskType.BACKGROUND,
+                ),
+                timeout=60.0,
             )
             # Парсим строки, начинающиеся с «• »
             lines = response.strip().split("\n")

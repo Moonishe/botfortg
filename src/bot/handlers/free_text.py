@@ -372,11 +372,6 @@ _active_tasks: dict[int, asyncio.Task] = {}
 _active_tasks_lock = asyncio.Lock()
 
 
-_HEAVY_MODES = frozenset({"maestro", "analysis"})
-
-_MODE_NOTICE = "Обрабатываю предыдущий запрос. Если это срочно — просто напиши заново, я прерву тяжёлую задачу."
-
-
 _WAITING_MESSAGES = [
     "⏳ Дай подумать…",
     "🤔 Сейчас соображу…",
