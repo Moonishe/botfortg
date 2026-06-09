@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from src.bot.filters import OwnerOnly
 from src.core.contacts.contact_resolver import resolve
@@ -469,6 +474,122 @@ async def cmd_clusters(message: Message) -> None:
         if cluster.summary:
             lines.append(f"   <i>{cluster.summary[:80]}</i>")
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("memory"))
+async def cmd_memory_summary(
+    message: Message,
+    command: CommandObject,
+    userbot_manager: UserbotManager,
+) -> None:
+    """Ручной пересказ чата: /memory summary <имя чата>"""
+    args = (command.args or "").strip().split()
+    if not args or args[0] != "summary":
+        await message.answer(
+            "Использование: <code>/memory summary &lt;имя чата&gt;</code>\n"
+            "Пример: <code>/memory summary Маша</code>"
+        )
+        return
+
+    chat_query = " ".join(args[1:]) if len(args) > 1 else ""
+    if not chat_query:
+        await message.answer(
+            "Укажи имя чата или контакта.\nПример: <code>/memory summary Маша</code>"
+        )
+        return
+
+    # Разрешаем контакт по имени
+    client = (
+        userbot_manager.get_client(message.from_user.id) if userbot_manager else None
+    )
+    contact_name = chat_query
+    chat_id: int | None = None
+
+    if client is not None:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+        candidates = await resolve(client, owner, chat_query)
+        if candidates and candidates[0].score >= 55:
+            contact_name = candidates[0].label()
+            chat_id = candidates[0].peer_id
+
+    if chat_id is None:
+        await message.answer(
+            f"Не удалось найти контакт «{sanitize_html(chat_query)}». "
+            f"Проверь имя и попробуй снова."
+        )
+        return
+
+    await message.answer(
+        f"🧠 Делаю пересказ чата <b>{sanitize_html(contact_name)}</b>…"
+    )
+
+    from src.core.memory.chat_summarizer import (
+        generate_chat_summary,
+        save_summary_checkpoint,
+    )
+
+    user_id = message.from_user.id
+    summary = await generate_chat_summary(chat_id, user_id)
+
+    # Сохраняем чекпоинт после успешной генерации
+    if not summary.startswith("❌") and not summary.startswith("📭"):
+        await save_summary_checkpoint(chat_id, user_id, 0)
+
+    # Кнопка «Сохранить в память»
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💾 Сохранить в память",
+                    callback_data=f"summary_save:{chat_id}",
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        f"📊 <b>Пересказ: {sanitize_html(contact_name)}</b>\n\n{summary}",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("summary_save:"))
+async def cb_summary_save(callback: CallbackQuery) -> None:
+    """Сохранить текст пересказа как факт памяти."""
+    chat_id = int(callback.data.split(":")[1])
+    # Извлекаем текст пересказа из сообщения (после заголовка)
+    if callback.message is None or callback.message.text is None:
+        await callback.answer("Не удалось извлечь текст.")
+        return
+
+    # Текст сообщения: "📊 <b>Пересказ: Имя</b>\n\n...summary..."
+    # Отделяем заголовок от тела
+    parts = callback.message.text.split("\n\n", 1)
+    summary_text = parts[1] if len(parts) > 1 else callback.message.text
+    # Убираем HTML-теги для сохранения в память как чистый текст
+    import re
+
+    clean_text = re.sub(r"<[^>]+>", "", summary_text).strip()
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        await add_memory(
+            session,
+            owner,
+            fact=f"[Пересказ чата #{chat_id}]: {clean_text[:500]}",
+            contact_id=chat_id,
+            source="summary",
+            sentiment="neutral",
+        )
+
+    await callback.answer("✅ Сохранено в память!")
+    # Обновляем кнопку — убираем её
+    if callback.message:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass  # кнопка уже убрана или сообщение недоступно
 
 
 @router.message(Command("persona"))

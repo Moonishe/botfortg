@@ -102,6 +102,32 @@ async def _proactive_scan(telegram_id: int) -> None:
             return_exceptions=True,
         )
 
+        # ── Проверка необходимости авто-саммари для активных чатов ──
+        from src.core.memory.chat_summarizer import check_chat_needs_summary
+
+        for _msg_count, contact in active:
+            try:
+                summary_info = await check_chat_needs_summary(contact.peer_id, owner.id)
+                if summary_info:
+                    await notification_queue.enqueue(
+                        topic="chat_summary",
+                        text=(
+                            f"📊 В чате <b>{summary_info['chat_name']}</b> "
+                            f"{summary_info['new_count']} новых сообщений. "
+                            f"Сделать краткий пересказ?"
+                        ),
+                        priority=1,
+                        category="chat_summary",
+                        metadata={
+                            "chat_id": contact.peer_id,
+                            "action": "offer_summary",
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "summary check skip for %s", contact.display_name, exc_info=True
+                )
+
     except Exception:
         logger.exception("proactive_chat_analyzer: scan failed")
 

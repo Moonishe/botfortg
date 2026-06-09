@@ -12,6 +12,11 @@ from src.core.memory.evolution_chain import (
     EvolutionChainResult,
 )
 from src.core.memory.pre_filter import score_transcript, should_extract
+from src.core.memory.chat_summarizer import (
+    check_chat_needs_summary,
+    generate_chat_summary,
+    save_summary_checkpoint,
+)
 
 __all__ = [
     "MemoryMode",
@@ -27,4 +32,7 @@ __all__ = [
     "EvolutionChainResult",
     "score_transcript",
     "should_extract",
+    "check_chat_needs_summary",
+    "generate_chat_summary",
+    "save_summary_checkpoint",
 ]

@@ -926,6 +926,14 @@ async def _cmd_memory_card(message: Message, args: str) -> None:
                     callback_data=f"mem:neighbors:{memory_id}",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    text="👍", callback_data=f"memcard:react:{memory_id}:👍"
+                ),
+                InlineKeyboardButton(
+                    text="👎", callback_data=f"memcard:react:{memory_id}:👎"
+                ),
+            ],
         ]
     )
 
@@ -968,6 +976,117 @@ async def cb_memcard_history(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.answer("\n".join(lines))
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("memcard:react:"))
+async def cb_memcard_react(callback: CallbackQuery) -> None:
+    """Пользователь поставил 👍 или 👎 на карточке факта → меняем confidence."""
+    if callback.data is None or callback.message is None:
+        await callback.answer("Ошибка")
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Неверный формат", show_alert=True)
+        return
+
+    memory_id_str = parts[2]
+    reaction = parts[3]
+
+    if not memory_id_str.isdigit():
+        await callback.answer("Неверный ID факта", show_alert=True)
+        return
+
+    memory_id = int(memory_id_str)
+
+    # Применяем реакцию: 👍 → boost, 👎 → reduce
+    from src.core.memory.meta_memory import boost_confidence, reduce_confidence
+
+    if reaction == "👍":
+        success = await boost_confidence(
+            memory_id,
+            amount=0.2,  # +20% confidence
+            reason="memcard_reaction_thumbs_up",
+        )
+        action_text = "👍 Уверенность повышена"
+    elif reaction == "👎":
+        success = await reduce_confidence(
+            memory_id,
+            amount=0.2,  # -20% confidence
+            reason="memcard_reaction_thumbs_down",
+        )
+        action_text = "👎 Уверенность снижена"
+    else:
+        await callback.answer("Неизвестная реакция", show_alert=True)
+        return
+
+    if not success:
+        await callback.answer("Не удалось обновить факт", show_alert=True)
+        return
+
+    # Загружаем обновлённый факт для отображения новой confidence
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        mem = await session.get(Memory, memory_id)
+        if not mem or mem.user_id != owner.id:
+            await callback.answer("Факт не найден", show_alert=True)
+            return
+
+        new_conf_pct = int((mem.confidence or 0) * 100)
+
+    # Формируем новый текст: добавляем реакцию как визуальный фидбек
+    if callback.message.text:
+        # Находим строку с уверенностью и обновляем её
+        import re
+
+        old_text: str = callback.message.text or ""
+        updated_text = re.sub(
+            r"🎯 <b>Уверенность:</b> \d+%",
+            f"🎯 <b>Уверенность:</b> {new_conf_pct}%",
+            old_text,
+        )
+
+        # Добавляем реакцию в конец если её ещё нет
+        if not updated_text.strip().endswith(action_text):
+            updated_text = f"{updated_text}\n\n{action_text}"
+
+        # Обновляем клавиатуру — убираем кнопки реакций, оставляем остальное
+        new_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✏️ Исправить",
+                        callback_data=f"memreval:confirm:{memory_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑 Удалить",
+                        callback_data=f"memreval:reject:{memory_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📋 История",
+                        callback_data=f"memcard:history:{memory_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🔗 Связи",
+                        callback_data=f"mem:neighbors:{memory_id}",
+                    ),
+                ],
+            ]
+        )
+
+        try:
+            await callback.message.edit_text(
+                updated_text,
+                reply_markup=new_kb,
+            )
+        except Exception:
+            # Если не получилось отредактировать — просто ack
+            await callback.answer(action_text)
+            return
+
+    await callback.answer(action_text)
 
 
 # ─── Режим: episodes <query> ─────────────────────────────────────────

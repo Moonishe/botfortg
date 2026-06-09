@@ -9,6 +9,7 @@ Replaces separate background tasks with a single orchestrated job:
   5. DSM feed generation (auto-generated insights for user)
   6. Auto-forgetting / stale-closure of inactive facts
   7. Episodic reflection — meta-memory from recent interactions
+  12. Mood tracking — sentiment change alerts for all contacts
 
 Runs once per day at 03:00 UTC and sends a single summary notification.
 """
@@ -67,7 +68,9 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         "dreaming_integrated": 0,
         "dreaming_insights": 0,
         "dreaming_forgotten": 0,
+        "mood_alert_details": [],
     }
+    mood_alert_details: list[str] = summary["mood_alert_details"]  # type: ignore[assignment]
 
     from src.db.repo import get_or_create_user
 
@@ -330,6 +333,21 @@ async def dream_cycle(owner_telegram_id: int) -> None:
             except Exception:
                 logger.exception("Dream cycle: phase 11 (dreaming) failed")
 
+        # ── Phase 12: Проверка настроения контактов ──────────────────
+        try:
+            from src.core.memory.mood_tracker import check_mood_alerts
+
+            mood_alerts = await check_mood_alerts(owner_telegram_id)
+            summary["mood_alert_details"] = mood_alerts
+            if mood_alerts:
+                logger.info(
+                    "Dream cycle: phase 12 (mood) — %d предупреждений",
+                    len(mood_alerts),
+                )
+        except Exception:
+            logger.exception("Dream cycle: phase 12 (mood) failed")
+            summary["mood_alert_details"] = []
+
         # ── Graph statistics ──────────────────────────────────────────────
         try:
             from src.db.repos.memory_repo import get_graph_stats
@@ -467,6 +485,17 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                     parts.append(f"забыто {dreaming_forgotten} малоценных")
                 if parts:
                     summary_lines.append(f"• 🌌 Dreaming: {', '.join(parts)}")
+
+            # Mood alerts (Phase 12)
+            mood_alerts_list: list[str] = summary.get("mood_alert_details", [])
+            if mood_alerts_list:
+                count = len(mood_alerts_list)
+                summary_lines.append(f"• 😟 Проверка настроения: {count} предупрежд.")
+                # Если предупреждений мало — показываем текст
+                for alert_text in mood_alerts_list[:2]:
+                    summary_lines.append(f"   ⚠️ {alert_text}")
+                if count > 2:
+                    summary_lines.append(f"   …и ещё {count - 2}")
 
             # Graph stats
             if graph_stats:
