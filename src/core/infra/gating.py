@@ -104,7 +104,6 @@ class Gates:
                     }
                 )
         return hints
-        return None
 
     @property
     def status(self) -> dict:

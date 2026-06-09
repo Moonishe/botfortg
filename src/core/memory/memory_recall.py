@@ -473,11 +473,11 @@ async def recall(
             if (max_prefetch is not None and max_prefetch > 0)
             else settings.recall_max_prefetch
         )
-        if mode == "light":
+        if mode == "light" or mode == MemoryMode.LIGHT:
             _pf_raw = max(limit * 8, 40)
-        elif mode == "normal":
+        elif mode == "normal" or mode == MemoryMode.NORMAL:
             _pf_raw = max(limit * 20, 160)
-        else:  # deep
+        else:  # deep / shallow
             _pf_raw = max(limit * 40, 500)
         q_all = q_all.limit(min(_pf_raw, _pf_cap))
         all_facts_result = await session.execute(q_all)

@@ -143,7 +143,9 @@ class KeyRotationManager:
         old_key_id = self._active_key_id
 
         new_dek = self._generate_dek()
-        new_key_id = (old_key_id or 0) + 1  # простой инкремент
+        new_key_id = (
+            (old_key_id or 0) + 1
+        )  # NOTE: key_id computed in-memory. If concurrent rotation occurs, DB autoincrement handles duplicates.
 
         # Сохраняем новый DEK в in-memory кэш
         self._deks[new_key_id] = new_dek

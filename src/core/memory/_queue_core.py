@@ -49,6 +49,7 @@ async def enqueue(job: MemoryJob) -> None:
     try:
         await asyncio.wait_for(_queue.put(job), timeout=timeout)
     except asyncio.TimeoutError:
+        logger.warning("Queue full, dropping job: %s", job)
         logger.error(
             "Queue full (size=%d, max=%d), dropping job %s after %.0fs timeout",
             _queue.qsize(),

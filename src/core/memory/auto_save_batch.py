@@ -333,12 +333,12 @@ class FactBatchBuffer:
                         # новый flush запустится после завершения текущего
                         return
                 batch = list(self._buffer)
-                # Запустить фоновую обработку ДО очистки буфера —
-                # если asyncio.create_task упадёт, сообщение останется в буфере
+                self._buffer.clear()
+                # Запустить фоновую обработку ПОСЛЕ очистки буфера —
+                # буфер освобождён, новые сообщения могут накапливаться сразу
                 self._flush_task = asyncio.create_task(
                     self._flush_batch(batch), name="auto-save-flush-batch"
                 )
-                self._buffer.clear()
                 self._created_at = None
             else:
                 # Запустить/перезапустить таймер — сброс после паузы
