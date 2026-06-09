@@ -148,6 +148,26 @@ class UserbotManager:
                 logger.exception("userbot disconnect failed")
             finally:
                 self._clients.pop(telegram_id, None)
+                # Очистка attached-множеств — предотвращает утечку id(client)
+                _cid = id(client)
+                try:
+                    from src.userbot.mirror import _attached_mirror_clients
+
+                    _attached_mirror_clients.discard(_cid)
+                except ImportError:
+                    pass
+                try:
+                    from src.userbot.auto_reply import _attached_auto_reply_clients
+
+                    _attached_auto_reply_clients.discard(_cid)
+                except ImportError:
+                    pass
+                try:
+                    from src.userbot.dialog_events import _attached_dialog_event_clients
+
+                    _attached_dialog_event_clients.discard(_cid)
+                except ImportError:
+                    pass
 
     def start_pending(
         self, telegram_id: int, api_id: int, api_hash: str
