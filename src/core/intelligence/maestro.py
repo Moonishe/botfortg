@@ -428,6 +428,24 @@ async def process(
         "4. read_memory('x') → получи сохранённый X\n"
         "5. Дай финальный ответ\n"
     )
+    # ── Knowledge Graph (граф знаний) instructions ──
+    tools_section += (
+        "\n\n### Граф знаний (Knowledge Graph)\n"
+        "У тебя есть граф знаний о пользователе — сущности и связи, "
+        "извлечённые из его фактов:\n"
+        "- `entity_search(query, entity_type?)` — поиск сущностей по имени. "
+        "entity_type: person, project, place, company, topic.\n"
+        "- `entity_traverse(entity_name, hops=2)` — обход графа от сущности. "
+        "Показывает все связи (works_at, friend_of, expert_in, located_in и др.)\n"
+        "- `entity_extract(facts)` — извлечь сущности и связи из текста фактов.\n"
+        "\n"
+        "Используй граф знаний когда пользователь спрашивает о людях, "
+        "проектах, местах или связях между ними. Пример:\n"
+        "1. entity_search('Дима') → найди сущность\n"
+        "2. entity_traverse('Дима', hops=2) → узнай все связи\n"
+        "3. Ответь: «Дима работает в Neurobench, дружит с Анной, "
+        "эксперт в Python»\n"
+    )
     system += tools_section
 
     # ── Inject skill documentation ──

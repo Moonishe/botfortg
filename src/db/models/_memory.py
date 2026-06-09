@@ -1,4 +1,4 @@
-"""Memory subsystem models: Memory, MemoryLink, MemoryCluster, MemoryClusterMember, MemoryCandidate."""
+"""Memory subsystem models: Memory, MemoryLink, MemoryCluster, MemoryClusterMember, MemoryCandidate, Entity, EntityRelation."""
 
 from __future__ import annotations
 
@@ -316,3 +316,69 @@ class EpisodeContact(Base):
     role: Mapped[str | None] = mapped_column(
         String(32), nullable=True
     )  # "participant", "mentioned"
+
+
+# ── Knowledge Graph: Entity & EntityRelation ─────────────────────────────
+
+
+class Entity(Base):
+    """Сущность в графе знаний: персона, проект, место, компания, тема.
+
+    Извлекается LLM из фактов памяти и связывается через EntityRelation.
+    """
+
+    __tablename__ = "entities"
+    __table_args__ = (Index("ix_entity_user_type", "user_id", "type"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(128))
+    type: Mapped[str] = mapped_column(
+        String(32)
+    )  # person, project, place, company, topic
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class EntityRelation(Base):
+    """Связь между двумя сущностями в графе знаний.
+
+    relation — тип связи: works_at, friend_of, expert_in, located_in, etc.
+    weight — сила связи 0.0-1.0 (1.0 = высокая уверенность).
+    source — источник: extraction (LLM), user_stated (пользователь указал явно).
+    """
+
+    __tablename__ = "entity_relations"
+    __table_args__ = (
+        Index("ix_er_user_relation", "user_id", "source_id", "target_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("entities.id", ondelete="CASCADE"), index=True
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("entities.id", ondelete="CASCADE"), index=True
+    )
+    relation: Mapped[str] = mapped_column(
+        String(64)
+    )  # "works_at", "friend_of", "expert_in", "located_in"
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+    source: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )  # "extraction", "user_stated"
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )

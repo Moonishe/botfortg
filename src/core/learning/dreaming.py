@@ -205,6 +205,22 @@ class DreamingConsolidator:
             logger.exception("DreamingConsolidator: ошибка генерации инсайтов")
             summary["errors"] += 1
 
+        # ── 4.5. Каузальные инсайты (Causal Reasoning) ──
+        # Генерирует 2-3 инсайта на основе причинно-следственного анализа
+        # эпизодов и цепочек эволюции. Даёт proactive понимание изменений.
+        try:
+            causal_stored = await self._generate_causal_insights(user_id, session, user)
+            summary["insights"] = summary.get("insights", 0) + causal_stored
+            if causal_stored:
+                logger.info(
+                    "DreamingConsolidator: каузальные инсайты — %d сохранено (user=%d)",
+                    causal_stored,
+                    user_id,
+                )
+        except Exception:
+            logger.exception("DreamingConsolidator: ошибка каузальных инсайтов")
+            summary["errors"] += 1
+
         # ── 5. Forgetting sweep ──
         try:
             forgotten = await self._forgetting_sweep(user_id, session, user)
@@ -607,6 +623,91 @@ class DreamingConsolidator:
                 )
 
         return insights
+
+    async def _generate_causal_insights(self, user_id: int, session, user) -> int:
+        """Генерирует 2-3 каузальных инсайта на основе причинно-следственного анализа.
+
+        Использует analyze_causes из causal.py для проактивного понимания
+        изменений в поведении пользователя. Сохраняет результат как memory-факты
+        типа 'insight'.
+
+        Возвращает количество сохранённых инсайтов.
+        """
+        try:
+            from src.core.reasoning.causal import analyze_causes
+        except ImportError:
+            logger.debug("DreamingConsolidator: causal module not available")
+            return 0
+
+        # Список вопросов для каузального анализа
+        causal_questions = [
+            "Что изменилось в поведении пользователя за последнюю неделю?",
+            "Какие ключевые события повлияли на настроение пользователя?",
+            "Есть ли признаки выгорания или перегрузки у пользователя?",
+        ]
+
+        stored = 0
+        for question in causal_questions[:2]:  # берём 2 вопроса для экономии токенов
+            try:
+                answer = await analyze_causes(
+                    user_id=user_id,
+                    question=question,
+                    session=session,
+                    user=user,
+                )
+
+                # Пропускаем fallback-ответы (без LLM)
+                if not answer or answer.startswith("📊 **Сводка данных"):
+                    continue
+
+                # Сохраняем как memory-факт типа insight
+                from src.db.session import get_session
+                from src.db.models._memory import Memory
+                from src.db.repo import get_or_create_user
+                from sqlalchemy import select
+
+                async with get_session() as s:
+                    owner = await get_or_create_user(s, user.telegram_id)
+                    if owner is None:
+                        continue
+
+                    # Дедупликация по первым 80 символам
+                    prefix = answer[:80].replace("%", "\\%").replace("_", "\\_")
+                    result = await s.execute(
+                        select(Memory.id).where(
+                            Memory.user_id == owner.id,
+                            Memory.memory_type == "insight",
+                            Memory.fact.like(f"%{prefix}%"),
+                            Memory.is_active == True,
+                        )
+                    )
+                    if result.scalars().first():
+                        continue
+
+                    memory = Memory(
+                        user_id=owner.id,
+                        fact=f"[Causal Insight] {answer}",
+                        memory_type="insight",
+                        source="auto",
+                        confidence=0.55,  # умеренная уверенность для авто-анализа
+                        importance=0.6,  # выше среднего — proactive понимание
+                        source_quality=0.5,
+                        cluster_topic="causal_insight",
+                        tags="dreaming,causal,insight",
+                        memory_tier=2,
+                    )
+                    s.add(memory)
+                    await s.commit()
+                    stored += 1
+
+            except Exception:
+                logger.debug(
+                    "DreamingConsolidator: ошибка каузального инсайта для вопроса %r",
+                    question,
+                    exc_info=True,
+                )
+
+        return stored
 
     async def _store_insights(self, insights: list[Insight], user) -> int:
         """Сохранить инсайты в БД как memory-факты и отправить в notification_queue.

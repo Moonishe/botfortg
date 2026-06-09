@@ -413,6 +413,29 @@ _AUTO_SAVE_PROMPT = (
 )
 
 
+async def _extract_entities_ff(
+    telegram_id: int,
+    fact_texts: list[str],
+    provider,
+) -> None:
+    """Fire-and-forget: извлечь сущности и связи из фактов.
+
+    Не блокирует основной поток. Ошибки логируются, не пробрасываются.
+    """
+    try:
+        from src.core.memory.entity_extractor import extract_and_save_entities
+
+        await extract_and_save_entities(telegram_id, fact_texts, provider=provider)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.debug(
+            "Entity extraction fire-and-forget failed for user %d",
+            telegram_id,
+            exc_info=True,
+        )
+
+
 async def _save_extracted_facts(
     facts_list: list[dict],
     telegram_id: int,
@@ -652,6 +675,19 @@ async def _maybe_auto_save_facts(
                             )
                     except Exception:
                         logger.debug("Failed to cache extraction result", exc_info=True)
+
+                    # ── Сущности: fire-and-forget ──
+                    fact_texts = [
+                        f.get("fact", "").strip()
+                        for f in facts_list
+                        if f.get("fact", "").strip()
+                    ]
+                    if fact_texts:
+                        track_ff(
+                            asyncio.create_task(
+                                _extract_entities_ff(telegram_id, fact_texts, provider)
+                            )
+                        )
         except asyncio.CancelledError:
             raise
         except (RequestError, HTTPStatusError, SQLAlchemyError, json.JSONDecodeError):
