@@ -783,6 +783,10 @@ def _resolve_model_for_task(
             return model
 
     # 3. Auto-select if enabled and no explicit override
+    # NOTE: available_slots is always None when called from build_provider()
+    # (the caller never passes it). This branch is intentionally unreachable
+    # from the build_provider path but is kept as future-proofing for
+    # direct callers that may supply slot data.
     if settings.auto_select_model and available_slots:
         from src.llm.provider_catalog import LLM_PROVIDERS as _LLM_PROVIDERS
 

@@ -171,8 +171,9 @@ class CoTEngine:
                             correction.observations = corr_obs
                             trace.total_tool_calls += len(correction.tool_calls)
 
-            # Проверка завершения
-            if step.thought.endswith("[FINAL]") or self._is_solved(trace):
+            # Проверка завершения — учитываем и исходный шаг, и коррекцию
+            last_step = trace.steps[-1]
+            if last_step.thought.endswith("[FINAL]") or self._is_solved(trace):
                 trace.final_answer = step.thought
                 trace.solved = True
                 break

@@ -9,7 +9,7 @@ from sqlalchemy import or_, select
 from src.config import settings
 from src.core.scheduling.notification_queue import notification_queue
 from src.db.models import Notification
-from src.core.infra.timeutil import fmt_local
+from src.core.infra.timeutil import ensure_utc, fmt_local
 from src.db.models import Commitment
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -54,7 +54,7 @@ async def _check_once(owner_telegram_id: int) -> None:
 
         to_remind: list[tuple[Commitment, str]] = []
         for c in open_items:
-            d = c.deadline_at
+            d = ensure_utc(c.deadline_at)
             if d is None:
                 continue
             if d < now and s.reminder_overdue_enabled:

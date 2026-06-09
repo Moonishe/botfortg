@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from typing import TYPE_CHECKING
 
 from .cookies import CookieStore
@@ -43,7 +44,7 @@ class AvitoSession:
         self.proxy: str | None = proxy
         self.use_browser_fallback: bool = use_browser_fallback
         self._max_connections: int = max_connections
-        self._created_at: float = asyncio.get_event_loop().time()
+        self._created_at: float = time.monotonic()
         self._requests_count: int = 0
         self._client: httpx.AsyncClient | None = None
 

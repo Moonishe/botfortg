@@ -299,9 +299,10 @@ def validate_base_url(url: str | None) -> str | None:
         )
     hostname = (parsed.hostname or "").lower()
 
-    # Plain hostname blocklist
-    if hostname in ("localhost",):
-        raise ValueError("Localhost endpoints not allowed")
+    # Plain hostname blocklist — use the full _SSRF_BLOCKED_HOSTS set
+    # (includes localhost, 127.0.0.1, 0.0.0.0, ::1, [::1], 169.254.169.254)
+    if hostname in _SSRF_BLOCKED_HOSTS:
+        raise ValueError(f"Blocked hostname not allowed: {hostname!r}")
 
     # Defense-in-depth: block hex/octal/decimal IP notation
     _notation_error = _is_nonstandard_ip_notation(hostname)

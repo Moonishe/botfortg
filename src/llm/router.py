@@ -347,9 +347,12 @@ class MultiKeyProvider:
                 f"пропущено по кулдауну: {skipped})"
             )
         # Все ключи пропущены по кулдауну — ни один не был опробован
-        assert skipped == len(self._keys), (
-            f"BUG: skipped={skipped} != total_keys={len(self._keys)} but last_error is None"
-        )
+        if skipped != len(self._keys):
+            logger.error(
+                "BUG: skipped=%d != total_keys=%d but last_error is None",
+                skipped,
+                len(self._keys),
+            )
         try:
             await _record_provider_failure(self.provider_name)
         except Exception:

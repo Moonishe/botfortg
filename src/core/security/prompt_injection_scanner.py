@@ -94,9 +94,7 @@ _INJECTION_AFTER_NORMALIZE = [
 ]
 
 # Excessive combining diacritical marks (3+ in a row = likely abuse)
-_COMBINING_RANGE = re.compile(
-    r"[\u0300-\u036F\u0370-\u03FF\uFE00-\uFE0F\u1DC0-\u1DFF]{3,}"
-)
+_COMBINING_RANGE = re.compile(r"[\u0300-\u036F\uFE00-\uFE0F\u1DC0-\u1DFF]{3,}")
 
 
 def _check_homoglyphs(content: str) -> str | None:

@@ -942,60 +942,6 @@ async def step_custom_provider_model(message: Message, state: FSMContext) -> Non
     )
 
 
-def _detect_provider(key: str) -> str | None:
-    """Пытается определить провайдера по формату ключа."""
-    key = key.strip()
-    if key.startswith("sk-or-"):
-        return "openrouter"
-    if key.startswith("sk-ant-"):
-        return "anthropic"
-    if key.startswith("sk-"):
-        return "openai"
-    if key.startswith("AIzaSy"):
-        return "gemini"
-    if key.startswith("Nb"):
-        return "mistral"
-    # Long unknown key — can't reliably guess provider, return None
-    if len(key) > 64 and not key.startswith("sk-") and not key.startswith("AIzaSy"):
-        return None
-    return None
-
-
-async def _validate_key(provider: str, key: str) -> tuple[bool, str | None]:
-    """Валидирует ключ через провайдера. Возвращает (valid, error_hint)."""
-    try:
-        if provider == "openai":
-            return (await OpenAIProvider(key).validate_key(), None)
-        if provider == "gemini":
-            return (await GeminiProvider(key).validate_key(), None)
-        if provider == "mistral":
-            from src.llm.mistral_provider import MistralProvider
-
-            return (await MistralProvider(key).validate_key(), None)
-        if provider == "cloudflare":
-            from src.llm.cloudflare_provider import CloudflareProvider
-
-            return (await CloudflareProvider(key).validate_key(), None)
-        if provider == "openrouter":
-            from src.llm.openrouter_provider import OpenRouterProvider
-
-            return (await OpenRouterProvider(key).validate_key(), None)
-        if provider == "anthropic":
-            from src.llm.anthropic_provider import AnthropicProvider
-
-            return (await AnthropicProvider(key).validate_key(), None)
-    except Exception as e:
-        err_str = safe_str(e).lower()
-        if any(
-            w in err_str
-            for w in ("timeout", "connect", "resolve", "network", "refused", "reset")
-        ):
-            return (False, "Сетевая ошибка. Проверь подключение и попробуй снова.")
-        logger.exception("Key validation failed for %s", provider)
-        return (False, "Не удалось проверить ключ. Попробуй позже.")
-    return (False, f"Неизвестный провайдер: {provider}")
-
-
 def provider_display_name(provider: str) -> str:
     """Возвращает человекочитаемое имя провайдера."""
     names = {

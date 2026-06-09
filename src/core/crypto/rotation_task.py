@@ -136,6 +136,13 @@ async def key_rotation_loop() -> None:
                     # Первый запуск: создаём начальный DEK
                     logger.info("Первый запуск ротации — создаю начальный DEK")
                     new_dek = mgr._generate_dek()
+                    # RISK: hardcoded key_id=1. If an old DEK with key_id=1
+                    # already exists in DB (e.g. from a previous deployment
+                    # that was not properly cleaned), save_to_db() will
+                    # silently overwrite it, causing data loss for any
+                    # secrets still encrypted with the old DEK.
+                    # Mitigation: load_from_db() should have restored
+                    # active_key_id from DB if one existed.
                     key_id = 1
                     mgr._deks[key_id] = new_dek
                     mgr._active_key_id = key_id
