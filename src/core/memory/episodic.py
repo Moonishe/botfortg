@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select, desc
@@ -457,6 +458,30 @@ async def _reflect_single_episode(
 _message_counter: dict[int, int] = {}
 _message_buffer: dict[int, list[str]] = {}
 _counter_lock = asyncio.Lock()
+_counter_last_cleanup: float = 0.0
+_COUNTER_CLEANUP_TTL = 3600.0  # 1 час бездействия → удаляем запись пользователя
+
+
+def _cleanup_stale_counters(now: float) -> None:
+    """Периодическая очистка неактивных пользователей из _message_counter."""
+    global _counter_last_cleanup
+    if now - _counter_last_cleanup < _COUNTER_CLEANUP_TTL:
+        return
+    _counter_last_cleanup = now
+    # Удаляем пользователей без сообщений за последний час
+    # (счётчик растёт только в track_message, поэтому если он старый — пользователь неактивен)
+    # NOTE: без timestamp на каждую запись — очищаем все записи с count==0
+    # и буферы без сообщений. Активные пользователи с count>0 сохраняются.
+    stale = [
+        uid
+        for uid, count in _message_counter.items()
+        if count == 0 and uid not in _message_buffer
+    ]
+    for uid in stale:
+        _message_counter.pop(uid, None)
+    stale_bufs = [uid for uid, buf in _message_buffer.items() if not buf]
+    for uid in stale_bufs:
+        _message_buffer.pop(uid, None)
 
 
 async def should_create_episode(user_id: int) -> bool:
@@ -472,6 +497,8 @@ async def track_message(user_id: int, text: str) -> None:
         _message_counter[user_id] = _message_counter.get(user_id, 0) + 1
         buf = _message_buffer.setdefault(user_id, [])
         buf.append(text)
+        # Периодическая очистка неактивных пользователей
+        _cleanup_stale_counters(time.time())
         # Держим буфер в рамках 2x batch_size
         if len(buf) > settings.episodic_batch_size * 2:
             buf[:] = buf[-settings.episodic_batch_size :]

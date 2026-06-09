@@ -558,6 +558,10 @@ async def _maybe_auto_save_facts(
 
             batch_buffer = await get_batch_buffer()
         except Exception:
+            logger.error(
+                "Failed to init batch buffer, falling back to single mode",
+                exc_info=True,
+            )
             batch_buffer = None
 
         if batch_buffer is not None and batch_buffer.enabled:
@@ -1881,8 +1885,10 @@ async def execute_maestro(
                         try:
                             await humanize_provider.close()
                         except Exception:
-                            pass
-
+                            logger.debug(
+                                "Failed to close humanize_provider (stream)",
+                                exc_info=True,
+                            )
             humanizer_changed = humanized != original_text
             response_text = sanitize_html(humanized)
             _cache_last_humanized(owner_telegram_id, response_text)
@@ -2096,8 +2102,10 @@ async def execute_maestro(
                 try:
                     await humanize_provider.close()
                 except Exception:
-                    pass
-
+                    logger.debug(
+                        "Failed to close humanize_provider (final)",
+                        exc_info=True,
+                    )
             # ── End Humanizer ─────────────────────────────────────────
 
             # Auto-save: fire-and-forget сохранение фактов о пользователе

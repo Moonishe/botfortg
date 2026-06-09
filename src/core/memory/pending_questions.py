@@ -54,15 +54,42 @@ async def save_pending(telegram_id: int, question: str, context: str = "") -> No
 
 
 async def get_pending(telegram_id: int) -> list[dict[str, Any]]:
-    """Возвращает список неотвеченных вопросов (in-memory snapshot)."""
+    """Возвращает список неотвеченных вопросов И удаляет их из in-memory очереди.
+
+    Вызывающая сторона должна показать вопросы пользователю.
+    После показа — вопросы считаются обработанными.
+    """
     async with _pending_lock:
-        return _pending.get(telegram_id, [])
+        return _pending.pop(telegram_id, [])
 
 
-async def clear_pending(telegram_id: int) -> None:
-    """Очищает после успешного ответа."""
+async def delete_pending_questions(telegram_id: int) -> None:
+    """Полностью удаляет pending-вопросы: in-memory + DB.
+
+    Вызывать после того как вопросы показаны пользователю.
+    """
+    # In-memory
     async with _pending_lock:
         _pending.pop(telegram_id, None)
+    # DB
+    try:
+        async with get_session() as session:
+            from src.db.repo import get_or_create_user
+            from sqlalchemy import delete as sa_delete
+
+            from src.db.models import PendingQuestion
+
+            owner = await get_or_create_user(session, telegram_id)
+            await session.execute(
+                sa_delete(PendingQuestion).where(PendingQuestion.owner_id == owner.id)
+            )
+            await session.commit()
+    except Exception:
+        logger.debug(
+            "Failed to delete pending questions from DB for user %d",
+            telegram_id,
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

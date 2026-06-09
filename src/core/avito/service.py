@@ -154,8 +154,15 @@ async def _get_stealth_session(proxy_url: str | None = None):
         if current_proxy != proxy_url:
             # M2: закрытие сессии внутри блокировки — предотвращает TOCTOU-гонку
             # с параллельными вызовами _get_stealth_session() с другим proxy_url
+            # ВАЖНО: не вызываем _close_stealth_session() здесь — она сама берёт
+            # _stealth_lock, а asyncio.Lock НЕ реентерабелен → deadlock.
+            # Вместо этого закрываем сессию напрямую под уже захваченной блокировкой.
             async with _stealth_lock:
-                await _close_stealth_session()
+                if _stealth_session is not None:
+                    try:
+                        await _stealth_session.close()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 _stealth_session = None
 
     if _stealth_session is None:

@@ -71,7 +71,8 @@ async def auto_forget_sweep(session: AsyncSession, user_id: int) -> int:
 
     # Invalidate recall cache for this user
     user_row = await session.execute(select(User.telegram_id).where(User.id == user_id))
-    if uid := user_row.scalar_one_or_none():
+    uid = user_row.scalar_one_or_none()
+    if uid is not None:
         await bump_recall_version(uid)
         # B6: инвалидируем stats-кэш (mem_*), чтобы health/coverage не показывали stale
         from src.core.actions.stats_cache import invalidate

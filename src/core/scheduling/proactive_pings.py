@@ -105,7 +105,10 @@ async def generate_pings(owner, provider, session) -> list[str]:
                 logger.warning("Proactive ping hallucination detected, applying guard")
                 resp, modified = apply_guard(resp, verify_result, 0.5)
         except Exception:
-            pass  # best-effort, не ломаем пинги
+            logger.debug(
+                "Hallucination guard failed for proactive ping, skipping guard",
+                exc_info=True,
+            )  # best-effort, не ломаем пинги
 
         lines = [
             sanitize_html(l.strip("- ").strip())

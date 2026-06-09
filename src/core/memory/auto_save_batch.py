@@ -387,6 +387,9 @@ class FactBatchBuffer:
         try:
             await asyncio.sleep(self._timeout)
         except asyncio.CancelledError:
+            logger.debug(
+                "Batch timeout flush cancelled (timer reset, new flush scheduled)"
+            )
             return
         async with self._lock:
             if not self._buffer:

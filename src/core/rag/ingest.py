@@ -137,8 +137,8 @@ async def _get_embeddings(texts: list[str]) -> list[list[float]]:
         provider = None
 
     if provider is None:
-        logger.warning("No embedding provider available — skipping embeddings")
-        return [[0.0] * settings.embedding_dim for _ in texts]
+        logger.warning("No embedding provider available — aborting ingest")
+        return []
 
     model = getattr(provider, "_embed_model", None) or "text-embedding-3-small"
     embeddings: list[list[float]] = []
@@ -236,6 +236,12 @@ async def ingest_file(
 
         # 5. Embed
         embeddings = await _get_embeddings(chunks)
+        if not embeddings:
+            return {
+                "ok": False,
+                "filename": file_path.name,
+                "error": "Не удалось получить эмбеддинги (нет embedding-провайдера)",
+            }
 
         # 6. Store in Qdrant
         await store.upsert_chunks(

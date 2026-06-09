@@ -248,7 +248,7 @@ class PreferenceLearner:
             if owner is None:
                 return {"updated": 0, "signal": "boost_topic", "errors": 1}
 
-            from sqlalchemy import select, update
+            from sqlalchemy import func, select, update
 
             from src.db.models._memory import Memory
 
@@ -271,7 +271,7 @@ class PreferenceLearner:
                         update(Memory)
                         .where(Memory.id == mid)
                         .values(
-                            importance=min(
+                            importance=func.least(
                                 self.MAX_IMPORTANCE,
                                 Memory.importance * factor,
                             )
@@ -307,7 +307,7 @@ class PreferenceLearner:
             if owner is None:
                 return {"updated": 0, "signal": "decay_topic", "errors": 1}
 
-            from sqlalchemy import select, update
+            from sqlalchemy import func, select, update
 
             from src.db.models._memory import Memory
 
@@ -329,7 +329,7 @@ class PreferenceLearner:
                         update(Memory)
                         .where(Memory.id == mid)
                         .values(
-                            importance=max(
+                            importance=func.greatest(
                                 self.MIN_IMPORTANCE,
                                 Memory.importance * factor,
                             )

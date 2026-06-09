@@ -614,7 +614,15 @@ class MultiKeyProvider:
         key = self._keys[0]
         provider = self._provider_class(key)
         try:
-            return await provider.list_models()
+            try:
+                return await provider.list_models()
+            except Exception:
+                logger.warning(
+                    "list_models() failed for key %s, returning empty",
+                    key[:16] + "…" if len(key) > 16 else key,
+                    exc_info=True,
+                )
+                return []
         finally:
             await provider.close()
 

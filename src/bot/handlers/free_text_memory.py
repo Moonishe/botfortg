@@ -501,6 +501,9 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
         for m in memories:
             if m.id == mid:
                 m.sentiment = "neutral"
+        # Явный commit: хотя get_session() коммитит при выходе из контекста,
+        # изменения на in-memory объектах могут не отслеживаться без flush.
+        await session.commit()
     await bump_recall_version(callback.from_user.id)
     # B6: инвалидируем stats-кэш после подтверждения актуальности факта
     from src.core.actions.stats_cache import invalidate as _invalidate_stats3

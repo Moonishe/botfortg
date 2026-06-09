@@ -392,9 +392,12 @@ class DreamingConsolidator:
         )
 
         try:
-            response = await provider.chat(
-                [ChatMessage(role="user", content=prompt)],
-                task_type=TaskType.BACKGROUND,
+            response = await asyncio.wait_for(
+                provider.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    task_type=TaskType.BACKGROUND,
+                ),
+                timeout=60.0,
             )
         except Exception:
             logger.exception("DreamingConsolidator: ошибка LLM паттернов")
@@ -479,7 +482,7 @@ class DreamingConsolidator:
                         Memory.is_active == True,
                     )
                 )
-                if result.scalar_one_or_none():
+                if result.scalars().first():
                     logger.debug(
                         "DreamingConsolidator: паттерн уже существует — пропускаем"
                     )
@@ -547,12 +550,18 @@ class DreamingConsolidator:
         ).format(max_ins=self.MAX_INSIGHTS)
 
         try:
-            response = await provider.chat(
-                [ChatMessage(role="user", content=prompt)],
-                task_type=TaskType.BACKGROUND,
+            response = await asyncio.wait_for(
+                provider.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    task_type=TaskType.BACKGROUND,
+                ),
+                timeout=60.0,
             )
         except Exception:
             logger.exception("DreamingConsolidator: ошибка LLM инсайтов")
+            return []
+
+        if not response:
             return []
 
         insights: list[Insight] = []
@@ -628,7 +637,7 @@ class DreamingConsolidator:
                             Memory.is_active == True,
                         )
                     )
-                    if result.scalar_one_or_none():
+                    if result.scalars().first():
                         continue
 
                     memory = Memory(

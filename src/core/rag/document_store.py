@@ -69,15 +69,21 @@ class DocumentStore:
         if self.COLLECTION_NAME in collections:
             return
 
-        client.create_collection(
-            collection_name=self.COLLECTION_NAME,
-            vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
-        )
-        logger.info(
-            "Created Qdrant collection '%s' with dim=%d",
-            self.COLLECTION_NAME,
-            dim,
-        )
+        try:
+            client.create_collection(
+                collection_name=self.COLLECTION_NAME,
+                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+            )
+            logger.info(
+                "Created Qdrant collection '%s' with dim=%d",
+                self.COLLECTION_NAME,
+                dim,
+            )
+        except Exception:
+            logger.debug(
+                "Collection '%s' already exists (concurrent create)",
+                self.COLLECTION_NAME,
+            )
 
     async def upsert_chunks(
         self,
@@ -116,10 +122,11 @@ class DocumentStore:
         points: list[PointStruct] = []
 
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-            # Stable hash across process restarts (Python hash() is randomized)
-            point_id = int(
-                _hashlib.md5(f"{content_hash}:{i}".encode()).hexdigest(), 16
-            ) % (10**9)
+            # Stable u64 hash across process restarts (collision-safe)
+            point_id = int.from_bytes(
+                _hashlib.md5(f"{content_hash}:{i}".encode()).digest()[:8],
+                byteorder="big",
+            )
             payload = {
                 "user_id": user_id,
                 "filename": filename,

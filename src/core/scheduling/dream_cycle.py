@@ -527,6 +527,10 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                         priority=5,  # PRIORITY_NORMAL
                     )
                     await asyncio.sleep(1)
+                # Очищаем pending-вопросы после того как они включены в пинги
+                from src.core.memory.pending_questions import delete_pending_questions
+
+                await delete_pending_questions(owner.telegram_id)
         except Exception:
             logger.debug("Proactive pings skipped", exc_info=True)
 

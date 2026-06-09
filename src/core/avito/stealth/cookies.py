@@ -45,7 +45,12 @@ class CookieStore:
             row = conn.execute(
                 "SELECT data FROM cookies WHERE domain = ?", (domain,)
             ).fetchone()
-            return json.loads(row[0]) if row else {}
+            if row:
+                try:
+                    return json.loads(row[0])
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning("Failed to parse cookies JSON for domain %s", domain)
+            return {}
         finally:
             conn.close()
 

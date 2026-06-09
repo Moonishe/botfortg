@@ -183,6 +183,8 @@ _PROVIDER_METRICS_LOCK: asyncio.Lock | None = (
 
 async def _record_provider_success(name: str, latency: float) -> None:
     """Записывает успешный вызов провайдера с замеренной латентностью."""
+    if _PROVIDER_METRICS_LOCK is None:
+        return  # locks not initialized yet (startup race)
     now = asyncio.get_running_loop().time()
     async with _PROVIDER_METRICS_LOCK:
         metrics = _PROVIDER_METRICS.get(name)
@@ -197,6 +199,8 @@ async def _record_provider_success(name: str, latency: float) -> None:
 
 async def _record_provider_failure(name: str) -> None:
     """Записывает неудачный вызов провайдера."""
+    if _PROVIDER_METRICS_LOCK is None:
+        return  # locks not initialized yet (startup race)
     now = asyncio.get_running_loop().time()
     async with _PROVIDER_METRICS_LOCK:
         metrics = _PROVIDER_METRICS.get(name)
@@ -208,7 +212,13 @@ async def _record_provider_failure(name: str) -> None:
 
 
 def _score_provider(name: str, now: float) -> float:
-    """Public score lookup. 1.0 для провайдеров без истории (exploration)."""
+    """Public score lookup. 1.0 для провайдеров без истории (exploration).
+
+    Безопасность: читает _PROVIDER_METRICS без блокировки — допустимо, т.к.:
+    - dict.get() атомарен в CPython (GIL)
+    - поля _ProviderMetrics — простые типы (int/float), атомарное чтение
+    - худший случай: score на слегка устаревших данных (метрики — soft state)
+    """
     metrics = _PROVIDER_METRICS.get(name)
     if metrics is None:
         return 1.0
@@ -695,8 +705,12 @@ def auto_select_model(
         if slot_model:
             score += 10.0
 
-        model_name: str = slot_model or "default"
-        scored.append((score, f"{provider_name}/{model_name}"))
+        # Пропускаем слоты без явной модели — "default" не является
+        # валидным именем модели и приведёт к ошибке при вызове API.
+        if not slot_model:
+            continue
+
+        scored.append((score, f"{provider_name}/{slot_model}"))
 
     if not scored:
         return None
