@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -258,7 +258,7 @@ class MetaReasoner:
 
             messages = [ChatMessage(role="user", content=prompt)]
             raw = await asyncio.wait_for(
-                provider.chat(messages),
+                provider.chat(messages, task_type=TaskType.DEFAULT),
                 timeout=60.0,
             )
             return self._parse_json_list(raw)

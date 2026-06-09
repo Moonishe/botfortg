@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
 from src.db.models._memory import Episode, EpisodeContact
 from src.db.models import Memory
+from src.db.repo import get_or_create_user
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -265,9 +266,10 @@ async def get_recent_episodes(
     """Получить последние эпизоды пользователя."""
     try:
         async with get_session() as session:
+            owner = await get_or_create_user(session, user_id)
             result = await session.execute(
                 select(Episode)
-                .where(Episode.user_id == user_id)
+                .where(Episode.user_id == owner.id)
                 .order_by(desc(Episode.started_at))
                 .limit(limit)
             )
@@ -292,9 +294,10 @@ async def search_episodes(
     query_lower = query.lower()
     try:
         async with get_session() as session:
+            owner = await get_or_create_user(session, user_id)
             result = await session.execute(
                 select(Episode)
-                .where(Episode.user_id == user_id)
+                .where(Episode.user_id == owner.id)
                 .order_by(desc(Episode.started_at))
                 .limit(200)  # загружаем больше для фильтрации в Python
             )
@@ -334,10 +337,11 @@ async def reflect_on_episodes(user_id: int) -> list[dict]:
 
             cutoff = cutoff - timedelta(days=7)
 
+            owner = await get_or_create_user(session, user_id)
             result = await session.execute(
                 select(Episode)
                 .where(
-                    Episode.user_id == user_id,
+                    Episode.user_id == owner.id,
                     Episode.started_at >= cutoff,
                 )
                 .order_by(desc(Episode.importance))

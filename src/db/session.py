@@ -80,7 +80,7 @@ _FTS_SETUP = [
 ]
 
 # Agent Session FTS5: external-content virtual table linked to agent_session_messages.
-# No triggers needed — FTS5 reads directly from the content table via content_rowid.
+# Triggers required to keep the FTS index synchronised with the content table.
 _SESSION_FTS_SETUP = [
     """
     CREATE VIRTUAL TABLE IF NOT EXISTS agent_session_messages_fts USING fts5(
@@ -88,6 +88,26 @@ _SESSION_FTS_SETUP = [
         content='agent_session_messages', content_rowid='id',
         tokenize='unicode61 remove_diacritics 2'
     );
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS agent_session_messages_fts_ai AFTER INSERT ON agent_session_messages BEGIN
+        INSERT INTO agent_session_messages_fts(rowid, content, role)
+        VALUES (new.id, new.content, new.role);
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS agent_session_messages_fts_ad AFTER DELETE ON agent_session_messages BEGIN
+        INSERT INTO agent_session_messages_fts(agent_session_messages_fts, rowid, content, role)
+        VALUES('delete', old.id, old.content, old.role);
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS agent_session_messages_fts_au AFTER UPDATE ON agent_session_messages BEGIN
+        INSERT INTO agent_session_messages_fts(agent_session_messages_fts, rowid, content, role)
+        VALUES('delete', old.id, old.content, old.role);
+        INSERT INTO agent_session_messages_fts(rowid, content, role)
+        VALUES (new.id, new.content, new.role);
+    END;
     """,
 ]
 

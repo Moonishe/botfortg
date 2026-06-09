@@ -133,17 +133,20 @@ async def key_rotation_loop() -> None:
             async with get_session() as session:
                 await mgr.load_from_db(session)
                 if mgr.active_key_id is None:
-                    # Первый запуск: создаём начальный DEK
+                    # Первый запуск: создаём начальный DEK.
+                    # Запрашиваем MAX(key_id) из БД вместо хардкода 1,
+                    # чтобы избежать перезаписи старого DEK, оставшегося
+                    # от предыдущего развёртывания.
                     logger.info("Первый запуск ротации — создаю начальный DEK")
                     new_dek = mgr._generate_dek()
-                    # RISK: hardcoded key_id=1. If an old DEK with key_id=1
-                    # already exists in DB (e.g. from a previous deployment
-                    # that was not properly cleaned), save_to_db() will
-                    # silently overwrite it, causing data loss for any
-                    # secrets still encrypted with the old DEK.
-                    # Mitigation: load_from_db() should have restored
-                    # active_key_id from DB if one existed.
-                    key_id = 1
+                    from sqlalchemy import select, func
+                    from src.db.models._encryption import EncryptionKey
+
+                    max_result = await session.execute(
+                        select(func.max(EncryptionKey.key_id))
+                    )
+                    max_id = max_result.scalar()
+                    key_id = (max_id or 0) + 1
                     mgr._deks[key_id] = new_dek
                     mgr._active_key_id = key_id
                     encrypted_dek = mgr._encrypt_dek(new_dek)

@@ -44,77 +44,94 @@ async def apply_persona_changes(telegram_id: int, changes: dict):
         if changes:
             await update_persona(session, p, **changes)
 
+        # Capture persona values BEFORE session exits to avoid
+        # accessing detached ORM attributes after session close.
+        p_brevity = p.brevity
+        p_formality = p.formality
+        p_initiative = p.initiative
+        p_preferred_format = p.preferred_format
+        p_max_response_len = p.max_response_len
+        p_work_mode = p.work_mode
+        p_base_tone = p.base_tone
+        p_warmth = p.warmth
+        p_enthusiasm = p.enthusiasm
+        p_headings_lists = p.headings_lists
+        p_emoji_level = p.emoji_level
+        p_emoji_usage = p.emoji_usage
+        p_alias = p.alias
+        p_custom_instructions = p.custom_instructions
+
     rules = []
-    if p.brevity == "short":
+    if p_brevity == "short":
         rules.append("отвечай коротко (1-2 предложения)")
-    elif p.brevity == "detailed":
+    elif p_brevity == "detailed":
         rules.append("отвечай подробно")
-    if p.formality == "formal":
+    if p_formality == "formal":
         rules.append("формальный тон, на «вы»")
-    elif p.formality == "casual":
+    elif p_formality == "casual":
         rules.append("очень неформально, с юмором")
-    if p.initiative == "proactive":
+    if p_initiative == "proactive":
         rules.append("проявляй инициативу — предлагай, напоминай, спрашивай")
-    elif p.initiative == "reactive":
+    elif p_initiative == "reactive":
         rules.append("только отвечай на вопросы, не предлагай сам")
-    if p.preferred_format == "bullets":
+    if p_preferred_format == "bullets":
         rules.append("форматируй списком")
-    elif p.preferred_format == "numbered":
+    elif p_preferred_format == "numbered":
         rules.append("нумеруй пункты")
-    if p.max_response_len:
-        rules.append(f"ответ не длиннее {p.max_response_len} символов")
-    if p.work_mode == "focus":
+    if p_max_response_len:
+        rules.append(f"ответ не длиннее {p_max_response_len} символов")
+    if p_work_mode == "focus":
         rules.append("режим фокуса — не отвлекай, только срочное")
-    elif p.work_mode == "relax":
+    elif p_work_mode == "relax":
         rules.append("режим отдыха — только приятное общение")
 
     # -- Новые поля личности (ChatGPT-style) --
 
     # Базовый тон
-    if p.base_tone and p.base_tone != "default":
-        tone_prompt = BASE_TONE_PROMPTS.get(p.base_tone, "")
+    if p_base_tone and p_base_tone != "default":
+        tone_prompt = BASE_TONE_PROMPTS.get(p_base_tone, "")
         if tone_prompt:
             rules.append(tone_prompt)
 
     # Теплота
-    if p.warmth and p.warmth != "normal":
-        warmth_text = LEVEL_PROMPTS["warmth"].get(p.warmth, "")
+    if p_warmth and p_warmth != "normal":
+        warmth_text = LEVEL_PROMPTS["warmth"].get(p_warmth, "")
         if warmth_text:
             rules.append(warmth_text)
 
     # Энтузиазм
-    if p.enthusiasm and p.enthusiasm != "normal":
-        enthusiasm_text = LEVEL_PROMPTS["enthusiasm"].get(p.enthusiasm, "")
+    if p_enthusiasm and p_enthusiasm != "normal":
+        enthusiasm_text = LEVEL_PROMPTS["enthusiasm"].get(p_enthusiasm, "")
         if enthusiasm_text:
             rules.append(enthusiasm_text)
 
     # Заголовки/списки
-    if p.headings_lists and p.headings_lists != "normal":
-        hl_text = LEVEL_PROMPTS["headings_lists"].get(p.headings_lists, "")
+    if p_headings_lists and p_headings_lists != "normal":
+        hl_text = LEVEL_PROMPTS["headings_lists"].get(p_headings_lists, "")
         if hl_text:
             rules.append(hl_text)
 
     # Эмодзи: новое поле emoji_level имеет приоритет над старым emoji_usage
-    if p.emoji_level and p.emoji_level != "normal":
-        emoji_text = LEVEL_PROMPTS["emoji_level"].get(p.emoji_level, "")
+    if p_emoji_level and p_emoji_level != "normal":
+        emoji_text = LEVEL_PROMPTS["emoji_level"].get(p_emoji_level, "")
         if emoji_text:
             rules.append(emoji_text)
     else:
         # Старое поле — только если emoji_level не переопределён
-        if p.emoji_usage == "none":
+        if p_emoji_usage == "none":
             rules.append("НЕ используй эмодзи")
-        elif p.emoji_usage == "minimal":
+        elif p_emoji_usage == "minimal":
             rules.append("минимум эмодзи")
-        elif p.emoji_usage == "rich":
+        elif p_emoji_usage == "rich":
             rules.append("используй больше эмодзи")
 
     # Обращение
-    if p.alias:
-        rules.append(f"обращайся ко мне «{p.alias}»")
+    if p_alias:
+        rules.append(f"обращайся ко мне «{p_alias}»")
 
     # Пользовательские инструкции (свободный текст)
-    if p.custom_instructions:
-        rules.append(f"ДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ ВЛАДЕЛЬЦА:\n{p.custom_instructions}")
+    if p_custom_instructions:
+        rules.append(f"ДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ ВЛАДЕЛЬЦА:\n{p_custom_instructions}")
 
     if not rules:
         result = ""

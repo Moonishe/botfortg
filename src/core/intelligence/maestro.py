@@ -144,6 +144,14 @@ async def _execute_one_tool(
             except Exception:
                 tool_result = {"error": f"DB/ORM error for tool '{tool_name}'"}
 
+        # Clean up closed session references after async with exits.
+        # The session is closed when the context manager exits, but
+        # runtime_kwargs still holds references.  The fallback below
+        # must NOT receive a closed session.
+        runtime_kwargs.pop("session", None)
+        runtime_kwargs.pop("user", None)
+        runtime_kwargs.pop("client", None)
+
         if tool_result is None:
             try:
                 tool_result = await tool_registry.execute(

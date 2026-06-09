@@ -57,18 +57,21 @@ class PairingManager:
         with self._lock:
             if sender_id in self._pending and self._pending[sender_id] == code:
                 self._allowlist.add(sender_id)
-                del self._pending[sender_id]
                 logger.info("Pairing approved: sender %d", sender_id)
                 approved = True
             else:
                 approved = False
         if approved:
-            # Persist to DB
+            # Persist to DB BEFORE removing from _pending.
+            # If DB write fails the pairing code is preserved for retry.
             try:
                 async with get_session() as session:
                     from src.db.repo import add_allowed_contact
 
                     await add_allowed_contact(session, sender_id)
+                # Only clean up pending after successful DB persist.
+                with self._lock:
+                    self._pending.pop(sender_id, None)
             except Exception:
                 logger.exception("Failed to persist pairing")
                 # Откат in-memory состояния при ошибке БД

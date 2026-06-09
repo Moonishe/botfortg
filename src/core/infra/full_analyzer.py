@@ -42,6 +42,13 @@ class AnalysisResult:
     details: list[str] = field(default_factory=list)
 
 
+async def list_memories(session, user, *, contact_id=None):
+    """Локальная обёртка — импортирует repo.list_memories."""
+    from src.db.repo import list_memories as _list_memories
+
+    return await _list_memories(session, user, contact_id=contact_id)
+
+
 async def run_full_analysis(
     owner_id: int,
     provider,
@@ -301,13 +308,6 @@ async def run_full_analysis(
         )
 
     return result
-
-
-async def list_memories(session, user, *, contact_id=None):
-    """Локальная обёртка — импортирует repo.list_memories."""
-    from src.db.repo import list_memories as _list_memories
-
-    return await _list_memories(session, user, contact_id=contact_id)
 
 
 def format_analysis_report(result: AnalysisResult) -> str:

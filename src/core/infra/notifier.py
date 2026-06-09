@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from src.config import settings
 from src.core.infra._retry import send_with_retry
+from src.core.infra.task_manager import track_ff
 
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ class Notifier:
         # Flush buffered notifications
         if self._buffer:
             logger.info("Flushing %d buffered notifications", len(self._buffer))
-            asyncio.create_task(self._flush_buffer())
+            track_ff(asyncio.create_task(self._flush_buffer()))
 
     async def _flush_buffer(self) -> None:
         while self._buffer:
