@@ -37,7 +37,14 @@ def _compute_hmac(action_id: int) -> str:
 async def add_pending_question(
     session: AsyncSession, owner_id: int, question: str
 ) -> None:
-    session.add(PendingQuestion(owner_id=owner_id, question=question))
+    """Queue a pending question with 24h TTL to prevent stale accumulation."""
+    session.add(
+        PendingQuestion(
+            owner_id=owner_id,
+            question=question,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+    )
     await session.flush()
 
 

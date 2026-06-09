@@ -200,10 +200,10 @@ class Notification(Base):
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     flushed_at: Mapped[datetime | None] = mapped_column(
-        DateTime, nullable=True, index=True
+        DateTime(timezone=True), nullable=True, index=True
     )
 
     # Приоритеты как константы

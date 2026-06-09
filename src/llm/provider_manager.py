@@ -404,15 +404,34 @@ async def ensure_locks_initialized() -> None:
         _locks_initialized = True
 
 
-async def acquire_purpose_slot(purpose: str) -> asyncio.Semaphore:
-    """Захватывает слот для purpose. Возвращает семафор."""
+async def acquire_purpose_slot(
+    purpose: str, timeout: float = 120.0
+) -> asyncio.Semaphore:
+    """Захватывает слот для purpose с таймаутом. Возвращает семафор.
+
+    Если purpose-семафор не освобождается за *timeout* секунд
+    (все слоты заняты и не возвращаются — deadlock/stuck),
+    переключается на fallback-семафор с собственным acquire.
+    """
     if _PURPOSE_SEMAPHORES is None:
         raise RuntimeError("ensure_locks_initialized() must be called at startup")
     sem = _PURPOSE_SEMAPHORES.get(purpose)
     if sem is None:
         sem = _PURPOSE_SEMAPHORES.get("fallback", asyncio.Semaphore(1))
-    await sem.acquire()
-    return sem
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=timeout)
+        return sem
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Timed out waiting for '%s' purpose slot (%.0fs), using fallback",
+            purpose,
+            timeout,
+        )
+        fallback = _PURPOSE_SEMAPHORES.get("fallback")
+        if fallback is None:
+            fallback = asyncio.Semaphore(1)
+        await fallback.acquire()
+        return fallback
 
 
 def release_purpose_slot(sem: asyncio.Semaphore) -> None:

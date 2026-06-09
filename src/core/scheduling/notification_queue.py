@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 from sqlalchemy import select, update
 
 from src.core.infra.notifier import notifier
+from src.core.infra.timeutil import ensure_utc
 from src.db.models import Notification
 from src.db.session import SessionLocal
 
@@ -120,11 +121,17 @@ class NotificationQueue:
                 return 0
 
             # Разделяем: свежие (в окне) — группируем, старые — отправляем по одному
-            window_start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            window_start = datetime.now(timezone.utc) - timedelta(
                 seconds=self._window_seconds
             )
-            fresh = [n for n in pending if n.created_at >= window_start]
-            stale = [n for n in pending if n.created_at < window_start]
+            fresh: list[Notification] = []
+            stale: list[Notification] = []
+            for n in pending:
+                created = ensure_utc(n.created_at)
+                if created is not None and created >= window_start:
+                    fresh.append(n)
+                else:
+                    stale.append(n)
 
             # Группировка свежих по (topic, priority_bucket)
             groups: dict[str, list[Notification]] = defaultdict(list)
@@ -164,7 +171,7 @@ class NotificationQueue:
                     update(Notification)
                     .where(Notification.id.in_(ids))
                     .values(
-                        flushed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        flushed_at=datetime.now(timezone.utc),
                     )
                 )
 
@@ -307,9 +314,7 @@ class NotificationQueue:
 
     async def cleanup_expired(self) -> int:
         """Удаляет уведомления старше TTL (включая отправленные). Возвращает количество удалённых."""
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-            hours=self._ttl_hours
-        )
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self._ttl_hours)
         async with SessionLocal() as session:
             result = await session.execute(
                 select(Notification).where(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import (
     BigInteger,
@@ -216,7 +216,11 @@ class LlmKeySlotModel(Base):
 
 
 class PendingQuestion(Base):
-    """Pending questions queued during async reply generation."""
+    """Pending questions queued during async reply generation.
+
+    Questions automatically expire after 24 hours to prevent unbounded
+    accumulation when the agent fails to consume them.
+    """
 
     __tablename__ = "pending_questions"
 
@@ -225,4 +229,8 @@ class PendingQuestion(Base):
     question: Mapped[str] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc) + timedelta(hours=24),
     )

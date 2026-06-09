@@ -138,7 +138,6 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
     except Exception:
         logger.debug("Persona auto-rebuild skipped (non-critical)", exc_info=True)
 
-    await session.commit()
     logger.debug(
         "Background saved %d/%d facts for user %d",
         len(saved_by_index),

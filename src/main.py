@@ -237,60 +237,60 @@ async def main() -> None:
         _tick = 0
         while True:
             await asyncio.sleep(_CLEANUP_INTERVAL)
-            # Cleanup stale circuit breakers every 300s (5 min)
-            _tick += 1
-            if _tick >= _CLEANUP_TICK_INTERVAL:
-                _tick = 0
-                try:
-                    from src.llm.router import cleanup_circuit_breakers
+            # Cleanup stale circuit breakers + PendingAction + WorkingMemory
+            # every _CLEANUP_TICK_INTERVAL * _CLEANUP_INTERVAL = 300s (5 min).
+            _tick = (_tick + 1) % _CLEANUP_TICK_INTERVAL
+            if _tick != 0:
+                continue
+            # --- Circuit breaker cleanup ---
+            try:
+                from src.llm.router import cleanup_circuit_breakers
 
-                    removed = await cleanup_circuit_breakers()
-                    if removed:
+                removed = await cleanup_circuit_breakers()
+                if removed:
+                    logger.info(
+                        "Circuit breaker cleanup: removed %d stale entries",
+                        removed,
+                    )
+            except Exception:
+                logger.debug("circuit_breaker cleanup failed", exc_info=True)
+            # --- PendingAction cleanup ---
+            try:
+                from src.db.repo import cleanup_expired_actions
+                from src.db.session import get_session
+
+                async with get_session() as _cleanup_sess:
+                    removed_pa = await cleanup_expired_actions(_cleanup_sess)
+                    if removed_pa:
                         logger.info(
-                            "Circuit breaker cleanup: removed %d stale entries",
-                            removed,
+                            "PendingAction cleanup: removed %d expired", removed_pa
                         )
-                except Exception:
-                    logger.debug("circuit_breaker cleanup failed", exc_info=True)
-            # Очистка просроченных PendingAction (каждые 5 минут, вместе с circuit_breaker)
-            if _tick == 0:
-                try:
-                    from src.db.repo import cleanup_expired_actions
-                    from src.db.session import get_session
+            except Exception:
+                logger.debug("pending_action cleanup failed", exc_info=True)
+            # --- WorkingMemory cleanup ---
+            try:
+                from datetime import datetime, timezone
 
-                    async with get_session() as _cleanup_sess:
-                        removed_pa = await cleanup_expired_actions(_cleanup_sess)
-                        if removed_pa:
-                            logger.info(
-                                "PendingAction cleanup: removed %d expired", removed_pa
-                            )
-                except Exception:
-                    logger.debug("pending_action cleanup failed", exc_info=True)
-            # Очистка истёкшей рабочей памяти (scratchpad) — каждые 5 минут
-            if _tick == 0:
-                try:
-                    from datetime import datetime, timezone
+                from sqlalchemy import delete
 
-                    from sqlalchemy import delete
+                from src.db.models._memory import WorkingMemory
+                from src.db.session import get_session
 
-                    from src.db.models._memory import WorkingMemory
-                    from src.db.session import get_session
-
-                    async with get_session() as _wm_sess:
-                        now = datetime.now(timezone.utc)
-                        result = await _wm_sess.execute(
-                            delete(WorkingMemory).where(
-                                WorkingMemory.expires_at.isnot(None),
-                                WorkingMemory.expires_at < now,
-                            )
+                async with get_session() as _wm_sess:
+                    now = datetime.now(timezone.utc)
+                    result = await _wm_sess.execute(
+                        delete(WorkingMemory).where(
+                            WorkingMemory.expires_at.isnot(None),
+                            WorkingMemory.expires_at < now,
                         )
-                        removed_wm = result.rowcount
-                        if removed_wm:
-                            logger.info(
-                                "WorkingMemory cleanup: removed %d expired", removed_wm
-                            )
-                except Exception:
-                    logger.debug("working_memory cleanup failed", exc_info=True)
+                    )
+                    removed_wm = result.rowcount
+                    if removed_wm:
+                        logger.info(
+                            "WorkingMemory cleanup: removed %d expired", removed_wm
+                        )
+            except Exception:
+                logger.debug("working_memory cleanup failed", exc_info=True)
 
     _cleanup_task = asyncio.create_task(_cleanup_global_state())
     _update_check_task = asyncio.create_task(check_and_notify_update())
@@ -573,7 +573,20 @@ def run() -> None:
         executor.shutdown(wait=True, cancel_futures=False)
         executor.shutdown(wait=False, cancel_futures=True)
 
-    asyncio.run(main())
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop — normal startup path
+        asyncio.run(main())
+    else:
+        # Event loop already running (e.g. called from Jupyter, tests,
+        # or another async context).  asyncio.run() would crash here.
+        # Schedule main() as a task in the existing loop instead.
+        logger.warning(
+            "run() called while event loop is already running. "
+            "Scheduling main() as a background task."
+        )
+        _loop.create_task(main())
 
 
 if __name__ == "__main__":
