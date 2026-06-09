@@ -366,6 +366,19 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
                     session.add(alert)
                     alerts_created += 1
 
+                    # LLM-саммари, если включено в actions правила
+                    if (rule.actions or {}).get("llm_summary"):
+                        try:
+                            from src.core.monitor.analyzer import summarize_message
+
+                            summary = await summarize_message(
+                                msg_dict.get("text") or "",
+                                (source.title if source else None) or "unknown",
+                            )
+                            alert.summary = summary
+                        except Exception:
+                            logger.debug("LLM summary failed for alert", exc_info=True)
+
         await status_msg.edit_text(
             f"📥 <b>Фетч завершён: {sanitize_html(source.title)}</b>\n\n"
             f"📨 Сообщений: <b>{len(msgs)}</b>\n"

@@ -418,6 +418,7 @@ async def _reflect_single_episode(
 
         # Сохраняем факты
         saved: list[str] = []
+        saved_memories: list[MemoryModel] = []
         from src.db.models._memory import Memory as MemoryModel
 
         for fact_text in facts[:5]:  # не больше 5 новых фактов за эпизод
@@ -430,19 +431,22 @@ async def _reflect_single_episode(
                     confidence=0.4,  # ниже чем у прямого извлечения
                 )
                 session.add(memory)
+                saved_memories.append(memory)
                 saved.append(fact_text)
             except Exception:
                 logger.debug("Failed to save reflected fact", exc_info=True)
 
         await session.flush()
 
-        # Обновляем episode.memory_ids
-        if saved:
-            existing_ids = json.loads(episode.memory_ids) if episode.memory_ids else []
-            # Добавляем новые ID (после flush у memory появится id)
-            # ... IDs сложно получить после flush без повторного запроса.
-            # Для MVP: обновим флаг что рефлексия была.
-            pass
+        # Обновить memory_ids в эпизоде после успешной рефлексии
+        if saved_memories:
+            new_memory_ids = [m.id for m in saved_memories if m.id is not None]
+            if new_memory_ids:
+                ep = await session.get(Episode, episode.id)
+                if ep:
+                    existing = json.loads(ep.memory_ids or "[]")
+                    ep.memory_ids = json.dumps(existing + new_memory_ids)
+                    await session.flush()
 
         return saved
 
