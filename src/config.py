@@ -392,6 +392,12 @@ class Settings(BaseSettings):
     recall_mmr_lambda: float = Field(
         0.7, description="MMR lambda (relevance vs diversity)"
     )
+    recall_worldview_boost_enabled: bool = Field(
+        True, description="Буст фактов по worldview"
+    )
+    recall_worldview_boost_factor: float = Field(
+        0.10, description="Коэффициент буста (0.0-1.0)"
+    )
 
     # ── Ebbinghaus retention scoring ──
     ebbinghaus_decay_base: float = Field(

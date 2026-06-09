@@ -34,7 +34,6 @@ from sqlalchemy import select
 from src.db.models import Memory, MemoryLink
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
-from src.core.memory.memory_chain import follow_supersedes_chain
 
 logger = logging.getLogger(__name__)
 
@@ -293,21 +292,34 @@ async def analyze(
         # 4. Генерируем инсайты из найденных фактов
         analysis = await _generate_insights(analysis, bfs_nodes, all_links)
 
-        # 5. Supersedes-цепочки
+        # 5. Supersedes-цепочки (через Evolution Chain)
         if include_chains:
-            # Ищем supersedes-связи среди найденных узлов
-            superseded_sources = {
-                link["from"]
-                for link in all_links
-                if link["type"] in ("supersedes", "superseded_by")
-            }
-            for mid in superseded_sources:
-                try:
-                    chain = await follow_supersedes_chain(session, owner, mid)
-                    if len(chain) > 1:
-                        analysis.evolution_chains.append(chain)
-                except Exception:
-                    logger.debug("System2: chain failed for %d", mid, exc_info=True)
+            try:
+                from src.core.memory.evolution_chain import get_evolution_chain
+
+                evo_chains = await get_evolution_chain(
+                    owner_id,
+                    max_chains=5,  # макс 5 цепочек для сводки
+                )
+                for chain_result in evo_chains.chains:
+                    if chain_result.length > 1:
+                        # Преобразуем EvolutionChainItem → dict для совместимости
+                        chain_dicts = []
+                        for item in chain_result.chain:
+                            chain_dicts.append(
+                                {
+                                    "memory_id": item.memory_id,
+                                    "fact": item.fact,
+                                    "sentiment": item.sentiment,
+                                    "created_at": item.created_at,
+                                    "is_head": item.is_head,
+                                    "is_tail": item.is_tail,
+                                    "depth": item.depth,
+                                }
+                            )
+                        analysis.evolution_chains.append(chain_dicts)
+            except Exception:
+                logger.debug("System2: evolution chain failed", exc_info=True)
 
         # 6. Противоречия
         if include_contradictions:

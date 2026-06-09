@@ -695,6 +695,34 @@ async def recall(
                                 )
                                 seen_ids.add(m.id)
 
+                    # --- WORLDVIEW BOOST ---
+                    if (
+                        getattr(settings, "recall_worldview_boost_enabled", False)
+                        and fused
+                    ):
+                        try:
+                            from src.core.memory.user_worldview import (
+                                build_worldview,
+                                boost_facts_by_worldview,
+                            )
+
+                            if mode in ("normal", "deep"):
+                                worldview = await build_worldview(telegram_id)
+                                if worldview and worldview.categories:
+                                    boost_facts_by_worldview(
+                                        hybrid_ranked,
+                                        worldview,
+                                        boost=getattr(
+                                            settings,
+                                            "recall_worldview_boost_factor",
+                                            0.10,
+                                        ),
+                                    )
+                        except Exception:
+                            logger.debug(
+                                "Worldview boost failed (non-critical)", exc_info=True
+                            )
+
                     # MMR rerank: balance relevance vs diversity
                     if len(hybrid_ranked) > 2:
                         mmr_input = [

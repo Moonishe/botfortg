@@ -1,7 +1,10 @@
 """Memory Health Score — единый балл здоровья памяти 0-100."""
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Optional
 from sqlalchemy import func, select
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, list_memories, list_contacts
@@ -315,3 +318,312 @@ async def compute_emotional_trend(owner_id: int) -> str | None:
         return "📉 Эмоциональный тренд: растёт напряжение ⚠️"
     else:
         return "➖ Эмоциональный тренд: стабильно"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Health Recommendations — actionable suggestions
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class RecommendationSeverity(str, Enum):
+    """Уровень критичности рекомендации."""
+
+    CRITICAL = "critical"  # требует немедленного внимания
+    WARNING = "warning"  # рекомендуется исправить
+    INFO = "info"  # информационная, nice-to-have
+
+
+@dataclass
+class HealthRecommendation:
+    """Одна рекомендация по улучшению здоровья памяти.
+
+    Attributes:
+        severity: Уровень критичности.
+        category: Категория (freshness, coverage, structure, tags, retention, graph).
+        title: Краткий заголовок рекомендации.
+        description: Развёрнутое описание и конкретные действия.
+        metric_name: Имя метрики, на которой основана рекомендация.
+        current_value: Текущее значение метрики.
+        threshold: Пороговое значение, ниже которого рекомендация активна.
+    """
+
+    severity: RecommendationSeverity
+    category: str
+    title: str
+    description: str
+    metric_name: str = ""
+    current_value: float = 0.0
+    threshold: float = 0.0
+
+
+def generate_recommendations(
+    health: dict,
+    *,
+    stale_fact_ratio: Optional[float] = None,
+    graph_density: Optional[float] = None,
+    orphan_ratio: Optional[float] = None,
+) -> list[HealthRecommendation]:
+    """Генерирует actionable-рекомендации на основе метрик здоровья памяти.
+
+    Анализирует переданные метрики и возвращает список конкретных рекомендаций
+    по улучшению качества памяти: свежесть, покрытие, структура, теги,
+    связность графа, retention, противоречия.
+
+    Args:
+        health: Результат `calculate_health_score()` — словарь с ключами:
+            score, confidence_score, coverage_score, freshness_score,
+            structure_score, tag_score, retention_score, total_facts,
+            total_contacts, contacts_with_facts, diagnostics.
+        stale_fact_ratio: Доля устаревших фактов (>30 дней). Вычисляется как
+            (1 - freshness_score/100). Если None — вычисляется из health.
+        graph_density: Плотность графа памяти (avg_degree / node_count).
+            Если None — рекомендации по графу не генерируются.
+        orphan_ratio: Доля контактов-сирот (без фактов). Вычисляется как
+            (1 - coverage_score/100). Если None — вычисляется из health.
+
+    Returns:
+        Список HealthRecommendation (может быть пустым, если всё хорошо).
+    """
+    recommendations: list[HealthRecommendation] = []
+
+    # ── Вычисляем производные метрики, если не переданы ──
+    freshness_score = health.get("freshness_score", 100.0)
+    _stale: float = (
+        stale_fact_ratio
+        if stale_fact_ratio is not None
+        else 1.0 - (freshness_score / 100.0)
+    )
+
+    coverage_score = health.get("coverage_score", 100.0)
+    _orphan: float = (
+        orphan_ratio if orphan_ratio is not None else 1.0 - (coverage_score / 100.0)
+    )
+
+    # ── 1. Свежесть (stale_fact_ratio) ──
+    if _stale > 0.7:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.CRITICAL,
+                category="freshness",
+                title="Критически низкая свежесть памяти",
+                description=(
+                    f"{_stale:.0%} фактов старше 30 дней. "
+                    "Память застаивается — новые взаимодействия не фиксируются. "
+                    "Рекомендуется: проверить работу экстрактора фактов, "
+                    "увеличить частоту общения с контактами, "
+                    "запустить принудительное извлечение фактов из истории."
+                ),
+                metric_name="stale_fact_ratio",
+                current_value=_stale,
+                threshold=0.7,
+            )
+        )
+    elif _stale > 0.4:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.WARNING,
+                category="freshness",
+                title="Свежесть памяти ниже нормы",
+                description=(
+                    f"{_stale:.0%} фактов устарели. "
+                    "Рекомендуется: активизировать диалоги с контактами, "
+                    "проверить настройки авто-сохранения фактов, "
+                    "использовать `/memory extract` для принудительного обновления."
+                ),
+                metric_name="stale_fact_ratio",
+                current_value=_stale,
+                threshold=0.4,
+            )
+        )
+
+    # ── 2. Покрытие / сироты (orphan_ratio) ──
+    if _orphan > 0.8:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.CRITICAL,
+                category="coverage",
+                title="Большинство контактов — «сироты» без фактов",
+                description=(
+                    f"{_orphan:.0%} контактов не имеют ни одного факта в памяти. "
+                    "Рекомендуется: написать/позвонить контактам-сиротам, "
+                    "импортировать историю переписки, "
+                    "вручную добавить ключевые факты через `/memory add`."
+                ),
+                metric_name="orphan_ratio",
+                current_value=_orphan,
+                threshold=0.8,
+            )
+        )
+    elif _orphan > 0.5:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.WARNING,
+                category="coverage",
+                title="Много контактов без фактов",
+                description=(
+                    f"{_orphan:.0%} контактов не охвачены памятью. "
+                    "Рекомендуется: проверить контакты без фактов через `/contacts orphans`, "
+                    "запустить анализ истории чатов."
+                ),
+                metric_name="orphan_ratio",
+                current_value=_orphan,
+                threshold=0.5,
+            )
+        )
+
+    # ── 3. Структурированность ──
+    structure_score = health.get("structure_score", 0.0)
+    if structure_score < 10.0 and health.get("total_facts", 0) > 10:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.WARNING,
+                category="structure",
+                title="Мало distillation-фактов — память не структурирована",
+                description=(
+                    f"Структурированность: {structure_score:.0f}/100. "
+                    "Рекомендуется: запустить distillation пайплайн "
+                    "(`/memory distill`), увеличить приоритет извлечения "
+                    "глубинных фактов в настройках."
+                ),
+                metric_name="structure_score",
+                current_value=structure_score,
+                threshold=10.0,
+            )
+        )
+
+    # ── 4. Теги ──
+    tag_score = health.get("tag_score", 100.0)
+    if tag_score < 30.0 and health.get("total_facts", 0) > 5:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.WARNING,
+                category="tags",
+                title="Низкое покрытие тегами — поиск неэффективен",
+                description=(
+                    f"Теги: {tag_score:.0f}/100. "
+                    "Рекомендуется: включить авто-тегирование в настройках, "
+                    "добавить теги к ключевым фактам вручную, "
+                    "запустить ретроспективное тегирование."
+                ),
+                metric_name="tag_score",
+                current_value=tag_score,
+                threshold=30.0,
+            )
+        )
+
+    # ── 5. Retention ──
+    retention_score = health.get("retention_score", 100.0)
+    if retention_score < 30.0:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.CRITICAL,
+                category="retention",
+                title="Критически низкая сохранность фактов",
+                description=(
+                    f"Retention: {retention_score:.0f}/100 — факты быстро забываются. "
+                    "Рекомендуется: увеличить частоту повторения "
+                    "(Ebbinghaus intervals), уменьшить порог авто-забывания, "
+                    "проверить настройки `auto_forget_threshold` и "
+                    "`ebbinghaus_decay_base`."
+                ),
+                metric_name="retention_score",
+                current_value=retention_score,
+                threshold=30.0,
+            )
+        )
+    elif retention_score < 60.0:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.WARNING,
+                category="retention",
+                title="Сохранность фактов ниже нормы",
+                description=(
+                    f"Retention: {retention_score:.0f}/100. "
+                    "Рекомендуется: настроить интервалы повторения, "
+                    "проверить работу dreaming_reval для укрепления памяти."
+                ),
+                metric_name="retention_score",
+                current_value=retention_score,
+                threshold=60.0,
+            )
+        )
+
+    # ── 6. Плотность графа ──
+    if graph_density is not None:
+        if graph_density < 0.5:
+            recommendations.append(
+                HealthRecommendation(
+                    severity=RecommendationSeverity.WARNING,
+                    category="graph",
+                    title="Низкая плотность графа памяти",
+                    description=(
+                        f"Плотность графа: {graph_density:.2f} — "
+                        "факты слабо связаны между собой. "
+                        "Рекомендуется: запустить memory_clusterer, "
+                        "проверить работу relation_extractor, "
+                        "добавить перекрёстные ссылки между фактами."
+                    ),
+                    metric_name="graph_density",
+                    current_value=graph_density,
+                    threshold=0.5,
+                )
+            )
+        elif graph_density > 5.0:
+            recommendations.append(
+                HealthRecommendation(
+                    severity=RecommendationSeverity.INFO,
+                    category="graph",
+                    title="Граф памяти переуплотнён",
+                    description=(
+                        f"Плотность графа: {graph_density:.2f} — "
+                        "слишком много связей может указывать на шум. "
+                        "Рекомендуется: проверить качество связей через "
+                        "`/memory contradictions`, запустить дедупликацию."
+                    ),
+                    metric_name="graph_density",
+                    current_value=graph_density,
+                    threshold=5.0,
+                )
+            )
+
+    # ── 7. Confidence ──
+    confidence_score = health.get("confidence_score", 100.0)
+    if confidence_score < 40.0:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.WARNING,
+                category="confidence",
+                title="Низкая уверенность в фактах",
+                description=(
+                    f"Confidence: {confidence_score:.0f}/100. "
+                    "Рекомендуется: перепроверить факты с низким confidence, "
+                    "увеличить порог извлечения (`extract_priority_threshold`), "
+                    "подтвердить или опровергнуть сомнительные факты."
+                ),
+                metric_name="confidence_score",
+                current_value=confidence_score,
+                threshold=40.0,
+            )
+        )
+
+    # ── 8. Пустой граф ──
+    total_facts = health.get("total_facts", 0)
+    if total_facts == 0:
+        recommendations.append(
+            HealthRecommendation(
+                severity=RecommendationSeverity.CRITICAL,
+                category="general",
+                title="Память пуста — нет ни одного факта",
+                description=(
+                    "В памяти нет ни одного активного факта. "
+                    "Рекомендуется: проверить подключение к БД, "
+                    "импортировать историю чатов, "
+                    "начать активное общение для накопления фактов."
+                ),
+                metric_name="total_facts",
+                current_value=0.0,
+                threshold=1.0,
+            )
+        )
+
+    return recommendations

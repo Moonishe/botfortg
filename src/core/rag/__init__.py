@@ -13,6 +13,17 @@ from src.core.rag.ingest import (
     delete_document,
     rebuild_index,
 )
+from src.core.rag.types import (
+    ResearchRequest,
+    ResearchResult,
+    ResearchSource,
+    ResearchStatus,
+    ResearchTopic,
+)
+from src.core.rag.deep_research_pipeline import (
+    DeepResearchPipeline,
+    get_deep_research_pipeline,
+)
 
 __all__ = [
     "chunk_text",
@@ -25,4 +36,11 @@ __all__ = [
     "get_ingested_documents",
     "delete_document",
     "rebuild_index",
+    "ResearchRequest",
+    "ResearchResult",
+    "ResearchSource",
+    "ResearchStatus",
+    "ResearchTopic",
+    "DeepResearchPipeline",
+    "get_deep_research_pipeline",
 ]

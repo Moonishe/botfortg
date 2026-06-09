@@ -396,3 +396,46 @@ async def build_worldview(owner_id: int) -> UserWorldview:
             worldview.health_summary = {"score": -1, "error": "unavailable"}
 
     return worldview
+
+
+def get_top_categories(worldview, top_n=3) -> list[str]:
+    """Top-N категорий по количеству фактов."""
+    if not worldview or not worldview.categories:
+        return []
+    scored = [(cat, len(facts)) for cat, facts in worldview.categories.items() if facts]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [cat for cat, _ in scored[:top_n]]
+
+
+def boost_facts_by_worldview(facts: list, worldview, boost: float = 0.10) -> list:
+    """Повышает score фактов из топ-категорий worldview. In-place."""
+    if not worldview or not boost:
+        return facts
+    top_cats = get_top_categories(worldview, top_n=3)
+    if not top_cats:
+        return facts
+    keywords = set()
+    for cat in top_cats:
+        cat_keywords = CATEGORY_KEYWORDS.get(cat, [])
+        keywords.update(cat_keywords)
+    if not keywords:
+        return facts
+    for fact_item in facts:
+        fact_text = ""
+        if hasattr(fact_item, "fact"):
+            fact_text = fact_item.fact
+        elif isinstance(fact_item, dict):
+            fact_text = fact_item.get("fact", "")
+        if not fact_text:
+            continue
+        fact_lower = fact_text.lower()
+        for kw in keywords:
+            if kw in fact_lower:
+                if hasattr(fact_item, "confidence"):
+                    fact_item.confidence = min(1.0, fact_item.confidence + boost)
+                elif isinstance(fact_item, dict):
+                    fact_item["confidence"] = min(
+                        1.0, fact_item.get("confidence", 0.5) + boost
+                    )
+                break
+    return facts

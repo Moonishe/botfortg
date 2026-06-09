@@ -72,6 +72,7 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_planner",
     "src.core.actions.mcp_reasoning",
     "src.core.actions.mcp_agent",
+    "src.core.actions.mcp_deep_research",
 )
 
 _BUILTINS_REGISTERED = False
