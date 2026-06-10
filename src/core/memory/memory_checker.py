@@ -124,7 +124,7 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                         elif mem.memory_type == "contact_fact":
                             type_mult = 1.2
 
-                        conf = mem.confidence or 0.5
+                        conf = mem.confidence if mem.confidence is not None else 0.5
                         new_conf = conf * (base_decay * use_mult * type_mult)
 
                         if new_conf < 0.2:  # забылся

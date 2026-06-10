@@ -527,14 +527,25 @@ class VectorStore:
                 import shutil
 
                 qdrant_dir = settings.data_dir / "qdrant"
+                known_dim = self._dim or settings.embedding_dim
                 async with self._lock:
                     self._client.close()
-                shutil.rmtree(str(qdrant_dir), ignore_errors=True)
-                qdrant_dir.mkdir(parents=True, exist_ok=True)
-                async with self._lock:
+                    shutil.rmtree(str(qdrant_dir), ignore_errors=True)
+                    qdrant_dir.mkdir(parents=True, exist_ok=True)
                     self._client = QdrantClient(path=str(qdrant_dir))
-                known_dim = self._dim or settings.embedding_dim
-                await self._ensure_collection(known_dim)
+
+                    def _create_collection() -> None:
+                        self._client.create_collection(
+                            COLLECTION,
+                            vectors_config=qmodels.VectorParams(
+                                size=known_dim, distance=qmodels.Distance.COSINE
+                            ),
+                        )
+
+                    await asyncio.to_thread(_create_collection)
+                    self._dim = known_dim
+                    self._reindex_required = False
+                    self._index_status = "ready"
                 logger.warning("Qdrant recovered — old data lost, re-index needed")
                 from src.core.scheduling.notification_queue import notification_queue
                 from src.db.models import Notification

@@ -4,6 +4,7 @@ from typing import Any
 
 from src.core.cache.manager import ManagedCache, cache_manager
 
+# NOTE: O(n) scan under lock. Acceptable for max_size=5000 single-user.
 _stats: ManagedCache[str, Any] = cache_manager.register(
     ManagedCache(name="stats", max_size=5000, default_ttl=300.0)
 )
