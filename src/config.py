@@ -337,7 +337,8 @@ class Settings(BaseSettings):
         0.3, description="Интервал обновления streaming (сек)"
     )
     streaming_update_interval: int = Field(
-        80, description="Edit message every N characters during streaming"
+        3,
+        description="Edit message every N characters during streaming (3 = typewriter effect)",
     )
     streaming_cursor: str = Field(" 🦊", description="Курсор при streaming")
 
