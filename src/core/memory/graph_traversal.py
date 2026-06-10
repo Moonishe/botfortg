@@ -323,6 +323,63 @@ async def search_entity(
         }
 
 
+async def get_related_entity_ids(
+    user_id: int,
+    entity_name: str,
+    hops: int = 1,
+) -> set[int]:
+    """Получить ID всех сущностей, связанных с entity_name, через BFS-обход.
+
+    Использует существующий traverse(), извлекает только ID узлов.
+
+    Args:
+        user_id: Telegram ID пользователя.
+        entity_name: Имя сущности для старта обхода (подстрока).
+        hops: Максимальное число шагов (по умолчанию 1).
+
+    Returns:
+        set[int] — ID связанных сущностей (включая стартовую).
+    """
+    graph = await traverse(user_id, entity_name, hops=hops)
+    ids: set[int] = set()
+    if graph and graph.get("ok"):
+        for node in graph.get("nodes", []):
+            if isinstance(node, dict):
+                eid = node.get("id")
+                if eid is not None:
+                    ids.add(eid)
+    return ids
+
+
+async def _get_entity_names_for_text(
+    user_id: int,
+    text: str,
+) -> list[str]:
+    """Быстрое извлечение имён сущностей из текста — поиск по подстроке среди известных сущностей пользователя.
+
+    Без LLM: keyword match по таблице Entity. Используется в recall для KG-буста.
+
+    Args:
+        user_id: Telegram ID пользователя.
+        text: Текст запроса для поиска имён сущностей.
+
+    Returns:
+        list[str] — до 5 имён сущностей, найденных в тексте.
+    """
+    if not text:
+        return []
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, user_id)
+        result = await session.execute(
+            select(Entity.name).where(Entity.user_id == owner.id)
+        )
+        known_names = [row[0] for row in result.all()]
+
+    text_lower = text.lower()
+    return [name for name in known_names if name.lower() in text_lower][:5]
+
+
 async def get_entity_by_name(
     user_id: int,
     name: str,

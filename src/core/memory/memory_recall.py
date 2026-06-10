@@ -234,6 +234,9 @@ class RecalledFact:
     contact_id: int | None = None
     layer: str = "recent"
     retention: float = 0.5  # Ebbinghaus retention score 0.0-1.0
+    entity_ids: list[int] | None = (
+        None  # ID сущностей KG, связанных с фактом (опционально)
+    )
 
 
 @dataclass
@@ -721,6 +724,67 @@ async def recall(
                         except Exception:
                             logger.debug(
                                 "Worldview boost failed (non-critical)", exc_info=True
+                            )
+
+                    # --- KNOWLEDGE GRAPH BOOST ---
+                    if getattr(settings, "recall_kg_boost_enabled", False) and fused:
+                        try:
+                            from src.core.memory.graph_traversal import (
+                                _get_entity_names_for_text,
+                                get_related_entity_ids,
+                            )
+                            from src.db.models._memory import Entity
+                            from sqlalchemy import select as sa_select
+
+                            if mode in ("normal", "deep") and query:
+                                # Быстрое извлечение имён сущностей из запроса
+                                # (keyword match по таблице Entity, без LLM)
+                                entity_names = await _get_entity_names_for_text(
+                                    telegram_id, query
+                                )
+
+                                if entity_names:
+                                    # Собираем ID связанных сущностей через BFS-обход KG
+                                    all_related_ids: set[int] = set()
+                                    for entity_name in entity_names[:3]:
+                                        related_ids = await get_related_entity_ids(
+                                            telegram_id, entity_name
+                                        )
+                                        all_related_ids.update(related_ids)
+
+                                    if all_related_ids:
+                                        # Получаем имена связанных сущностей
+                                        # для текстового матчинга фактов
+                                        _kg_result = await session.execute(
+                                            sa_select(Entity.name).where(
+                                                Entity.id.in_(all_related_ids)
+                                            )
+                                        )
+                                        related_names: list[str] = [
+                                            row[0] for row in _kg_result.all()
+                                        ]
+
+                                        # Буст фактов, чей текст содержит
+                                        # имена связанных сущностей
+                                        boost = getattr(
+                                            settings,
+                                            "recall_kg_boost_factor",
+                                            0.10,
+                                        )
+                                        for fact_item in hybrid_ranked:
+                                            fact_lower = fact_item.fact.lower()
+                                            if any(
+                                                name.lower() in fact_lower
+                                                for name in related_names
+                                            ):
+                                                fact_item.confidence = min(
+                                                    1.0,
+                                                    (fact_item.confidence or 0.5)
+                                                    + boost,
+                                                )
+                        except Exception:
+                            logger.debug(
+                                "KG boost failed (non-critical)", exc_info=True
                             )
 
                     # MMR rerank: balance relevance vs diversity

@@ -18,6 +18,18 @@ import uuid
 _DEFAULT_SEARCH_LIMIT = 5  # элементов — лимит deep recall по умолчанию
 _DEFAULT_CONTACT_LIMIT = 3  # контактов — лимит разрешения контакта
 
+# ── Progress messages — индикаторы этапов пайплайна ────────────────────
+_PROGRESS_MESSAGES: dict[str, str] = {
+    "classifying": "🔍 Анализирую запрос…",
+    "recalling": "🧠 Ищу в памяти…",
+    "planning": "📋 Составляю план…",
+    "researching": "🌐 Ищу информацию…",
+    "generating": "✍️ Формирую ответ…",
+}
+
+# Порог показа прогресса — только если этап длится дольше (секунды)
+_PROGRESS_MIN_DURATION = 0.5
+
 from httpx import RequestError, HTTPStatusError
 
 from src.config import settings
@@ -1723,6 +1735,10 @@ async def execute_maestro(
         logger.debug("LLM response cache HIT, bypassed LLM call: %.60s", raw)
         return True
 
+    # ── Progress: память и продуктивное обдумывание ──────────────────
+    _progress_msg = await message.answer(_PROGRESS_MESSAGES["recalling"])
+    _progress_start = time.monotonic()
+
     rag_needed = plan.recall_mode == "deep"
     # 📊 Productive thinking time: use the delay for better recall
     if not rag_needed and len(raw) > 30:
@@ -1746,6 +1762,21 @@ async def execute_maestro(
                 )
         except (SQLAlchemyError, RequestError, HTTPStatusError):
             logger.debug("Enhanced recall in thinking time failed", exc_info=True)
+
+    # ── Progress: планирование ───────────────────────────────────────
+    _elapsed = time.monotonic() - _progress_start
+    if _elapsed >= _PROGRESS_MIN_DURATION:
+        try:
+            await _progress_msg.edit_text(_PROGRESS_MESSAGES["planning"])
+        except TelegramAPIError:
+            _progress_msg = await message.answer(_PROGRESS_MESSAGES["planning"])
+    else:
+        try:
+            await _progress_msg.edit_text(_PROGRESS_MESSAGES["planning"])
+        except TelegramAPIError:
+            pass  # не критично, если сообщение пропало
+    _planning_start = time.monotonic()
+
     try:
         pipeline_result = await run_pipeline(
             provider,
@@ -1821,6 +1852,13 @@ async def execute_maestro(
         # ── Handle streaming response ────────────────────────────────
         stream = pipeline_result.get("_stream")
         if stream is not None:
+            # ── Progress: генерация ответа ─────────────────────────
+            _elapsed_total = time.monotonic() - _planning_start
+            if _elapsed_total >= _PROGRESS_MIN_DURATION:
+                try:
+                    await _progress_msg.edit_text(_PROGRESS_MESSAGES["generating"])
+                except TelegramAPIError:
+                    pass  # сообщение могло быть удалено
             # Определяем context_hint заранее для финального humanize
             plan_purpose = plan.tasks[0].purpose.value if plan.tasks else None
             context_hint = _detect_context_hint(raw, plan_purpose=plan_purpose)
@@ -1836,29 +1874,43 @@ async def execute_maestro(
                 style_block = None
 
             if settings.streaming_enabled:
-                cursor = settings.streaming_cursor.strip()
-                interval = settings.streaming_edit_interval
+                # Курсор для отображения в процессе стриминга
+                cursor = (
+                    settings.streaming_cursor.strip()
+                    if settings.streaming_cursor
+                    else "▌"
+                )
+                # Временной интервал (сек) — страховка от лагов сети
+                time_interval = settings.streaming_edit_interval
+                # Символьный интервал — основная логика обновления
+                char_interval = settings.streaming_update_interval
 
-                # Send initial message with cursor
+                # Отправляем первое сообщение с курсором
                 sent_msg = await message.answer(cursor)
                 full_text = ""
                 last_update = asyncio.get_event_loop().time()
+                chars_since_update = 0
 
                 try:
                     async for chunk in stream:
                         full_text += chunk
+                        chars_since_update += len(chunk)
                         now = asyncio.get_event_loop().time()
-                        if now - last_update >= interval:
-                            display_text = full_text + settings.streaming_cursor
+                        # Обновляем по достижении символьного ИЛИ временного порога
+                        if (
+                            chars_since_update >= char_interval
+                            or now - last_update >= time_interval
+                        ):
                             try:
-                                await sent_msg.edit_text(display_text[:4000])
+                                await sent_msg.edit_text((full_text + cursor)[:4000])
                             except TelegramAPIError:
-                                pass  # message deleted or too old
+                                pass  # сообщение удалено или устарело
                             last_update = now
+                            chars_since_update = 0
                 except Exception:
                     logger.debug("Stream interrupted", exc_info=True)
             else:
-                # Non-streaming: accumulate text silently
+                # Non-streaming: silently accumulate text
                 sent_msg = await message.answer("⏳")
                 full_text = ""
                 try:
@@ -2180,6 +2232,11 @@ async def execute_maestro(
                 humanizer_changed=response_text != original_response_text,
                 extra={"used_skills": _used_skills},
             )
+            # ── Убираем прогресс-сообщение перед финальным ответом ──
+            try:
+                await _progress_msg.edit_text(_PROGRESS_MESSAGES["generating"])
+            except TelegramAPIError:
+                pass
             await safe_answer(
                 message,
                 sanitize_html(response_text + extra_suffix),

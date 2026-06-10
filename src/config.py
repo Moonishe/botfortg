@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     @field_validator(
         "recall_semantic_threshold",
         "recall_mmr_lambda",
+        "recall_kg_boost_factor",
         "ebbinghaus_decay_base",
         "ebbinghaus_access_weight",
         "auto_forget_threshold",
@@ -329,9 +330,14 @@ class Settings(BaseSettings):
     )
 
     # ── Streaming ──
-    streaming_enabled: bool = Field(True, description="Включить streaming-ответы")
+    streaming_enabled: bool = Field(
+        True, description="Stream LLM responses token-by-token"
+    )
     streaming_edit_interval: float = Field(
         0.3, description="Интервал обновления streaming (сек)"
+    )
+    streaming_update_interval: int = Field(
+        80, description="Edit message every N characters during streaming"
     )
     streaming_cursor: str = Field(" 🦊", description="Курсор при streaming")
 
@@ -397,6 +403,14 @@ class Settings(BaseSettings):
     )
     recall_worldview_boost_factor: float = Field(
         0.10, description="Коэффициент буста (0.0-1.0)"
+    )
+
+    # ── Knowledge Graph boost ──
+    recall_kg_boost_enabled: bool = Field(
+        True, description="Буст фактов по Knowledge Graph (связные сущности)"
+    )
+    recall_kg_boost_factor: float = Field(
+        0.10, description="Коэффициент KG-буста (0.0-1.0)"
     )
 
     # ── Ebbinghaus retention scoring ──

@@ -1468,6 +1468,9 @@ async def _process_text(
                 "Prefetched recall unavailable", exc_info=True
             )  # prefetch — оптимизация
 
+    # ── Progress: вспоминаем контекст перед планированием ─────────
+    progress_msg = await message.answer("🧠 Вспоминаю контекст…")
+
     plan = await make_plan(
         raw,
         owner_telegram_id,
@@ -1475,6 +1478,13 @@ async def _process_text(
         last_purpose=_last_purpose,
         prefetched_context=_prefetched_ctx,
     )
+
+    # ── Progress: план готов, думаем ───────────────────────────────
+    try:
+        await progress_msg.edit_text("💭 Думаю…")
+    except TelegramAPIError:
+        pass  # сообщение могло быть удалено
+
     if plan is None:
         return
     if plan.tasks:
