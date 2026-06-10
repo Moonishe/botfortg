@@ -304,3 +304,20 @@ class MessageReaction(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+
+
+class HumanizerFeedback(Base):
+    """Фидбек пользователя на очеловечивание — persist between restarts."""
+
+    __tablename__ = "humanizer_feedback"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    original_phrase: Mapped[str] = mapped_column(String(256))
+    replacement: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    action: Mapped[str] = mapped_column(String(16))  # "accept" | "reject"
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )

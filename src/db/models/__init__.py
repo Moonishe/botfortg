@@ -28,6 +28,7 @@ from src.db.models._messaging import (
     ConversationSummary,
     ScheduledMessage,
     MessageReaction,
+    HumanizerFeedback,
 )
 from src.db.models._memory import (
     Entity,
@@ -94,6 +95,7 @@ __all__ = [
     "ConversationSummary",
     "ScheduledMessage",
     "MessageReaction",
+    "HumanizerFeedback",
     "Entity",
     "EntityRelation",
     "Episode",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from enum import Enum
 from typing import Any, Callable, Coroutine
 
@@ -64,8 +65,14 @@ class BackgroundTaskManager:
     Call ``get_status(name)`` or ``get_all_statuses()`` for health checks.
     """
 
+    # Supervisor: глобальные лимиты для _supervised_run
+    MAX_CONSECUTIVE_FAILURES: int = 5
+    RESTART_DELAY: float = 60.0  # секунд перед auto-restart после сбоя
+
     def __init__(self) -> None:
         self._tasks: dict[str, RegisteredTask] = {}
+        self._failure_counts: dict[str, int] = {}
+        self._last_failure: dict[str, float] = {}
 
     def register(
         self,
@@ -253,6 +260,103 @@ class BackgroundTaskManager:
     def get_all_statuses(self) -> dict[str, TaskStatus]:
         """Return a map of all task names → current status."""
         return {name: self._tasks[name].status for name in self._tasks}
+
+    async def _supervised_run(self, name: str, coro_func, interval: float) -> None:
+        """Запускает coro_func периодически с авто-перезапуском при сбоях.
+
+        В отличие от wrapper() (который предполагает бесконечный цикл внутри
+        factory), этот метод сам управляет циклом: вызывает coro_func,
+        ждёт interval секунд, повторяет. При сбое — уведомление и перезапуск.
+
+        После MAX_CONSECUTIVE_FAILURES подряд задача останавливается навсегда
+        с критическим уведомлением.
+
+        Args:
+            name: Уникальное имя задачи (для логирования и словарей сбоев).
+            coro_func: Async callable без аргументов — тело одного цикла.
+            interval: Пауза в секундах между успешными выполнениями.
+        """
+        while True:
+            try:
+                await coro_func()
+                self._failure_counts[name] = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._failure_counts[name] = self._failure_counts.get(name, 0) + 1
+                self._last_failure[name] = time.monotonic()
+                logger.exception(
+                    "Supervised task '%s' failed (attempt %d/%d)",
+                    name,
+                    self._failure_counts[name],
+                    self.MAX_CONSECUTIVE_FAILURES,
+                )
+                if self._failure_counts[name] >= self.MAX_CONSECUTIVE_FAILURES:
+                    logger.critical(
+                        "Task '%s' failed %d times consecutively — DISABLING",
+                        name,
+                        self.MAX_CONSECUTIVE_FAILURES,
+                    )
+                    try:
+                        from src.core.scheduling.notification_queue import (
+                            notification_queue,
+                        )
+
+                        await notification_queue.enqueue(
+                            topic="system_alert",
+                            text=(
+                                f"🚨 Task <b>{name}</b> disabled after "
+                                f"{self.MAX_CONSECUTIVE_FAILURES} failures: {e}"
+                            ),
+                            priority=1,
+                        )
+                    except Exception:
+                        logger.critical(
+                            "Failed to send system_alert for task '%s'", name
+                        )
+                    break
+                # Уведомление о разовом сбое
+                try:
+                    from src.core.scheduling.notification_queue import (
+                        notification_queue,
+                    )
+
+                    await notification_queue.enqueue(
+                        topic="system_alert",
+                        text=(
+                            f"⚠️ Task <b>{name}</b> failed "
+                            f"(attempt {self._failure_counts[name]}): "
+                            f"{str(e)[:200]}"
+                        ),
+                    )
+                except Exception:
+                    logger.debug("Failed to send system_alert for task '%s'", name)
+                await asyncio.sleep(self.RESTART_DELAY)
+                continue
+            await asyncio.sleep(interval)
+
+    def status(self) -> dict[str, dict]:
+        """Возвращает расширенный статус всех задач для /health.
+
+        Returns:
+            Словарь: имя задачи → {"running": bool, "failures": int,
+            "last_failure": float|None, "restart_count": int, "status": str}
+        """
+        result: dict[str, dict] = {}
+        for name, t in self._tasks.items():
+            is_running = (
+                t.status == TaskStatus.RUNNING
+                and t.task is not None
+                and not t.task.done()
+            )
+            result[name] = {
+                "running": is_running,
+                "failures": self._failure_counts.get(name, 0),
+                "last_failure": self._last_failure.get(name),
+                "restart_count": t.restart_count,
+                "status": t.status.value,
+            }
+        return result
 
     def task(
         self,

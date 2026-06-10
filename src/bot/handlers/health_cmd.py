@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import text
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -15,42 +16,76 @@ router.message.filter(OwnerOnly())
 
 @router.message(Command("health"))
 async def cmd_health(message: Message) -> None:
-    lines = ["🏥 <b>Состояние бота</b>\n"]
-    from src.config import settings
+    """Показать статус всех фоновых задач и систем."""
+    lines = ["🏥 **Статус системы**\n"]
 
-    # 1. DB size
-    db = settings.data_dir / "app.db"
-    if db.exists():
-        lines.append(f"🗄 БД: {db.stat().st_size / 1024 / 1024:.1f} MB")
+    # ── 1. Background tasks status ──────────────────────────
+    from src.core.infra.task_manager import task_manager
 
-    # 2. Qdrant
-    qdrant = settings.data_dir / "qdrant"
-    if qdrant.exists():
-        total = sum(f.stat().st_size for f in qdrant.rglob("*") if f.is_file())
-        lines.append(f"🔍 Qdrant: {total / 1024 / 1024:.1f} MB")
+    tasks = task_manager.status()
+    lines.append("**Фоновые задачи:**")
+    if tasks:
+        for name, status in tasks.items():
+            icon = "🟢" if status.get("running") else "🔴"
+            fail_count = status.get("failures", 0)
+            fail_text = f" ({fail_count} ошибок)" if fail_count else ""
+            lines.append(f"  {icon} {name}{fail_text}")
+    else:
+        lines.append("  _(нет зарегистрированных задач)_")
 
-    # 3. Gates
-    from src.core.infra.gating import gates
-
-    status = gates.status
-    passed_count = len(status["passed"])
-    total_count = status["total"]
-    lines.append(f"\n🔧 Зависимости: {passed_count}/{total_count}")
-    for name in sorted(status["failed"]):
-        lines.append(f"  ❌ {name}")
-
-    # 4. Context files
-    from src.core.memory.context_files import list_context_files
-
-    ctx = list_context_files()
-    lines.append(f"\n📝 Контекстных файлов: {len(ctx)}")
-
-    # 5. Skills
+    # ── 2. DB liveness ──────────────────────────────────────
     try:
-        from src.core.intelligence.skill_docs import list_skill_docs
+        from src.db.session import get_session
 
-        docs = list_skill_docs()
-        lines.append(f"📋 Документированных навыков: {len(docs)}")
+        async with get_session() as session:
+            await session.execute(text("SELECT 1"))
+        lines.append("\n🗄️ БД: 🟢 OK")
+    except Exception as e:
+        lines.append(f"\n🗄️ БД: 🔴 ошибка ({e.__class__.__name__})")
+
+    # ── 3. Qdrant liveness ──────────────────────────────────
+    try:
+        from src.core.actions.vector_store import get_vector_store
+
+        vs = await get_vector_store()
+        if vs is not None and vs._client is not None:
+            # Лёгкая проверка: запрос коллекций
+            _ = vs._client.get_collections()
+            lines.append("🔍 Qdrant: 🟢 OK")
+        else:
+            lines.append("🔍 Qdrant: 🟡 не инициализирован")
+    except Exception as e:
+        lines.append(f"🔍 Qdrant: 🔴 ошибка ({e.__class__.__name__})")
+
+    # ── 4. LLM providers ────────────────────────────────────
+    try:
+        from src.bot.handlers.keys_cmd import _PROVIDER_ORDER
+
+        provider_count = len(_PROVIDER_ORDER)
+    except ImportError:
+        provider_count = 0
+    lines.append(f"\n🤖 LLM провайдеров: {provider_count}")
+
+    # ── 5. Gates (сохранено из предыдущей версии) ───────────
+    try:
+        from src.core.infra.gating import gates
+
+        status = gates.status
+        passed_count = len(status["passed"])
+        total_count = status["total"]
+        lines.append(f"\n🔧 Зависимости: {passed_count}/{total_count}")
+        for name in sorted(status["failed"]):
+            lines.append(f"  ❌ {name}")
+    except Exception:
+        pass
+
+    # ── 6. DB size ──────────────────────────────────────────
+    try:
+        from src.config import settings
+
+        db = settings.data_dir / "app.db"
+        if db.exists():
+            lines.append(f"\n📦 Размер БД: {db.stat().st_size / 1024 / 1024:.1f} MB")
     except Exception:
         pass
 

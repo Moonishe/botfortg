@@ -129,6 +129,14 @@ async def main() -> None:
 
     await init_db()
 
+    # --- Humanizer: загружаем фидбек из БД после инициализации схемы ---
+    try:
+        from src.core.humanizer.humanizer import load_humanizer_feedback
+
+        await load_humanizer_feedback()
+    except Exception:
+        pass  # non-critical — humanizer работает и без БД-фидбека
+
     # --- LLM router: initialize global locks (safe: inside event loop) ---
     from src.llm.router import ensure_locks_initialized
 

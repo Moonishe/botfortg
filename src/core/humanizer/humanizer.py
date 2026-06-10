@@ -1,10 +1,12 @@
 """Humanizer — заменяет AI-маркеры на человеческие аналоги."""
 
+import asyncio
 import logging
 import random
 import re
 import threading
 import time
+from datetime import datetime, timezone as tz
 
 from src.config import settings
 
@@ -225,6 +227,93 @@ _response_cache_times: dict[int, float] = {}  # user_id → timestamp
 # гонок в asyncio нет. Lock добавлен для защиты от гипотетической многопоточной
 # нагрузки и для документирования намерений.
 _cache_lock = threading.RLock()
+
+# Флаг: загружен ли фидбек из БД. После первой загрузки повторные вызовы — no-op.
+_feedback_loaded_from_db: bool = False
+
+
+def _schedule_db_save(
+    user_id: int, original: str, corrected: str, accepted: bool
+) -> None:
+    """Fire-and-forget: сохранить запись фидбека в БД через активный event loop.
+
+    Если event loop не запущен (например, при тестах вне asyncio) — тихо
+    пропускаем сохранение. Данные в _feedback_store остаются доступны в памяти.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # нет активного event loop — некуда сохранять
+    loop.create_task(_save_feedback_to_db(user_id, original, corrected, accepted))
+
+
+async def _save_feedback_to_db(
+    user_id: int, original: str, corrected: str, accepted: bool
+) -> None:
+    """Сохраняет одну запись фидбека в таблицу humanizer_feedback."""
+    try:
+        from src.db.models._messaging import HumanizerFeedback
+        from src.db.session import get_session
+
+        action = "accept" if accepted else "reject"
+        async with get_session() as session:
+            fb = HumanizerFeedback(
+                user_id=user_id,
+                original_phrase=original[:256],
+                replacement=corrected[:256] if corrected else None,
+                action=action,
+            )
+            session.add(fb)
+    except Exception:
+        logger.debug("Failed to persist humanizer feedback to DB", exc_info=True)
+
+
+async def load_humanizer_feedback() -> None:
+    """Загружает фидбек из БД в in-memory _feedback_store при старте.
+
+    Вызывается один раз при инициализации приложения (после init_db).
+    Повторные вызовы — no-op.
+    """
+    global _feedback_loaded_from_db
+    if _feedback_loaded_from_db:
+        return
+    try:
+        from sqlalchemy import select
+        from src.db.models._messaging import HumanizerFeedback
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            result = await session.execute(
+                select(HumanizerFeedback)
+                .order_by(HumanizerFeedback.created_at.desc())
+                .limit(5000)
+            )
+            rows = result.scalars().all()
+            loaded = 0
+            with _cache_lock:
+                for row in rows:
+                    entry = {
+                        "original": row.original_phrase[:300],
+                        "corrected": (row.replacement or "")[:300],
+                        "accepted": row.action == "accept",
+                        "time": row.created_at.replace(tzinfo=tz.utc).timestamp()
+                        if row.created_at
+                        else time.time(),
+                    }
+                    _feedback_store.setdefault(row.user_id, []).append(entry)
+                    loaded += 1
+                # Ограничиваем 100 записей на пользователя
+                for uid in list(_feedback_store.keys()):
+                    if len(_feedback_store[uid]) > 100:
+                        _feedback_store[uid] = _feedback_store[uid][-50:]
+            logger.info("Loaded %d humanizer feedback entries from DB", loaded)
+            _feedback_loaded_from_db = True
+    except Exception:
+        logger.warning(
+            "Failed to load humanizer feedback from DB — starting with empty store",
+            exc_info=True,
+        )
+        _feedback_loaded_from_db = True  # не пытаемся повторно
 
 
 def _maybe_cleanup_caches() -> None:
@@ -752,6 +841,8 @@ def store_feedback(user_id: int, original: str, corrected: str) -> None:
         # Ограничиваем 100 записей на пользователя
         if len(_feedback_store[user_id]) > 100:
             _feedback_store[user_id] = _feedback_store[user_id][-50:]
+    # Persist to DB (fire-and-forget)
+    _schedule_db_save(user_id, original, corrected, accepted=False)
 
 
 def record_humanizer_feedback(
@@ -781,6 +872,8 @@ def record_humanizer_feedback(
         if len(_feedback_store[user_id]) > 50:
             _feedback_store[user_id] = _feedback_store[user_id][-50:]
         _maybe_cleanup_caches()
+    # Persist to DB (fire-and-forget)
+    _schedule_db_save(user_id, original, corrected, accepted=accepted)
 
 
 def _cache_last_humanized(user_id: int, text: str) -> None:
