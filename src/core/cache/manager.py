@@ -268,6 +268,15 @@ class ManagedCache(Generic[K, V]):
                     logger.debug("on_evict failed for %s", key, exc_info=True)
         return count
 
+    async def invalidate_by_prefix(self, prefix: str) -> int:
+        """Remove all keys starting with *prefix*. Returns count of removed."""
+        async with self._lock:
+            keys_to_remove = [k for k in self._cache if str(k).startswith(prefix)]
+            for key in keys_to_remove:
+                self._evict(key, expired=False)
+                self._write_events.pop(key, None)
+            return len(keys_to_remove)
+
     async def cleanup_expired(self) -> int:
         """Remove all expired entries. Call periodically."""
         async with self._lock:

@@ -212,15 +212,17 @@ async def _save_and_process_reaction(
             await process_reaction_feedback(reaction_data)
         else:
             # Проверяем, от известного ли контакта сообщение
+            # NOTE: reopen session — original session closed by async with above
             try:
-                result = await session.execute(
-                    select(MessageModel).where(
-                        MessageModel.user_id == owner.id,
-                        MessageModel.peer_id == chat_id,
-                        MessageModel.message_id == message_id,
+                async with get_session() as session2:
+                    result = await session2.execute(
+                        select(MessageModel).where(
+                            MessageModel.user_id == owner.id,
+                            MessageModel.peer_id == chat_id,
+                            MessageModel.message_id == message_id,
+                        )
                     )
-                )
-                msg = result.scalar_one_or_none()
+                    msg = result.scalar_one_or_none()
                 if msg is not None and msg.sender_id:
                     # Сообщение от известного контакта — слабый сигнал
                     reaction_data["feedback_weight"] = 0.5

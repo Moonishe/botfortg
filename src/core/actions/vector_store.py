@@ -497,8 +497,9 @@ class VectorStore:
             # Try a simple reconnect first (transient failure?)
             try:
                 qdrant_dir = settings.data_dir / "qdrant"
-                self._client.close()
-                self._client = QdrantClient(path=str(qdrant_dir))
+                async with self._lock:
+                    self._client.close()
+                    self._client = QdrantClient(path=str(qdrant_dir))
                 self._client.get_collections()
                 logger.info("Qdrant reconnected successfully")
                 return True
@@ -526,10 +527,12 @@ class VectorStore:
                 import shutil
 
                 qdrant_dir = settings.data_dir / "qdrant"
-                self._client.close()
+                async with self._lock:
+                    self._client.close()
                 shutil.rmtree(str(qdrant_dir), ignore_errors=True)
                 qdrant_dir.mkdir(parents=True, exist_ok=True)
-                self._client = QdrantClient(path=str(qdrant_dir))
+                async with self._lock:
+                    self._client = QdrantClient(path=str(qdrant_dir))
                 known_dim = self._dim or settings.embedding_dim
                 await self._ensure_collection(known_dim)
                 logger.warning("Qdrant recovered — old data lost, re-index needed")

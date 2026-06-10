@@ -220,7 +220,7 @@ async def news_scheduler_loop() -> None:
                         th, tm = target_hm.split(":")
                         target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
                     except (ValueError, AttributeError):
-                        target_hm_normalized = target_hm
+                        continue
                     if (
                         target_hm_normalized == current_hm
                         and last_sent.get(owner_id) != current_day

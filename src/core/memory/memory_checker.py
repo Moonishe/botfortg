@@ -124,14 +124,15 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                         elif mem.memory_type == "contact_fact":
                             type_mult = 1.2
 
-                        new_conf = mem.confidence * (base_decay * use_mult * type_mult)
+                        conf = mem.confidence or 0.5
+                        new_conf = conf * (base_decay * use_mult * type_mult)
 
                         if new_conf < 0.2:  # забылся
                             mem.is_active = False
                             mem.validity_end = now_utc
                             mem.confidence = new_conf
                             closed_count += 1
-                        elif new_conf < mem.confidence * 0.7:  # значительно затух
+                        elif new_conf < conf * 0.7:  # значительно затух
                             mem.confidence = new_conf
                             decayed_count += 1
                             continue  # skip time-based decay — already decayed by Ebbinghaus

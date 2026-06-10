@@ -113,6 +113,8 @@ async def resolve_conflict(
         else:  # context_explains
             reason = f"Контекст объясняет противоречие: «{pos.fact[:50]}» vs «{neg.fact[:50]}»"
 
+        # NOTE: savepoint ensures atomicity. If add_memory fails,
+        # deactivation is rolled back, preventing partial state.
         # Сохраняем resolution как факт
         res = await add_memory(
             session,

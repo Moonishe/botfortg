@@ -267,6 +267,8 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
                 # NOTE: exec() выполняется в основном процессе.
                 # AST проверен whitelist-ом, __builtins__ отключены.
                 # Для полноценной песочницы используйте mcp_code_exec.
+                # NOTE: asyncio.wait_for cancels Future but does NOT kill the thread.
+                # Infinite loop = resource leak — thread continues running.
                 lambda: exec(compile(tree, "<sdd>", "exec"), namespace),  # nosec: B102
             ),
             timeout=5.0,

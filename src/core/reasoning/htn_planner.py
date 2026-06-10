@@ -283,12 +283,6 @@ class HTNPlanner:
 
         # 4. Оценка рисков (LLM)
         risk = await self._assess_risk(ordered)
-        # Применяем per-step риск из LLM-оценки, если доступен
-        if isinstance(ctx.get("_step_risks"), dict):
-            for step in ordered:
-                step_risk = ctx["_step_risks"].get(step.id)
-                if step_risk in _RISK_LEVELS:
-                    step.risk_level = step_risk
 
         # 5. Определяем контрольные точки
         checkpoints = self._identify_checkpoints(ordered)
@@ -707,7 +701,7 @@ class HTNPlanner:
     async def _assess_risk(self, steps: list[PlanStep]) -> str:
         """LLM оценивает общий уровень риска плана.
 
-        Также заполняет per-step риск в context["_step_risks"].
+        NOTE: per-step риск определяется эвристически из атрибутов шагов.
         """
         if not steps:
             return "low"

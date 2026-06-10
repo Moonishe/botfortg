@@ -450,6 +450,7 @@ async def add_memory(
                 .where(
                     Memory.user_id == user.id,
                     Memory.embedding_hash == emb_hash,
+                    Memory.is_active.is_(True),
                 )
                 .limit(1)
             )

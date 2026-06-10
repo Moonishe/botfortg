@@ -22,8 +22,4 @@ async def invalidate(prefix: str = "") -> None:
     if not prefix:
         await _stats.clear()
     else:
-        # Snapshot keys, then invalidate matching ones
-        keys = list(_stats._cache.keys())
-        for k in keys:
-            if k.startswith(prefix):
-                await _stats.invalidate(k)
+        await _stats.invalidate_by_prefix(prefix)

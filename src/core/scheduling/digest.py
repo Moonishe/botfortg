@@ -244,7 +244,7 @@ async def digest_scheduler_loop() -> None:
                 th, tm = target_hm.split(":")
                 target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
             except (ValueError, AttributeError):
-                target_hm_normalized = target_hm
+                continue
             if (
                 enabled
                 and target_hm_normalized == current_hm
