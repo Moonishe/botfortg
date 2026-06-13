@@ -61,12 +61,10 @@ async def _is_message_duplicate(msg_id: int, peer_id: int) -> bool:
             return True
         _SEEN_MESSAGES.add(key)
         if len(_SEEN_MESSAGES) > _SEEN_MESSAGES_MAX:
-            # Coarse eviction: clear oldest half
-            to_remove = len(_SEEN_MESSAGES) // 2
-            _SEEN_MESSAGES.clear()
-            # Re-add recent entries? No — just clear and start fresh.
+            # Coarse eviction: clear entire set.
             # This is safe: duplicates arrive quickly after reconnect,
             # so we only need short-term memory (~1000 msgs ≈ 1-2 min).
+            _SEEN_MESSAGES.clear()
         return False
 
 

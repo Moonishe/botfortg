@@ -211,9 +211,13 @@ class MultiKeyProvider:
             else:
                 cb = None
             if cb is not None and not cb.is_ready(now):
-                # asyncio single-threaded: состояние cb читается/модифицируется атомарно без отдельного лока
-                _ = cb.try_half_open(now)
-                if not cb.is_ready(now):
+                # OPEN state (cooldown not yet expired) → skip the key.
+                # When the cooldown expires, try_half_open() transitions
+                # OPEN→HALF_OPEN and is_ready() returns True — the caller
+                # proceeds to probe the key.
+                # HALF_OPEN keys are always ready (is_ready=True), so they
+                # bypass this block entirely.
+                if not cb.try_half_open(now):
                     skipped += 1
                     continue
             # Create provider instance — handle creation failure separately
@@ -332,7 +336,9 @@ class MultiKeyProvider:
                 try:
                     await provider.close()
                 except Exception:
-                    logger.debug("Non-critical error", exc_info=True)  # close failures should never mask the actual result
+                    logger.debug(
+                        "Non-critical error", exc_info=True
+                    )  # close failures should never mask the actual result
         if last_error:
             try:
                 await _record_provider_failure(self.provider_name)
@@ -442,8 +448,11 @@ class MultiKeyProvider:
                         cb = None
                     if cb is not None:
                         now = asyncio.get_running_loop().time()
-                        _ = cb.try_half_open(now)
-                        if not cb.is_ready(now):
+                        if not cb.is_ready(now) and not cb.try_half_open(now):
+                            # CLOSED → is_ready=True → skip this block.
+                            # HALF_OPEN → is_ready=True → skip this block.
+                            # OPEN (cooldown expired) → try_half_open=True → skip this block.
+                            # Only OPEN with active cooldown → both False → skip entirely.
                             continue
                     endpoint = (
                         self._endpoints[idx]
@@ -546,7 +555,9 @@ class MultiKeyProvider:
                         try:
                             await provider.close()
                         except Exception:
-                            logger.debug("Non-critical error", exc_info=True)  # close failures should never mask the actual result
+                            logger.debug(
+                                "Non-critical error", exc_info=True
+                            )  # close failures should never mask the actual result
                 # All streaming attempts failed — record failure and fallback
                 if last_error:
                     try:

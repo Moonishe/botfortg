@@ -664,7 +664,10 @@ def run() -> None:
                 )
                 raise SystemExit(1) from e
         finally:
-            executor.shutdown(wait=True, cancel_futures=False)
+            # Не ждём зависшие future — при таймауте миграция ещё выполняется
+            # в фоновом потоке и shutdown(wait=True) заблокирует retry loop.
+            # Используем wait=False, cancel_futures=True для немедленного
+            # освобождения ресурсов без блокировки.
             executor.shutdown(wait=False, cancel_futures=True)
 
     try:

@@ -280,9 +280,14 @@ class UserbotManager:
                     me = await client.get_me()
                     if me is None:
                         logger.error(
-                            "Userbot for tg_id=%d not authorized — session revoked?",
+                            "Userbot for tg_id=%d not authorized — removing (session revoked?)",
                             tg_id,
                         )
+                        try:
+                            await client.disconnect()
+                        except RPCError:
+                            pass
+                        self._clients.pop(tg_id, None)
                 except Exception:
                     logger.debug(
                         "Health check for tg_id=%d failed (non-critical)",

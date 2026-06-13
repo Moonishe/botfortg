@@ -84,10 +84,14 @@ class _KeyCircuitBreaker:
     def is_ready(self, now: float) -> bool:
         if self._state == _CircuitState.CLOSED:
             return True
-        # HALF_OPEN is NOT ready — only a single probe via try_half_open() is allowed.
-        # Returning False here ensures that concurrent callers all skip the key;
-        # only the one caller that successfully transitions OPEN→HALF_OPEN via
-        # try_half_open() gets through (see router.py key-shifting logic).
+        # HALF_OPEN is ready for probing.  Multiple concurrent callers may
+        # attempt the key during the probe window — the first failure
+        # re-trips back to OPEN (see record_failure), and the extra
+        # parallelism is bounded by the purpose semaphore + round-robin
+        # index.  The transition OPEN→HALF_OPEN itself is gated by
+        # try_half_open() under _CIRCUIT_BREAKERS_LOCK.
+        if self._state == _CircuitState.HALF_OPEN:
+            return True
         return False
 
     def record_success(self) -> None:
@@ -708,7 +712,8 @@ def auto_select_model(
         score: float = 0.0
 
         # Tier preference (±30 for matching preferred tier)
-        pref_tier: str | None = profile.get("prefer_tier")
+        _raw_tier: object = profile.get("prefer_tier")
+        pref_tier: str | None = _raw_tier if isinstance(_raw_tier, str) else None
         info_tier: str = getattr(info, "tier", "")
         if (pref_tier == "paid" and info_tier == "paid") or (
             pref_tier == "free" and info_tier == "free"
@@ -950,14 +955,12 @@ async def build_provider(
                 and cooldown > datetime.now(UTC)
             ]
             if in_cooldown:
-                min_cooldown = min(
-                    (
-                        _ensure_utc(s.cooldown_until)
-                        for s in in_cooldown
-                        if s.cooldown_until
-                    ),
-                    default=None,
-                )
+                in_cooldown_utc = [
+                    c
+                    for s in in_cooldown
+                    if (c := _ensure_utc(s.cooldown_until)) is not None
+                ]
+                min_cooldown = min(in_cooldown_utc) if in_cooldown_utc else None
                 if min_cooldown is not None:
                     wait_sec = max(
                         1,
