@@ -33,12 +33,19 @@ class UserbotManager:
     _clients: dict[int, TelegramClient] = field(default_factory=dict)
     _pending: dict[int, PendingLogin] = field(default_factory=dict)
     _retry_tasks: set[asyncio.Task] = field(default_factory=set)
+    _restore_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _restored: bool = False
 
     def __post_init__(self) -> None:
         global _MANAGER_SINGLETON
         _MANAGER_SINGLETON = self
 
     async def restore_all(self) -> None:
+        async with self._restore_lock:
+            if self._restored:
+                logger.warning("restore_all already called — skipping duplicate")
+                return
+            self._restored = True
         async with get_session() as session:
             from src.db.models import User
             from sqlalchemy import select
@@ -54,6 +61,10 @@ class UserbotManager:
                     api_id,
                     api_hash,
                     proxy=parse_telethon_proxy(settings.proxy_url),
+                    connection_retries=5,
+                    retry_delay=1,
+                    auto_reconnect=True,
+                    request_retries=3,
                 )
                 try:
                     await client.connect()
@@ -177,6 +188,9 @@ class UserbotManager:
             api_id,
             api_hash,
             proxy=parse_telethon_proxy(settings.proxy_url),
+            connection_retries=3,
+            retry_delay=1,
+            auto_reconnect=True,
         )
         pending = PendingLogin(client=client, api_id=api_id, api_hash=api_hash)
         self._pending[telegram_id] = pending

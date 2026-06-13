@@ -42,29 +42,32 @@ _watched_peers_cache: dict[
 ] = {}  # peer_id → (timestamp, is_watched)
 _WATCHED_PEERS_TTL: float = 5.0  # seconds
 _WATCHED_PEERS_MAX: int = 500
+_watched_peers_lock = asyncio.Lock()
 
 
-def _is_watched_peer_cached(peer_id: int) -> bool | None:
+async def _is_watched_peer_cached(peer_id: int) -> bool | None:
     """Returns True/False if cached and fresh, None if cache miss or expired."""
-    now = time.monotonic()
-    if peer_id in _watched_peers_cache:
-        ts, val = _watched_peers_cache[peer_id]
-        if now - ts < _WATCHED_PEERS_TTL:
-            return val
-        del _watched_peers_cache[peer_id]
-    return None
+    async with _watched_peers_lock:
+        now = time.monotonic()
+        if peer_id in _watched_peers_cache:
+            ts, val = _watched_peers_cache[peer_id]
+            if now - ts < _WATCHED_PEERS_TTL:
+                return val
+            del _watched_peers_cache[peer_id]
+        return None
 
 
-def _cache_watched_peer(peer_id: int, is_watched: bool) -> None:
+async def _cache_watched_peer(peer_id: int, is_watched: bool) -> None:
     """Store a watched_peers lookup result in the TTL cache."""
-    if len(_watched_peers_cache) >= _WATCHED_PEERS_MAX:
-        # Remove oldest 20%
-        stale = sorted(_watched_peers_cache.items(), key=lambda x: x[1][0])[
-            : _WATCHED_PEERS_MAX // 5
-        ]
-        for k, _ in stale:
-            del _watched_peers_cache[k]
-    _watched_peers_cache[peer_id] = (time.monotonic(), is_watched)
+    async with _watched_peers_lock:
+        if len(_watched_peers_cache) >= _WATCHED_PEERS_MAX:
+            # Remove oldest 20%
+            stale = sorted(_watched_peers_cache.items(), key=lambda x: x[1][0])[
+                : _WATCHED_PEERS_MAX // 5
+            ]
+            for k, _ in stale:
+                del _watched_peers_cache[k]
+        _watched_peers_cache[peer_id] = (time.monotonic(), is_watched)
 
 
 # Semaphore to limit concurrent background inbox processing tasks
@@ -311,13 +314,13 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                 owner = await get_or_create_user(session, owner_telegram_id)
 
                 # Проверка watched_peers — фильтрация чатов (PERF-002: TTL-кэш)
-                _cached = _is_watched_peer_cached(peer_id)
+                _cached = await _is_watched_peer_cached(peer_id)
                 if _cached is not None:
                     _is_watched = _cached
                 else:
                     _watched = await get_watched_peers(session, owner)
                     _is_watched = peer_id in _watched or not _watched
-                    _cache_watched_peer(peer_id, _is_watched)
+                    await _cache_watched_peer(peer_id, _is_watched)
                 if not _is_watched:
                     should_process_inbox = False
 

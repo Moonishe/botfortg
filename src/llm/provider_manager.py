@@ -84,10 +84,10 @@ class _KeyCircuitBreaker:
     def is_ready(self, now: float) -> bool:
         if self._state == _CircuitState.CLOSED:
             return True
-        if self._state == _CircuitState.HALF_OPEN:
-            return True
-        # OPEN always returns False — only try_half_open() gates recovery probes,
-        # ensuring single-probe + exponential backoff on re-trip.
+        # HALF_OPEN is NOT ready — only a single probe via try_half_open() is allowed.
+        # Returning False here ensures that concurrent callers all skip the key;
+        # only the one caller that successfully transitions OPEN→HALF_OPEN via
+        # try_half_open() gets through (see router.py key-shifting logic).
         return False
 
     def record_success(self) -> None:
@@ -497,6 +497,11 @@ async def _restore_cooldowns(slot_ids: list[int]) -> None:
             now_mono = asyncio.get_running_loop().time()
             restored_by_provider: dict[str, int] = {}
 
+            if _CIRCUIT_BREAKERS_LOCK is None:
+                logger.warning(
+                    "_restore_cooldowns called before locks initialized — skipping"
+                )
+                return
             async with _CIRCUIT_BREAKERS_LOCK:
                 for slot in cooldown_slots:
                     cu = _ensure_utc(slot.cooldown_until)
@@ -705,7 +710,9 @@ def auto_select_model(
         # Tier preference (±30 for matching preferred tier)
         pref_tier: str | None = profile.get("prefer_tier")
         info_tier: str = getattr(info, "tier", "")
-        if (pref_tier == "paid" and info_tier == "paid") or (pref_tier == "free" and info_tier == "free"):
+        if (pref_tier == "paid" and info_tier == "paid") or (
+            pref_tier == "free" and info_tier == "free"
+        ):
             score += 30.0
         elif pref_tier is not None and info_tier != pref_tier:
             score -= 10.0  # slight penalty for wrong tier
@@ -954,9 +961,7 @@ async def build_provider(
                 if min_cooldown is not None:
                     wait_sec = max(
                         1,
-                        int(
-                            (min_cooldown - datetime.now(UTC)).total_seconds()
-                        ),
+                        int((min_cooldown - datetime.now(UTC)).total_seconds()),
                     )
                 else:
                     wait_sec = 60

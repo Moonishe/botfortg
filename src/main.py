@@ -89,6 +89,7 @@ async def main() -> None:
     # --- Обработчики сигналов для graceful shutdown ---
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
+    assert main_task is not None, "main() must be called via asyncio.run()"
 
     def _shutdown() -> None:
         logger.info("Received shutdown signal, cancelling main task...")
@@ -578,10 +579,8 @@ def run() -> None:
     sys.stderr.write("=== run() START ===\n")
     sys.stderr.flush()
 
-    # --- Schema migrations (Alembic — with 120s timeout) ---
-    # NOTE: Alembic миграции выполняются синхронно при старте. Если они занимают
-    # >120s, стартап падает. При больших миграциях рекомендуется запускать их
-    # перед деплоем нового контейнера (pre-deploy migration).
+    # --- Schema migrations (Alembic — with 120s timeout and retry) ---
+    import time as _time
     import alembic.command
     import alembic.config
     from alembic.script import ScriptDirectory
@@ -590,29 +589,64 @@ def run() -> None:
     _script = ScriptDirectory.from_config(_cfg)
     head_rev = _script.get_current_head()
 
-    sys.stderr.write(
-        f"=== alembic upgrade head START (timeout=120s, head={head_rev}) ===\n"
-    )
-    sys.stderr.flush()
+    _MIGRATION_MAX_RETRIES = 3
+    _MIGRATION_TIMEOUT = 120
+    _MIGRATION_RETRY_DELAY = 10  # seconds base delay (doubles each retry)
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        future = executor.submit(alembic.command.upgrade, _cfg, "head")
-        future.result(timeout=120)
-        sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
+    for _attempt in range(1, _MIGRATION_MAX_RETRIES + 1):
+        sys.stderr.write(
+            f"=== alembic upgrade head (attempt {_attempt}/{_MIGRATION_MAX_RETRIES}, "
+            f"timeout={_MIGRATION_TIMEOUT}s, head={head_rev}) ===\n"
+        )
         sys.stderr.flush()
-    except FutureTimeoutError:
-        logger.critical("Alembic migration timed out after 120s. Refusing to start.")
-        raise SystemExit(1) from None
-    except Exception as e:
-        logger.critical("Alembic migration failed: %s. Refusing to start.", e)
-        raise SystemExit(1) from e
-    finally:
-        # Two-phase shutdown: first let running tasks finish gracefully,
-        # then cancel any stragglers.  This avoids abandoning in-flight
-        # DB writes / schema work that could corrupt the database.
-        executor.shutdown(wait=True, cancel_futures=False)
-        executor.shutdown(wait=False, cancel_futures=True)
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(alembic.command.upgrade, _cfg, "head")
+            future.result(timeout=_MIGRATION_TIMEOUT)
+            sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
+            sys.stderr.flush()
+            break  # success — exit retry loop
+        except FutureTimeoutError:
+            if _attempt < _MIGRATION_MAX_RETRIES:
+                delay = _MIGRATION_RETRY_DELAY * (2 ** (_attempt - 1))
+                logger.warning(
+                    "Alembic migration timed out (attempt %d/%d). Retrying in %ds…",
+                    _attempt,
+                    _MIGRATION_MAX_RETRIES,
+                    delay,
+                )
+                _time.sleep(delay)
+            else:
+                logger.critical(
+                    "Alembic migration timed out after %d attempts (%ds each). "
+                    "Refusing to start.",
+                    _MIGRATION_MAX_RETRIES,
+                    _MIGRATION_TIMEOUT,
+                )
+                raise SystemExit(1) from None
+        except Exception as e:
+            if _attempt < _MIGRATION_MAX_RETRIES:
+                delay = _MIGRATION_RETRY_DELAY * (2 ** (_attempt - 1))
+                logger.warning(
+                    "Alembic migration failed (attempt %d/%d): %s. Retrying in %ds…",
+                    _attempt,
+                    _MIGRATION_MAX_RETRIES,
+                    e,
+                    delay,
+                )
+                _time.sleep(delay)
+            else:
+                logger.critical(
+                    "Alembic migration failed after %d attempts: %s. "
+                    "Refusing to start.",
+                    _MIGRATION_MAX_RETRIES,
+                    e,
+                )
+                raise SystemExit(1) from e
+        finally:
+            executor.shutdown(wait=True, cancel_futures=False)
+            executor.shutdown(wait=False, cancel_futures=True)
 
     try:
         _loop = asyncio.get_running_loop()
