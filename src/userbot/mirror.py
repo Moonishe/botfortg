@@ -56,16 +56,18 @@ _SEEN_MESSAGES_LOCK = asyncio.Lock()
 async def _is_message_duplicate(msg_id: int, peer_id: int) -> bool:
     """Check if (msg_id, peer_id) was already processed recently."""
     async with _SEEN_MESSAGES_LOCK:
-        key = (msg_id, peer_id)
-        if key in _SEEN_MESSAGES:
-            return True
-        _SEEN_MESSAGES.add(key)
+        return (msg_id, peer_id) in _SEEN_MESSAGES
+
+
+async def _mark_message_processed(msg_id: int, peer_id: int) -> None:
+    """Mark (msg_id, peer_id) as processed in dedup set."""
+    async with _SEEN_MESSAGES_LOCK:
+        _SEEN_MESSAGES.add((msg_id, peer_id))
         if len(_SEEN_MESSAGES) > _SEEN_MESSAGES_MAX:
-            # Coarse eviction: clear entire set.
-            # This is safe: duplicates arrive quickly after reconnect,
-            # so we only need short-term memory (~1000 msgs ≈ 1-2 min).
-            _SEEN_MESSAGES.clear()
-        return False
+            # Remove oldest ~50% to keep recent entries for dedup.
+            remove_count = len(_SEEN_MESSAGES) // 2
+            for _ in range(remove_count):
+                _SEEN_MESSAGES.pop()
 
 
 async def _is_watched_peer_cached(peer_id: int) -> bool | None:
@@ -432,6 +434,11 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     media_path=None,
                     extracted_text=None,
                 )
+
+                # Mark as processed AFTER successful DB insert — if upsert
+                # fails, Telethon replay will retry this message instead of
+                # losing it permanently.
+                await _mark_message_processed(msg.id, peer_id)
 
                 # детекция фраз отсутствия в исходящих сообщениях
                 if msg.out and msg.text:

@@ -612,6 +612,14 @@ def run() -> None:
     _MIGRATION_TIMEOUT = 120
     _MIGRATION_RETRY_DELAY = 10  # seconds base delay (doubles each retry)
 
+    # На каждый retry создаётся отдельный ThreadPoolExecutor чтобы
+    # гарантировать чистый старт. При таймауте shutdown(wait=False)
+    # не ждёт зависший поток, но Alembic идемпотентен — повторный
+    # upgrade head на частично мигрированной БД либо завершит
+    # миграцию, либо безопасно пропустит уже применённые шаги.
+    # SQLite WAL + busy_timeout=30s защищают от гонки между старым
+    # и новым потоком на уровне БД.
+
     for _attempt in range(1, _MIGRATION_MAX_RETRIES + 1):
         sys.stderr.write(
             f"=== alembic upgrade head (attempt {_attempt}/{_MIGRATION_MAX_RETRIES}, "

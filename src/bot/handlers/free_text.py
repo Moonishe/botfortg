@@ -73,7 +73,7 @@ from .free_text_pipeline import (
 )
 from src.core.humanizer import record_humanizer_feedback, _pop_last_humanized
 from src.core.infra.rate_limiter import check_rate_limit
-from src.bot.classifier import classify_message as _classify_message
+from src.core.classification import classify_message as _classify_message
 from src.core.security.prompt_injection_scanner import scan_content
 from httpx import RequestError, HTTPStatusError
 from aiogram.exceptions import TelegramAPIError
