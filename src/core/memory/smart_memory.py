@@ -299,18 +299,25 @@ async def smart_extract_after_sync(
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
 
-    # Pre-build display-name map for progress_tracker (avoids DB calls in item_name_fn)
-    # L5: get_session() на каждый контакт — допустимо для типичных списков
-    # (<100 контактов). Каждая сессия короткая (один запрос) и живёт недолго.
-    # При большом количестве контактов (>500) стоит перейти на batch-загрузку.
+    # Pre-build display-name map via batch query (avoid N sequential DB sessions)
     _name_map: dict[int, str] = {}
     if total > 0:
-        from src.db.repo import get_contact
+        from sqlalchemy import select
+        from src.db.models._contacts import Contact
 
+        async with get_session() as session:
+            result = await session.execute(
+                select(Contact.peer_id, Contact.display_name).where(
+                    Contact.user_id == owner.id,
+                    Contact.peer_id.in_(contact_ids),
+                )
+            )
+            for peer_id, display_name in result:
+                _name_map[peer_id] = display_name or str(peer_id)
+        # Fill in any contacts not found in DB
         for pid in contact_ids:
-            async with get_session() as session:
-                c = await get_contact(session, owner, pid)
-            _name_map[pid] = c.display_name if c else str(pid)
+            if pid not in _name_map:
+                _name_map[pid] = str(pid)
 
     # ── Detect ambiguous contacts (Feature 1: question accumulation) ──
     await _detect_ambiguous_contacts(owner_id, contact_ids, _name_map, owner)
