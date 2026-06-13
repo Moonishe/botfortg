@@ -2084,7 +2084,7 @@ async def free_text(
                 create_episode,
             )
 
-            track_message(uid, raw[:500])
+            await track_message(uid, raw[:500])
 
             if should_create_episode(uid):
                 # Снимок буфера без сброса счётчика (чтобы не терять данные при ошибке)

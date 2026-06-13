@@ -486,7 +486,7 @@ class DeepResearchPipeline:
         """Загрузить источники по поисковому запросу.
 
         Использует DuckDuckGo (duckduckgo-search) для поиска.
-        Jina API для полного текста — заглушка (TODO 2026-06-13).
+        Страницы загружаются через httpx (до 50KB) — заглушка заменена.
 
         Args:
             query: Поисковый запрос.
@@ -519,12 +519,29 @@ class DeepResearchPipeline:
         finally:
             self._sem.release()
 
+    async def _fetch_page_content(self, url: str) -> str:
+        """Fetch page content via httpx with timeout and size limits."""
+        try:
+            import httpx
+        except ImportError:
+            return ""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    url,
+                    headers={"User-Agent": "TelegramHelper/2.0"},
+                    follow_redirects=True,
+                )
+                resp.raise_for_status()
+                # Limit to 50KB to prevent memory issues
+                return resp.text[:50000]
+        except Exception:
+            logger.debug("Failed to fetch page content for %s", url, exc_info=True)
+            return ""
+
     async def _do_fetch(self, query: str) -> list[ResearchSource]:
         """Непосредственно выполнить поиск через DuckDuckGo.
-
-        Jina API для загрузки полного текста страницы — заглушка.
-        TODO(2026-06-13): интегрировать Jina Reader API для полного контента.
-        """
+        Контент страниц загружается через httpx (см. _fetch_page_content).
         sources: list[ResearchSource] = []
 
         try:
@@ -564,8 +581,8 @@ class DeepResearchPipeline:
                 url=url,
                 title=r.get("title", ""),
                 snippet=r.get("body", ""),
-                content="",  # TODO(2026-06-13): Jina API stub
-                relevance_score=0.5,  # базовая оценка, без ML
+                content=await self._fetch_page_content(url),
+                relevance_score=0.5,
                 retrieved_at=now,
             )
             sources.append(source)
