@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 from telethon import TelegramClient
@@ -23,6 +24,7 @@ class PendingLogin:
     api_hash: str
     phone: str | None = None
     phone_code_hash: str | None = None
+    created_at: float = field(default_factory=time.monotonic)
 
 
 _MANAGER_SINGLETON: "UserbotManager | None" = None
@@ -238,6 +240,55 @@ class UserbotManager:
         self._pending.clear()
 
         logger.info("UserbotManager shutdown complete")
+
+    _PENDING_LOGIN_TTL = 600  # 10 minutes
+
+    async def cleanup_stale_pending(self) -> None:
+        """Disconnect pending login clients older than TTL."""
+        now = time.monotonic()
+        stale = []
+        for tg_id, pending in self._pending.items():
+            if now - pending.created_at > self._PENDING_LOGIN_TTL:
+                stale.append(tg_id)
+        for tg_id in stale:
+            pending = self._pending.pop(tg_id, None)
+            if pending is not None:
+                try:
+                    await pending.client.disconnect()
+                    logger.info(
+                        "Cleaned up stale pending login for tg_id=%d (age=%.0fs)",
+                        tg_id,
+                        now - pending.created_at,
+                    )
+                except RPCError:
+                    logger.exception(
+                        "Failed to disconnect stale pending client %d", tg_id
+                    )
+
+    async def health_check_loop(self) -> None:
+        """Periodically check connected + authorized for all userbot clients."""
+        while True:
+            await asyncio.sleep(300)  # every 5 minutes
+            for tg_id, client in list(self._clients.items()):
+                try:
+                    if not client.is_connected():
+                        logger.warning(
+                            "Userbot for tg_id=%d disconnected — reconnecting…",
+                            tg_id,
+                        )
+                        await client.connect()
+                    me = await client.get_me()
+                    if me is None:
+                        logger.error(
+                            "Userbot for tg_id=%d not authorized — session revoked?",
+                            tg_id,
+                        )
+                except Exception:
+                    logger.debug(
+                        "Health check for tg_id=%d failed (non-critical)",
+                        tg_id,
+                        exc_info=True,
+                    )
 
 
 # ── Gateway registration (Protocol from core layer) ──────────────────────

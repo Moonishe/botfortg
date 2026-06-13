@@ -162,7 +162,7 @@ def should_extract(transcript: str, *, min_score: float = _MIN_SCORE_DEFAULT) ->
             # NOTE: core→bot layering tradeoff — classifier lives in bot layer.
             # Lazy import prevents circular dependency.
             try:
-                from src.bot.classifier import classify_message
+                from src.core.classification import classify_message
 
                 classification = classify_message(transcript)
                 if classification:
@@ -173,8 +173,12 @@ def should_extract(transcript: str, *, min_score: float = _MIN_SCORE_DEFAULT) ->
                     ):
                         return False
             except Exception:
-                logger.debug("Non-critical error", exc_info=True)  # classifier недоступен — продолжаем без него
+                logger.debug(
+                    "Non-critical error", exc_info=True
+                )  # classifier недоступен — продолжаем без него
     except Exception:
-        logger.debug("Non-critical error", exc_info=True)  # настройки недоступны — продолжаем без оптимизаций
+        logger.debug(
+            "Non-critical error", exc_info=True
+        )  # настройки недоступны — продолжаем без оптимизаций
 
     return score_transcript(transcript) >= min_score

@@ -287,6 +287,23 @@ async def main() -> None:
     userbot_manager = UserbotManager()
     await userbot_manager.restore_all()
 
+    async def _run_periodic(coro_factory, interval: int):
+        """Run a coroutine periodically every ``interval`` seconds."""
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await coro_factory()
+            except Exception:
+                logger.debug("Periodic task failed", exc_info=True)
+
+    # --- Background: pending login TTL cleanup (every 5 minutes) ---
+    _pending_cleanup_task = asyncio.create_task(
+        _run_periodic(userbot_manager.cleanup_stale_pending, interval=300)
+    )
+
+    # --- Background: userbot health check (every 5 minutes) ---
+    _health_check_task = asyncio.create_task(userbot_manager.health_check_loop())
+
     # --- Key Rotation: инициализация KEK/DEK менеджера ---
     if settings.key_rotation_enabled:
         try:
@@ -445,6 +462,8 @@ async def main() -> None:
             (_cleanup_task, "cleanup"),
             (_update_check_task, "update_check"),
             (_prefetch_task, "startup_prefetch"),
+            (_pending_cleanup_task, "pending_cleanup"),
+            (_health_check_task, "health_check"),
         ]:
             _t.cancel()
             try:

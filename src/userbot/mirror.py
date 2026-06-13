@@ -44,6 +44,31 @@ _WATCHED_PEERS_TTL: float = 5.0  # seconds
 _WATCHED_PEERS_MAX: int = 500
 _watched_peers_lock = asyncio.Lock()
 
+# ===== DEDUP: message deduplication for Telethon replayed events =====
+# When Telethon reconnects, it replays recent updates — the same message
+# can be delivered multiple times. This LRU set tracks recently seen
+# (message_id, peer_id) pairs to prevent duplicate DB inserts.
+_SEEN_MESSAGES: set[tuple[int, int]] = set()  # (message_id, peer_id)
+_SEEN_MESSAGES_MAX = 1000
+_SEEN_MESSAGES_LOCK = asyncio.Lock()
+
+
+async def _is_message_duplicate(msg_id: int, peer_id: int) -> bool:
+    """Check if (msg_id, peer_id) was already processed recently."""
+    async with _SEEN_MESSAGES_LOCK:
+        key = (msg_id, peer_id)
+        if key in _SEEN_MESSAGES:
+            return True
+        _SEEN_MESSAGES.add(key)
+        if len(_SEEN_MESSAGES) > _SEEN_MESSAGES_MAX:
+            # Coarse eviction: clear oldest half
+            to_remove = len(_SEEN_MESSAGES) // 2
+            _SEEN_MESSAGES.clear()
+            # Re-add recent entries? No — just clear and start fresh.
+            # This is safe: duplicates arrive quickly after reconnect,
+            # so we only need short-term memory (~1000 msgs ≈ 1-2 min).
+        return False
+
 
 async def _is_watched_peer_cached(peer_id: int) -> bool | None:
     """Returns True/False if cached and fresh, None if cache miss or expired."""
@@ -288,6 +313,10 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             msg: TgMessage = event.message
             peer_id = _peer_id_of(msg)
             if not peer_id:
+                return
+
+            # ===== DEDUP: skip replayed events after Telethon reconnect =====
+            if await _is_message_duplicate(msg.id, peer_id):
                 return
 
             should_process_inbox = True

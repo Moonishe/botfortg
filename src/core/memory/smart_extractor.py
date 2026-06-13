@@ -563,7 +563,7 @@ def _classify_message(text: str) -> dict[str, bool] | None:
     # NOTE: core→bot layering tradeoff — classifier lives in bot layer
     # for historical reasons. Lazy import prevents circular dependency.
     try:
-        from src.bot.classifier import classify_message
+        from src.core.classification import classify_message
 
         return classify_message(text)
     except Exception:

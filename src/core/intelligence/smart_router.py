@@ -121,9 +121,9 @@ def get_router() -> SmartModelRouter:
 
 def _get_classifier():
     """Lazy-импорт MessageClassifier (тяжёлая зависимость)."""
-    # NOTE: core→bot layering tradeoff — classifier lives in bot layer.
+    # NOTE: classifier lives in core.classification layer.
     # Lazy import prevents circular dependency.
-    from src.bot.classifier import get_classifier
+    from src.core.classification import get_classifier
 
     return get_classifier()
 

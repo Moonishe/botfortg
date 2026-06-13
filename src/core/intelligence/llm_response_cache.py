@@ -300,7 +300,7 @@ class LLMResponseCache:
         # NOTE: core→bot layering tradeoff — classifier lives in bot layer.
         # Lazy import prevents circular dependency.
         if self._classifier is None:
-            from src.bot.classifier import get_classifier
+            from src.core.classification import get_classifier
 
             self._classifier = get_classifier()
         return self._classifier
