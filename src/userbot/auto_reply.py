@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, UTC
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta, UTC
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import (
     User as TgUser,
@@ -124,6 +126,14 @@ async def _check_and_track_offline(
                 return True
             return False
         return True
+    except FloodWaitError as e:
+        logger.warning(
+            "FloodWait %ds in _check_and_track_offline — retrying after delay",
+            e.seconds,
+        )
+        await asyncio.sleep(e.seconds)
+        me = await client.get_me()
+        return me is not None
     except Exception:
         logger.exception("get_me failed in _check_and_track_offline")
         return False
@@ -473,7 +483,15 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     from src.core.humanizer.humanizer import humanize_response
 
                     reply = humanize_response(reply or "")
-                except Exception:
+    except FloodWaitError as e:
+        logger.warning(
+            "FloodWait %ds in _check_and_track_offline — retrying after delay",
+            e.seconds,
+        )
+        await asyncio.sleep(e.seconds)
+        me = await client.get_me()
+        return me is not None
+    except Exception:
                     logger.debug("Non-critical error", exc_info=True)
 
             else:  # static (default)
