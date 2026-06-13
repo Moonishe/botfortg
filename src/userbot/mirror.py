@@ -30,7 +30,29 @@ from src.llm.base import TaskType
 from src.llm.router import build_provider
 
 
+from telethon.errors import FloodWaitError
+
 logger = logging.getLogger(__name__)
+
+
+async def _safe_telethon_call(coro, description: str = "Telethon RPC"):
+    """Execute a Telethon RPC call with FloodWait retry.
+
+    Unlike restore_all() which handles FloodWait explicitly, message handlers
+    previously had no protection — a FloodWaitError would silently lose the
+    operation. This wrapper retries once with the server-specified delay.
+    """
+    try:
+        return await coro
+    except FloodWaitError as e:
+        logger.warning(
+            "FloodWait %ds during %s — retrying once after delay",
+            e.seconds,
+            description,
+        )
+        await asyncio.sleep(e.seconds)
+        return await coro
+
 
 # ===== PERF-002: TTL-кэш для проверки watched_peers =====
 # Каждый входящий месседж проверяет, отслеживается ли peer в БД.
@@ -144,7 +166,7 @@ async def _sender_label(msg: TgMessage) -> str | None:
     if msg.out:
         return None  # это мы сами
     try:
-        sender = await msg.get_sender()
+        sender = await _safe_telethon_call(msg.get_sender(), "get_sender")
     except Exception:
         sender = None
     if sender is None:
@@ -359,7 +381,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     owner.absence_message = None
 
                 try:
-                    chat = await event.get_chat()
+                    chat = await _safe_telethon_call(event.get_chat(), "get_chat")
                 except Exception:
                     chat = None
                 if chat is not None:
@@ -460,7 +482,9 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                 _is_bot_sender = False  # our own messages are not from bots
             elif msg.sender_id:
                 try:
-                    _sender_entity = await client.get_entity(msg.sender_id)
+                    _sender_entity = await _safe_telethon_call(
+                        client.get_entity(msg.sender_id), "get_entity"
+                    )
                     _is_bot_sender = bool(getattr(_sender_entity, "bot", False))
                 except Exception:
                     _is_bot_sender = True  # can't resolve → skip (fail-safe)

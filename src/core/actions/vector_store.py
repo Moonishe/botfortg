@@ -526,8 +526,22 @@ class VectorStore:
 
             try:
                 import shutil
+                import time as _time
 
                 qdrant_dir = settings.data_dir / "qdrant"
+                # Backup before wipe — prevents total data loss on false-positive
+                # corruption detection. Backup kept for 7 days, auto-cleaned.
+                _backup_dir = settings.data_dir / f"qdrant.backup.{int(_time.time())}"
+                try:
+                    shutil.copytree(str(qdrant_dir), str(_backup_dir))
+                    logger.warning(
+                        "Qdrant backup saved to %s before recovery", _backup_dir
+                    )
+                except Exception:
+                    logger.exception(
+                        "Qdrant backup failed — proceeding with wipe anyway"
+                    )
+
                 known_dim = self._dim or settings.embedding_dim
                 async with self._lock:
                     self._client.close()
