@@ -55,15 +55,14 @@ async def enqueue(job: MemoryJob) -> None:
     try:
         await asyncio.wait_for(_queue.put(job), timeout=timeout)
     except TimeoutError:
-        logger.error(
-            "Queue full (size=%d, max=%d), dropping job %s after %.0fs timeout",
+        logger.warning(
+            "Queue full (size=%d, max=%d), dropping job %s after %.0fs timeout "
+            "(not critical: memory extraction is best-effort)",
             _queue.qsize(),
             _queue.maxsize,
             job.job_type,
             timeout,
         )
-        raise MemoryQueueFullError(
-            f"Очередь памяти переполнена (size={_queue.qsize()}, "
-            f"max={_queue.maxsize}), задание {job.job_type} отброшено "
-            f"после {timeout:.0f}s таймаута"
-        ) from None
+        # Best-effort: don't raise — memory extraction is non-critical.
+        # Callers already handle this via fire-and-forget (track_ff).
+        return

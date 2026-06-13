@@ -483,15 +483,7 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     from src.core.humanizer.humanizer import humanize_response
 
                     reply = humanize_response(reply or "")
-    except FloodWaitError as e:
-        logger.warning(
-            "FloodWait %ds in _check_and_track_offline — retrying after delay",
-            e.seconds,
-        )
-        await asyncio.sleep(e.seconds)
-        me = await client.get_me()
-        return me is not None
-    except Exception:
+                except Exception:
                     logger.debug("Non-critical error", exc_info=True)
 
             else:  # static (default)

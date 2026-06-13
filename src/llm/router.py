@@ -18,9 +18,6 @@ from src.llm.base import ChatMessage, LLMProvider, TaskType
 from src.llm.provider_manager import (
     _CircuitState,
     _KeyCircuitBreaker,
-    _ProviderMetrics,
-    _PROVIDER_METRICS,
-    _PROVIDER_METRICS_LOCK,
     _record_provider_success,
     _record_provider_failure,
     _score_provider,
@@ -29,20 +26,8 @@ from src.llm.provider_manager import (
     RETRY_BASE_DELAY,
     _CIRCUIT_BREAKERS,
     _CIRCUIT_BREAKERS_LOCK,
-    cleanup_circuit_breakers,
-    _PURPOSE_SEMAPHORES,
-    ensure_locks_initialized,
     acquire_purpose_slot,
     release_purpose_slot,
-    _provider_class_for,
-    _provider_order,
-    PROVIDER_ORDER,
-    build_provider,
-    _restore_cooldowns,
-    _parse_user_model_overrides,
-    _resolve_model_for_task,
-    _TASK_TYPE_TO_SETTINGS_ATTR,
-    auto_select_model,
 )
 
 logger = logging.getLogger(__name__)
