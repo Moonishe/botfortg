@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import io
+import base64
+import json
+import logging
+import marshal
+import subprocess
+import sys
 import logging
 from typing import Any
 
@@ -207,89 +212,66 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
             "error": "Code contains unsafe operations (blacklisted names)",
         }
 
-    # 2. Prepare safe builtins namespace
-    safe_builtins: dict[str, Any] = {
-        # Functions
-        "print": print,
-        "len": len,
-        "range": range,
-        "int": int,
-        "str": str,
-        "float": float,
-        "bool": bool,
-        "list": list,
-        "dict": dict,
-        "set": set,
-        "tuple": tuple,
-        "zip": zip,
-        "enumerate": enumerate,
-        "sorted": sorted,
-        "min": min,
-        "max": max,
-        "sum": sum,
-        "any": any,
-        "all": all,
-        "isinstance": isinstance,
-        # Constants
-        "True": True,
-        "False": False,
-        "None": None,
-    }
-
-    # 3. Build execution namespace
-    # kwargs dict is available so code can access params by key: data = kwargs.get('test_data', [])
-    # Sanitize kwargs — never pass DB/callbacks to sandbox
+    # 2. Sanitize kwargs — never pass DB/callbacks to sandbox
     _safe_kwargs: dict[str, Any] = {
         k: v
         for k, v in kwargs.items()
         if k not in ("session", "user", "provider", "userbot_manager", "owner", "bot")
     }
-    namespace: dict[str, Any] = {
-        "__builtins__": safe_builtins,
-        "kwargs": _safe_kwargs,
-        **_safe_kwargs,
-    }
 
-    # 4. Capture print() output
-    output_buffer = io.StringIO()
-    safe_builtins["print"] = (
-        lambda *args, _sep=" ", _end="\n", _file=output_buffer, **kw: print(
-            *args, sep=kw.get("sep", _sep), end=kw.get("end", _end), file=_file
-        )
+    # 3. Execute in isolated subprocess (with timeout)
+    # Prior design used exec() in a thread pool, which leaked threads
+    # on timeout — asyncio.wait_for cancelled the Future but the thread
+    # kept running.  Subprocess isolation guarantees the process and
+    # all its resources are killed after timeout.
+    import pickle
+    import subprocess
+    import sys
+
+    # Serialize code via marshal+base64 — subprocess script reads and executes.
+    # Keeps AST validation in main process, only code execution in subprocess.
+    code_bytes = marshal.dumps(compile(tree, "<sdd>", "exec"))
+    script = (
+        "import marshal, base64, json, sys, io\n"
+        "code = marshal.loads(base64.b64decode("
+        + repr(base64.b64encode(code_bytes).decode())
+        + "))\n"
+        "safe_kwargs = " + repr(_safe_kwargs) + "\n"
+        "safe_builtins = {k: __builtins__[k] for k in ['print','len','range','int','str','float','bool','list','dict','set','tuple','zip','enumerate','sorted','min','max','sum','any','all','isinstance']}\n"
+        "safe_builtins.update({'True': True, 'False': False, 'None': None})\n"
+        "namespace = {'__builtins__': safe_builtins, 'kwargs': safe_kwargs, **safe_kwargs}\n"
+        "output_buffer = io.StringIO()\n"
+        "def _sandbox_print(*args, **kw):\n"
+        "    print(*args, file=output_buffer, **kw)\n"
+        "safe_builtins['print'] = _sandbox_print\n"
+        "try:\n"
+        "    exec(code, namespace)\n"
+        "    result = {'output': output_buffer.getvalue().strip()[:5000], 'result': str(namespace.get('_result', ''))[:2000], 'error': None}\n"
+        "except Exception as e:\n"
+        "    result = {'output': output_buffer.getvalue().strip()[:2000], 'result': None, 'error': str(e)[:500]}\n"
+        "sys.stdout.write(json.dumps(result))\n"
     )
 
-    # 5. Execute (with timeout)
-    loop = asyncio.get_running_loop()
     try:
-        await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                # NOTE: exec() выполняется в основном процессе.
-                # AST проверен whitelist-ом, __builtins__ отключены.
-                # Для полноценной песочницы используйте mcp_code_exec.
-                # NOTE: asyncio.wait_for cancels Future but does NOT kill the thread.
-                # Infinite loop = resource leak — thread continues running.
-                lambda: exec(compile(tree, "<sdd>", "exec"), namespace),  # nosec: B102
-            ),
-            timeout=5.0,
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-        result_value = namespace.get("_result")
-        output = output_buffer.getvalue()
-        return {
-            "output": output.strip()[:5000],
-            "result": str(result_value)[:2000] if result_value is not None else None,
-            "error": None,
-        }
-    except TimeoutError:
+        result = json.loads(proc.stdout)
+        return result
+    except subprocess.TimeoutExpired:
         return {
             "error": "execution timed out (5s limit)",
-            "output": output_buffer.getvalue().strip()[:2000],
+            "output": "",
             "result": None,
         }
-    except Exception as e:
+    except json.JSONDecodeError:
         return {
-            "error": f"{type(e).__name__}: {e}",
-            "output": output_buffer.getvalue().strip()[:2000],
+            "error": f"execution failed: {proc.stderr[:500] if proc else 'unknown'}",
+            "output": "",
             "result": None,
         }
 
