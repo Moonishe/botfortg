@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.temporal_layers import utc_naive, utcnow_naive
@@ -125,12 +125,12 @@ async def store_undo(
         if telegram_id not in _undo_buffer:
             _undo_buffer[telegram_id] = []
         _undo_buffer[telegram_id].append(
-            (peer_id, message_id, text, datetime.now(timezone.utc))
+            (peer_id, message_id, text, datetime.now(UTC))
         )
         _undo_buffer[telegram_id] = [
             (p, m, t, ts)
             for p, m, t, ts in _undo_buffer[telegram_id]
-            if (datetime.now(timezone.utc) - ts).total_seconds() < 300
+            if (datetime.now(UTC) - ts).total_seconds() < 300
         ]
 
 
@@ -139,7 +139,7 @@ async def get_undo(telegram_id: int) -> tuple | None:
         if telegram_id not in _undo_buffer or not _undo_buffer[telegram_id]:
             return None
         last = _undo_buffer[telegram_id][-1]
-        age = (datetime.now(timezone.utc) - last[3]).total_seconds()
+        age = (datetime.now(UTC) - last[3]).total_seconds()
         if age > 60:
             return None
         return last

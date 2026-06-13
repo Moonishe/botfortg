@@ -11,12 +11,12 @@ if TYPE_CHECKING:
 class UserbotGateway(Protocol):
     """Single gateway from core layer to userbot layer."""
 
-    def get_client(self, telegram_id: int) -> "TelegramClient | None":
+    def get_client(self, telegram_id: int) -> TelegramClient | None:
         """Return active Telethon client for user, or None if not started."""
         ...
 
     async def sync_dialogs(
-        self, client: "TelegramClient", user: "User", *, limit: int = 500
+        self, client: TelegramClient, user: User, *, limit: int = 500
     ) -> dict:
         """Sync Telegram dialogs to local DB. Returns stats dict."""
         ...

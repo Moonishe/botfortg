@@ -31,7 +31,7 @@ async def _get_lock(key: str) -> asyncio.Lock:
     # Remove locks that are not currently held (no waiters).
     # Amortized cost: O(#keys) every 100 calls, i.e. O(1) avg.
     if _get_lock_calls % 100 == 0:
-        for k in list(_key_locks.keys()):
+        for k in list(_key_locks):
             lock = _key_locks[k]
             if not lock.locked():
                 del _key_locks[k]

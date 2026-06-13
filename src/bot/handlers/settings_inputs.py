@@ -10,8 +10,6 @@ from aiogram.exceptions import TelegramError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder

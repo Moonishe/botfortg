@@ -124,7 +124,7 @@ class AgentHealth:
     def _load(self) -> None:
         """Восстанавливает неистекшие кулдауны из JSON-файла."""
         try:
-            with open(HEALTH_FILE, "r", encoding="utf-8") as f:
+            with open(HEALTH_FILE, encoding="utf-8") as f:
                 data = __import__("json").load(f)
         except (FileNotFoundError, OSError, ValueError):
             return
@@ -219,7 +219,7 @@ class AgentResultCache:
     def _cleanup_expired(self) -> None:
         """Удаляет все просроченные записи."""
         now = time.monotonic()
-        for key in list(self._store.keys()):
+        for key in list(self._store):
             _, stored_at, ttl = self._store[key]
             if now - stored_at > ttl:
                 del self._store[key]
@@ -299,7 +299,7 @@ class AgentOrchestrator:
         if executor is None:
             from src.core.intelligence.agent_dispatcher import (
                 _execute_agent as executor,
-            )  # noqa: E402
+            )
 
         if not agents_to_call:
             return [], []
@@ -370,7 +370,7 @@ class AgentOrchestrator:
         if executor is None:
             from src.core.intelligence.agent_dispatcher import (
                 _execute_agent as executor,
-            )  # noqa: E402
+            )
 
         # Фильтруем только известных агентов
         known_agents = [name for name in agents if name in self._specs]
@@ -545,8 +545,8 @@ class AgentOrchestrator:
                     executor(provider, agent_spec_ref, owner_id=owner_id),
                     timeout=spec.timeout,
                 )
-            except asyncio.TimeoutError:
-                last_error = asyncio.TimeoutError(f"Таймаут {spec.timeout:.0f}с")
+            except TimeoutError:
+                last_error = TimeoutError(f"Таймаут {spec.timeout:.0f}с")
                 self._stats["timeouts"] += 1
                 logger.warning(
                     "Agent %s timeout (attempt %d/%d)",

@@ -176,7 +176,6 @@ class ProceduralMemory:
             Procedure или None если индукция не дала результата.
         """
         from src.core.skills.procedure_bridge import Procedure
-        from src.db.models import User
         from src.db.session import get_session
         from src.llm.router import build_provider
 
@@ -213,7 +212,7 @@ class ProceduralMemory:
 
                     owner = await _get_or_create(session, 0)  # fallback: guest user
                 except Exception:
-                    pass
+                    logger.debug("Non-critical error", exc_info=True)
 
                 if owner is None:
                     logger.debug(

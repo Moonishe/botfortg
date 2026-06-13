@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
 
 from src.core.intelligence.prompt_assembler import prompt_assembler
 from src.db.models import SoulSnapshot
@@ -81,7 +80,7 @@ class SoulSnapshotManager:
 
     async def freeze(
         self, session, approved_by: str = "system", version: str | None = None
-    ) -> "SoulSnapshot":
+    ) -> SoulSnapshot:
         """Сохраняет текущий state tier-2 блоков как снапшот.
 
         Args:
@@ -176,7 +175,7 @@ class SoulSnapshotManager:
         """
         current = prompt_assembler.get_context_blocks()
         result = {}
-        for name in sorted(current.keys()):
+        for name in sorted(current):
             result[name] = {"note": "diff between saved versions requires DB query"}
         return result
 
@@ -230,7 +229,7 @@ class SoulSnapshotManager:
         count = result.scalar() or 0
         return f"1.0.{count}"
 
-    async def _get_latest_active(self, session) -> Optional["SoulSnapshot"]:
+    async def _get_latest_active(self, session) -> SoulSnapshot | None:
         """Возвращает последний активный снапшот."""
         from sqlalchemy import select
 

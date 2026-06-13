@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -85,7 +85,7 @@ def _sanitize_for_prompt(text: str) -> str:
 # underscore-prefixed private name.  Keeping both names means internal
 # callers (and any existing user code) keep working unchanged.
 sanitize_for_prompt = _sanitize_for_prompt
-__all__ = ["sanitize_for_prompt", "_sanitize_for_prompt"]
+__all__ = ["_sanitize_for_prompt", "sanitize_for_prompt"]
 
 
 # ── Public API ─────────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ async def find_underperforming_skills(owner_id: int) -> list[Skill]:
             select(Skill)
             .where(
                 Skill.user_id == owner.id,
-                Skill.enabled == True,  # noqa: E712
+                Skill.enabled == True,
             )
             .where(
                 (Skill.validation_score < 0.6)
@@ -146,7 +146,7 @@ async def collect_failure_trajectories(
     owner_id: int,
     skill_name: str,
     limit: int = 10,
-) -> list["TrajectoryData"]:
+) -> list[TrajectoryData]:
     """Collect recent trajectories where the given skill was used and failed.
 
     Filters trajectories from the last ``FAILURE_TRAJECTORY_DAYS`` days where:
@@ -166,7 +166,7 @@ async def collect_failure_trajectories(
     """
     from src.core.intelligence.skill_validator import TrajectoryData
 
-    since = datetime.now(timezone.utc) - timedelta(days=FAILURE_TRAJECTORY_DAYS)
+    since = datetime.now(UTC) - timedelta(days=FAILURE_TRAJECTORY_DAYS)
     results: list[TrajectoryData] = []
 
     async with get_session() as session:
@@ -176,7 +176,7 @@ async def collect_failure_trajectories(
             select(Trajectory)
             .where(
                 Trajectory.user_id == owner.id,
-                Trajectory.success == False,  # noqa: E712
+                Trajectory.success == False,
                 Trajectory.created_at >= since,
                 Trajectory.used_skills_json.isnot(None),
             )
@@ -215,7 +215,7 @@ async def collect_failure_trajectories(
 async def rewrite_skill_with_llm(
     skill_name: str,
     skill_body: str,
-    failures: list["TrajectoryData"],
+    failures: list[TrajectoryData],
     rejected_edits: list | None = None,
 ) -> str | None:
     """Use LLM to rewrite a skill body so it handles failure cases better.
@@ -507,7 +507,7 @@ async def auto_evolve_loop(owner_telegram_id: int) -> None:
     )
 
     while True:
-        cycle_start = datetime.now(timezone.utc)
+        cycle_start = datetime.now(UTC)
 
         # 1. Find candidates
         try:
@@ -573,7 +573,7 @@ async def auto_evolve_loop(owner_telegram_id: int) -> None:
                 )
 
         # 4. Sleep until next cycle (clock-based interval)
-        elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
+        elapsed = (datetime.now(UTC) - cycle_start).total_seconds()
         sleep_time = max(MIN_SLEEP_SEC, interval_sec - elapsed)
         await asyncio.sleep(sleep_time)
 

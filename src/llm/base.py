@@ -49,7 +49,7 @@ class LLMProvider(Protocol):
         *,
         heavy: bool = False,  # DEPRECATED: use task_type instead. Kept for backward compat.
         task_type: str = "default",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         """Stream tokens from chat completion. Raises NotImplementedError if unsupported."""
         raise NotImplementedError("chat_stream not supported by this provider")
 

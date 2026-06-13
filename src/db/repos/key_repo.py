@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,7 @@ from src.db.models import (
     ApiKey,
     LlmKeySlot,
     LlmKeySlotModel,
+    User,
 )
 from src.crypto import decrypt_async, encrypt_async
 
@@ -159,7 +160,7 @@ async def get_active_keys(
     purpose: str = "main",
 ) -> list[LlmKeySlot]:
     """Активные (enabled, не в кулдауне) ключи для провайдера и назначения."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     q = (
         select(LlmKeySlot)
         .where(
@@ -186,8 +187,8 @@ async def mark_key_failure(
     if slot:
         slot.failure_count = (slot.failure_count or 0) + 1
         slot.last_error = error_msg[:256]
-        slot.last_error_at = datetime.now(timezone.utc)
-        slot.cooldown_until = datetime.now(timezone.utc) + timedelta(
+        slot.last_error_at = datetime.now(UTC)
+        slot.cooldown_until = datetime.now(UTC) + timedelta(
             seconds=cooldown_sec
         )
         await session.flush()
@@ -263,3 +264,58 @@ async def get_enabled_models(session: AsyncSession, slot_id: int) -> list[str]:
     """
     models = await get_slot_models(session, slot_id)
     return [m.model_name for m in models if m.enabled]
+
+
+async def get_key_slot(
+    session: AsyncSession, slot_id: int, user: User
+) -> LlmKeySlot | None:
+    """Возвращает слот ключа по ID с проверкой владения."""
+    slot = await session.get(LlmKeySlot, slot_id)
+    if slot is None or slot.user_id != user.id:
+        return None
+    return slot
+
+
+async def delete_key_slot(session: AsyncSession, slot_id: int, user: User) -> bool:
+    """Удаляет слот ключа с проверкой владения."""
+    slot = await session.get(LlmKeySlot, slot_id)
+    if slot is None or slot.user_id != user.id:
+        return False
+    await session.delete(slot)
+    await session.flush()
+    return True
+
+
+async def add_key_slot_raw(
+    session: AsyncSession,
+    user: User,
+    provider: str,
+    key_enc: str,
+    *,
+    purpose: str = "main",
+    model: str = "",
+    endpoint: str = "",
+    category: str = "llm",
+    label: str = "",
+    priority: int = 0,
+    enabled: bool = True,
+) -> LlmKeySlot:
+    """Добавляет слот с уже зашифрованным ключом (без повторного шифрования).
+
+    Используется для импорта конфигурации.
+    """
+    slot = LlmKeySlot(
+        user_id=user.id,
+        provider=provider,
+        purpose=purpose,
+        model=model,
+        endpoint=endpoint,
+        category=category,
+        label=label,
+        priority=priority,
+        enabled=enabled,
+        key_enc=key_enc,
+    )
+    session.add(slot)
+    await session.flush()
+    return slot

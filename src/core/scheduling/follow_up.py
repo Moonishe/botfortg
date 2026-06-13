@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from src.core.scheduling.notification_queue import notification_queue
 from src.db.models import Notification
@@ -27,7 +27,7 @@ async def follow_up_loop(owner_id: int) -> None:
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
-                cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(
                     hours=24
                 )
                 convos = await list_active_conversations(

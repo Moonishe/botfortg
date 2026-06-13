@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from sqlalchemy import (
@@ -46,7 +46,7 @@ class MonitoredSource(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
     last_fetched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -57,12 +57,12 @@ class MonitoredSource(Base):
     )  # {"keywords": [...], "exclude_keywords": [...]}
 
     # Связи
-    rules: Mapped[list["MonitorRule"]] = relationship(
+    rules: Mapped[list[MonitorRule]] = relationship(
         back_populates="source",
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    messages: Mapped[list["MonitoredMessage"]] = relationship(
+    messages: Mapped[list[MonitoredMessage]] = relationship(
         back_populates="source",
         cascade="all, delete-orphan",
         lazy="select",
@@ -94,12 +94,12 @@ class MonitorRule(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
 
     # Связи
-    source: Mapped["MonitoredSource"] = relationship(back_populates="rules")
-    alerts: Mapped[list["MonitoredAlert"]] = relationship(
+    source: Mapped[MonitoredSource] = relationship(back_populates="rules")
+    alerts: Mapped[list[MonitoredAlert]] = relationship(
         back_populates="rule",
         cascade="all, delete-orphan",
         lazy="select",
@@ -131,8 +131,8 @@ class MonitoredMessage(Base):
     forwards: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Связи
-    source: Mapped["MonitoredSource"] = relationship(back_populates="messages")
-    alerts: Mapped[list["MonitoredAlert"]] = relationship(
+    source: Mapped[MonitoredSource] = relationship(back_populates="messages")
+    alerts: Mapped[list[MonitoredAlert]] = relationship(
         back_populates="message",
         cascade="all, delete-orphan",
         lazy="select",
@@ -170,5 +170,5 @@ class MonitoredAlert(Base):
     )  # LLM-саммари сообщения
 
     # Связи
-    rule: Mapped["MonitorRule | None"] = relationship(back_populates="alerts")
-    message: Mapped["MonitoredMessage | None"] = relationship(back_populates="alerts")
+    rule: Mapped[MonitorRule | None] = relationship(back_populates="alerts")
+    message: Mapped[MonitoredMessage | None] = relationship(back_populates="alerts")

@@ -213,7 +213,7 @@ async def _get_info(
             if about:
                 result["bio"] = about
         except Exception:
-            pass  # bio is optional
+            logger.debug("Non-critical error", exc_info=True)  # bio is optional
 
     else:
         # For chats / channels — set sensible defaults

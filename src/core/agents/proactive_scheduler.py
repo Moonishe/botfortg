@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, UTC
 
-from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ def _parse_frequency(freq: str) -> timedelta | None:
     Возвращает timedelta от now до следующего запуска, или None если
     формат не распознан.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     freq_lower = freq.strip().lower()
 
     if freq_lower == "hourly":
@@ -157,7 +156,7 @@ class ProactiveScheduler:
             if goal.next_run is None:
                 delta = _parse_frequency(goal.frequency)
                 if delta is not None:
-                    goal.next_run = datetime.now(timezone.utc) + delta
+                    goal.next_run = datetime.now(UTC) + delta
             self._goals[goal.id] = goal
             logger.info(
                 "ProactiveScheduler: зарегистрирована цель %r (frequency=%s, next=%s)",
@@ -177,7 +176,7 @@ class ProactiveScheduler:
 
     async def get_due_goals(self) -> list[BackgroundGoal]:
         """Получить список целей, время которых наступило."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with self._lock:
             return [
                 g
@@ -198,7 +197,7 @@ class ProactiveScheduler:
         """
         # Atomically fetch AND advance due goals under lock
         # to prevent concurrent run_due() from double-executing the same goal.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with self._lock:
             due = [
                 g
@@ -230,7 +229,7 @@ class ProactiveScheduler:
                 # Обновить last_run только при успешном выполнении
                 # (next_run уже продвинут атомарно при получении due-списка)
                 async with self._lock:
-                    goal.last_run = datetime.now(timezone.utc)
+                    goal.last_run = datetime.now(UTC)
             except Exception:
                 logger.exception(
                     "ProactiveScheduler: ошибка выполнения цели %r", goal.id
@@ -268,7 +267,7 @@ class ProactiveScheduler:
                 for m in memories[:5]:
                     context_lines.append(f"  • {m.fact[:200]}")
         except Exception:
-            pass  # контекст опционален
+            logger.debug("Non-critical error", exc_info=True)  # контекст опционален
 
         prompt = (
             f"🎯 **Фоновая цель:** {goal.description}\n\n"

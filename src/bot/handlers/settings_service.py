@@ -5,10 +5,9 @@ SRP: data access and business logic — no router, no rendering, no handlers.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.db.repo import (
-    add_key_slot,
     get_or_create_user,
     list_key_slots,
 )
@@ -36,7 +35,7 @@ async def _collect_export_config(telegram_id: int) -> dict:
 
         config = {
             "version": 1,
-            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "exported_at": datetime.now(UTC).isoformat(),
             "settings": {
                 "llm_provider": s.llm_provider,
                 "use_heavy_model": s.use_heavy_model,

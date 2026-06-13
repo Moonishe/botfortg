@@ -15,13 +15,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from src.db.models import Memory, MemoryLink
 from src.db.repo import get_or_create_user, list_memories
@@ -196,7 +195,6 @@ class UserWorldview:
             if cat and cat.fact_count > 0:
                 lines.append(f"[{cat.label}] ({cat.active_count} активных)")
                 for f in cat.facts[:5]:
-                    active_mark = "" if f.get("is_active", True) else " [неакт.]"
                     superseded_mark = (
                         " (устарело)" if not f.get("is_active", True) else ""
                     )
@@ -245,7 +243,7 @@ async def build_worldview(owner_id: int) -> UserWorldview:
     цепочками эволюции и сводкой здоровья.
     """
     worldview = UserWorldview(user_id=owner_id)
-    worldview.generated_at = datetime.now(timezone.utc).isoformat()
+    worldview.generated_at = datetime.now(UTC).isoformat()
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)

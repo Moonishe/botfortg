@@ -208,9 +208,7 @@ def entity_to_dict(entity) -> dict:
     is_group = isinstance(entity, types.Chat)
 
     if is_channel:
-        if entity.megagroup:
-            etype = "supergroup"
-        elif entity.gigagroup:
+        if entity.megagroup or entity.gigagroup:
             etype = "supergroup"
         else:
             etype = "channel"

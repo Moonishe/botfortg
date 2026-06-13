@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib as _hashlib
 import logging
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -109,14 +109,14 @@ class DocumentStore:
         Returns:
             List of stored DocumentRecord objects.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
         from qdrant_client.models import PointStruct
 
         dim = len(embeddings[0]) if embeddings else 1536
         self._ensure_collection(dim)
 
         client = self._get_client()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         total = len(chunks)
         records: list[DocumentRecord] = []
         points: list[PointStruct] = []

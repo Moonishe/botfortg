@@ -159,7 +159,7 @@ async def _get_llm_provider() -> Any | None:
 
                 openai_key = os.environ.get("OPENAI_API_KEY")
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
 
         if not openai_key:
             logger.debug("_get_llm_provider: нет API-ключа")

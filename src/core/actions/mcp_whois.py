@@ -135,7 +135,7 @@ async def _try_whois(
 
     def _do_whois() -> dict[str, Any] | None:
         try:
-            import whois  # type: ignore[import-untyped]  # noqa: F811
+            import whois  # type: ignore[import-untyped]
         except ImportError:
             logger.info("python-whois not installed — using DNS fallback")
             return None

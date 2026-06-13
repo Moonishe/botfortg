@@ -3,7 +3,7 @@ Trajectory, Skill, SkillUsage, InstructionProfile, InstructionCandidate, Instruc
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import (
     Boolean,
@@ -28,7 +28,7 @@ class AgentCache(Base):
     cache_key: Mapped[str] = mapped_column(String(128), primary_key=True)
     result_json: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     ttl_seconds: Mapped[int] = mapped_column(Integer, default=0)
 
@@ -64,12 +64,12 @@ class SelfProfile(Base):
     )  # "09:00-18:00"
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -83,7 +83,7 @@ class InstructionProfile(Base):
     )
     rules_json: Mapped[str] = mapped_column(Text, default="[]")  # JSON список правил
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -106,7 +106,7 @@ class InstructionCandidate(Base):
         Boolean, default=False
     )  # обработано LLM-оптимизатором
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -126,7 +126,7 @@ class InstructionEvent(Base):
         String(16), default="detected"
     )  # detected/applied/asked/ignored
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -208,7 +208,7 @@ class AdaptivePersona(Base):
     total_corrections: Mapped[int] = mapped_column(Integer, default=0)
     last_correction_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -259,7 +259,7 @@ class Trajectory(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+        DateTime, default=lambda: datetime.now(UTC), index=True
     )
 
 
@@ -292,12 +292,12 @@ class Skill(Base):
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
     # ── V2: SkillOpt-inspired fields ──
     version: Mapped[str] = mapped_column(
@@ -337,5 +337,5 @@ class SkillUsage(Base):
     )
     success: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+        DateTime, default=lambda: datetime.now(UTC), index=True
     )

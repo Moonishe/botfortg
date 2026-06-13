@@ -22,7 +22,7 @@ class Notifier:
     # шлёт сообщения владельцу через control bot — используется userbot-кодом
 
     def __init__(self) -> None:
-        self._bot: "Bot | None" = None
+        self._bot: Bot | None = None
         self._buffer: deque[dict] = deque()
 
     def attach(self, bot: "Bot") -> None:

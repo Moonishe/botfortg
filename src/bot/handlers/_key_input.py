@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 def make_key_handler(
     state: State,
     provider_name: str,
-    provider_class: Optional[type] = None,
+    provider_class: type | None = None,
     category: str = "llm",
     *,
-    validation_error_msg: Optional[str] = None,
-    provider_label: Optional[str] = None,
+    validation_error_msg: str | None = None,
+    provider_label: str | None = None,
 ) -> Any:
     """Создаёт асинхронный handler для ввода API-ключа провайдера.
 
@@ -103,7 +103,7 @@ def make_key_handler(
                         try:
                             await provider.close()
                         except Exception:
-                            pass
+                            logger.debug("Non-critical error", exc_info=True)
                 if not valid:
                     msg = (
                         f"❌ Ключ #{i + 1} не работает. Повтори или /cancel."

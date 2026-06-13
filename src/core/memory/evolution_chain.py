@@ -19,10 +19,9 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, UTC
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from src.core.memory.relation_types import RelationType
 from src.db.models import Memory, MemoryLink
@@ -140,7 +139,6 @@ def _detect_sentiment_trend(chain_items: list[EvolutionChainItem]) -> str:
     # Считаем распределение
     pos = sum(1 for s in sentiments if s == "positive")
     neg = sum(1 for s in sentiments if s == "negative")
-    neu = sum(1 for s in sentiments if s == "neutral")
 
     total = len(sentiments)
     if pos > total * 0.6:
@@ -175,7 +173,7 @@ async def get_evolution_chain(
         AllEvolutionChains с найденными цепочками и аналитикой.
     """
     result = AllEvolutionChains(user_id=owner_id)
-    result.generated_at = datetime.now(timezone.utc).isoformat()
+    result.generated_at = datetime.now(UTC).isoformat()
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)

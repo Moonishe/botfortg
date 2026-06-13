@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import or_, select
 
@@ -30,7 +30,7 @@ async def _check_once(owner_telegram_id: int) -> None:
             return
 
         tz_name = s.timezone
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         lead_hours = max(0, int(s.reminder_lead_hours))
         soon = now + timedelta(hours=lead_hours)
 
@@ -85,7 +85,7 @@ async def _check_once(owner_telegram_id: int) -> None:
 
         # Сначала сохраняем метки времени в транзакции
         for c, _ in to_remind:
-            c.last_reminded_at = datetime.now(timezone.utc)
+            c.last_reminded_at = datetime.now(UTC)
         try:
             await session.commit()
         except Exception:

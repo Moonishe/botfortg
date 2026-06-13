@@ -72,7 +72,6 @@ async def mcp_memory_edit(
         owner = await get_or_create_user(session, user.telegram_id)
 
         # ── Проверка принадлежности факта ────────────────────────────
-        from sqlalchemy import select
         from src.db.models._memory import Memory
 
         if memory_id <= 0:

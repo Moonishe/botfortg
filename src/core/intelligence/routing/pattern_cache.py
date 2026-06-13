@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import time
 from typing import TYPE_CHECKING
 
 from src.core.cache.manager import ManagedCache, cache_manager
@@ -39,7 +38,7 @@ class RouteCache:
     def __init__(self, max_size: int = 1000, ttl: float = 300.0):
         self._max_size = max_size
         self._ttl = ttl
-        self._cache: ManagedCache[str, "RouterPlan"] = cache_manager.register(
+        self._cache: ManagedCache[str, RouterPlan] = cache_manager.register(
             ManagedCache(
                 name="route_plans",
                 max_size=max_size,
@@ -68,7 +67,7 @@ class RouteCache:
         digest = hashlib.md5(normalized.encode("utf-8")).hexdigest()
         return f"rc:{user_id}:{digest}"
 
-    async def get(self, text: str, user_id: int) -> "RouterPlan | None":
+    async def get(self, text: str, user_id: int) -> RouterPlan | None:
         """Получить закэшированный RouterPlan.
 
         Возвращает None если:
@@ -90,7 +89,7 @@ class RouteCache:
         return None
 
     async def set(
-        self, text: str, user_id: int, plan: "RouterPlan", *, ttl: float | None = None
+        self, text: str, user_id: int, plan: RouterPlan, *, ttl: float | None = None
     ) -> None:
         """Сохранить RouterPlan в кэш.
 

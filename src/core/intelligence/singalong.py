@@ -331,7 +331,7 @@ async def _search_lyrics(text: str) -> list[dict] | None:
         items = result.get("results") or result.get("items") or []
         return items if items else None
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.debug("singalong: web search timed out (%.1fs)", _SEARCH_TIMEOUT)
         return None
     except Exception:

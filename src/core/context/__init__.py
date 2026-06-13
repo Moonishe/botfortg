@@ -3,4 +3,4 @@
 from src.core.context.engine import ContextEngine, engine
 from src.core.context.spec import ContextChunk, ContextProvider
 
-__all__ = ["ContextEngine", "engine", "ContextChunk", "ContextProvider"]
+__all__ = ["ContextChunk", "ContextEngine", "ContextProvider", "engine"]

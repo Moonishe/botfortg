@@ -7,10 +7,9 @@ logic separate from UI / history concerns.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.models._memory import Memory, MemoryLink
@@ -111,15 +110,15 @@ async def rollback_reval_history(owner_telegram_id: int, *, limit: int = 20) -> 
         for new_fact in new_facts:
             try:
                 # savepoint: атомарная пара деактивация нового + реактивация старого
-                async with session.begin_nested() as sp:
+                async with session.begin_nested() as sp:  # noqa: F841
                     new_fact.is_active = False
-                    new_fact.updated_at = datetime.now(timezone.utc)
+                    new_fact.updated_at = datetime.now(UTC)
                     old_id = new_to_old.get(new_fact.id)
                     if old_id is not None:
                         old = await session.get(Memory, old_id)
                         if old and old.user_id == owner.id:
                             old.is_active = True
-                            old.updated_at = datetime.now(timezone.utc)
+                            old.updated_at = datetime.now(UTC)
                     undone += 1
             except Exception:
                 logger.exception(
@@ -146,7 +145,7 @@ async def rollback_reval_history(owner_telegram_id: int, *, limit: int = 20) -> 
         await invalidate("mem_")
         await bump_recall_version(owner_telegram_id)
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     logger.info("rollback_reval_history: undone=%d", undone)
     return undone

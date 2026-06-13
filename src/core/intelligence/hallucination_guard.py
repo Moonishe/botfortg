@@ -61,9 +61,7 @@ async def verify_claims(
             has_contact = False
 
         # Если утверждение содержит контакт, но память не подтверждает — подозрительно
-        if has_contact and keyword_ratio < 0.3:
-            unverified.append(claim)
-        elif not has_contact and keyword_ratio < 0.1:
+        if (has_contact and keyword_ratio < 0.3) or (not has_contact and keyword_ratio < 0.1):
             unverified.append(claim)
 
     if unverified:

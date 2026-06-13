@@ -6,7 +6,7 @@ Handlers: /keys, interactive add/remove/import via inline keyboards.
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from aiogram import F, Router
 
@@ -204,7 +204,7 @@ async def _detect_provider(key: str) -> str | None:
             if await prov.validate_key():
                 return by_prefix
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
     # 2. Перебор всех провайдеров
     from src.llm.router import _provider_class_for
@@ -623,7 +623,7 @@ async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
         return sorted(models), None
     except NotImplementedError:
         return [], f"{slot.provider} не поддерживает список моделей"
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return [], "Таймаут запроса"
     except Exception as e:
         error_msg = str(e)
@@ -634,7 +634,7 @@ async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
         try:
             await provider.close()
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
 
 async def _show_model_discovery(message: Message, slot: LlmKeySlot) -> None:
@@ -888,7 +888,7 @@ async def cmd_keys(message: Message) -> None:
             lines.append(f"Всего фейлов: {total_fail} ({fail_rate:.1f}%)")
             lines.append(f"Активных: {sum(1 for s in slots if s.enabled)}")
             lines.append(
-                f"В кулдауне: {sum(1 for s in slots if (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(timezone.utc))}"
+                f"В кулдауне: {sum(1 for s in slots if (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(UTC))}"
             )
             lines.append("")
             for s in sorted(
@@ -965,7 +965,7 @@ async def cmd_keys(message: Message) -> None:
             cool = (
                 " 🔒"
                 if (c := _ensure_utc(s.cooldown_until))
-                and c > datetime.now(timezone.utc)
+                and c > datetime.now(UTC)
                 else ""
             )
             lines.append(
@@ -1650,7 +1650,7 @@ async def _pending_key_entry_handler(message: Message) -> None:
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     async with get_session() as session:
         owner = await get_or_create_user(session, uid)

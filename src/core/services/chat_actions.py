@@ -53,6 +53,7 @@ from src.db.session import get_session
 from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.core.infra.userbot_gateway import get_userbot_gateway
+from datetime import UTC
 
 
 logger = logging.getLogger(__name__)
@@ -363,7 +364,7 @@ async def ask_chat_action(
     try:
         style_profile = (await _get_style_profile(owner_telegram_id)) or ""
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     humanized = _humanize_response(
         text,
@@ -414,7 +415,7 @@ async def load_working_memory_context(telegram_id: int) -> str:
     Возвращает форматированную строку или пустую строку если записей нет.
     """
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from sqlalchemy import select
 
@@ -426,7 +427,7 @@ async def load_working_memory_context(telegram_id: int) -> str:
             owner = await get_or_create_user(session, telegram_id)
             if owner is None:
                 return ""
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             result = await session.execute(
                 select(WorkingMemory).where(
                     WorkingMemory.user_id == owner.id,

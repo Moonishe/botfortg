@@ -27,9 +27,7 @@ class DocumentProvider:
         Requires an embedding provider to generate the query vector.
         Falls back gracefully if no provider is available.
         """
-        import asyncio
 
-        from src.config import settings
         from src.core.actions.embedding_cache import aget, aset
         from src.llm.router import build_provider
         from src.llm.base import TaskType

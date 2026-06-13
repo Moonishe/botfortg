@@ -337,8 +337,6 @@ _STOP_WORDS: Final[set[str]] = {
     "она",
     "оно",
     "они",
-    "это",
-    "что",
     "всё",
     "все",
     "весь",
@@ -389,7 +387,7 @@ class LearnedRouter:
         if self._loaded:
             return
         try:
-            with open(self._filepath, "r", encoding="utf-8") as f:
+            with open(self._filepath, encoding="utf-8") as f:
                 self._words = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             self._words = {}

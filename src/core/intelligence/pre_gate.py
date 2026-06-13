@@ -31,7 +31,7 @@ _PATTERNS_PATH = (
 def _load_patterns() -> dict[str, list[str]]:
     """Load pre-gate patterns from JSON file. Returns empty dict on failure."""
     try:
-        with open(_PATTERNS_PATH, "r", encoding="utf-8") as f:
+        with open(_PATTERNS_PATH, encoding="utf-8") as f:
             data: dict[str, Any] = json.load(f)
         # Filter out metadata keys (starting with _)
         return {

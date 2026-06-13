@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
@@ -81,7 +81,7 @@ async def _check_and_track_offline(
         me = await client.get_me()
         status = getattr(me, "status", None)
         if isinstance(status, UserStatusOnline):
-            owner.last_seen_online = datetime.now(timezone.utc).replace(tzinfo=None)
+            owner.last_seen_online = datetime.now(UTC).replace(tzinfo=None)
             # Сброс absence статуса — владелец онлайн
             if owner.absence_status in ("sleeping", "away", "soon_back"):
                 owner.absence_status = None
@@ -92,11 +92,11 @@ async def _check_and_track_offline(
             status, (UserStatusRecently, UserStatusLastWeek, UserStatusLastMonth)
         ):
             # Owner was recently online — not definitely offline, do not auto-reply
-            owner.last_seen_online = datetime.now(timezone.utc).replace(tzinfo=None)
+            owner.last_seen_online = datetime.now(UTC).replace(tzinfo=None)
             await session.flush()
             return False
         if isinstance(status, UserStatusOffline):
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = datetime.now(UTC).replace(tzinfo=None)
             last_seen = owner.last_seen_online
             if last_seen is None or (now - last_seen) > timedelta(minutes=10):
                 # Sleep detection — определяем, не спит ли владелец
@@ -474,7 +474,7 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
                     reply = humanize_response(reply or "")
                 except Exception:
-                    pass
+                    logger.debug("Non-critical error", exc_info=True)
 
             else:  # static (default)
                 reply = static_text.strip()
@@ -496,8 +496,8 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     _ar_owner,
                     sender.id,
                     status="active",
-                    last_outgoing_at=datetime.now(timezone.utc).replace(tzinfo=None),
-                    last_auto_reply_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    last_outgoing_at=datetime.now(UTC).replace(tzinfo=None),
+                    last_auto_reply_at=datetime.now(UTC).replace(tzinfo=None),
                 )
 
             async with get_session() as session:

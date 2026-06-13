@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
 
 from rapidfuzz import fuzz, process as fuzz_process
 
@@ -40,7 +39,7 @@ def _get_cache_ttl() -> float:
 _CACHE_LOCK = asyncio.Lock()
 
 # _contact_cache: user_id → _CachedEntry
-_contact_cache: dict[int, "_CachedEntry"] = {}
+_contact_cache: dict[int, _CachedEntry] = {}
 
 # Maximum contacts to cache per user
 _MAX_CONTACTS_PER_USER = 100
@@ -253,7 +252,7 @@ def invalidate_contact(user_id: int) -> None:
         _contact_cache.pop(user_id, None)
         logger.debug("invalidated contact cache for user %d", user_id)
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
 
 def invalidate_all() -> None:
@@ -262,7 +261,7 @@ def invalidate_all() -> None:
         _contact_cache.clear()
         logger.debug("invalidated all contact caches")
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
 
 # NOTE: TTL читается динамически через _get_cache_ttl(),

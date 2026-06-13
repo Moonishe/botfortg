@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 
@@ -75,7 +75,7 @@ async def get_contact_mood(
           - daily: список {"date": "...", "positive": N, "negative": N}
           - alert: предупреждение или None
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)

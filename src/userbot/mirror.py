@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, UTC
 
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
@@ -30,6 +31,41 @@ from src.llm.router import build_provider
 
 
 logger = logging.getLogger(__name__)
+
+# ===== PERF-002: TTL-кэш для проверки watched_peers =====
+# Каждый входящий месседж проверяет, отслеживается ли peer в БД.
+# При 10 msg/s из одного чата — 10 запросов к БД в секунду, большинство избыточны.
+# Кэш на уровне модуля снижает нагрузку: повторный запрос того же peer_id
+# в течение TTL не ходит в БД.
+_watched_peers_cache: dict[
+    int, tuple[float, bool]
+] = {}  # peer_id → (timestamp, is_watched)
+_WATCHED_PEERS_TTL: float = 5.0  # seconds
+_WATCHED_PEERS_MAX: int = 500
+
+
+def _is_watched_peer_cached(peer_id: int) -> bool | None:
+    """Returns True/False if cached and fresh, None if cache miss or expired."""
+    now = time.monotonic()
+    if peer_id in _watched_peers_cache:
+        ts, val = _watched_peers_cache[peer_id]
+        if now - ts < _WATCHED_PEERS_TTL:
+            return val
+        del _watched_peers_cache[peer_id]
+    return None
+
+
+def _cache_watched_peer(peer_id: int, is_watched: bool) -> None:
+    """Store a watched_peers lookup result in the TTL cache."""
+    if len(_watched_peers_cache) >= _WATCHED_PEERS_MAX:
+        # Remove oldest 20%
+        stale = sorted(_watched_peers_cache.items(), key=lambda x: x[1][0])[
+            : _WATCHED_PEERS_MAX // 5
+        ]
+        for k, _ in stale:
+            del _watched_peers_cache[k]
+    _watched_peers_cache[peer_id] = (time.monotonic(), is_watched)
+
 
 # Semaphore to limit concurrent background inbox processing tasks
 _bg_semaphore = asyncio.Semaphore(50)
@@ -136,7 +172,7 @@ async def _process_incoming_bg(
                     peer_id,
                     status=status,
                     increment_unread=True,
-                    last_incoming_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    last_incoming_at=datetime.now(UTC).replace(tzinfo=None),
                 )
 
             # Применить решение (вне сессии)
@@ -174,24 +210,27 @@ async def _save_and_process_reaction(
             chat_id = reaction_data["chat_id"]
             message_id = reaction_data["message_id"]
 
-            # Проверяем, является ли это сообщение исходящим сообщением бота
-            is_bot_message = False
+            # Единый запрос: получаем строку сообщения и определяем сразу
+            # is_bot_message (is_outgoing) и has_known_sender (sender_id).
+            # Раньше было 2 отдельных сессии — объединено для PERF-017.
+            msg_row = None
             try:
                 result = await session.execute(
                     select(MessageModel).where(
                         MessageModel.user_id == owner.id,
                         MessageModel.peer_id == chat_id,
                         MessageModel.message_id == message_id,
-                        MessageModel.is_outgoing.is_(True),
                     )
                 )
-                if result.scalar_one_or_none() is not None:
-                    is_bot_message = True
+                msg_row = result.scalar_one_or_none()
             except Exception:
                 logger.debug(
-                    "Не удалось проверить принадлежность сообщения %d боту",
+                    "Не удалось проверить сообщение %d",
                     message_id,
                 )
+
+            is_bot_message = msg_row is not None and msg_row.is_outgoing
+            has_known_sender = msg_row is not None and msg_row.sender_id is not None
 
             await save_reaction(
                 session,
@@ -210,32 +249,14 @@ async def _save_and_process_reaction(
         if is_bot_message:
             reaction_data["feedback_weight"] = 1.0
             await process_reaction_feedback(reaction_data)
-        else:
-            # Проверяем, от известного ли контакта сообщение
-            # NOTE: reopen session — original session closed by async with above
-            try:
-                async with get_session() as session2:
-                    result = await session2.execute(
-                        select(MessageModel).where(
-                            MessageModel.user_id == owner.id,
-                            MessageModel.peer_id == chat_id,
-                            MessageModel.message_id == message_id,
-                        )
-                    )
-                    msg = result.scalar_one_or_none()
-                if msg is not None and msg.sender_id:
-                    # Сообщение от известного контакта — слабый сигнал
-                    reaction_data["feedback_weight"] = 0.5
-                    from src.core.memory.reaction_feedback import (
-                        process_reaction_feedback,
-                    )
+        elif has_known_sender:
+            # Сообщение от известного контакта — слабый сигнал
+            reaction_data["feedback_weight"] = 0.5
+            from src.core.memory.reaction_feedback import (
+                process_reaction_feedback,
+            )
 
-                    await process_reaction_feedback(reaction_data)
-            except Exception:
-                logger.debug(
-                    "Не удалось проверить автора сообщения %d для реакции",
-                    message_id,
-                )
+            await process_reaction_feedback(reaction_data)
 
     except Exception:
         logger.exception(
@@ -289,9 +310,15 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_telegram_id)
 
-                # Проверка watched_peers — фильтрация чатов (было отдельной сессией)
-                _watched = await get_watched_peers(session, owner)
-                if _watched and peer_id not in _watched:
+                # Проверка watched_peers — фильтрация чатов (PERF-002: TTL-кэш)
+                _cached = _is_watched_peer_cached(peer_id)
+                if _cached is not None:
+                    _is_watched = _cached
+                else:
+                    _watched = await get_watched_peers(session, owner)
+                    _is_watched = peer_id in _watched or not _watched
+                    _cache_watched_peer(peer_id, _is_watched)
+                if not _is_watched:
                     should_process_inbox = False
 
                 # сброс статуса отсутствия при любом исходящем
@@ -337,6 +364,29 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                             username=getattr(chat, "username", None),
                         )
 
+                # Clock-skew guard: if msg.date is >1 day in the future,
+                # clamp it to now — prevents invalid FTS5/sort orders.
+                _msg_date = msg.date
+                if _msg_date is not None:
+                    _now_utc = datetime.now(UTC)
+                    # Compare as offset-naive after stripping tzinfo
+                    _msg_naive = _msg_date.replace(tzinfo=None)
+                    _now_naive = _now_utc.replace(tzinfo=None)
+                    if _msg_naive > _now_naive + timedelta(days=1):
+                        logger.debug(
+                            "Clock skew detected: msg.date %s is >1d in future, "
+                            "clamping to now for peer %s msg %s",
+                            _msg_date,
+                            peer_id,
+                            msg.id,
+                        )
+                        _msg_date = _now_utc
+                _final_date = (
+                    _msg_date.replace(tzinfo=None)
+                    if _msg_date
+                    else datetime.now(UTC).replace(tzinfo=None)
+                )
+
                 await upsert_message(
                     session,
                     user_id=owner.id,
@@ -345,9 +395,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     sender_id=msg.sender_id,
                     sender_name=sender_name,
                     is_outgoing=bool(msg.out),
-                    date=msg.date.replace(tzinfo=None)
-                    if msg.date
-                    else datetime.now(timezone.utc).replace(tzinfo=None),
+                    date=_final_date,
                     kind=kind,
                     text=text,
                     transcript=None,
@@ -437,7 +485,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                         "chat_id": peer_id,
                         "reactor_id": reactor_id,
                         "reaction": str(reaction_emoji),
-                        "timestamp": datetime.now(timezone.utc),
+                        "timestamp": datetime.now(UTC),
                     }
 
                     # Fire-and-forget: не блокируем обработку сообщений

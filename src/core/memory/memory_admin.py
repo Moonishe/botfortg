@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,10 +21,10 @@ __all__ = [
     "ALLOWED_MEMORY_TYPES",
     "MAX_FACT_LEN",
     "MIN_FACT_LEN",
-    "select_old_temporary_facts",
-    "deactivate_memory",
-    "update_memory_text",
     "add_supersedes_link",
+    "deactivate_memory",
+    "select_old_temporary_facts",
+    "update_memory_text",
 ]
 
 # ── Shared constants ─────────────────────────────────────────────────
@@ -60,7 +60,7 @@ async def select_old_temporary_facts(
 
     Returns up to *limit* memories ordered oldest-first.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff_old = now - timedelta(days=7)
     cutoff_recent = now - timedelta(
         days=lookback_days if lookback_days is not None else 365
@@ -106,7 +106,7 @@ async def deactivate_memory(
     if not mem or mem.user_id is None:
         return
     mem.is_active = False
-    mem.updated_at = datetime.now(timezone.utc)
+    mem.updated_at = datetime.now(UTC)
     await session.flush()
     logger.info("Deactivated memory %d (reason=%s)", memory_id, reason)
 
@@ -162,7 +162,7 @@ async def update_memory_text(
         mem.memory_type = new_memory_type
     if new_decay_rate is not None:
         mem.decay_rate = max(0.01, min(0.30, new_decay_rate))
-    mem.updated_at = datetime.now(timezone.utc)
+    mem.updated_at = datetime.now(UTC)
     await session.flush()
 
     # Инвалидация кэша: сбрасываем recall-кэш и stats-кэш владельца

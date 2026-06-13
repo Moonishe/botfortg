@@ -8,7 +8,7 @@
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -60,7 +60,7 @@ async def cmd_inbox(message: Message) -> None:
         # ── 2. Обязательства ───────────────────────────────────────
         commits = await list_open_commitments(session, owner)
         if commits:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             overdue = [c for c in commits if c.deadline_at and c.deadline_at < now]
             upcoming = [c for c in commits if c not in overdue]
             lines.append(f"🔴 <b>Обязательства ({len(commits)}):</b>")

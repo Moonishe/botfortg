@@ -1,0 +1,7 @@
+name: example_plugin
+version: "1.0.0"
+description: "Example plugin for TelegramHelper"
+category: utility
+module: src.core.actions.mcp_shell
+dependencies: []
+risk: low

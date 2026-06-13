@@ -5,7 +5,7 @@ Each function handles a specific intent kind.
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from aiogram.filters import CommandObject
 from aiogram.types import (
@@ -495,7 +495,9 @@ async def exec_full_analysis(intent, message) -> None:
         report = format_analysis_report(result)
         await status_msg.edit_text(sanitize_html(report))
 
-    asyncio.create_task(_run())
+    from src.core.infra.task_manager import track_ff
+
+    track_ff(asyncio.create_task(_run()))
 
 
 # ─── Key management handlers (natural language) ─────────────────────
@@ -907,7 +909,7 @@ async def exec_list_keys(intent: dict, message: Message) -> None:
         cool = (
             " 🔒"
             if (cooldown := _ensure_utc(s.cooldown_until))
-            and cooldown > datetime.now(timezone.utc)
+            and cooldown > datetime.now(UTC)
             else ""
         )
         lines.append(

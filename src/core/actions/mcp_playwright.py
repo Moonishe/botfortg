@@ -41,9 +41,10 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────
 
 _SCREENSHOTS_DIR: Path = settings.data_dir / "screenshots"
-_NAVIGATE_TIMEOUT = 30_000  # ms (30 s)
-_OPERATION_TIMEOUT = 30  # seconds for asyncio.wait_for
-_IDLE_TIMEOUT = 300  # seconds (5 min) before closing idle page
+_NAVIGATE_TIMEOUT: int = 30_000  # ms (30 s)
+_OPERATION_TIMEOUT: int = 30  # seconds for asyncio.wait_for
+_IDLE_TIMEOUT: int = 300  # seconds (5 min) before closing idle page
+_MAX_REUSE: int = 50  # recycle browser after N calls to prevent memory leak
 
 # Платформенно-зависимые аргументы Chromium:
 #   - Windows: песочница Chromium не поддерживается — нужен --no-sandbox.
@@ -57,7 +58,7 @@ else:
     # Linux/macOS: sandbox включён по умолчанию — безопаснее
     _BROWSER_ARGS: list[str] = []
     logger.info("Playwright: non-Windows platform, running with Chromium sandbox")
-_MAX_TEXT_CHARS = 3000
+_MAX_TEXT_CHARS: int = 3000
 _VALID_SCHEMES = frozenset({"http", "https"})
 _BLOCKED_SCHEMES = frozenset({"file", "chrome", "data", "javascript"})
 
@@ -87,6 +88,7 @@ class _BrowserManager:
         self._last_used: float = 0.0
         self._idle_task: asyncio.Task[None] | None = None
         self._closed = False
+        self._call_count: int = 0
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -95,10 +97,23 @@ class _BrowserManager:
 
         Acquires the lock, starts browser on first call, opens a new
         page if none exists, and resets the idle timer.
+
+        After :data:`_MAX_REUSE` calls the browser process is recycled —
+        closed and re-launched — to prevent memory creep from lingering
+        Chromium allocations.
         """
         async with self._lock:
             if self._closed:
                 raise RuntimeError("BrowserManager has been closed")
+
+            self._call_count += 1
+            if self._call_count > _MAX_REUSE:
+                logger.info(
+                    "BrowserManager: recycling browser after %d calls (limit=%d)",
+                    self._call_count - 1,
+                    _MAX_REUSE,
+                )
+                await self._recycle_browser()
 
             if self._playwright is None:
                 await self._init_browser()
@@ -173,6 +188,30 @@ class _BrowserManager:
             args=_BROWSER_ARGS,
         )
 
+    async def _recycle_browser(self) -> None:
+        """Close and re-launch the browser, resetting the call counter.
+
+        Must be called under ``self._lock``.  Preserves the Playwright
+        process handle and reuses the same launch parameters.
+        """
+        if self._page is not None:
+            try:
+                await self._page.close()
+            except Exception:
+                logger.debug("Error closing page during recycle", exc_info=True)
+            self._page = None
+
+        if self._browser is not None:
+            try:
+                await self._browser.close()
+            except Exception:
+                logger.debug("Error closing browser during recycle", exc_info=True)
+            self._browser = None
+
+        self._call_count = 0
+        self._cancel_idle_timer()
+        await self._init_browser()
+
     def _touch(self) -> None:
         """Record activity and restart idle timer."""
         self._last_used = time.monotonic()
@@ -206,6 +245,28 @@ class _BrowserManager:
 
 # Module-level singleton
 _browser_manager = _BrowserManager()
+
+
+async def _get_browser() -> Any:
+    """Return the singleton browser page (lazy-init + recycle on reuse limit).
+
+    This is the primary entry point for browser access.  It reuses the
+    same Chromium process across calls, recycling after
+    :data:`_MAX_REUSE` calls to prevent memory leaks.
+
+    Returns:
+        The Playwright ``Page`` object.
+    """
+    return await _browser_manager.ensure_page()
+
+
+async def _close_browser() -> None:
+    """Shut down the singleton browser and clean up all Playwright resources.
+
+    Safe to call multiple times.  Must be awaited during graceful
+    shutdown to prevent zombie Chromium processes.
+    """
+    await _browser_manager.close()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -330,7 +391,7 @@ async def mcp_playwright(
             timeout=_OPERATION_TIMEOUT,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "playwright action %r timed out after %ds", action, _OPERATION_TIMEOUT
         )

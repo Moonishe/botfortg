@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Переопределяем DATABASE_URL на in-memory ДО импорта src-модулей
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["ENCRYPTION_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-os.environ["BOT_TOKEN"] = "test:token"
+os.environ.setdefault("BOT_TOKEN", "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
 os.environ["OWNER_TELEGRAM_ID"] = "123456789"
 
 from src.db.session import init_db, get_session
@@ -35,21 +35,23 @@ OWNER_TG_ID = 123456789
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+async def setup_db():
     """Пересоздаёт таблицы перед каждым тестом (чтобы не копились данные)."""
     from src.db.session import engine, Base
     from sqlalchemy import text
 
-    async def _recreate():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            # Drop artifacts that survive drop_all and would confuse init_db
-            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
-            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
-        await init_db()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        # Drop artifacts that survive drop_all and would confuse init_db
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+        await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
+    await init_db()
 
-    asyncio.run(_recreate())
+    yield
+
+    # Dispose pool so next test gets a fresh :memory: connection
+    engine.sync_engine.dispose()
 
 
 async def _get_owner():

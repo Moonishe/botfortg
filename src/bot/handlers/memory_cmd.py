@@ -35,6 +35,7 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
+from datetime import UTC
 
 
 logger = logging.getLogger(__name__)
@@ -1109,7 +1110,6 @@ async def _cmd_memory_episodes(message: Message, query: str) -> None:
         return
 
     from src.core.memory.episodic import search_episodes
-    from src.db.models._memory import Episode
 
     episodes = await search_episodes(message.from_user.id, query.strip(), limit=5)
 
@@ -1270,10 +1270,10 @@ def _format_timeline(
     owner_id: int,
 ) -> str:
     """Форматирует факты как хронологию по неделям."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from collections import defaultdict
 
-    _now = datetime.now(timezone.utc)
+    _now = datetime.now(UTC)
 
     # Разделяем на долгосрочные (tier 3 или distillation) и обычные
     longterm = [m for m in items if m.memory_tier == 3 or m.source == "distillation"]
@@ -1288,7 +1288,7 @@ def _format_timeline(
         iso = m.created_at.isocalendar()
         week_start = datetime.strptime(
             f"{iso[0]}-W{iso[1]:02d}-1", "%G-W%V-%u"
-        ).replace(tzinfo=timezone.utc)
+        ).replace(tzinfo=UTC)
         week_end = week_start + timedelta(days=6)
         label = f"{week_start.strftime('%-d')}-{week_end.strftime('%-d %b')}"
         weekly[label].append(m)

@@ -14,7 +14,7 @@ class ContextEngine:
     def __init__(self) -> None:
         self._providers: list[ContextProvider] = []
 
-    def register(self, provider: ContextProvider) -> "ContextEngine":
+    def register(self, provider: ContextProvider) -> ContextEngine:
         if any(p is provider or p.name == provider.name for p in self._providers):
             logger.debug("Context provider already registered: %s", provider.name)
             return self

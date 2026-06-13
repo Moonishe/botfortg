@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.13"]
+        python-version: ["3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +29,15 @@ jobs:
 
       - name: Lint with ruff
         run: ruff check src/ tests/ --output-format=github
+
+      - name: Security audit (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit --requirement requirements.txt --strict --progress-spinner=off
+
+      - name: Ruff check src/ (informational, non-blocking)
+        run: ruff check src/
+        continue-on-error: true
 
       - name: Compile Python modules
         run: python -m compileall -q src tests alembic
@@ -75,4 +84,4 @@ jobs:
           OWNER_TELEGRAM_ID: "123456789"
           API_ID: "12345"
           API_HASH: "0123456789abcdef0123456789abcdef"
-        run: python -m pytest -v --tb=short
+        run: python -m pytest -v --tb=short -n auto

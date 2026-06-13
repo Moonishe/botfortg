@@ -19,7 +19,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.core.memory.ttl_cache import TTLCache
 
@@ -255,7 +255,7 @@ class MemoryMetricsCollector:
                 self._recall_cache_hits / rc_total if rc_total > 0 else 0.0
             )
 
-            snap.generated_at = datetime.now(timezone.utc).isoformat()
+            snap.generated_at = datetime.now(UTC).isoformat()
 
             return snap
 

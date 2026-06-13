@@ -1,7 +1,7 @@
 """Temporal Memory Layers — факты мигрируют между временными слоями."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import or_, select
 
@@ -44,12 +44,12 @@ def utc_naive(dt: datetime) -> datetime:
     """Return a UTC-naive datetime compatible with SQLite DateTime columns."""
     if dt.tzinfo is None:
         return dt
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.astimezone(UTC).replace(tzinfo=None)
 
 
 def utcnow_naive() -> datetime:
     """Current UTC time as a naive datetime for DB comparisons."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def compute_retention(

@@ -98,12 +98,38 @@ async def safe_answer(
                 await message.react([ReactionTypeEmoji(emoji=emoji)])
                 return
             except Exception:
-                pass  # Fall through to normal text send
+                logger.debug(
+                    "Non-critical error", exc_info=True
+                )  # Fall through to normal text send
 
     if await dedup.is_duplicate(message.chat.id, text):
         return
     # Apply auto-formatting for Telegram HTML
     text = auto_format(text)
+
+    # ── Rich Messages: пробуем отправить одним расширенным сообщением ──
+    from src.bot.rich_messages import (
+        RICH_MESSAGE_MAX,
+        is_rich_applicable,
+        send_rich_message,
+        to_rich_markdown,
+    )
+
+    # is_rich_applicable() сама проверяет длину > RICH_MESSAGE_LIMIT для plain text,
+    # но также возвращает True для таблиц/заголовков любой длины.
+    # Ограничиваем сверху хард-лимитом API.
+    if len(text) <= RICH_MESSAGE_MAX and is_rich_applicable(text):
+        rich_md = to_rich_markdown(text)
+        result = await send_rich_message(
+            message.bot,
+            message.chat.id,
+            rich_md,
+            reply_markup=kwargs.get("reply_markup"),
+        )
+        if result is not None:
+            return  # Rich Message отправлен успешно
+        # Fall through к обычному sendMessage, если Rich не поддерживается
+
     parts = _smart_split(text, max_len)
     for i, part in enumerate(parts):
         final_kwargs = {}
@@ -124,7 +150,8 @@ logger = logging.getLogger(__name__)
 _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9@/_.:-]{1,128}$")
 
 
-from src.core.infra.settings_cache import _settings_cache, invalidate_settings_cache
+from src.core.infra.settings_cache import _settings_cache, invalidate_settings_cache  # noqa: F401
+from datetime import UTC
 
 
 async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object]:
@@ -391,17 +418,17 @@ def _parse_iso_to_utc_naive(value, tz_name: str | None = None):
     if not value:
         return None
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
         from src.core.infra.timeutil import parse_tz
 
         s = str(value).replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is not None:
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt.astimezone(UTC).replace(tzinfo=None)
         if tz_name:
             tz = parse_tz(tz_name)
             local_dt = dt.replace(tzinfo=tz)
-            return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return local_dt.astimezone(UTC).replace(tzinfo=None)
         return dt
     except Exception:
         return None

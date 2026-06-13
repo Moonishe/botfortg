@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import re
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from src.bot.filters import OwnerOnly
@@ -331,7 +329,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
         async with get_session() as session:
             # Обновляем last_fetched_at для источника
             source = await session.merge(source)
-            source.last_fetched_at = datetime.now(timezone.utc)
+            source.last_fetched_at = datetime.now(UTC)
 
             for msg_dict, matched_rules in matched_pairs:
                 # Сохраняем сообщение (пропускаем, если уже есть — concurrent fetch)

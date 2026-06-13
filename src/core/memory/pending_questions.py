@@ -27,7 +27,7 @@ def _cleanup_stale_pending() -> None:
     """Удаляет pending-записи старше _PENDING_TTL."""
     now = time.time()
     cutoff = now - _PENDING_TTL
-    for uid in list(_pending.keys()):
+    for uid in list(_pending):
         _pending[uid] = [q for q in _pending[uid] if q.get("ts", 0) > cutoff]
         if not _pending[uid]:
             del _pending[uid]

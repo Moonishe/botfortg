@@ -1,0 +1,9 @@
+{
+  "_description": "Quality metrics across all sessions. Updated at session end.",
+  "sessions": { "total": 0, "completed": 0, "escalated": 0, "completion_rate": 0 },
+  "tasks": { "total": 0, "completed": 0, "avg_per_session": 0 },
+  "pipeline": { "d5r5_cycles_total": 0, "avg_iterations_per_task": 0, "max_iterations_hit": 0, "goal_judge_ok": 0, "goal_judge_impossible": 0 },
+  "dream_distill": { "dream_runs": 0, "dream_findings_total": 0, "distill_runs": 0, "skills_created": 0 },
+  "max_mode": { "runs": 0, "candidates_avg_score": 0, "winner_was_best": 0 },
+  "updated_at": "2026-06-11T00:00:00Z"
+}

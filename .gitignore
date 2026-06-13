@@ -52,4 +52,20 @@ SOUL.md
 
 DB_LAYER_SUMMARY.md
 explorer_output.json
+explorer-findings.json
 FINDINGS.md
+PERFORMANCE_AUDIT.md
+PERFORMANCE_AUDIT_DETAILED.md
+SECURITY_AUDIT.md
+ARCHITECTURE.md
+CHANGELOG.md
+judge_analysis.md
+pyright_out.json
+railway.json
+clean-upgrade.db
+*.stderr.log
+*.stdout.log
+*.script.log
+alembic_out.log
+uv.lock
+file

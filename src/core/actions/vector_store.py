@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -179,7 +179,8 @@ class VectorStore:
                             "importance": importance,
                             "confidence": confidence,
                             "created_at": created_at,
-                            "embedding": embedding,  # store vector for cosine similarity
+                            # store vector for cosine similarity
+                            "embedding": embedding,
                         },
                     )
                 ],
@@ -433,7 +434,7 @@ class VectorStore:
             self._dim = dim
             self._reindex_required = False
             self._index_status = "ready"
-            self._indexed_at = datetime.now(timezone.utc).isoformat()
+            self._indexed_at = datetime.now(UTC).isoformat()
             if provider:
                 self.embedding_provider = provider
             if model:
@@ -465,7 +466,7 @@ class VectorStore:
             self._memory_dim = dim
             self._memory_reindex_required = False
             self._index_status = "ready"
-            self._indexed_at = datetime.now(timezone.utc).isoformat()
+            self._indexed_at = datetime.now(UTC).isoformat()
             if provider:
                 self.embedding_provider = provider
             if model:
@@ -521,7 +522,7 @@ class VectorStore:
                     priority=1,
                 )
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
 
             try:
                 import shutil
@@ -553,11 +554,14 @@ class VectorStore:
                 try:
                     await notification_queue.enqueue(
                         topic="qdrant_health",
-                        text="⚠️ Qdrant был повреждён и восстановлен. Нужен /index для переиндексации.",
+                        text=(
+                            "⚠️ Qdrant был повреждён и восстановлен. "
+                            "Нужен /index для переиндексации."
+                        ),
                         priority=Notification.PRIORITY_HIGH,
                     )
                 except Exception:
-                    pass
+                    logger.debug("Non-critical error", exc_info=True)
                 return False
             except Exception:
                 logger.exception("Qdrant recovery failed")

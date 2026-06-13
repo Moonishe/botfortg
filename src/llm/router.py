@@ -332,7 +332,7 @@ class MultiKeyProvider:
                 try:
                     await provider.close()
                 except Exception:
-                    pass  # close failures should never mask the actual result
+                    logger.debug("Non-critical error", exc_info=True)  # close failures should never mask the actual result
         if last_error:
             try:
                 await _record_provider_failure(self.provider_name)
@@ -413,7 +413,7 @@ class MultiKeyProvider:
 
     async def chat_stream(
         self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         """Stream chat output token by token with key rotation.
         Falls back to regular chat() if no provider supports streaming."""
         # Resolve heavy: explicit True/False wins; if not passed, use _default_heavy
@@ -546,7 +546,7 @@ class MultiKeyProvider:
                         try:
                             await provider.close()
                         except Exception:
-                            pass  # close failures should never mask the actual result
+                            logger.debug("Non-critical error", exc_info=True)  # close failures should never mask the actual result
                 # All streaming attempts failed — record failure and fallback
                 if last_error:
                     try:
@@ -736,7 +736,7 @@ class ProviderFallback:
         *,
         heavy=_UNSET,
         task_type: str = TaskType.DEFAULT,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         """Stream chat with adaptive provider fallback. Falls back to regular chat."""
         now = asyncio.get_running_loop().time()
         sorted_providers = sorted(
@@ -885,7 +885,7 @@ class ExhaustedProvider:
         *,
         heavy: bool = False,
         task_type: str = TaskType.DEFAULT,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         raise ExhaustedError(self._reason)
 
     async def embed(self, text: str) -> list[float]:

@@ -16,7 +16,7 @@ import logging
 import re
 from typing import Any, TYPE_CHECKING
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 
 if TYPE_CHECKING:
     from src.core.avito.stealth.session import AvitoSession
@@ -266,7 +266,7 @@ def _extract_seller_other_count(soup: BeautifulSoup) -> int | None:
 
 async def fetch_listing_detail(
     url: str,
-    session: "AvitoSession" = None,
+    session: AvitoSession = None,
 ) -> dict[str, Any]:
     """Загружает и парсит индивидуальную карточку объявления Авито.
 
@@ -339,7 +339,7 @@ async def fetch_listing_detail(
             url,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result["error"] = "Таймаут загрузки страницы"
         logger.error("fetch_listing_detail: timeout для %s", url)
     except Exception:
@@ -351,7 +351,7 @@ async def fetch_listing_detail(
 
 async def fetch_listing_details_batch(
     urls: list[str],
-    session: "AvitoSession" = None,
+    session: AvitoSession = None,
     concurrency: int = 3,
 ) -> dict[str, dict[str, Any]]:
     """Загружает несколько карточек объявлений конкурентно.

@@ -16,7 +16,7 @@ Usage:
 
 import logging
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,8 +70,8 @@ async def record_turn(
                 cached[2] if cached and len(cached) > 2 else cached_started
             )
             if cached_started:
-                gap = datetime.now(timezone.utc) - cached_started
-                inactivity = datetime.now(timezone.utc) - (
+                gap = datetime.now(UTC) - cached_started
+                inactivity = datetime.now(UTC) - (
                     cached_last_active or cached_started
                 )
                 if (
@@ -84,7 +84,7 @@ async def record_turn(
                     )
                     agent_session = result.scalar_one_or_none()
                     if agent_session is not None:
-                        agent_session.ended_at = datetime.now(timezone.utc)
+                        agent_session.ended_at = datetime.now(UTC)
                     _active_sessions.pop(telegram_id, None)
                     session_id = None
 
@@ -94,7 +94,7 @@ async def record_turn(
             agent_session = AgentSession(
                 user_id=user_id,
                 session_type=session_type,
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
                 turn_count=0,
             )
             db_session.add(agent_session)
@@ -103,7 +103,7 @@ async def record_turn(
             _active_sessions[telegram_id] = (
                 session_id,
                 agent_session.started_at,
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
             )
 
     # Update last_active timestamp for the active session
@@ -113,7 +113,7 @@ async def record_turn(
             _active_sessions[telegram_id] = (
                 existing[0],
                 existing[1],
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
             )
 
     # Record the message
@@ -121,7 +121,7 @@ async def record_turn(
         session_id=session_id,
         role=role,
         content=content[:4000],
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     db_session.add(msg)
 
@@ -142,7 +142,7 @@ async def close_session(telegram_id: int, db_session: AsyncSession) -> None:
         await db_session.execute(
             sa_update(AgentSession)
             .where(AgentSession.id == session_id)
-            .values(ended_at=datetime.now(timezone.utc))
+            .values(ended_at=datetime.now(UTC))
         )
 
 
@@ -161,11 +161,11 @@ async def close_stale_sessions(
     Returns:
         Number of sessions closed.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
     result = await db_session.execute(
         sa_update(AgentSession)
         .where(AgentSession.ended_at.is_(None), AgentSession.started_at < cutoff)
-        .values(ended_at=datetime.now(timezone.utc))
+        .values(ended_at=datetime.now(UTC))
     )
     return result.rowcount
 

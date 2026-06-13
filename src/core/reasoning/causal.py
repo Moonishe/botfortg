@@ -14,7 +14,6 @@ import asyncio
 import logging
 from typing import Any
 
-from src.config import settings
 from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 
@@ -202,7 +201,7 @@ async def analyze_causes(
             timeout=LLM_TIMEOUT,
         )
         return response.strip()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("analyze_causes: таймаут LLM для user %d", user_id)
         return "⏱️ Анализ причин занял слишком много времени. Попробуйте позже."
     except Exception:
@@ -322,7 +321,7 @@ async def analyze_counterfactual(
             timeout=LLM_TIMEOUT,
         )
         return response.strip()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("analyze_counterfactual: таймаут LLM для user %d", user_id)
         return (
             "⏱️ Контрфактуальный анализ занял слишком много времени. Попробуйте позже."

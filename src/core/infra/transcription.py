@@ -184,7 +184,7 @@ class TranscriptionService:
                             or resolved.is_reserved
                         ):
                             raise ValueError(
-                                f"STT endpoint DNS resolves to internal IP"
+                                "STT endpoint DNS resolves to internal IP"
                             )
                 except (_socket.gaierror, OSError):
                     pass

@@ -23,20 +23,22 @@ from src.core.memory.hybrid_search import reciprocal_rank_fusion
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+async def setup_db():
     """Пересоздаёт таблицы перед каждым тестом."""
     from src.db.session import engine, Base, init_db
     from sqlalchemy import text
 
-    async def _recreate():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
-            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
-        await init_db()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+        await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
+    await init_db()
 
-    asyncio.run(_recreate())
+    yield
+
+    # Dispose pool so next test gets a fresh :memory: connection
+    engine.sync_engine.dispose()
 
 
 def utc_naive():
@@ -210,6 +212,7 @@ async def test_recall_cache_hit():
         contact_id=None,
         mode="deep",
         limit=5,
+        offset=0,
         include_self=True,
         include_pinned=True,
         include_tasks=True,
@@ -240,6 +243,7 @@ async def test_recall_cache_expiry():
         contact_id=None,
         mode="deep",
         limit=5,
+        offset=0,
         include_self=True,
         include_pinned=True,
         include_tasks=True,

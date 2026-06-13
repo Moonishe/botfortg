@@ -161,7 +161,7 @@ def _is_blocked(resp: httpx.Response) -> bool:
     return False
 
 
-def _make_pseudo_response(html: str, url: str) -> "httpx.Response":
+def _make_pseudo_response(html: str, url: str) -> httpx.Response:
     """Wrap raw HTML in a response-like httpx.Response."""
     import httpx
 

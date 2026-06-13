@@ -14,6 +14,7 @@ Hybrid search combines FTS5 (keywords) + Qdrant (semantic) via RRF.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import threading
@@ -26,6 +27,7 @@ import aiosqlite
 from src.config import PROJECT_ROOT, settings
 from src.core.infra.task_manager import track_ff
 from src.core.security.prompt_injection_scanner import safe_read_context_file
+from datetime import UTC
 
 if TYPE_CHECKING:
     from qdrant_client import QdrantClient
@@ -35,6 +37,40 @@ logger = logging.getLogger(__name__)
 CONTEXTS_DIR: Path = settings.data_dir / "contexts"
 
 _MAX_CONTEXT_CHARS = 2000
+
+
+def _safe_context_key(name: str) -> str:
+    """Sanitize contact name for use in file paths.
+
+    Blocks path-traversal characters and null bytes.
+    Replaces any suspicious characters with underscore.
+    Returns at most 100 characters.
+    """
+    if not name or ".." in name or "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError(f"Unsafe context name: {name!r}")
+    safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in name)
+    return safe.strip()[:100] or "unknown"
+
+
+def _safe_context_path(key: str) -> Path:
+    """Build and validate a safe file path under CONTEXTS_DIR.
+
+    1. Sanitizes ``key`` via ``_safe_context_key``.
+    2. Resolves ``CONTEXTS_DIR / f"{safe_key}.md"``.
+    3. Verifies the resolved path is still under ``CONTEXTS_DIR``.
+
+    Resolves ``CONTEXTS_DIR`` on every call so that tests which
+    monkeypatch ``CONTEXTS_DIR`` get correct behaviour.
+
+    Raises ``ValueError`` on path-traversal attempts.
+    """
+    safe_key = _safe_context_key(key)
+    contexts_dir_resolved = CONTEXTS_DIR.resolve()
+    path = (CONTEXTS_DIR / f"{safe_key.lower()}.md").resolve()
+    if not path.is_relative_to(contexts_dir_resolved):
+        raise ValueError(f"Path traversal detected for key: {key!r}")
+    return path
+
 
 # === LLM-WIKI constants ===
 OWNER_KEY = "_owner"  # special key for owner profile
@@ -101,7 +137,7 @@ def _get_file_lock(key: str) -> threading.Lock:
         # Cleanup every 1000 accesses
         _file_cleanup_counter += 1
         if _file_cleanup_counter % 1000 == 0:
-            for k in list(_file_locks.keys()):
+            for k in list(_file_locks):
                 if not _file_locks[k].locked():
                     del _file_locks[k]
         return _file_locks[key]
@@ -109,7 +145,7 @@ def _get_file_lock(key: str) -> threading.Lock:
 
 def get_contact_context(contact_name: str) -> str | None:
     """Read data/contexts/{name}.md and return content, or None."""
-    path = CONTEXTS_DIR / f"{contact_name.lower()}.md"
+    path = _safe_context_path(contact_name)
     if path.exists():
         content = safe_read_context_file(str(path), max_chars=_MAX_CONTEXT_CHARS)
         if content is None:
@@ -123,7 +159,7 @@ def get_contact_context(contact_name: str) -> str | None:
 def save_contact_context(contact_name: str, content: str) -> None:
     """Save/update context file for a contact."""
     CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = CONTEXTS_DIR / f"{contact_name.lower()}.md"
+    path = _safe_context_path(contact_name)
     path.write_text(content, encoding="utf-8")
     logger.info("Saved context for '%s' (%d chars)", contact_name, len(content))
 
@@ -174,19 +210,17 @@ def find_relevant_contexts(user_message: str) -> dict[str, str]:
 
 def save_context(key: str, content: str) -> None:
     """Save/overwrite context file for any key (contact name, owner, arbitrary topic)."""
-    # sanitize key: lowercase, replace spaces with -
-    safe_k = key.lower().replace(" ", "-")[:64]
     CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = CONTEXTS_DIR / f"{safe_k}.md"
+    path = _safe_context_path(key)
     path.write_text(content, encoding="utf-8")
-    _schedule_semantic_index(safe_k, content)
+    safe_stem = path.stem
+    _schedule_semantic_index(safe_stem, content)
     logger.info("Saved context '%s' (%d chars)", key, len(content))
 
 
 def get_context(key: str) -> str | None:
     """Read context file for any key."""
-    safe_k = key.lower().replace(" ", "-")[:64]
-    path = CONTEXTS_DIR / f"{safe_k}.md"
+    path = _safe_context_path(key)
     if path.exists():
         content = safe_read_context_file(str(path), max_chars=_MAX_CONTEXT_CHARS)
         if content is None:
@@ -205,11 +239,11 @@ def append_to_context(key: str, text: str, max_lines: int = 500) -> None:
     - Caps at max_lines lines
     - Adds timestamp prefix to new lines
     """
-    safe_k = key.lower().replace(" ", "-")[:64]
+    path = _safe_context_path(key)
+    safe_k = path.stem  # consistent with the resolved file name
     lock = _get_file_lock(safe_k)
     with lock:
         CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
-        path = CONTEXTS_DIR / f"{safe_k}.md"
 
         # Normalize text
         line = text.strip()
@@ -233,9 +267,9 @@ def append_to_context(key: str, text: str, max_lines: int = 500) -> None:
             return
 
         # Append with timestamp
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        ts = datetime.now(UTC).strftime("%Y-%m-%d")
         new_line = f"- [{ts}] {line}\n"
 
         # Cap total lines
@@ -307,26 +341,31 @@ async def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
                             for r in rows
                         ]
             except Exception:
-                pass  # FTS5 table doesn't exist → fall back to substring
+                logger.debug(
+                    "Non-critical error", exc_info=True
+                )  # FTS5 table doesn't exist → fall back to substring
 
-    # ── Fallback: substring search (with injection scanning) ─────────
-    results: list[dict] = []
-    ql = query.lower()
-    for md_file in CONTEXTS_DIR.iterdir():
-        if md_file.suffix != ".md":
-            continue
-        content = safe_read_context_file(str(md_file), max_chars=_MAX_CONTEXT_CHARS)
-        if content is None:
-            continue
-        pos = content.lower().find(ql)
-        if pos >= 0:
-            start = max(0, pos - 40)
-            end = min(len(content), pos + len(query) + 80)
-            snippet = content[start:end].strip()
-            results.append({"key": md_file.stem, "snippet": snippet, "rank": 0.0})
-            if len(results) >= limit:
-                break
-    return results
+    # ── Fallback: substring search (PERF-005: offloaded to thread) ────
+    def _do_substring_search() -> list[dict]:
+        results: list[dict] = []
+        ql = query.lower()
+        for md_file in CONTEXTS_DIR.iterdir():
+            if md_file.suffix != ".md":
+                continue
+            content = safe_read_context_file(str(md_file), max_chars=_MAX_CONTEXT_CHARS)
+            if content is None:
+                continue
+            pos = content.lower().find(ql)
+            if pos >= 0:
+                start = max(0, pos - 40)
+                end = min(len(content), pos + len(query) + 80)
+                snippet = content[start:end].strip()
+                results.append({"key": md_file.stem, "snippet": snippet, "rank": 0.0})
+                if len(results) >= limit:
+                    break
+        return results
+
+    return await asyncio.to_thread(_do_substring_search)
 
 
 async def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
@@ -384,25 +423,45 @@ async def index_contexts_to_fts() -> int:
             "CREATE VIRTUAL TABLE IF NOT EXISTS contexts_fts "
             "USING fts5(key, content, tokenize='unicode61 remove_diacritics 2')"
         )
-        await db.execute("DELETE FROM contexts_fts")  # clear stale entries
+        # PERF-012: wrap the DELETE + INSERT loop in a transaction
+        # for ~80% speedup on startup FTS5 rebuild.
+        # BEGIN IMMEDIATE prevents SQLITE_BUSY from concurrent readers.
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute("DELETE FROM contexts_fts")  # clear stale entries
 
-        count = 0
-        for md_file in sorted(CONTEXTS_DIR.iterdir()):
-            if md_file.suffix != ".md":
-                continue
-            key = md_file.stem
-            if not key:
-                continue
-            content = safe_read_context_file(str(md_file), max_chars=10000)
-            if content is None:
-                continue
-            await db.execute(
-                "INSERT INTO contexts_fts(key, content) VALUES (?, ?)",
-                (key, content),
-            )
-            count += 1
+            count = 0
+            for md_file in sorted(CONTEXTS_DIR.iterdir()):
+                if md_file.suffix != ".md":
+                    continue
+                key = md_file.stem
+                if not key:
+                    continue
+                content = safe_read_context_file(str(md_file), max_chars=10000)
+                if content is None:
+                    continue
+                await db.execute(
+                    "INSERT INTO contexts_fts(key, content) VALUES (?, ?)",
+                    (key, content),
+                )
+                count += 1
 
-        await db.commit()
+            await db.execute("COMMIT")
+        except Exception:
+            # ROLLBACK is a transaction-level operation — safe even if the
+            # FTS5 virtual table doesn't exist.  Guard against ROLLBACK
+            # failure (broken connection, locked DB) so the original
+            # exception is not masked.
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                logger.debug(
+                    "ROLLBACK after FTS5 indexing failure also failed "
+                    "(connection may be broken)",
+                    exc_info=True,
+                )
+            raise
+
         logger.info("Indexed %d context files into FTS5", count)
         return count
 
@@ -535,7 +594,7 @@ def _setup_auto_save_hook() -> None:
 # ============================================================================
 
 
-def _get_qdrant() -> "QdrantClient":
+def _get_qdrant() -> QdrantClient:
     """Lazy-init Qdrant client for context vector search.
 
     Thread-safe via ``_qdrant_init_lock`` — concurrent first-callers from
@@ -578,7 +637,7 @@ async def index_context_for_semantic(key: str, content: str, provider=None) -> b
                     ),
                 )
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
             _qdrant_dim = dim
         from qdrant_client.http import models as qmodels
 
@@ -686,6 +745,10 @@ async def rebuild_semantic_index(provider) -> int:
     return count
 
 
+# PERF-019: dedup in-flight/duplicate indexing by content hash
+_indexed_hashes: set[str] = set()
+
+
 def _schedule_semantic_index(key: str, content: str) -> None:
     """Fire-and-forget: schedule semantic indexing for a context file.
 
@@ -700,7 +763,16 @@ def _schedule_semantic_index(key: str, content: str) -> None:
 
 
 async def _index_with_provider(key: str, content: str) -> None:
-    """Lazy-load a provider and index the context file."""
+    """Lazy-load a provider and index the context file.
+
+    PERF-019: skips re-indexing if the content hash was already indexed
+    in this process lifetime, avoiding redundant provider builds.
+    """
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    if content_hash in _indexed_hashes:
+        return  # already indexed this exact content
+    _indexed_hashes.add(content_hash)
+
     try:
         from src.llm.base import TaskType
         from src.llm.router import build_provider

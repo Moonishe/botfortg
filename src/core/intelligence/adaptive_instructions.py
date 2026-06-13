@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.db.session import get_session
 from src.db.repo import get_or_create_user
@@ -176,7 +176,7 @@ async def apply_instruction(telegram_id: int, rule: str):
         if rule not in rules:
             rules.append(rule)
         profile.rules_json = json.dumps(rules, ensure_ascii=False)
-        profile.updated_at = datetime.now(timezone.utc)
+        profile.updated_at = datetime.now(UTC)
         await session.flush()
 
 

@@ -20,20 +20,22 @@ OWNER_TG_ID = 99002
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+async def setup_db():
     """Re-create tables before each test (in-memory SQLite)."""
     from src.db.session import engine, Base, init_db
     from sqlalchemy import text
 
-    async def _recreate():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
-            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
-        await init_db()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+        await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
+    await init_db()
 
-    asyncio.run(_recreate())
+    yield
+
+    # Dispose pool so next test gets a fresh :memory: connection
+    engine.sync_engine.dispose()
 
 
 def _utc_naive() -> datetime:

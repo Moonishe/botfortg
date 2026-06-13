@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select
 
@@ -29,7 +29,7 @@ def _naive_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
     if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.astimezone(UTC).replace(tzinfo=None)
     return dt
 
 
@@ -122,7 +122,7 @@ async def detect_silence_triggers(owner_id: int) -> list[dict]:
             archetype = contact.archetype if contact else None
 
             # Текущее молчание (с момента последнего исходящего)
-            now = _naive_utc(datetime.now(timezone.utc))
+            now = _naive_utc(datetime.now(UTC))
             assert now is not None
             current_silence = (now - last_out).total_seconds() / 3600
 

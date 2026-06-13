@@ -1,7 +1,6 @@
 """MCP Tool: анализ изображений через Vision API — любой vision-capable провайдер."""
 
 import asyncio
-import base64
 import logging
 import os
 from pathlib import Path
@@ -54,7 +53,7 @@ async def _try_openai_compat_vision(
             "description": result.description[:2000],
             "tokens": result.total_tokens,
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return None
     except Exception as e:
         logger.debug("OpenAI-compat vision failed (%s): %s", base_url, e)
@@ -97,7 +96,7 @@ async def _try_gemini_vision(
         )
         if text:
             return {"ok": True, "description": text[:2000], "tokens": 0}
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     except Exception as e:
         logger.debug("Gemini vision failed: %s", e)
@@ -199,7 +198,7 @@ async def analyze_image(
                 if result:
                     result["provider"] = "gemini"
                     return result
-                errors.append(f"gemini: vision failed")
+                errors.append("gemini: vision failed")
                 continue
 
             # ── OpenAI-совместимые: openai, mimo, cloudflare, custom ──

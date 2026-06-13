@@ -3,23 +3,45 @@ services:
     build: .
     container_name: telegram-assistant
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=128M
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
     env_file:
       - .env
     environment:
-      # переопределяем путь к БД, чтобы лежал в смонтированном томе
+      # Override DB path to use the mounted volume
       DATABASE_URL: sqlite+aiosqlite:////app/data/app.db
       TZ: UTC
     volumes:
       - ./data:/app/data
+    # Раскомментируйте для webhook-режима (задайте WEBHOOK_URL в .env)
+    # ports:
+    #   - "8080:8080"
+    networks:
+      - telegram-net
     # лог-ротация, чтобы не разрастался диск
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "5"
+
+networks:
+  telegram-net:
+    driver: bridge

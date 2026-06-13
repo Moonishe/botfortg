@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from telethon import functions
@@ -50,8 +50,8 @@ def _format_status(status) -> dict[str, Any]:
     if isinstance(status, UserStatusOffline):
         was_online = status.was_online
         if was_online:
-            dt = was_online.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
+            dt = was_online.replace(tzinfo=UTC)
+            now = datetime.now(UTC)
             diff = now - dt
             minutes = int(diff.total_seconds() / 60)
 
@@ -123,7 +123,7 @@ def _get_photo_url(client, entity) -> str | None:
             if hasattr(photo, "photo_id"):
                 return f"tg://photo/{entity.id}?id={photo.photo_id}"
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
     return None
 
 
@@ -463,15 +463,15 @@ async def _check_ignore(
             # This is a message from them after our message
             if m.id > message_id and m.date:
                 has_response = True
-                msg_date = msg.date.replace(tzinfo=timezone.utc) if msg.date else None
-                m_date = m.date.replace(tzinfo=timezone.utc) if m.date else None
+                msg_date = msg.date.replace(tzinfo=UTC) if msg.date else None
+                m_date = m.date.replace(tzinfo=UTC) if m.date else None
                 if msg_date and m_date:
                     diff = (m_date - msg_date).total_seconds() / 3600
                     response_time_hours = round(diff, 1)
                 break
 
-        now = datetime.now(timezone.utc)
-        msg_date = msg.date.replace(tzinfo=timezone.utc) if msg.date else None
+        now = datetime.now(UTC)
+        msg_date = msg.date.replace(tzinfo=UTC) if msg.date else None
         hours_since_sent = (
             round((now - msg_date).total_seconds() / 3600, 1) if msg_date else 0
         )
@@ -615,7 +615,7 @@ async def _check_info(client, peer: str) -> dict[str, Any]:
 
     # ── Last seen pattern analysis ───────────────────────────────────
     if isinstance(entity.status, UserStatusOffline) and entity.status.was_online:
-        dt = entity.status.was_online.replace(tzinfo=timezone.utc)
+        dt = entity.status.was_online.replace(tzinfo=UTC)
         result["last_seen_analysis"] = {
             "hour_utc": dt.hour,
             "day_of_week": dt.strftime("%A"),

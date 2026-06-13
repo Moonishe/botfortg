@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, UTC
 
 from sqlalchemy import (
     BigInteger,
@@ -128,7 +128,7 @@ class TelegramSession(Base):
     phone: Mapped[str] = mapped_column(String(32))
     account_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
     user: Mapped[User] = relationship(back_populates="session")
@@ -186,7 +186,7 @@ class LlmKeySlot(Base):
     usage_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
     user: Mapped[User] = relationship(back_populates="key_slots")
@@ -209,7 +209,7 @@ class LlmKeySlotModel(Base):
     model_name: Mapped[str] = mapped_column(String(128))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
     slot: Mapped[LlmKeySlot] = relationship(back_populates="models")
@@ -228,9 +228,9 @@ class PendingQuestion(Base):
     owner_id: Mapped[int] = mapped_column(BigInteger, index=True)
     question: Mapped[str] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc) + timedelta(hours=24),
+        default=lambda: datetime.now(UTC) + timedelta(hours=24),
     )

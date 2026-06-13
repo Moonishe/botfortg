@@ -6,7 +6,7 @@ import random
 import re
 import threading
 import time
-from datetime import datetime, timezone as tz
+from datetime import UTC
 
 from src.config import settings
 
@@ -296,14 +296,14 @@ async def load_humanizer_feedback() -> None:
                         "original": row.original_phrase[:300],
                         "corrected": (row.replacement or "")[:300],
                         "accepted": row.action == "accept",
-                        "time": row.created_at.replace(tzinfo=tz.utc).timestamp()
+                        "time": row.created_at.replace(tzinfo=UTC).timestamp()
                         if row.created_at
                         else time.time(),
                     }
                     _feedback_store.setdefault(row.user_id, []).append(entry)
                     loaded += 1
                 # Ограничиваем 100 записей на пользователя
-                for uid in list(_feedback_store.keys()):
+                for uid in list(_feedback_store):
                     if len(_feedback_store[uid]) > 100:
                         _feedback_store[uid] = _feedback_store[uid][-50:]
             logger.info("Loaded %d humanizer feedback entries from DB", loaded)

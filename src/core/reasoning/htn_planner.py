@@ -15,8 +15,8 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, UTC
 from typing import Any
 
 from src.config import settings
@@ -77,7 +77,7 @@ class Plan:
         default_factory=list
     )  # Индексы шагов с подтверждением
     estimated_cost_tokens: int = 0  # Суммарная оценка расхода токенов
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)  # Доп. метаданные
 
     def __post_init__(self) -> None:
@@ -370,7 +370,7 @@ class HTNPlanner:
                 ),
                 timeout=30.0,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("HTNPlanner: decomposition timed out")
             return self._heuristic_decompose(goal)
         except Exception as e:
@@ -515,7 +515,7 @@ class HTNPlanner:
                 purpose="planner",
             )
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         if provider is None:
             # Без LLM — создаём один простой шаг
@@ -554,7 +554,7 @@ class HTNPlanner:
                 ),
                 timeout=30.0,
             )
-        except (asyncio.TimeoutError, Exception) as e:
+        except (TimeoutError, Exception) as e:
             logger.warning("HTNPlanner: ad-hoc step generation failed: %s", e)
             return [
                 PlanStep(

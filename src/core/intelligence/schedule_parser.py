@@ -1,7 +1,7 @@
 """NL-парсер отложенных сообщений."""
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 
 def parse_schedule_message(text: str, tz_name: str | None = None) -> dict | None:
@@ -62,9 +62,9 @@ def parse_schedule_message(text: str, tz_name: str | None = None) -> dict | None
                     user_tz = zoneinfo.ZoneInfo(tz_name)
                     now = datetime.now(user_tz)
                 except (zoneinfo.ZoneInfoNotFoundError, KeyError, ValueError):
-                    now = datetime.now(timezone.utc)
+                    now = datetime.now(UTC)
             else:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
             send_at = now + timedelta(hours=1)  # default: через час
 
             # Парсим день

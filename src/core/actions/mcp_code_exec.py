@@ -298,7 +298,7 @@ async def code_exec(
                 proc.communicate(),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return {"error": f"Превышен таймаут ({timeout}с)", "output": ""}

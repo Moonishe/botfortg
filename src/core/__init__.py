@@ -8,11 +8,11 @@ from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import HM_RE, get_user_tz, now_in_tz
 
 __all__ = [
-    "sanitize_html",
-    "now_in_tz",
-    "get_user_tz",
     "HM_RE",
+    "get_user_tz",
     "notification_queue",
+    "now_in_tz",
+    "sanitize_html",
 ]
 
 

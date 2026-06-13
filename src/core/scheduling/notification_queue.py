@@ -4,8 +4,8 @@ import asyncio
 import logging
 import uuid
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime, timedelta, UTC
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
 
@@ -41,7 +41,7 @@ class NotificationQueue:
         self._flush_interval = 60  # проверка раз в минуту
         self._max_batch_size = 10
         self._ttl_hours = 24
-        self._loop_task: Optional[asyncio.Task] = None
+        self._loop_task: asyncio.Task | None = None
 
     async def enqueue(
         self,
@@ -121,9 +121,7 @@ class NotificationQueue:
                 return 0
 
             # Разделяем: свежие (в окне) — группируем, старые — отправляем по одному
-            window_start = datetime.now(timezone.utc) - timedelta(
-                seconds=self._window_seconds
-            )
+            window_start = datetime.now(UTC) - timedelta(seconds=self._window_seconds)
             fresh: list[Notification] = []
             stale: list[Notification] = []
             for n in pending:
@@ -171,7 +169,7 @@ class NotificationQueue:
                     update(Notification)
                     .where(Notification.id.in_(ids))
                     .values(
-                        flushed_at=datetime.now(timezone.utc),
+                        flushed_at=datetime.now(UTC),
                     )
                 )
 
@@ -240,14 +238,14 @@ class NotificationQueue:
         if len(topic_set) > 1:
             header = f"📬 <b>Сводка</b> ({len(topic_set)} тем, {count} уведомлений)"
         else:
-            header = f"📬 <b>Сводка</b>"
+            header = "📬 <b>Сводка</b>"
 
         lines = [
             header,
             "─" * 28,
         ]
 
-        for prio in sorted(by_priority.keys()):
+        for prio in sorted(by_priority):
             items = by_priority[prio]
             emoji = priority_emoji.get(prio, "⚪")
             sub_topic = _topic_ru.get(
@@ -314,7 +312,7 @@ class NotificationQueue:
 
     async def cleanup_expired(self) -> int:
         """Удаляет уведомления старше TTL (включая отправленные). Возвращает количество удалённых."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=self._ttl_hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=self._ttl_hours)
         async with SessionLocal() as session:
             result = await session.execute(
                 select(Notification).where(

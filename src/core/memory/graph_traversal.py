@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -81,7 +81,7 @@ async def traverse(
                     "total_nodes": 0,
                     "total_edges": 0,
                     "message": f"Сущность '{start_entity}' не найдена в графе знаний.",
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "generated_at": datetime.now(UTC).isoformat(),
                 }
 
             # Берём первую найденную как стартовую
@@ -212,7 +212,7 @@ async def traverse(
                 "edges": unique_edges,
                 "total_nodes": len(nodes_list),
                 "total_edges": len(unique_edges),
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
             }
 
     except Exception:
@@ -225,7 +225,7 @@ async def traverse(
         return {
             "ok": False,
             "error": "Ошибка обхода графа знаний",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
         }
 
 

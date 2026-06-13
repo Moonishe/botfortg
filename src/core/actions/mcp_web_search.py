@@ -79,7 +79,7 @@ async def web_search(
             await asyncio.wait_for(
                 _SEARCH_SEM.acquire(), timeout=_SEM_ACQUIRE_TIMEOUT_SEC
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"ok": False, "error": "search pool busy", "results": []}
         try:
 
@@ -91,7 +91,7 @@ async def web_search(
                     try:
                         ddgs.close()
                     except Exception:
-                        pass
+                        logger.debug("Non-critical error", exc_info=True)
 
             results = await asyncio.wait_for(
                 asyncio.to_thread(_sync_search), timeout=_DDG_TIMEOUT_SEC

@@ -14,7 +14,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ class AgentState:
     errors: list[str] = field(default_factory=list)
     output: dict[str, Any] = field(default_factory=dict)
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def snapshot(self) -> dict[str, Any]:
         """Снять снапшот состояния для чекпоинта."""
@@ -349,7 +349,7 @@ class AgentRuntime:
                         ),
                         agent_state=cp_raw.get("agent_state", {}),
                         memory_versions=cp_raw.get("memory_versions", {}),
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=datetime.now(UTC),
                     )
                     break
 
@@ -510,7 +510,7 @@ class AgentRuntime:
             working_memory_snapshot=dict(context.get("working_memory", {})),
             agent_state=state.snapshot(),
             memory_versions=dict(context.get("memory_versions", {})),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
         state.checkpoints.append(checkpoint)
 

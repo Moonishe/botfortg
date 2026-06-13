@@ -12,9 +12,8 @@
 from __future__ import annotations
 
 import asyncio
-import math
-import time
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from src.core.cache.manager import ManagedCache, cache_manager
 

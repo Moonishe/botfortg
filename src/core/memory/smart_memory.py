@@ -12,7 +12,8 @@ import asyncio
 import hashlib
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timedelta, UTC
 
 from src.core.contacts.chat_service import messages_to_transcript
 from src.core.memory.memory_extractor import MEMORIES_SYSTEM, _parse_json_array
@@ -30,6 +31,33 @@ logger = logging.getLogger(__name__)
 # per contact, so the semaphore bounds the absolute fan-out.
 _MAX_CONCURRENT_LLM = 4
 _llm_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_LLM)
+
+# Timeout for acquiring the LLM semaphore. If all 4 slots are occupied by
+# hanging LLM calls, this prevents the remaining tasks from waiting forever.
+_SEMAPHORE_ACQUIRE_TIMEOUT: float = 120.0  # 2 minutes
+
+# Simple TTL cache for already-extracted facts to avoid redundant LLM
+# calls during batch processing.  Key: "{owner_id}:{contact_id_or_0}:{transcript_hash}".
+# Transcript hash prevents owner-facts from different conversations
+# (contact=None → both get the same contact_id=0 part) from colliding.
+# Bounded at _FACT_CACHE_MAX entries — oldest entries are evicted when
+# the limit is exceeded. Stale entries (past _FACT_CACHE_TTL) are also
+# lazily cleaned on key re-access.
+_FACT_CACHE_TTL: float = 300.0  # 5 minutes
+_FACT_CACHE_MAX: int = 200
+_fact_cache: dict[str, tuple[float, list[dict[str, object]]]] = {}
+
+
+def _evict_fact_cache_if_full() -> None:
+    """Evict oldest entries when the fact cache exceeds its max size."""
+    if len(_fact_cache) > _FACT_CACHE_MAX:
+        # Sort by timestamp (ascending) and remove oldest 25%
+        stale = sorted(_fact_cache.items(), key=lambda x: x[1][0])[
+            : _FACT_CACHE_MAX // 4
+        ]
+        for key, _ in stale:
+            _fact_cache.pop(key, None)
+
 
 # Regex для поиска дат в тексте факта
 _DATE_PATTERNS = [
@@ -144,6 +172,107 @@ async def _detect_ambiguous_contacts(
                         )
 
 
+async def _process_single_contact(
+    provider: LLMProvider,
+    owner_id: int,
+    peer_id: int,
+    progress_callback=None,
+    idx: int = 0,
+    total: int = 0,
+) -> dict:
+    """Process one contact: load messages, extract facts, save, return stats.
+
+    Designed for use with asyncio.gather — each invocation is independent
+    and manages its own DB sessions.  The module-level _llm_semaphore
+    (used inside _extract_llm_filtered) caps total concurrent LLM calls.
+    """
+    from src.db.repo import get_contact
+
+    # ── Load contact & messages ──
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        contact = await get_contact(session, owner, peer_id)
+    contact_name = contact.display_name if contact else str(peer_id)
+
+    if progress_callback:
+        await progress_callback(idx, total, contact_name, "processing", "")
+
+    async with get_session() as session:
+        messages = await fetch_chat_messages(session, owner, peer_id, limit=80)
+
+    if not messages:
+        if progress_callback:
+            await progress_callback(idx, total, contact_name, "skip", "нет сообщений")
+        return {
+            "owner_facts": 0,
+            "contact_facts": 0,
+            "skipped": 0,
+            "recent_facts": [],
+        }
+
+    transcript = messages_to_transcript(messages)
+
+    # ── Extract owner + contact facts (concurrent, semaphore-limited) ──
+    (owner_result, contact_result) = await asyncio.gather(
+        _extract_llm_filtered(provider, owner_id, contact=None, transcript=transcript),
+        _extract_llm_filtered(
+            provider, owner_id, contact=contact, transcript=transcript
+        ),
+        return_exceptions=True,
+    )
+
+    recent: list[str] = []
+    total_skipped = 0
+
+    if isinstance(owner_result, BaseException):
+        logger.warning(
+            "Owner-facts extraction failed for peer %d: %s", peer_id, owner_result
+        )
+        owner_facts: list[dict] = []
+        skipped_o = 0
+    else:
+        owner_facts, skipped_o = owner_result  # type: ignore[assignment]
+    total_skipped += skipped_o
+    if owner_facts:
+        await _save_facts_to_queue(owner_id, contact_id=None, facts=owner_facts)
+        for fact in owner_facts[:2]:
+            recent.append(fact["fact"])
+
+    if isinstance(contact_result, BaseException):
+        logger.warning(
+            "Contact-facts extraction failed for peer %d: %s", peer_id, contact_result
+        )
+        contact_facts: list[dict] = []
+        skipped_c = 0
+    else:
+        contact_facts, skipped_c = contact_result  # type: ignore[assignment]
+    total_skipped += skipped_c
+    if contact_facts:
+        contact_peer_id = contact.peer_id if contact else None
+        await _save_facts_to_queue(
+            owner_id, contact_id=contact_peer_id, facts=contact_facts
+        )
+        for fact in contact_facts[:2]:
+            recent.append(fact["fact"])
+
+    # ── Progress: done ──
+    extra_parts = []
+    if owner_facts:
+        extra_parts.append(f"+{len(owner_facts)} о себе")
+    if contact_facts:
+        extra_parts.append(f"+{len(contact_facts)} о контакте")
+    extra = ", ".join(extra_parts) if extra_parts else "0 фактов"
+    if progress_callback:
+        await progress_callback(idx, total, contact_name, "done", extra)
+
+    return {
+        "owner_facts": len(owner_facts),
+        "contact_facts": len(contact_facts),
+        "skipped": total_skipped,
+        "recent_facts": recent,
+    }
+
+
 async def smart_extract_after_sync(
     owner_id: int,
     provider: LLMProvider,
@@ -165,10 +294,6 @@ async def smart_extract_after_sync(
     Returns:
         {"owner_facts": N, "contact_facts": M, "skipped_stale": K, "recent_facts": [...]}
     """
-    total_owner_facts = 0
-    total_contact_facts = 0
-    total_skipped = 0
-
     total = len(contact_ids)
 
     async with get_session() as session:
@@ -179,7 +304,7 @@ async def smart_extract_after_sync(
     # (<100 контактов). Каждая сессия короткая (один запрос) и живёт недолго.
     # При большом количестве контактов (>500) стоит перейти на batch-загрузку.
     _name_map: dict[int, str] = {}
-    if progress_message and total > 0:
+    if total > 0:
         from src.db.repo import get_contact
 
         for pid in contact_ids:
@@ -190,122 +315,32 @@ async def smart_extract_after_sync(
     # ── Detect ambiguous contacts (Feature 1: question accumulation) ──
     await _detect_ambiguous_contacts(owner_id, contact_ids, _name_map, owner)
 
-    # Выбираем источник контактов: с прогрессом или без
-    if progress_message and total > 0:
-        from src.core.infra.progress import progress_tracker
+    # ── Parallel extraction across all contacts ──
+    # Each per-contact task manages its own DB sessions; the module-level
+    # _llm_semaphore caps total concurrent LLM calls at _MAX_CONCURRENT_LLM.
+    tasks = [
+        _process_single_contact(provider, owner_id, pid, progress_callback, i, total)
+        for i, pid in enumerate(contact_ids)
+    ]
 
-        contact_iter = progress_tracker(
-            progress_message,
-            total,
-            contact_ids,
-            item_name_fn=lambda pid: _name_map.get(pid, str(pid)),
-            prefix="🧠 Smart‑память",
-        )
-    else:
-        # Вспомогательный async‑генератор
-        async def _pid_iter():
-            for pid in contact_ids:
-                yield pid
+    gather_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        contact_iter = _pid_iter()
-
-    _contact_idx = 0
-
-    # Collect recent facts for conversational display (Feature 2)
+    # ── Aggregate results ──
+    total_owner_facts = 0
+    total_contact_facts = 0
+    total_skipped = 0
     _recent_facts: list[str] = []
 
-    async for peer_id in contact_iter:
-        _contact_idx += 1
-
-        # Получаем объект контакта
-        from src.db.repo import get_contact
-
-        async with get_session() as session:
-            contact = await get_contact(session, owner, peer_id)
-            contact_name = contact.display_name if contact else str(peer_id)
-
-        # --- progress: processing ---
-        if progress_callback:
-            await progress_callback(
-                _contact_idx - 1, total, contact_name, "processing", ""
-            )
-
-        # Загружаем сообщения из БД (уже синхронизированы)
-        async with get_session() as session:
-            messages = await fetch_chat_messages(session, owner, peer_id, limit=80)
-
-        if not messages:
-            if progress_callback:
-                await progress_callback(
-                    _contact_idx - 1, total, contact_name, "skip", "нет сообщений"
-                )
+    for result in gather_results:
+        if isinstance(result, BaseException):
+            logger.error("Contact-processing task failed: %s", result)
             continue
-
-        transcript = messages_to_transcript(messages)
-
-        # --- 1 + 2. Извлекаем факты о ВЛАДЕЛЬЦЕ и КОНТАКТЕ параллельно ---
-        # Fan-out reduction: both LLM calls share the same transcript and
-        # are independent, so we run them concurrently. The semaphore in
-        # _extract_llm_filtered caps absolute concurrency; return_exceptions
-        # ensures a failure on one branch does not cancel the other.
-        (owner_result, contact_result) = await asyncio.gather(
-            _extract_llm_filtered(
-                provider,
-                owner_id,
-                contact=None,
-                transcript=transcript,
-            ),
-            _extract_llm_filtered(
-                provider,
-                owner_id,
-                contact=contact,
-                transcript=transcript,
-            ),
-            return_exceptions=True,
-        )
-
-        if isinstance(owner_result, BaseException):
-            logger.warning("Owner-facts extraction failed: %s", owner_result)
-            owner_facts: list[dict] = []
-            skipped = 0
-        else:
-            owner_facts, skipped = owner_result  # type: ignore[assignment]
-        total_skipped += skipped
-        if owner_facts:
-            await _save_facts_to_queue(owner_id, contact_id=None, facts=owner_facts)
-            total_owner_facts += len(owner_facts)
-            for fact in owner_facts[:2]:
-                if len(_recent_facts) < 10:
-                    _recent_facts.append(fact["fact"])
-
-        if isinstance(contact_result, BaseException):
-            logger.warning("Contact-facts extraction failed: %s", contact_result)
-            contact_facts: list[dict] = []
-            skipped = 0
-        else:
-            contact_facts, skipped = contact_result  # type: ignore[assignment]
-        total_skipped += skipped
-        if contact_facts:
-            contact_peer_id = contact.peer_id if contact else None
-            await _save_facts_to_queue(
-                owner_id, contact_id=contact_peer_id, facts=contact_facts
-            )
-            total_contact_facts += len(contact_facts)
-            for fact in contact_facts[:2]:
-                if len(_recent_facts) < 10:
-                    _recent_facts.append(fact["fact"])
-
-        # --- progress: done ---
-        extra_parts = []
-        if owner_facts:
-            extra_parts.append(f"+{len(owner_facts)} о себе")
-        if contact_facts:
-            extra_parts.append(f"+{len(contact_facts)} о контакте")
-        extra = ", ".join(extra_parts) if extra_parts else "0 фактов"
-        if progress_callback:
-            await progress_callback(
-                _contact_idx - 1, total, contact_name, "done", extra
-            )
+        total_owner_facts += result["owner_facts"]
+        total_contact_facts += result["contact_facts"]
+        total_skipped += result["skipped"]
+        for fact_text in result["recent_facts"]:
+            if len(_recent_facts) < 10:
+                _recent_facts.append(fact_text)
 
     return {
         "owner_facts": total_owner_facts,
@@ -334,6 +369,20 @@ async def _extract_llm_filtered(
     if not transcript:
         return [], 0
 
+    # ── Cache check (avoids redundant LLM calls within TTL window) ──
+    # Include transcript hash so owner-facts from different conversations
+    # are not incorrectly shared (contact=None → both get key "...:0").
+    transcript_hash = hashlib.md5(transcript.encode()).hexdigest()[:12]
+    cache_key = f"{telegram_id}:{contact.peer_id if contact else 0}:{transcript_hash}"
+    cached = _fact_cache.get(cache_key)
+    if cached is not None:
+        cached_time, cached_facts = cached
+        if time.monotonic() - cached_time < _FACT_CACHE_TTL:
+            logger.debug("Cache hit for %s", cache_key)
+            return cached_facts, 0
+        else:
+            _fact_cache.pop(cache_key, None)
+
     # Формируем промпт (как в memory_extractor.py)
     if contact is not None:
         user_prompt = (
@@ -349,7 +398,21 @@ async def _extract_llm_filtered(
         )
 
     try:
-        async with _llm_semaphore:
+        # Acquire semaphore with timeout — prevents deadlock if all LLM
+        # calls hang and consume every semaphore slot.
+        try:
+            await asyncio.wait_for(
+                _llm_semaphore.acquire(), timeout=_SEMAPHORE_ACQUIRE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "LLM semaphore acquire timed out after %.0fs — "
+                "all %d slots may be occupied by hanging calls",
+                _SEMAPHORE_ACQUIRE_TIMEOUT,
+                _MAX_CONCURRENT_LLM,
+            )
+            return [], 0
+        try:
             raw = await provider.chat(
                 [
                     ChatMessage(role="system", content=MEMORIES_SYSTEM),
@@ -357,6 +420,8 @@ async def _extract_llm_filtered(
                 ],
                 task_type=TaskType.MEMORY,
             )
+        finally:
+            _llm_semaphore.release()
     except (ConnectionError, OSError, ValueError):
         logger.exception("Smart memory LLM call failed")
         return [], 0
@@ -444,6 +509,10 @@ async def _extract_llm_filtered(
             }
         )
 
+    # ── Cache store (with eviction to prevent unbounded growth) ──
+    _evict_fact_cache_if_full()
+    _fact_cache[cache_key] = (time.monotonic(), valid)
+
     return valid, skipped
 
 
@@ -456,7 +525,7 @@ def _has_invalid_date(fact_text: str) -> bool:
 
     Факты без дат считаются валидными.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     one_year_ago = now - timedelta(days=365)
     future_cutoff = now + timedelta(days=1)  # +1 день допуска (часовые пояса)
 
@@ -503,7 +572,7 @@ def _parse_date_match(match: re.Match) -> datetime | None:
         if year < 100:
             year += 2000
         if 1 <= day <= 31 and 1 <= month <= 12 and year >= 2000:
-            return datetime(year, month, day, tzinfo=timezone.utc)
+            return datetime(year, month, day, tzinfo=UTC)
 
     # YYYY-MM-DD — первая группа 4 цифры, вторая/третья тоже цифры
     if (
@@ -514,7 +583,7 @@ def _parse_date_match(match: re.Match) -> datetime | None:
     ):
         year, month, day = int(groups[0]), int(groups[1]), int(groups[2])
         if 1 <= month <= 12 and 1 <= day <= 31:
-            return datetime(year, month, day, tzinfo=timezone.utc)
+            return datetime(year, month, day, tzinfo=UTC)
 
     # Русская дата: "15 мая 2024" — вторая группа содержит буквы
     if group_count == 3 and not groups[1].isdigit():
@@ -523,13 +592,13 @@ def _parse_date_match(match: re.Match) -> datetime | None:
         year = int(groups[2])
         month = _MONTH_MAP.get(month_name)
         if month and 1 <= day <= 31 and year >= 2000:
-            return datetime(year, month, day, tzinfo=timezone.utc)
+            return datetime(year, month, day, tzinfo=UTC)
 
     # Просто год: "2024 года" — одна группа
     if group_count == 1:
         year = int(groups[0])
         if year >= 2000:
-            return datetime(year, 1, 1, tzinfo=timezone.utc)
+            return datetime(year, 1, 1, tzinfo=UTC)
 
     return None
 

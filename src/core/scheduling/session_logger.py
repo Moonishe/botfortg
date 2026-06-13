@@ -3,7 +3,7 @@
 from __future__ import annotations
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from src.db.session import get_session
 from src.db.repo import get_or_create_user
 from sqlalchemy import select
@@ -69,7 +69,7 @@ async def log_assistant_response(telegram_id: int, text: str) -> None:
                     texts = [r[0] for r in recent.fetchall() if r[0]]
                     if texts:
                         sess.summary = "\n".join(texts)[:500]
-                        sess.ended_at = datetime.now(timezone.utc)
+                        sess.ended_at = datetime.now(UTC)
             await session.flush()
     except Exception:
         logger.debug("Session log failed (assistant)", exc_info=True)
@@ -84,7 +84,7 @@ async def end_session(telegram_id: int) -> None:
             async with get_session() as session:
                 sess = await session.get(AgentSession, sid)
                 if sess:
-                    sess.ended_at = datetime.now(timezone.utc)
+                    sess.ended_at = datetime.now(UTC)
                     await session.flush()
         except Exception:
             logger.debug("Session end failed", exc_info=True)

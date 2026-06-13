@@ -253,7 +253,7 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
     # 4. Capture print() output
     output_buffer = io.StringIO()
     safe_builtins["print"] = (
-        lambda *args, _sep=" ", _end="\n", _file=output_buffer, **kw: print(  # noqa: E731
+        lambda *args, _sep=" ", _end="\n", _file=output_buffer, **kw: print(
             *args, sep=kw.get("sep", _sep), end=kw.get("end", _end), file=_file
         )
     )
@@ -273,14 +273,14 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
             ),
             timeout=5.0,
         )
-        result_value = namespace.get("_result", None)
+        result_value = namespace.get("_result")
         output = output_buffer.getvalue()
         return {
             "output": output.strip()[:5000],
             "result": str(result_value)[:2000] if result_value is not None else None,
             "error": None,
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {
             "error": "execution timed out (5s limit)",
             "output": output_buffer.getvalue().strip()[:2000],

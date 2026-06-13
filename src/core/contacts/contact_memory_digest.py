@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from src.core.cache import AdaptiveTTLCache
@@ -77,7 +77,7 @@ async def get_contact_digest(owner_telegram_id: int, peer_id: int) -> dict[str, 
             and profile.memory_digest_updated_at
         ):
             age = (
-                datetime.now(timezone.utc) - profile.memory_digest_updated_at
+                datetime.now(UTC) - profile.memory_digest_updated_at
             ).total_seconds()
             if age < 600:
                 try:
@@ -97,7 +97,7 @@ async def get_contact_digest(owner_telegram_id: int, peer_id: int) -> dict[str, 
         # 2c. Persist
         if profile:
             profile.memory_digest = json.dumps(digest, ensure_ascii=False)
-            profile.memory_digest_updated_at = datetime.now(timezone.utc)
+            profile.memory_digest_updated_at = datetime.now(UTC)
         else:
             from src.db.repo import upsert_contact_profile
 
@@ -106,7 +106,7 @@ async def get_contact_digest(owner_telegram_id: int, peer_id: int) -> dict[str, 
                 owner,
                 contact_id=peer_id,
                 memory_digest=json.dumps(digest, ensure_ascii=False),
-                memory_digest_updated_at=datetime.now(timezone.utc),
+                memory_digest_updated_at=datetime.now(UTC),
             )
         await session.flush()
 
@@ -130,7 +130,7 @@ async def _build_digest(session, owner, contact, profile) -> dict[str, Any]:
         "risks": [],
         "facts": [],
         "health": None,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
     # ── Style ──────────────────────────────────────────────────────
@@ -182,7 +182,7 @@ async def _build_digest(session, owner, contact, profile) -> dict[str, Any]:
         commitments = await list_open_commitments(
             session, owner, peer_id=contact.peer_id
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for c in commitments[:3]:
             deadline_str = ""
             if c.deadline_at:

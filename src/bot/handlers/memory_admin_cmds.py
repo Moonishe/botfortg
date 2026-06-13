@@ -8,7 +8,7 @@ Callbacks: memory:clear_negative, memory:stats, pattern:*, mem:neighbors:*,
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -72,7 +72,7 @@ async def cmd_llm_status(message: Message) -> None:
     lines.append("")
     for s in slots[:10]:
         cooldown_active = (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(
-            timezone.utc
+            UTC
         )
         status = "❌" if not s.enabled else "⏳" if cooldown_active else "✅"
         lines.append(
@@ -589,7 +589,7 @@ async def cb_summary_save(callback: CallbackQuery) -> None:
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
-            pass  # кнопка уже убрана или сообщение недоступно
+            logger.debug("Non-critical error", exc_info=True)  # кнопка уже убрана или сообщение недоступно
 
 
 @router.message(Command("persona"))

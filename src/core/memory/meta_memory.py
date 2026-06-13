@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import func, select, update as sa_update
 
@@ -44,7 +44,7 @@ def calculate_importance(
 
     Возвращает значение 0.0–1.0, где 1.0 = максимальная важность.
     """
-    now = reference_time or datetime.now(timezone.utc)
+    now = reference_time or datetime.now(UTC)
 
     # Уверенность (0.0–1.0)
     confidence = 0.5 if (c := getattr(memory, "confidence", None)) is None else float(c)
@@ -96,7 +96,7 @@ async def boost_confidence(
         True если обновление успешно, False иначе.
     """
     boost = amount if amount is not None else settings.meta_memory_confidence_boost
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         async with get_session() as session:
@@ -150,7 +150,7 @@ async def reduce_confidence(
         True если обновление успешно, False иначе.
     """
     decay = amount if amount is not None else settings.meta_memory_confidence_decay
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         async with get_session() as session:
@@ -201,7 +201,7 @@ async def recalculate_all_importance(
     Returns:
         Количество обновлённых фактов.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     updated = 0
 
     try:

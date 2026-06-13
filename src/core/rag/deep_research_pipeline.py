@@ -13,9 +13,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
+from datetime import datetime, UTC
+from collections.abc import Callable, Awaitable
+from typing import Any
 
 from src.config import settings
 from src.core.rag.types import (
@@ -37,6 +37,9 @@ _MIN_SUB_QUERIES = 3
 # Таймаут одного fetch-запроса (сек)
 _FETCH_TIMEOUT_SEC = 30.0
 
+# Callback для оповещения о прогрессе исследования
+ProgressCallback = Callable[[str, str, str], Awaitable[None]]
+
 
 class DeepResearchPipeline:
     """Оркестратор двухфазного глубокого исследования.
@@ -54,8 +57,48 @@ class DeepResearchPipeline:
     def __init__(self) -> None:
         self._jobs: dict[str, ResearchResult] = {}
         self._sem = asyncio.Semaphore(_MAX_PARALLEL_FETCHES)
+        self._session: Any = None
+        self._user: Any = None
+        self._provider: Any = None
+        self._progress_callback: ProgressCallback | None = None
+        self._pending_tasks: dict[str, asyncio.Task[None]] = {}
+        """Фоновые задачи фазы 1 по job_id — для возможности отмены при shutdown."""
 
     # ── Публичные методы ──────────────────────────────────────────────
+
+    def configure(self, session: Any = None, user: Any = None) -> None:
+        """Lazy-init: передать session и user для RAG-модулей.
+
+        Args:
+            session: SQLAlchemy AsyncSession (опционально).
+            user: ORM User object (опционально).
+        """
+        self._session = session
+        self._user = user
+
+    def set_progress_callback(self, callback: ProgressCallback | None) -> None:
+        """Установить callback для оповещений о прогрессе исследования.
+
+        Callback вызывается с сигнатурой (job_id: str, phase: str, detail: str).
+        Установите None чтобы отключить оповещения.
+
+        Args:
+            callback: Асинхронная функция оповещения или None.
+        """
+        self._progress_callback = callback
+
+    async def _notify_progress(self, job_id: str, phase: str, detail: str = "") -> None:
+        """Отправить оповещение о прогрессе через callback (если задан).
+
+        Все ошибки внутри callback'а перехватываются — оповещения
+        не должны ломать конвейер.
+        """
+        if self._progress_callback is None:
+            return
+        try:
+            await self._progress_callback(job_id, phase, detail)
+        except Exception:
+            logger.debug("Progress callback failed (non-critical)", exc_info=True)
 
     def submit(self, request: ResearchRequest) -> str:
         """Зарегистрировать задачу и запустить фазу 1 в фоне.
@@ -69,15 +112,40 @@ class DeepResearchPipeline:
         Задача стартует асинхронно через `asyncio.create_task`.
         Статус сразу становится PENDING, затем PHASE1_RUNNING.
         """
+        # Edge guard: validate max_minutes (1–60 range for safety)
+        request.max_minutes = max(1, min(60, request.max_minutes))
+
+        # Memory guard: evict oldest jobs if above max
+        _MAX_JOBS = 100
+        if len(self._jobs) >= _MAX_JOBS:
+            oldest = min(
+                self._jobs.keys(),
+                key=lambda jid: (
+                    self._jobs[jid].started_at.timestamp()
+                    if self._jobs[jid].started_at
+                    else 0
+                ),
+            )
+            logger.info("Evicting oldest research job: %s", oldest)
+            del self._jobs[oldest]
+
         result = ResearchResult(
             query=request.query,
             status=ResearchStatus.PENDING,
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
         self._jobs[result.job_id] = result
 
-        # Запуск фазы 1 в фоне
-        asyncio.create_task(self._run_phase1(result.job_id, request))
+        # Запуск фазы 1 в фоне — сохраняем ссылку для возможности отмены
+        task = asyncio.create_task(
+            self._run_phase1(result.job_id, request),
+            name=f"deep-research-{result.job_id}",
+        )
+        self._pending_tasks[result.job_id] = task
+        # Автоочистка ссылки при завершении задачи (успех/отмена/ошибка)
+        task.add_done_callback(
+            lambda _t, jid=result.job_id: self._pending_tasks.pop(jid, None)
+        )
 
         logger.info(
             "Deep research job %s submitted: query=%r max_minutes=%d",
@@ -87,7 +155,7 @@ class DeepResearchPipeline:
         )
         return result.job_id
 
-    async def get_status(self, job_id: str) -> Optional[ResearchResult]:
+    async def get_status(self, job_id: str) -> ResearchResult | None:
         """Получить текущий статус и результат задачи.
 
         Args:
@@ -98,17 +166,73 @@ class DeepResearchPipeline:
         """
         return self._jobs.get(job_id)
 
+    def get_summary(self, job_id: str) -> str:
+        """Get research summary for a job (disk-first, in-memory fallback).
+
+        Checks ``SUMMARY.md`` on disk first; if missing, falls back to
+        the in-memory result object.
+
+        Args:
+            job_id: Research job identifier.
+
+        Returns:
+            Summary Markdown string, or ``""`` if the job is not found.
+        """
+        # 1. Disk-first — read SUMMARY.md if it exists
+        summary_path = settings.data_dir / "research" / job_id / "SUMMARY.md"
+        if summary_path.is_file():
+            try:
+                return summary_path.read_text(encoding="utf-8")
+            except Exception:
+                logger.debug(
+                    "Failed to read SUMMARY.md for job %s", job_id, exc_info=True
+                )
+
+        # 2. In-memory fallback
+        result = self._jobs.get(job_id)
+        if result is not None:
+            return self._generate_summary(result)
+
+        logger.debug("get_summary: job %s not found", job_id)
+        return ""
+
+    # ── LLM Provider ──────────────────────────────────────────────────
+
+    async def _build_llm_provider(self) -> object | None:
+        """Build LLM provider for RAG modules (lazy, cached).
+
+        Returns:
+            Provider instance or None if unavailable.
+        """
+        if self._provider is not None:
+            return self._provider
+        try:
+            from src.core.rag._provider import get_rag_provider
+
+            if self._user is not None:
+                self._provider = await get_rag_provider(
+                    purpose="background", telegram_id=self._user.telegram_id
+                )
+            else:
+                logger.debug("_build_llm_provider: user not configured")
+        except Exception:
+            logger.debug("LLM provider unavailable", exc_info=True)
+        return self._provider
+
     # ── Фаза 1: Сбор веб-источников ───────────────────────────────────
 
     async def _run_phase1(self, job_id: str, request: ResearchRequest) -> None:
-        """Выполнить фазу 1: поиск → подзапросы → параллельная загрузка.
+        """Выполнить фазу 1: memory-seed → поиск → подзапросы → swarm → KG → timeline.
 
         Шаги:
+        0. Memory-seeded research (Qdrant prior facts, если включено).
         1. Поиск по основному запросу (через duckduckgo_search).
-        2. Генерация 3–5 подзапросов.
-        3. Параллельная загрузка источников (semaphore=3).
-        4. Сохранение topics/*.md, sources/*.md, SUMMARY.md.
-        5. Эмиссия RESEARCH_COMPLETED.
+        2. Генерация 3–5 подзапросов + auto-tool selection.
+        3. Параллельная загрузка источников (semaphore=3, опционально Swarm).
+        4. Knowledge Graph: contradiction detection (если включено).
+        5. Timeline extraction (если включено).
+        6. Сохранение topics/*.md, sources/*.md, SUMMARY.md.
+        7. Эмиссия RESEARCH_COMPLETED.
         """
         result = self._jobs.get(job_id)
         if result is None:
@@ -117,38 +241,128 @@ class DeepResearchPipeline:
 
         result.status = ResearchStatus.PHASE1_RUNNING
         logger.info("Phase 1 started for job %s", job_id)
+        await self._notify_progress(
+            job_id, "searching", f"👀 Ищу: {request.query[:100]}"
+        )
 
         try:
+            # ── Шаг 0: Memory-Seeded Research ──
+            if settings.deep_research_memory_seed_enabled and self._user is not None:
+                await self._notify_progress(
+                    job_id, "memory_seed", "🧠 Копаюсь в долгосрочной памяти…"
+                )
+                try:
+                    from src.core.rag.memory_seed import MemorySeeder
+
+                    seeder = MemorySeeder()
+                    seed_ctx = await seeder.seed(
+                        request.query,
+                        self._user.telegram_id,
+                    )
+                    if seed_ctx.seed_prompt:
+                        logger.debug(
+                            "Memory-seeded: %d prior facts", len(seed_ctx.prior_facts)
+                        )
+                        result.seed_context = seed_ctx
+                except Exception:
+                    logger.debug("Memory-seeding failed (non-critical)", exc_info=True)
+
             # ── Шаг 1: Поиск по основному запросу ──
+            await self._notify_progress(job_id, "searching", "👀 Выполняю поиск…")
             main_sources = await self._fetch_sources(request.query, request.max_minutes)
+            await self._notify_progress(
+                job_id, "searching", f"👀 Найдено: {len(main_sources)} источников"
+            )
 
             # ── Шаг 2: Генерация подзапросов ──
             sub_queries = self._generate_sub_queries(request.query)
+            await self._notify_progress(
+                job_id,
+                "deep_dive",
+                f"💡 Придумал {len(sub_queries)} уточняющих вопросов",
+            )
 
-            # ── Шаг 3: Параллельная загрузка по подзапросам ──
+            # ── Auto-Tool Selection for sub-queries ──
+            if settings.deep_research_auto_tools_enabled:
+                try:
+                    from src.core.rag.tool_selector import ToolSelector
+
+                    selector = ToolSelector()
+                    for sq in sub_queries:
+                        tools = await selector.select_tools([sq], {"query": sq})
+                        if tools:
+                            logger.debug(
+                                "ToolSelector: %d tools for %r", len(tools), sq
+                            )
+                except Exception:
+                    logger.debug("ToolSelector failed (non-critical)", exc_info=True)
+
+            # ── Шаг 3a: Swarm — parallel search (опционально) ──
+            swarm_handled_queries: set[str] = set()
+            if settings.deep_research_swarm_enabled:
+                await self._notify_progress(
+                    job_id, "cross_ref", "🤖 Запускаю рой поисковых агентов…"
+                )
+                try:
+                    from src.core.rag.swarm import SwarmOrchestrator
+                    from src.core.rag.types import SwarmSubTask
+
+                    swarm = SwarmOrchestrator(max_parallel=settings.swarm_max_parallel)
+                    swarm_queries = sub_queries[: settings.swarm_max_parallel]
+                    subtasks = [
+                        SwarmSubTask(subtopic=f"sub_{i}", query=sq, priority=i)
+                        for i, sq in enumerate(swarm_queries)
+                    ]
+                    swarm_results, _consensus = await swarm.execute(
+                        subtasks,
+                        search_fn=lambda q: self._fetch_sources(q, request.max_minutes),
+                    )
+                    for sr in swarm_results:
+                        if sr.status == "completed":
+                            result.claims.extend(sr.claims)
+                    # Track handled queries to avoid double-fetch in Step 3b
+                    swarm_handled_queries = set(swarm_queries)
+                    logger.debug("Swarm: %d results", len(swarm_results))
+                except Exception:
+                    logger.debug(
+                        "Swarm failed (non-critical), using linear search",
+                        exc_info=True,
+                    )
+
+            # ── Шаг 3b: линейный поиск по оставшимся подзапросам ──
+            remaining_queries = [
+                sq for sq in sub_queries if sq not in swarm_handled_queries
+            ]
+            if remaining_queries:
+                await self._notify_progress(
+                    job_id,
+                    "deep_dive",
+                    f"📥 Скачиваю источники по {len(remaining_queries)} запросам…",
+                )
             topic = ResearchTopic(
                 topic=request.query,
                 sub_queries=sub_queries,
                 sources=list(main_sources),
             )
 
-            # Параллельный fetch по каждому подзапросу
-            sub_tasks = [
-                self._fetch_sources(sq, request.max_minutes) for sq in sub_queries
-            ]
-            sub_results = await asyncio.gather(*sub_tasks, return_exceptions=True)
+            # Параллельный fetch по оставшимся подзапросам
+            if remaining_queries:
+                sub_tasks = [
+                    self._fetch_sources(sq, request.max_minutes)
+                    for sq in remaining_queries
+                ]
+                sub_results = await asyncio.gather(*sub_tasks, return_exceptions=True)
 
-            for sq, sr in zip(sub_queries, sub_results):
-                if isinstance(sr, BaseException):
-                    logger.warning("Sub-query %r failed: %s", sq, sr)
-                    continue
-                # sr гарантированно list[ResearchSource] после проверки isinstance
-                sub_topic = ResearchTopic(
-                    topic=sq,
-                    sub_queries=[],
-                    sources=sr,  # type: ignore[arg-type]
-                )
-                result.topics.append(sub_topic)
+                for sq, sr in zip(remaining_queries, sub_results, strict=True):
+                    if isinstance(sr, BaseException):
+                        logger.warning("Sub-query %r failed: %s", sq, sr)
+                        continue
+                    sub_topic = ResearchTopic(
+                        topic=sq,
+                        sub_queries=[],
+                        sources=sr,  # type: ignore[arg-type]
+                    )
+                    result.topics.append(sub_topic)
 
             # Основная тема — последней (для SUMMARY)
             result.topics.insert(0, topic)
@@ -163,7 +377,64 @@ class DeepResearchPipeline:
                         all_sources.append(s)
             result.sources = all_sources
 
+            await self._notify_progress(
+                job_id,
+                "deep_dive",
+                f"📊 Собрал: {len(result.topics)} тем, "
+                f"{len(result.sources)} источников",
+            )
+
+            # ── Knowledge Graph: contradiction detection ──
+            if settings.deep_research_kg_enabled and result.claims:
+                await self._notify_progress(job_id, "cross_ref", "🕸️ Строю граф знаний…")
+                try:
+                    provider = await self._build_llm_provider()
+                    if provider is not None:
+                        from src.core.rag.knowledge_graph import KnowledgeGraph
+
+                        kg = KnowledgeGraph()
+                        contradictions = await kg.detect_contradictions(
+                            result.claims, provider
+                        )
+                        result.edges = contradictions
+                        logger.debug(
+                            "KG: %d claims, %d contradictions",
+                            len(result.claims),
+                            len(contradictions),
+                        )
+                except Exception:
+                    logger.debug("KnowledgeGraph failed (non-critical)", exc_info=True)
+
+            # ── Timeline Extraction ──
+            if settings.deep_research_timeline_enabled and result.claims:
+                await self._notify_progress(
+                    job_id, "timeline", "⏱️ Строю хронологию событий…"
+                )
+                try:
+                    provider = await self._build_llm_provider()
+                    if provider is not None:
+                        from src.core.rag.timeline import TimelineExtractor
+
+                        extractor = TimelineExtractor()
+                        result.timeline = await extractor.extract(
+                            result.claims, provider
+                        )
+                        timeline_events = (
+                            getattr(result.timeline, "events", [])
+                            if result.timeline
+                            else []
+                        )
+                        logger.debug(
+                            "Timeline: %d events extracted",
+                            len(timeline_events),
+                        )
+                except Exception:
+                    logger.debug(
+                        "Timeline extraction failed (non-critical)", exc_info=True
+                    )
+
             # ── Шаг 4: Сохранение на диск ──
+            await self._notify_progress(job_id, "synthesis", "💾 Сохраняю результаты…")
             await self._save_results(job_id, result)
 
             # ── Генерация сводки ──
@@ -171,13 +442,24 @@ class DeepResearchPipeline:
 
             # ── Шаг 5: Завершение ──
             result.status = ResearchStatus.COMPLETED
-            result.completed_at = datetime.now(timezone.utc)
+            result.completed_at = datetime.now(UTC)
 
             # Эмиссия события
             await event_bus.emit(
                 RESEARCH_COMPLETED,
                 job_id=job_id,
                 result=result,
+            )
+
+            await self._notify_progress(
+                job_id,
+                "completed",
+                (
+                    f"🎉 Исследование завершено!\n"
+                    f"• Тем: {len(result.topics)}\n"
+                    f"• Источников: {len(result.sources)}\n"
+                    f"• Результаты: data/research/{job_id}/"
+                ),
             )
 
             logger.info(
@@ -191,7 +473,10 @@ class DeepResearchPipeline:
             logger.exception("Phase 1 failed for job %s", job_id)
             result.status = ResearchStatus.FAILED
             result.error = str(exc)
-            result.completed_at = datetime.now(timezone.utc)
+            result.completed_at = datetime.now(UTC)
+            await self._notify_progress(
+                job_id, "failed", f"💥 Ошибка: {str(exc)[:200]}"
+            )
 
     # ── Fetch источников ──────────────────────────────────────────────
 
@@ -201,7 +486,7 @@ class DeepResearchPipeline:
         """Загрузить источники по поисковому запросу.
 
         Использует DuckDuckGo (duckduckgo-search) для поиска.
-        Jina API для полного текста — заглушка (TODO).
+        Jina API для полного текста — заглушка (TODO 2026-06-13).
 
         Args:
             query: Поисковый запрос.
@@ -215,7 +500,7 @@ class DeepResearchPipeline:
                 self._sem.acquire(),
                 timeout=min(max_minutes * 10, 30.0),
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("Semaphore acquire timeout for query %r", query)
             return []
 
@@ -225,7 +510,7 @@ class DeepResearchPipeline:
                 timeout=min(max_minutes * 20, _FETCH_TIMEOUT_SEC),
             )
             return sources
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("Fetch timeout for query %r", query)
             return []
         except Exception:
@@ -238,7 +523,7 @@ class DeepResearchPipeline:
         """Непосредственно выполнить поиск через DuckDuckGo.
 
         Jina API для загрузки полного текста страницы — заглушка.
-        TODO: интегрировать Jina Reader API для полного контента.
+        TODO(2026-06-13): интегрировать Jina Reader API для полного контента.
         """
         sources: list[ResearchSource] = []
 
@@ -248,7 +533,7 @@ class DeepResearchPipeline:
             logger.warning("duckduckgo-search not installed — returning empty results")
             return sources
 
-        def _sync_search() -> list[dict]:
+        def _sync_search() -> list[dict[str, Any]]:
             ddgs = DDGS()
             try:
                 return list(ddgs.text(query, max_results=5))
@@ -259,17 +544,17 @@ class DeepResearchPipeline:
                     try:
                         _close()
                     except Exception:
-                        pass
+                        logger.debug("Non-critical error", exc_info=True)
 
         try:
             results = await asyncio.wait_for(
                 asyncio.to_thread(_sync_search), timeout=15.0
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("DDG search timeout for query %r", query)
             return sources
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for r in results:
             url = r.get("href", "")
             if not url:
@@ -279,7 +564,7 @@ class DeepResearchPipeline:
                 url=url,
                 title=r.get("title", ""),
                 snippet=r.get("body", ""),
-                content="",  # TODO: Jina API stub
+                content="",  # TODO(2026-06-13): Jina API stub
                 relevance_score=0.5,  # базовая оценка, без ML
                 retrieved_at=now,
             )
@@ -297,7 +582,7 @@ class DeepResearchPipeline:
         от доступности модели). Добавляет модификаторы к исходному
         запросу: «примеры», «статистика», «мнения», «история», «прогноз».
 
-        TODO: в будущем — LLM-генерация через lightweight модель.
+        TODO(2026-06-13): в будущем — LLM-генерация через lightweight модель.
 
         Args:
             query: Исходный поисковый запрос.
@@ -305,6 +590,10 @@ class DeepResearchPipeline:
         Returns:
             Список из 3–5 подзапросов.
         """
+        # Edge guard: strip to avoid leading spaces in sub-queries
+        query = query.strip()
+        if not query:
+            return []
         modifiers = [
             f"{query} примеры использование",
             f"{query} статистика данные 2024 2025",
@@ -384,7 +673,7 @@ class DeepResearchPipeline:
 
     @staticmethod
     def _format_topic_md(topic: ResearchTopic, idx: int) -> str:
-        """Форматировать тему в Markdown."""
+        """Форматировать тему в GFM Markdown (совместимо с Rich Messages)."""
         lines = [
             f"# Тема {idx + 1}: {topic.topic}",
             "",
@@ -395,11 +684,33 @@ class DeepResearchPipeline:
             "## Источники",
             "",
         ]
-        for si, src in enumerate(topic.sources, 1):
-            lines.append(f"{si}. [{src.title or src.url}]({src.url})")
-            if src.snippet:
-                lines.append(f"   > {src.snippet[:200]}")
+        if topic.sources:
+            lines.extend(
+                [
+                    "| # | Название | Сниппет |",
+                    "|---|---------|--------|",
+                ]
+            )
+            for si, src in enumerate(topic.sources, 1):
+                title = (
+                    (src.title or src.url)[:100]
+                    .replace("|", "\\|")
+                    .replace("[", "\\[")
+                    .replace("]", "\\]")
+                )
+                # URL: encode ) to %29 to avoid breaking Markdown link syntax
+                safe_url = src.url.replace(")", "%29")
+                snippet = (
+                    (src.snippet or "—")[:150]
+                    .replace("|", "\\|")
+                    .replace("\n", " ")
+                    .replace("\r", " ")
+                    .replace("\t", " ")
+                )
+                lines.append(f"| {si} | [{title}]({safe_url}) | {snippet} |")
             lines.append("")
+        else:
+            lines.extend(["*Нет источников*", ""])
         return "\n".join(lines)
 
     @staticmethod
@@ -421,12 +732,28 @@ class DeepResearchPipeline:
             lines.extend(["", "## Полный текст", "", source.content[:5000]])
         return "\n".join(lines)
 
+    @staticmethod
+    def _truncate_md(text: str, max_chars: int = 32000) -> str:
+        """Обрезать Markdown до безопасного размера для Telegram Rich Messages.
+
+        Пытается обрезать по границе параграфа. Если не удаётся —
+        жёсткая обрезка с добавлением маркера обрезания.
+        """
+        if len(text) <= max_chars:
+            return text
+
+        # Пытаемся найти ближайший двойной перенос строки (конец параграфа)
+        cut = text.rfind("\n\n", 0, max_chars - 100)
+        if cut < max_chars // 2:
+            cut = max_chars - 100
+        return text[:cut] + "\n\n… *(обрезано — полный отчёт в файле)*"
+
     def _generate_summary(self, result: ResearchResult) -> str:
-        """Сгенерировать сводку исследования в Markdown."""
+        """Сгенерировать сводку исследования в GFM Markdown (совместимо с Rich Messages)."""
         lines = [
-            f"# Сводка исследования: {result.query}",
+            f"# Сводка исследования: {result.query.replace(chr(10), ' ').strip()}",
             "",
-            f"- **Job ID:** {result.job_id}",
+            f"- **Job ID:** `{result.job_id}`",
             f"- **Статус:** {result.status.value}",
             f"- **Начат:** {result.started_at.isoformat() if result.started_at else '—'}",
             f"- **Завершён:** {result.completed_at.isoformat() if result.completed_at else '—'}",
@@ -436,27 +763,75 @@ class DeepResearchPipeline:
         if result.error:
             lines.extend(["", f"**Ошибка:** {result.error}"])
 
+        # ── Темы: GFM-таблица ──
         if result.topics:
-            lines.extend(["", "## Темы", ""])
+            lines.extend(
+                [
+                    "",
+                    "## Темы",
+                    "",
+                    "| # | Тема | Подзапросов | Источников |",
+                    "|---|------|------------|-----------|",
+                ]
+            )
             for i, topic in enumerate(result.topics, 1):
                 src_count = len(topic.sources)
+                # Экранируем pipe в названии темы и обрезаем длинные названия
+                raw_topic = topic.topic.replace("|", "\\|").replace("\n", " ")
+                if len(raw_topic) > 80:
+                    safe_topic = raw_topic[:77] + "..."
+                else:
+                    safe_topic = raw_topic
                 lines.append(
-                    f"{i}. **{topic.topic}** "
-                    f"(подзапросов: {len(topic.sub_queries)}, "
-                    f"источников: {src_count})"
+                    f"| {i} | **{safe_topic}** | {len(topic.sub_queries)} | {src_count} |"
                 )
 
+        # ── Все источники: GFM-таблица ──
         if result.sources:
-            lines.extend(["", "## Все источники", ""])
+            lines.extend(
+                [
+                    "",
+                    "## Все источники",
+                    "",
+                    "| # | Название | URL |",
+                    "|---|---------|-----|",
+                ]
+            )
             for i, src in enumerate(result.sources, 1):
-                lines.append(f"{i}. [{src.title or src.url}]({src.url})")
+                title = (src.title or src.url)[:120].replace("|", "\\|")
+                safe_url = src.url.replace("|", "\\|")
+                lines.append(f"| {i} | {title} | {safe_url} |")
 
-        return "\n".join(lines)
+        # ── Timeline section (сворачиваемый блок) ──
+        timeline = getattr(result, "timeline", None)
+        if timeline is not None and hasattr(timeline, "events") and timeline.events:
+            try:
+                from src.core.rag.timeline import TimelineExtractor
+
+                extractor = TimelineExtractor()
+                timeline_md = extractor.export_markdown(timeline)
+                lines.extend(
+                    [
+                        "",
+                        "<details>",
+                        "<summary>**📅 Хронология** (нажмите чтобы развернуть)</summary>",
+                        "",
+                        timeline_md,
+                        "",
+                        "</details>",
+                    ]
+                )
+            except Exception:
+                logger.debug(
+                    "Timeline export_markdown failed (non-critical)", exc_info=True
+                )
+
+        return self._truncate_md("\n".join(lines))
 
 
 # ── Синглтон ──────────────────────────────────────────────────────────
 
-_pipeline: Optional[DeepResearchPipeline] = None
+_pipeline: DeepResearchPipeline | None = None
 
 
 def get_deep_research_pipeline() -> DeepResearchPipeline:

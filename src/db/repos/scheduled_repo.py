@@ -1,6 +1,6 @@
 """CRUD для отложенных сообщений."""
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +28,7 @@ async def create_scheduled(
 
 async def get_pending(session: AsyncSession) -> list[ScheduledMessage]:
     """Возвращает все pending сообщения где send_at <= now (UTC)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     result = await session.execute(
         select(ScheduledMessage)
         .where(ScheduledMessage.status == "pending")
@@ -42,7 +42,7 @@ async def mark_sent(session: AsyncSession, msg_id: int) -> None:
     await session.execute(
         update(ScheduledMessage)
         .where(ScheduledMessage.id == msg_id)
-        .values(status="sent", sent_at=datetime.now(timezone.utc))
+        .values(status="sent", sent_at=datetime.now(UTC))
     )
     await session.flush()
 

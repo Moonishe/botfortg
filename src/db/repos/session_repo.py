@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +43,7 @@ def _get_user_lock(user_id: int) -> asyncio.Lock:
         _user_locks[user_id] = asyncio.Lock()
     _lock_cleanup_counter += 1
     if _lock_cleanup_counter % 1000 == 0:
-        for k in list(_user_locks.keys()):
+        for k in list(_user_locks):
             # Пропускаем ключ, созданный в текущем вызове —
             # иначе только что созданный lock будет удалён до возврата.
             if k != user_id and not _user_locks[k].locked():
@@ -218,7 +218,7 @@ async def update_persona(session: AsyncSession, persona: AdaptivePersona, **kwar
     for k, v in kwargs.items():
         if hasattr(persona, k):
             setattr(persona, k, v)
-    persona.updated_at = datetime.now(timezone.utc)
+    persona.updated_at = datetime.now(UTC)
     await session.flush()
 
 

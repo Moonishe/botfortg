@@ -58,6 +58,6 @@ def reciprocal_rank_fusion(
 
 
 __all__ = [
-    "reciprocal_rank_fusion",
     "RRF_K",
+    "reciprocal_rank_fusion",
 ]

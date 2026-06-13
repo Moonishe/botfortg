@@ -67,7 +67,7 @@ class DeepSeekProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
         *,
         heavy: bool = False,
         task_type: str = "default",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         model = self._resolve_model(heavy)
         fmt = self._fmt_messages(messages)
         stream = await self._client.chat.completions.create(

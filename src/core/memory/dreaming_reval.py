@@ -39,16 +39,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.core.infra.key_guard import mask_keys, safe_str
 from src.core.infra.telemetry import start_span
-from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_admin import (
     ALLOWED_MEMORY_TYPES,
     MAX_FACT_LEN,
@@ -57,12 +55,8 @@ from src.core.memory.memory_admin import (
     deactivate_memory,
     add_supersedes_link,
 )
-from src.core.memory.dreaming_reval_history import (
-    recent_reval_history,
-    rollback_reval_history,
-)
 from src.core.security.prompt_injection_scanner import scan_content
-from src.db.models._memory import Memory, MemoryLink
+from src.db.models._memory import Memory
 
 if TYPE_CHECKING:
     from src.llm.base import LLMProvider
@@ -238,7 +232,7 @@ def _build_user_prompt(fact: Memory, today: datetime) -> str | None:
 
 
 async def reval_fact(
-    provider: "LLMProvider",
+    provider: LLMProvider,
     fact: Memory,
     today: datetime | None = None,
 ) -> dict[str, Any] | None:
@@ -246,7 +240,7 @@ async def reval_fact(
 
     Never raises — caller decides what to do with None (treat as skip).
     """
-    today = today or datetime.now(timezone.utc)
+    today = today or datetime.now(UTC)
     user_prompt = _build_user_prompt(fact, today)
     if user_prompt is None:
         # Content scanner blocked the fact — treat as skip
@@ -315,7 +309,7 @@ async def apply_reval_result(
         # Шаг 1: деактивация — в savepoint для атомарности
         try:
             # savepoint: атомарная деактивация + аудит-трейл факта
-            async with session.begin_nested() as sp:
+            async with session.begin_nested() as sp:  # noqa: F841
                 # Сохраняем версию в аудит-трейл перед деактивацией
                 from src.db.repos.memory_repo import save_memory_version
 
@@ -364,7 +358,7 @@ async def apply_reval_result(
 
     try:
         # savepoint: атомарное создание нового факта + supersedes-связь + деактивация старого
-        async with session.begin_nested() as savepoint:
+        async with session.begin_nested() as savepoint:  # noqa: F841
             from src.db.repos.memory_repo import add_memory
 
             new_mem = await add_memory(
@@ -538,7 +532,7 @@ async def _reval_run_impl(
             try:
                 await provider.close()
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
             return summary
 
     # Phase 1 session closed; the LLM provider is shared and its chat()
@@ -549,11 +543,11 @@ async def _reval_run_impl(
         try:
             await provider.close()
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
         return summary
 
     summary.examined = len(facts)
-    today = datetime.now(timezone.utc)
+    today = datetime.now(UTC)
 
     # ── Phase 2: parallel processing with bounded concurrency ──
     sem = asyncio.Semaphore(concurrency)
@@ -609,14 +603,14 @@ async def _reval_run_impl(
         try:
             await provider.close()
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
         raise
     except Exception:
         logger.exception("Dreaming reval: gather failed")
         try:
             await provider.close()
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
         return summary
 
     # ── Phase 3: aggregate counters ──
@@ -673,7 +667,7 @@ async def _process_one_fact(
     *,
     owner_id: int,
     owner_telegram_id: int,
-    provider: "LLMProvider",
+    provider: LLMProvider,
     today: datetime,
     vector_store_obj: Any = None,
     sem: asyncio.Semaphore,

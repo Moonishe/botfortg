@@ -14,7 +14,7 @@ import asyncio
 import hashlib
 import logging
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import Any
 
 from sqlalchemy import func, select
@@ -60,7 +60,7 @@ class SmartCache:
     def _ensure_aware(dt: datetime) -> datetime:
         """Return a timezone-aware datetime (UTC)."""
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=UTC)
         return dt
 
     _MAX_KEY_LOCKS: int = 500  # cap to prevent unbounded growth
@@ -126,47 +126,46 @@ class SmartCache:
             return value
 
         # ── L1 check ──
-        async with self._ensure_lock(key, owner_id):
-            async with get_session() as session:
-                result = await session.execute(
-                    select(SmartCacheEntry).where(
-                        SmartCacheEntry.cache_key == key,
-                        SmartCacheEntry.owner_id == owner_id,
-                    )
+        async with self._ensure_lock(key, owner_id), get_session() as session:
+            result = await session.execute(
+                select(SmartCacheEntry).where(
+                    SmartCacheEntry.cache_key == key,
+                    SmartCacheEntry.owner_id == owner_id,
                 )
-                entry = result.scalar_one_or_none()
+            )
+            entry = result.scalar_one_or_none()
 
-                if entry is not None:
-                    now = datetime.now(timezone.utc)
+            if entry is not None:
+                now = datetime.now(UTC)
 
-                    # Calculate importance BEFORE updating accessed_at
-                    # (so decay uses the old timestamp)
-                    new_score = self._calculate_importance(entry, entry.source, now)
-                    entry.importance_score = new_score
-                    entry.access_count = min(entry.access_count + 1, ACCESS_COUNT_CAP)
-                    entry.accessed_at = now
+                # Calculate importance BEFORE updating accessed_at
+                # (so decay uses the old timestamp)
+                new_score = self._calculate_importance(entry, entry.source, now)
+                entry.importance_score = new_score
+                entry.access_count = min(entry.access_count + 1, ACCESS_COUNT_CAP)
+                entry.accessed_at = now
 
-                    await session.flush()
+                await session.flush()
 
-                    # Promote to L0
-                    async with self._l0_lock:
-                        self._enforce_l0_limit()
-                        self._l0[l0k] = entry.cache_value
-                        self._l0.move_to_end(l0k)
+                # Promote to L0
+                async with self._l0_lock:
+                    self._enforce_l0_limit()
+                    self._l0[l0k] = entry.cache_value
+                    self._l0.move_to_end(l0k)
 
-                    # Evaluate graduation to L2
-                    if entry.importance_score > 0.7 and not entry.graduated:
-                        can_graduate = await self._check_daily_graduation_limit(
-                            session, owner_id
-                        )
-                        if can_graduate:
-                            await self._graduate(entry, owner_id, session)
+                # Evaluate graduation to L2
+                if entry.importance_score > 0.7 and not entry.graduated:
+                    can_graduate = await self._check_daily_graduation_limit(
+                        session, owner_id
+                    )
+                    if can_graduate:
+                        await self._graduate(entry, owner_id, session)
 
-                    self._ops_since_cleanup += 1
-                    await self._maybe_cleanup(session)
-                    self._maybe_cleanup_key_locks()
+                self._ops_since_cleanup += 1
+                await self._maybe_cleanup(session)
+                self._maybe_cleanup_key_locks()
 
-                    return entry.cache_value
+                return entry.cache_value
 
         # ── Cache miss ──
         self._ops_since_cleanup += 1
@@ -188,7 +187,7 @@ class SmartCache:
         immediately to L2 (respecting daily limit).
         """
         content_hash = hashlib.sha256(value.encode("utf-8")).hexdigest()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         l0k = self._l0_key(key, owner_id)
 
         async with self._ensure_lock(key, owner_id):
@@ -279,7 +278,7 @@ class SmartCache:
                     )
                     entry = result.scalar_one_or_none()
                     if entry is not None:
-                        now = datetime.now(timezone.utc)
+                        now = datetime.now(UTC)
                         # Calculate importance BEFORE updating timestamps
                         new_score = self._calculate_importance(entry, entry.source, now)
                         entry.importance_score = new_score
@@ -313,7 +312,7 @@ class SmartCache:
         source: str,
     ) -> float:
         """Pure‑function version for scoring without a DB entry."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         created_at = SmartCache._ensure_aware(created_at)
         accessed_at = SmartCache._ensure_aware(accessed_at)
         hours_existed = max((now - created_at).total_seconds() / 3600, 0.01)
@@ -344,7 +343,7 @@ class SmartCache:
         hours_since_access reflects the actual time since last real access.
         """
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
         # SQLite returns naive datetimes — make them aware for safe arithmetic
         accessed_at = (
@@ -421,7 +420,7 @@ class SmartCache:
             )
             return False
 
-        today_start = datetime.now(timezone.utc).replace(
+        today_start = datetime.now(UTC).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         daily_result = await session.execute(
@@ -496,7 +495,7 @@ class SmartCache:
         )
 
         entry.graduated = True
-        entry.accessed_at = datetime.now(timezone.utc)
+        entry.accessed_at = datetime.now(UTC)
         await session.flush()
         logger.info(
             "SmartCache: graduated key=%s source=%s score=%.3f",
@@ -527,7 +526,7 @@ class SmartCache:
 
     async def _cleanup_stale_entries(self, session: Any) -> None:
         """Delete L1 entries: access_count=0, older than 7 days, not graduated."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)
+        cutoff = datetime.now(UTC) - timedelta(days=STALE_DAYS)
         result = await session.execute(
             select(SmartCacheEntry).where(
                 SmartCacheEntry.access_count == 0,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from telethon import TelegramClient
 
@@ -58,7 +58,7 @@ async def _gather_posts(
     hours: int,
     per_channel_limit: int,
 ) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     posts: list[dict] = []
     for ch in channels:
         try:

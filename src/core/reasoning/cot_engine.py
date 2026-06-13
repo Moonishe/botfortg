@@ -219,7 +219,7 @@ class CoTEngine:
                 provider.chat(messages, task_type=TaskType.DEFAULT),
                 timeout=60.0,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("CoT: таймаут генерации шага")
             return None
         except Exception:
@@ -264,7 +264,7 @@ class CoTEngine:
                 provider.chat(messages, task_type=TaskType.DEFAULT),
                 timeout=45.0,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("CoT: таймаут самокоррекции")
             return None
         except Exception:

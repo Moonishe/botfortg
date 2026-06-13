@@ -9,6 +9,10 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 router.message.filter(OwnerOnly())
@@ -77,7 +81,7 @@ async def cmd_health(message: Message) -> None:
         for name in sorted(status["failed"]):
             lines.append(f"  ❌ {name}")
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     # ── 6. DB size ──────────────────────────────────────────
     try:
@@ -87,6 +91,6 @@ async def cmd_health(message: Message) -> None:
         if db.exists():
             lines.append(f"\n📦 Размер БД: {db.stat().st_size / 1024 / 1024:.1f} MB")
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     await message.answer("\n".join(lines))

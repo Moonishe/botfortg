@@ -18,7 +18,8 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import AsyncIterator, TypeVar
+from typing import TypeVar
+from collections.abc import AsyncIterator
 
 from aiogram.types import Message
 

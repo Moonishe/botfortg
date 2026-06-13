@@ -1,7 +1,7 @@
 """Agent session model — tracks conversations between bot and owner."""
 
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from src.db.models._base import Base
@@ -13,7 +13,7 @@ class AgentSession(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
     session_type: Mapped[str] = mapped_column(String(32), default="chat")
     started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     ended_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -31,7 +31,7 @@ class AgentSessionMessage(Base):
     role: Mapped[str] = mapped_column(String(16))  # user, assistant
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
 
@@ -45,7 +45,7 @@ class SessionContext(Base):
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), unique=True
     )
     last_active_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     context_summary: Mapped[str | None] = mapped_column(
         Text, nullable=True

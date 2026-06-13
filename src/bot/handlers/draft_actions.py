@@ -254,7 +254,7 @@ async def store_variant_group(
     peer_id: int, contact_name: str, incoming_text: str, variants: list[dict]
 ) -> str:
     """Сохраняет группу вариантов и возвращает hash для callback'ов."""
-    raw = f"{peer_id}:{contact_name}:{incoming_text}:{str(variants)}"
+    raw = f"{peer_id}:{contact_name}:{incoming_text}:{variants!s}"
     loop = asyncio.get_running_loop()
     group_hash = (
         await loop.run_in_executor(

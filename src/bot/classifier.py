@@ -360,7 +360,7 @@ class MessageClassifier:
     def _build_result(self, matched_cats: set[str]) -> dict[str, bool]:
         """Build result dict with all categories + computed flags."""
         result: dict[str, bool] = {}
-        for category in sorted(CATEGORY_PRIORITY.keys()):
+        for category in sorted(CATEGORY_PRIORITY):
             result[category] = category in matched_cats
 
         # Computed flags
@@ -373,7 +373,7 @@ class MessageClassifier:
     def _empty_result() -> dict[str, bool]:
         """Return result for empty/unmatched text."""
         result: dict[str, bool] = {}
-        for category in sorted(CATEGORY_PRIORITY.keys()):
+        for category in sorted(CATEGORY_PRIORITY):
             result[category] = False
         result["needs_routing"] = False
         result["needs_llm"] = True  # empty → LLM should handle

@@ -85,7 +85,7 @@ def analyze_ai_score(text: str, user_slots: list | None = None) -> tuple[float, 
                 )
 
     # 4. Length check
-    from .patterns import IDEAL_LENGTH_MIN  # noqa: F811
+    from .patterns import IDEAL_LENGTH_MIN
 
     if len(text) < IDEAL_LENGTH_MIN:
         score += 0.1

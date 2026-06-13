@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from src.core.contacts.chat_service import message_to_text
 from src.core.scheduling.notification_queue import notification_queue
@@ -49,7 +49,7 @@ async def summarize_contact_week(
             return []
 
         # Фильтр по дате (since)
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(
             days=since_days
         )
         recent = [m for m in messages if m.date and m.date >= cutoff]
@@ -192,7 +192,7 @@ async def weekly_summary_loop(owner_id: int) -> None:
                             conv_states = await list_active_conversations(
                                 session, owner_safe, limit=50
                             )
-                            cutoff_24h = datetime.now(timezone.utc).replace(
+                            cutoff_24h = datetime.now(UTC).replace(
                                 tzinfo=None
                             ) - timedelta(hours=24)
                             contact_map = {c.peer_id: c.display_name for c in contacts}
@@ -351,7 +351,7 @@ async def consolidate_tier(
                     # НЕ деактивируем факты — повышаем tier и помечаем как сконсолидированные
                     for m in group:
                         m.memory_tier = to_tier
-                        m.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                        m.updated_at = datetime.now(UTC).replace(tzinfo=None)
                         # Добавляем 'consolidated' в comma-separated tags
                         current_tags = [
                             t.strip()

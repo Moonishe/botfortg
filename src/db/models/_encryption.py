@@ -6,7 +6,7 @@ KEK НИКОГДА не хранится в БД — только в .env.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import Boolean, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -35,7 +35,7 @@ class EncryptionKey(Base):
     created_at: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc).isoformat(),
+        default=lambda: datetime.now(UTC).isoformat(),
         comment="ISO8601 timestamp создания",
     )
     rotated_at: Mapped[str | None] = mapped_column(

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from functools import partial
 
 from sqlalchemy import case, select, func, and_, or_, desc
@@ -95,7 +95,7 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
             result.unread_total += conv.unread_count
 
         # Просроченные и сегодняшние обязательства
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
         today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
         open_commits = await list_open_commitments(session, owner)
         for c in open_commits:
@@ -272,7 +272,7 @@ async def _collect_morning_digest(owner_id: int) -> str:
     """Собирает утренний дайджест: вчера, неотвеченные, дедлайны, здоровье, план."""
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
         seven_days_ago = now - timedelta(days=7)
@@ -503,8 +503,8 @@ async def _collect_healthy(
 
         if last_date:
             if last_date.tzinfo is None:
-                last_date = last_date.replace(tzinfo=timezone.utc)
-            days_gap = (datetime.now(timezone.utc) - last_date).days
+                last_date = last_date.replace(tzinfo=UTC)
+            days_gap = (datetime.now(UTC) - last_date).days
         else:
             days_gap = 365
 
@@ -559,7 +559,7 @@ async def proactive_briefing_loop(owner_id: int) -> None:
                     slot_start_tz = now_tz.replace(
                         hour=9, minute=0, second=0, microsecond=0
                     )
-                    slot_start_utc = slot_start_tz.astimezone(timezone.utc).replace(
+                    slot_start_utc = slot_start_tz.astimezone(UTC).replace(
                         tzinfo=None
                     )
 

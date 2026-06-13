@@ -85,7 +85,7 @@ class AnthropicProvider(BaseLLMProvider):
         *,
         heavy: bool = False,
         task_type: str = "default",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         system, anthropic_messages = self._convert_messages(messages)
         model = self._resolve_model(heavy)
         kwargs: dict = {

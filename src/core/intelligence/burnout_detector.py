@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from functools import partial
 
 from sqlalchemy import desc, select
@@ -29,7 +29,7 @@ async def check_burnout(owner_telegram_id: int) -> str | None:
     """
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
         three_days_ago = now - timedelta(days=3)
 
         # 1. Check recent outgoing messages for patterns

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 from src.core.memory.context_files import _get_db_path
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ async def dsm_write(
     """Write a fact/decision to DSM. Deduplicates by key (overwrites if exists)."""
     try:
         conn = await asyncio.to_thread(_get_dsm_db)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await asyncio.to_thread(
             lambda: conn.execute(
                 "INSERT OR REPLACE INTO dsm_entries(key, content, tags, source, importance, created_at, accessed_at) "
@@ -134,7 +134,7 @@ async def dsm_cleanup(days: int = 30) -> int:
     """Delete entries older than N days. Returns count."""
     try:
         conn = await asyncio.to_thread(_get_dsm_db)
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         res = await asyncio.to_thread(
             lambda: conn.execute(
                 "DELETE FROM dsm_entries WHERE created_at < ?", (cutoff,)

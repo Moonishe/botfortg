@@ -1,0 +1,20 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint + fix)
+        entry: python -m ruff check src/ --fix
+        language: system
+        types: [python]
+        stages: [pre-commit]
+        pass_filenames: false
+
+      - id: pip-audit
+        name: pip-audit
+        entry: pip-audit
+        args: [--requirement, requirements.txt]
+        language: system
+        types: [file]
+        files: ^requirements\.txt$
+        stages: [pre-push]
+        pass_filenames: false

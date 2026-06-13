@@ -13,16 +13,16 @@ from src.db.repo import (
 from src.db.session import get_session
 
 __all__ = [
-    "get_session",
+    "Contact",
+    "Memory",
+    "Message",
+    "User",
+    "get_contact",
     "get_or_create_user",
-    "upsert_message",
+    "get_self_profile",
+    "get_session",
     "list_contacts",
     "search_memories",
-    "get_self_profile",
-    "get_contact",
+    "upsert_message",
     "upsert_self_profile",
-    "User",
-    "Contact",
-    "Message",
-    "Memory",
 ]

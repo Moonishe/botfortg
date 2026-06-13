@@ -6,22 +6,22 @@ SRP: thin facade — only imports from sub-modules. Router lives in settings_rou
 """
 
 # ── Core router (exported from settings_router to avoid circular deps) ──
-from src.bot.handlers.settings_router import router  # noqa: F401
+from src.bot.handlers.settings_router import router
 
 # ── Import handler modules to register callbacks on router ──
 # Handlers are registered via `@router.callback_query()` which imports
 # router from settings_router. The side-effects here just ensure all
 # handler modules are loaded so their decorators execute.
 
-from src.bot.handlers import settings_handler  # noqa: F401
-from src.bot.handlers import settings_sections  # noqa: F401
-from src.bot.handlers import settings_inputs  # noqa: F401
-from src.bot.handlers import settings_menu  # noqa: F401
-from src.bot.handlers import settings_service  # noqa: F401
-from src.bot.handlers import settings_validator  # noqa: F401
+from src.bot.handlers import settings_handler
+from src.bot.handlers import settings_sections
+from src.bot.handlers import settings_inputs
+from src.bot.handlers import settings_menu
+from src.bot.handlers import settings_service
+from src.bot.handlers import settings_validator
 
 # Re-export public symbols for backward compat
-from src.bot.handlers.settings_handler import (  # noqa: F401, E402
+from src.bot.handlers.settings_handler import (
     cmd_settings,
     cb_menu,
     cb_settings_back,
@@ -48,9 +48,9 @@ from src.bot.handlers.settings_handler import (  # noqa: F401, E402
     cancel_settings_state,
 )
 
-from src.bot.handlers.settings_sections import _render_section  # noqa: F401, E402
+from src.bot.handlers.settings_sections import _render_section
 
-from src.bot.handlers.settings_inputs import (  # noqa: F401, E402
+from src.bot.handlers.settings_inputs import (
     cb_input_openai,
     cb_input_gemini,
     cb_input_mistral,
@@ -97,17 +97,17 @@ from src.bot.handlers.settings_inputs import (  # noqa: F401, E402
     step_assemblyai_key,
 )
 
-from src.bot.handlers.settings_menu import (  # noqa: F401, E402
+from src.bot.handlers.settings_menu import (
     _check,
     _back_row,
     _render_menu,
 )
 
-from src.bot.handlers.settings_service import (  # noqa: F401, E402
+from src.bot.handlers.settings_service import (
     _count_slots_for_provider,
 )
 
-from src.bot.handlers.settings_validator import (  # noqa: F401, E402
+from src.bot.handlers.settings_validator import (
     SEARCHABLE_SETTINGS,
     BOOL_KEYS,
     CHOICE_KEYS,

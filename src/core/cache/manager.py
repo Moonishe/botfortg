@@ -6,7 +6,8 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Generic, TypeVar
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ class ManagedCache(Generic[K, V]):
         if not event.is_set():
             try:
                 await asyncio.wait_for(event.wait(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "get_or_compute: reader timed out waiting for writer on key=%s, "
                     "falling through to writer path",
@@ -396,7 +397,7 @@ class ManagedCache(Generic[K, V]):
                     try:
                         self.on_evict(oldest_key, oldest_value)
                     except Exception:
-                        pass
+                        logger.debug("Non-critical error", exc_info=True)
 
             self._cache[key] = (expires_at, result)
             self._expires[key] = expires_at

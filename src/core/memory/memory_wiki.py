@@ -3,7 +3,7 @@
 from __future__ import annotations
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 from src.config import settings
@@ -87,7 +87,7 @@ def _render_category(category: str, items: list) -> str:
 def _render_index(by_type: dict, memories: list) -> str:
     lines = ["# 📚 Memory Wiki — Оглавление\n"]
     lines.append(
-        f"*Сгенерировано: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
+        f"*Сгенерировано: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*\n"
     )
     lines.append(f"*Всего фактов: {len(memories)}*\n")
 

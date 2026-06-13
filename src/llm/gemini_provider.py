@@ -9,6 +9,10 @@ from google.genai import errors as genai_errors
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 GEMINI_CHAT_LIGHT = "gemini-3-flash"
 GEMINI_CHAT_HEAVY = "gemini-3.1-pro"
@@ -100,7 +104,7 @@ class GeminiProvider(BaseLLMProvider):
         *,
         heavy: bool = False,
         task_type: str = "default",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         """Stream chat output token by token using Gemini's streaming API."""
         import queue as sync_queue
 
@@ -122,7 +126,8 @@ class GeminiProvider(BaseLLMProvider):
                         yield chunk.text
                 return
             except Exception:
-                pass  # fall through to thread-based streaming
+                # fall through to thread-based streaming
+                logger.debug("Non-critical error", exc_info=True)
 
         # Thread-based streaming fallback for sync-only client
         token_queue: sync_queue.Queue = sync_queue.Queue()
@@ -221,7 +226,7 @@ class GeminiProvider(BaseLLMProvider):
                     )
                 )
 
-            for idx, emb in zip(uncached_indices, api_results):
+            for idx, emb in zip(uncached_indices, api_results, strict=True):
                 await aset(texts[idx], emb, self._embed_model)
                 results[idx] = emb
 

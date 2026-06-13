@@ -3,7 +3,7 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 from src.config import settings
@@ -27,7 +27,7 @@ class CookieStore:
             )
             conn.execute(
                 "INSERT OR REPLACE INTO cookies VALUES (?, ?, ?)",
-                (domain, json.dumps(cookies), datetime.now(timezone.utc).isoformat()),
+                (domain, json.dumps(cookies), datetime.now(UTC).isoformat()),
             )
             conn.commit()
             logger.debug("Saved %d cookies for domain %s", len(cookies), domain)

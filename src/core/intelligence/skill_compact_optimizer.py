@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -186,7 +186,7 @@ async def check_and_rollback(skill: Skill) -> bool:
     history.append(
         {
             "op": "auto-rollback",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "version_from": old_version,
             "version_to": skill.version,
             "reason": (
@@ -275,7 +275,7 @@ async def compress_skill_body(skill, session, provider) -> tuple[bool, str]:
                 last_compressed.replace("Z", "+00:00")
             )
         hours_since = (
-            datetime.now(timezone.utc) - last_compressed.replace(tzinfo=timezone.utc)
+            datetime.now(UTC) - last_compressed.replace(tzinfo=UTC)
         ).total_seconds() / 3600
         if hours_since < COMPRESS_COOLDOWN_HOURS:
             return False, body

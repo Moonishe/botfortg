@@ -28,29 +28,31 @@ async def _fetch_rag(
     provider: Any,
 ) -> str:
     """S2 RAG: релевантный контекст из истории переписок."""
-    if rag_enabled and owner_id is not None:
-        _owner_db_id = None
-        try:
-            async with get_session() as session:
-                owner_db = await get_or_create_user(session, owner_id)
-                _owner_db_id = owner_db.id if owner_db else None
-            if _owner_db_id is not None:
-                from src.core.actions.vector_store import get_vector_store
+    # Edge guard: skip if provider is unavailable
+    if not rag_enabled or owner_id is None or provider is None:
+        return ""
+    _owner_db_id = None
+    try:
+        async with get_session() as session:
+            owner_db = await get_or_create_user(session, owner_id)
+            _owner_db_id = owner_db.id if owner_db else None
+        if _owner_db_id is not None:
+            from src.core.actions.vector_store import get_vector_store
 
-                query_vec = await provider.embed(user_text)
-                hits = await (await get_vector_store()).search(
-                    user_id=_owner_db_id, embedding=query_vec, limit=5
-                )
-            else:
-                hits = []
-            if hits:
-                rag_lines = []
-                for h in hits:
-                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
-                    rag_lines.append(f"{prefix} {h.text[:200]}")
-                return "\n".join(rag_lines)
-        except Exception:
-            logger.debug("RAG search non-critical fail", exc_info=True)
+            query_vec = await provider.embed(user_text)
+            hits = await (await get_vector_store()).search(
+                user_id=_owner_db_id, embedding=query_vec, limit=5
+            )
+        else:
+            hits = []
+        if hits:
+            rag_lines = []
+            for h in hits:
+                prefix = f"[{h.peer_name}]" if h.peer_name else ""
+                rag_lines.append(f"{prefix} {h.text[:200]}")
+            return "\n".join(rag_lines)
+    except Exception:
+        logger.debug("RAG search non-critical fail", exc_info=True)
     return ""
 
 
@@ -83,14 +85,29 @@ async def _fetch_style(owner_id: int | None) -> str:
 
 
 async def _fetch_rules(owner_id: int | None) -> list:
-    """S3c confirmed rules."""
+    """S3c confirmed rules + persistent user rules from Memory."""
     if owner_id is not None:
+        rules: list[str] = []
+        # Load instruction-profile rules (existing mechanism)
         try:
             from src.core.intelligence.adaptive_instructions import get_active_rules
 
-            return await get_active_rules(owner_id)
+            rules = await get_active_rules(owner_id)
         except Exception:
             logger.debug("Failed to load active rules", exc_info=True)
+
+        # Load persistent rules stored as Memory facts (user commands like
+        # «никогда не делай X» → remembered across sessions)
+        try:
+            from src.core.memory.persistent_rules import get_rules
+
+            persistent = await get_rules(owner_id)
+            if persistent:
+                rules = list(dict.fromkeys(rules + persistent))  # dedup, keep order
+        except Exception:
+            logger.debug("Failed to load persistent rules", exc_info=True)
+
+        return rules
     return []
 
 
@@ -168,6 +185,22 @@ async def _fetch_contact_graph(owner_id: int | None) -> str:
                 return "\n".join(lines)
         except Exception:
             logger.debug("Failed to build contact graph", exc_info=True)
+    return ""
+
+
+async def _fetch_self_profile(owner_id: int | None) -> str:
+    """S3o self‑profile: информация о владельце для инжекции в промпт."""
+    if owner_id is not None:
+        try:
+            from src.core.intelligence.prompt_assembler import (
+                assemble_self_profile_prompt,
+            )
+
+            return await assemble_self_profile_prompt(owner_id) or ""
+        except Exception:
+            logger.debug(
+                "Failed to load self_profile, continuing without", exc_info=True
+            )
     return ""
 
 

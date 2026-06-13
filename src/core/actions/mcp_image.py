@@ -156,7 +156,7 @@ async def _image_info(image_path: Path) -> dict[str, Any]:
             if dpi_info:
                 dpi = round(dpi_info[0], 1)
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         return {
             "width": width,

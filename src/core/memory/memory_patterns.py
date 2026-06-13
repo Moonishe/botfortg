@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -63,7 +63,7 @@ async def detect_patterns(owner_id: int) -> list[dict]:
                     )
 
         # ---- Инсайт 2: забытые негативные контакты ----
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         contact_last_neg: dict[int, tuple[datetime, str]] = {}
         for m in memories:
             if (

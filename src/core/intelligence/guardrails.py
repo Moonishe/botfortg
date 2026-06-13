@@ -473,7 +473,7 @@ def _registered_tool_allowed_keys(intent: str) -> set[str] | None:
     schema = spec.input_schema if isinstance(spec.input_schema, dict) else {}
     properties = schema.get("properties")
     if isinstance(properties, dict):
-        allowed.update(str(key) for key in properties.keys())
+        allowed.update(str(key) for key in properties)
     return allowed
 
 

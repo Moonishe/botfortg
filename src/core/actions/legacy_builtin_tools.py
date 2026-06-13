@@ -9,6 +9,7 @@ from typing import Any
 from src.core.actions.tool_registry import tool
 from httpx import HTTPStatusError, RequestError
 from sqlalchemy.exc import SQLAlchemyError
+from datetime import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ async def _tool_search_messages(
             candidates = await resolve_contact(client, user, contact, limit=1)
             if candidates:
                 peer_id = candidates[0].peer_id
-        except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+        except (RequestError, HTTPStatusError, SQLAlchemyError):
             logger.exception(
                 "search_messages: contact resolution failed for %r", contact
             )
@@ -148,7 +149,7 @@ async def _tool_summarize_chat(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+    except (RequestError, HTTPStatusError, SQLAlchemyError):
         logger.exception("summarize_chat: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -179,7 +180,7 @@ async def _tool_summarize_chat(
         from src.core.contacts.chat_service import messages_to_transcript
 
         text = messages_to_transcript(messages)
-    except (ValueError, TypeError) as e:
+    except (ValueError, TypeError):
         logger.exception("summarize_chat: transcript conversion failed")
         return {"ok": False, "error": "Failed to convert messages to transcript"}
 
@@ -194,7 +195,7 @@ async def _tool_summarize_chat(
             "contact": display_name,
             "message_count": len(messages),
         }
-    except (RequestError, HTTPStatusError) as e:
+    except (RequestError, HTTPStatusError):
         logger.exception("summarize_chat: LLM summarization failed")
         return {"ok": False, "error": "LLM summarization failed"}
 
@@ -246,7 +247,7 @@ async def _tool_ask_chat(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+    except (RequestError, HTTPStatusError, SQLAlchemyError):
         logger.exception("ask_chat: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -308,7 +309,7 @@ async def _tool_ask_chat(
                     lines.append(f"• {_sh2(p.get('text', ''))}")
             lines.append("</recall_context>")
             memory_context = "\n".join(lines)
-    except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+    except (RequestError, HTTPStatusError, SQLAlchemyError):
         logger.debug("ask_chat tool: failed to load memory context", exc_info=True)
 
     # Analyse via LLM
@@ -337,7 +338,7 @@ async def _tool_ask_chat(
             "contact": display_name,
             "message_count": len(messages),
         }
-    except (RequestError, HTTPStatusError) as e:
+    except (RequestError, HTTPStatusError):
         logger.exception("ask_chat: LLM analysis failed")
         return {"ok": False, "error": "LLM analysis failed"}
 
@@ -388,7 +389,7 @@ async def _tool_draft_reply(
         from src.core.contacts.contact_resolver import resolve as resolve_contact
 
         candidates = await resolve_contact(client, user, contact, limit=1)
-    except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+    except (RequestError, HTTPStatusError, SQLAlchemyError):
         logger.exception("draft_reply: contact resolution failed for %r", contact)
         return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
 
@@ -406,7 +407,7 @@ async def _tool_draft_reply(
         history = await fetch_chat_messages(session, user, peer_id, limit=20)
         if history:
             history_text = messages_to_transcript(history)
-    except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+    except (RequestError, HTTPStatusError, SQLAlchemyError):
         logger.exception("draft_reply: history fetch failed for peer_id=%s", peer_id)
         # Non-fatal: proceed without history
 
@@ -427,7 +428,7 @@ async def _tool_draft_reply(
             "tone": result.get("tone", ""),
             "contact": sender_name,
         }
-    except (RequestError, HTTPStatusError) as e:
+    except (RequestError, HTTPStatusError):
         logger.exception("draft_reply: LLM drafting failed")
         return {"ok": False, "error": "LLM draft generation failed"}
 
@@ -475,9 +476,8 @@ async def _tool_set_reminder(
                 deadline = _dt.fromisoformat(s2)
 
             if deadline.tzinfo is None:
-                from datetime import timezone
 
-                deadline = deadline.replace(tzinfo=timezone.utc)
+                deadline = deadline.replace(tzinfo=UTC)
         except (ValueError, TypeError):
             logger.exception("set_reminder: cannot parse date %r", when)
             return {"ok": False, "error": f"Cannot parse date/time: {when}"}
@@ -571,7 +571,7 @@ async def _tool_list_contacts(
                 for c in contacts[:limit]
             ]
         return {"ok": True, "contacts": results, "count": len(results)}
-    except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+    except (RequestError, HTTPStatusError, SQLAlchemyError):
         logger.exception("list_contacts: failed for query=%r", query)
         return {"ok": False, "error": "Failed to list contacts"}
 
@@ -652,7 +652,7 @@ async def _tool_delegate_task(
                     user_prompt += (
                         f"\n\nПоследние сообщения из чата с {contact}:\n{transcript}"
                     )
-        except (RequestError, HTTPStatusError, SQLAlchemyError) as e:
+        except (RequestError, HTTPStatusError, SQLAlchemyError):
             logger.debug(
                 "delegate_task: failed to fetch contact messages", exc_info=True
             )
@@ -676,6 +676,6 @@ async def _tool_delegate_task(
             "analysis": raw.strip(),
             "task": task,
         }
-    except (RequestError, HTTPStatusError, asyncio.TimeoutError):
+    except (TimeoutError, RequestError, HTTPStatusError):
         logger.exception("delegate_task: sub-agent LLM call failed")
         return {"ok": False, "error": "Sub-agent analysis failed"}

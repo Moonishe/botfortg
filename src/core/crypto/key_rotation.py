@@ -12,11 +12,9 @@
 
 from __future__ import annotations
 
-import base64
 import logging
-import os
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -255,7 +253,7 @@ class KeyRotationManager:
         )
         row = existing.scalar_one_or_none()
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         if row is not None:
             row.encrypted_dek = encrypted_dek

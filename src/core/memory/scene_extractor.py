@@ -237,7 +237,7 @@ async def extract_scenes_for_user(telegram_id: int) -> int:
 
 
 __all__ = [
-    "generate_scene_narrative",
-    "extract_scenes_for_user",
     "SCENE_SYSTEM_PROMPT",
+    "extract_scenes_for_user",
+    "generate_scene_narrative",
 ]

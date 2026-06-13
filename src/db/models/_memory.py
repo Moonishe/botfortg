@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import (
     BigInteger,
@@ -75,15 +75,15 @@ class Memory(Base):
         String(16), nullable=True, index=True
     )  # хеш для дедупликации
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
     validity_start: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     validity_end: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -143,7 +143,7 @@ class MemoryVersion(Base):
     )  # "user" | "system" | "agent"
     edited_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -172,7 +172,7 @@ class MemoryLink(Base):
         String(32), nullable=True
     )  # cause/effect/contradicts/supports/continues/co_temporal/co_entity/preceded
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -191,12 +191,12 @@ class MemoryCluster(Base):
     )  # LLM-саммари кластера
     fact_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -217,7 +217,7 @@ class MemoryClusterMember(Base):
     )
     relevance_score: Mapped[float] = mapped_column(Float, default=0.5)
     added_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -238,7 +238,7 @@ class MemoryCandidate(Base):
     importance: Mapped[float] = mapped_column(Float, default=0.5)
     decay_rate: Mapped[float] = mapped_column(Float, default=0.07)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -259,7 +259,7 @@ class WorkingMemory(Base):
     key: Mapped[str] = mapped_column(String(64))
     value: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
@@ -285,7 +285,7 @@ class Episode(Base):
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     started_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     summary: Mapped[str | None] = mapped_column(
@@ -344,12 +344,12 @@ class Entity(Base):
     )  # person, project, place, company, topic
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -391,5 +391,5 @@ class EntityRelation(Base):
         String(64), nullable=True
     )  # "extraction", "user_stated"
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )

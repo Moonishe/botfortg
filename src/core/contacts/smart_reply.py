@@ -170,7 +170,7 @@ def get_simple_reply(text: str) -> str | None:
     if t == "привет":
         import datetime
 
-        hour = datetime.datetime.now(datetime.timezone.utc).hour
+        hour = datetime.datetime.now(datetime.UTC).hour
         result: str
         if 5 <= hour < 12:
             result = random.choice(["☀️👋", "🌅👋"])

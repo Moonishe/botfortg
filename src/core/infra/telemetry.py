@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import Optional
 
 _TRACING_ENABLED: bool = bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
 

@@ -13,7 +13,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from enum import Enum
 
 from sqlalchemy import func, select
@@ -34,7 +34,7 @@ _GLOBAL_REPLY_MAX_PER_HOUR = settings.auto_reply_global_limit_per_hour
 
 def _global_reply_hour_key() -> str:
     """Return the current hour bucket key, e.g. ``"2026-05-23-14"``."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+    return datetime.now(UTC).strftime("%Y-%m-%d-%H")
 
 
 async def _global_reply_allow() -> bool:
@@ -53,10 +53,10 @@ async def _global_reply_increment() -> None:
         _global_reply_count[key] = _global_reply_count.get(key, 0) + 1
         # Purge stale buckets older than 2 hours
         now_ts = time.time()
-        stale_cutoff = datetime.fromtimestamp(now_ts - 7200, tz=timezone.utc).strftime(
+        stale_cutoff = datetime.fromtimestamp(now_ts - 7200, tz=UTC).strftime(
             "%Y-%m-%d-%H"
         )
-        for stale_key in list(_global_reply_count.keys()):
+        for stale_key in list(_global_reply_count):
             if stale_key < stale_cutoff:
                 del _global_reply_count[stale_key]
 
@@ -139,7 +139,7 @@ async def decide(
     AutoReplyChoice
         Verdict, chosen *style* label, and a human-readable *reason*.
     """
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
 
     # ── 1. Bot sender ──────────────────────────────────────────────────────
     if is_bot:

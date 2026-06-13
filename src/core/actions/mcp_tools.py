@@ -134,8 +134,6 @@ _TEXT_EXTENSIONS: frozenset[str] = frozenset(
         ".env",
         ".gitignore",
         ".dockerignore",
-        ".cfg",
-        ".cfg",
     }
 )
 
@@ -146,7 +144,7 @@ def _is_text_file(path: Path) -> bool:
         return True
     # Fallback: try to read a small chunk as UTF-8
     try:
-        with open(path, "r", encoding="utf-8", errors="strict") as f:
+        with open(path, encoding="utf-8", errors="strict") as f:
             f.read(1024)
         return True
     except (UnicodeDecodeError, OSError):
@@ -543,7 +541,7 @@ async def _sys_doctor() -> dict[str, Any]:
     warnings: list[str] = []
 
     try:
-        register_builtin_tools()
+        await asyncio.to_thread(register_builtin_tools)
     except Exception as exc:
         failures.append(f"tool bootstrap failed: {exc.__class__.__name__}")
 
@@ -571,7 +569,7 @@ async def _sys_doctor() -> dict[str, Any]:
                     )
 
     try:
-        register_builtin_connectors()
+        await asyncio.to_thread(register_builtin_connectors)
     except Exception as exc:
         failures.append(f"connector bootstrap failed: {exc.__class__.__name__}")
 

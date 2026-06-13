@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class AmbientIntelligence:
         last_active = context.get("last_active_at")
         if last_active is None:
             return True  # Первое сообщение — считаем новым днём
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # NOTE: UTC date comparison — ignores user timezone.
         # Acceptable tradeoff for single-user bot; multi-user would need
         # per-user timezone-aware "start of day" logic.

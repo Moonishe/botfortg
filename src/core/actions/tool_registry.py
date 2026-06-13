@@ -30,7 +30,8 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Awaitable, Callable
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 

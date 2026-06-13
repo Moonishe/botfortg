@@ -178,7 +178,7 @@ class MCPOAuthClient:
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         # Fallback: OpenID Connect discovery
         try:
@@ -193,7 +193,7 @@ class MCPOAuthClient:
                     "registration_endpoint": data.get("registration_endpoint"),
                 }
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         return {"error": f"No OAuth metadata found at {server_url}"}
 
@@ -330,7 +330,7 @@ class MCPOAuthClient:
                 writer.write(response.encode())
                 await writer.drain()
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
             finally:
                 writer.close()
                 event.set()
@@ -349,7 +349,7 @@ class MCPOAuthClient:
 
         try:
             await asyncio.wait_for(event.wait(), timeout=_CALLBACK_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result["error"] = "timeout waiting for OAuth callback"
         finally:
             server.close()
@@ -432,7 +432,7 @@ class MCPOAuthClient:
                 self._save_token(server_name, vars(new_token), token.server_url)
                 return new_token
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         return None
 

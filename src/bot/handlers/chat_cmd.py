@@ -12,7 +12,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.bot.handlers.rate_limiter import check_rate_limit
+from src.core.infra.rate_limiter import check_rate_limit
 from src.bot.pending_questions import get_pending, has_pending
 from src.core.infra.formatting import italic
 from src.core.infra.text_sanitizer import sanitize_html
@@ -622,7 +622,7 @@ async def cb_sync_start(
                     f"🔄 Синхронизация: {current}/{total} … {peer_name}"
                 )
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
 
     try:
         stats = await sync_dialogs_with_options(
@@ -687,7 +687,7 @@ async def cb_sync_start(
                 "⚠ Синхронизация завершилась с ошибкой — см. логи."
             )
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
 
 @router.callback_query(F.data == "sync:cancel")
@@ -1012,7 +1012,9 @@ async def cb_smart_memories(
             text = await _build_progress_text()
             await progress_msg.edit_text(text)
         except Exception:
-            pass  # игнорируем ошибки редактирования
+            logger.debug(
+                "Non-critical error", exc_info=True
+            )  # игнорируем ошибки редактирования
 
     # Запускаем smart extraction
     try:
@@ -1027,7 +1029,7 @@ async def cb_smart_memories(
         try:
             await progress_msg.edit_text("⚠️ Ошибка при анализе диалогов. Смотри логи.")
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
         await callback.answer()
         return
 

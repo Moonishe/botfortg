@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from sqlalchemy import and_, select
@@ -87,8 +87,8 @@ async def add_fact(
                 source_quality=1.0,
                 confidence=1.0,
                 memory_type="personal",
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
             )
             session.add(new_memory)
             await session.commit()
@@ -216,7 +216,7 @@ async def list_facts(
 
             conditions = [
                 Memory.user_id == owner.id,
-                Memory.is_active == True,  # noqa: E712
+                Memory.is_active == True,
             ]
             if contact_id is not None:
                 conditions.append(Memory.contact_id == contact_id)

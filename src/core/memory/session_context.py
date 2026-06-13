@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,7 +31,7 @@ _SUMMARY_PROMPT = (
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def save_session_context(

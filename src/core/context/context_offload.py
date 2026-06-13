@@ -275,7 +275,7 @@ async def compress_context(
 
 
 __all__ = [
+    "CRITICAL_PATTERNS",
     "CompressedContext",
     "compress_context",
-    "CRITICAL_PATTERNS",
 ]

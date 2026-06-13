@@ -88,9 +88,6 @@ def top_k_diverse(
     if k >= n:
         return list(range(n))
 
-    # Precompute query similarities
-    query_sims = batch_cosine(query_embedding, candidate_embeddings)
-
     # Precompute pairwise similarity matrix
     sim_matrix = cosine_similarity_matrix(candidate_embeddings)
 

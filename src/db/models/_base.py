@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, DateTime, String, Text
@@ -29,7 +29,7 @@ class User(Base):
     )  # Integer — SQLite autoincrement requires INTEGER
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
     last_seen_online: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     absence_status: Mapped[str | None] = mapped_column(
@@ -42,34 +42,34 @@ class User(Base):
     global_style_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )
-    settings: Mapped["UserSettings"] = relationship(
+    settings: Mapped[UserSettings] = relationship(
         back_populates="user",
         uselist=False,
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    session: Mapped["TelegramSession | None"] = relationship(
+    session: Mapped[TelegramSession | None] = relationship(
         back_populates="user",
         uselist=False,
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    api_keys: Mapped[list["ApiKey"]] = relationship(
+    api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    key_slots: Mapped[list["LlmKeySlot"]] = relationship(
+    key_slots: Mapped[list[LlmKeySlot]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="select",
     )
-    conversation_summaries: Mapped[list["ConversationSummary"]] = relationship(
+    conversation_summaries: Mapped[list[ConversationSummary]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    scheduled_messages: Mapped[list["ScheduledMessage"]] = relationship(
+    scheduled_messages: Mapped[list[ScheduledMessage]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",

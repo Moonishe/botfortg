@@ -113,7 +113,7 @@ async def _fetch_models(slot: LlmKeySlot) -> tuple[list[str], str | None]:
 
     except NotImplementedError:
         return [], f"{slot.provider} не поддерживает список моделей"
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return [], "Таймаут запроса (проверь endpoint)"
     except Exception as e:
         msg = str(e)
@@ -184,7 +184,7 @@ async def _build_models_keyboard(
 
             enabled_set = set(await _gem(session, slot_id))
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     total = len(cached)
     total_pages = max(1, (total + MODELS_PER_PAGE - 1) // MODELS_PER_PAGE)
@@ -567,7 +567,7 @@ async def cb_models_save(callback: CallbackQuery) -> None:
 
         await invalidate_settings_cache(callback.from_user.id)
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     await callback.answer(
         f"✅ Модель «{model_name[:50]}» сохранена в слот #{slot_id}.",
@@ -625,7 +625,7 @@ async def cb_models_toggle(callback: CallbackQuery) -> None:
 
         await invalidate_settings_cache(callback.from_user.id)
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     # Перерисовываем клавиатуру
     if callback.message:
@@ -677,7 +677,7 @@ async def cb_models_enable_all(callback: CallbackQuery) -> None:
 
         await invalidate_settings_cache(callback.from_user.id)
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     if callback.message:
         await callback.message.edit_reply_markup(
@@ -718,7 +718,7 @@ async def cb_models_disable_all(callback: CallbackQuery) -> None:
 
         await invalidate_settings_cache(callback.from_user.id)
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     if callback.message:
         await callback.message.edit_reply_markup(

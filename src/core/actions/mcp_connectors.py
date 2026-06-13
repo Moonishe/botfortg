@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 from src.core.actions.tool_registry import ToolActionSpec, ToolSpec, tool, tool_registry
 from src.core.connectors.base import ConnectorExposure
-from src.core.connectors import ConnectorRuntime, connector_registry, register_builtin_connectors
+from src.core.connectors import (
+    ConnectorRuntime,
+    connector_registry,
+    register_builtin_connectors,
+)
 from src.core.connectors.credentials import redact_secrets
 
 CONFIRMATION_RISKS = {"high", "critical"}
@@ -27,7 +32,9 @@ def _parse_params(value: Any) -> dict[str, Any]:
     raise ValueError("params must be an object or JSON object string")
 
 
-def _connector_confirmation_status(connector: str, connector_action: str) -> tuple[bool, dict[str, Any]]:
+def _connector_confirmation_status(
+    connector: str, connector_action: str
+) -> tuple[bool, dict[str, Any]]:
     registered = connector_registry.get(connector)
     if registered is None:
         return False, {"connector": connector}
@@ -68,7 +75,9 @@ def _local_mcp_confirmation_status(
         return None
     action_name = _local_mcp_action_name(params)
     risk = spec.effective_risk(action_name)
-    needs_confirmation = spec.effective_requires_confirmation(action_name) or risk in CONFIRMATION_RISKS
+    needs_confirmation = (
+        spec.effective_requires_confirmation(action_name) or risk in CONFIRMATION_RISKS
+    )
     return needs_confirmation, {
         "connector": connector,
         "action": spec.name,
@@ -154,7 +163,7 @@ async def mcp_connectors(
     target: str = "",
     **runtime_kwargs: Any,
 ) -> dict[str, Any]:
-    register_builtin_connectors()
+    await asyncio.to_thread(register_builtin_connectors)
     confirmed = bool(runtime_kwargs.pop("_confirmed", False))
     normalized_action = (action or "list").strip().lower()
     try:
@@ -172,7 +181,12 @@ async def mcp_connectors(
 
     if normalized_action == "describe":
         if not connector:
-            return {"ok": False, "data": None, "error": "connector is required", "metadata": {}}
+            return {
+                "ok": False,
+                "data": None,
+                "error": "connector is required",
+                "metadata": {},
+            }
         try:
             return {
                 "ok": True,
@@ -181,32 +195,72 @@ async def mcp_connectors(
                 "metadata": {"connector": connector, "exposure": exposure_mode},
             }
         except KeyError as exc:
-            return {"ok": False, "data": None, "error": str(exc), "metadata": {"connector": connector}}
+            return {
+                "ok": False,
+                "data": None,
+                "error": str(exc),
+                "metadata": {"connector": connector},
+            }
 
     if normalized_action != "execute":
-        return {"ok": False, "data": None, "error": f"Unknown action: {action}", "metadata": {}}
+        return {
+            "ok": False,
+            "data": None,
+            "error": f"Unknown action: {action}",
+            "metadata": {},
+        }
     if not connector:
-        return {"ok": False, "data": None, "error": "connector is required", "metadata": {}}
+        return {
+            "ok": False,
+            "data": None,
+            "error": "connector is required",
+            "metadata": {},
+        }
     if not connector_action:
-        return {"ok": False, "data": None, "error": "connector_action is required", "metadata": {"connector": connector}}
+        return {
+            "ok": False,
+            "data": None,
+            "error": "connector_action is required",
+            "metadata": {"connector": connector},
+        }
 
     try:
         parsed_params = _parse_params(params)
     except json.JSONDecodeError as exc:
-        return {"ok": False, "data": None, "error": f"Invalid params JSON: {exc}", "metadata": {"connector": connector}}
+        return {
+            "ok": False,
+            "data": None,
+            "error": f"Invalid params JSON: {exc}",
+            "metadata": {"connector": connector},
+        }
     except ValueError as exc:
-        return {"ok": False, "data": None, "error": str(exc), "metadata": {"connector": connector}}
+        return {
+            "ok": False,
+            "data": None,
+            "error": str(exc),
+            "metadata": {"connector": connector},
+        }
 
     registered = connector_registry.get(connector)
-    action_spec = registered.spec.get_action(connector_action) if registered is not None else None
+    action_spec = (
+        registered.spec.get_action(connector_action) if registered is not None else None
+    )
     local_spec = _local_mcp_tool_spec(connector, connector_action)
     local_tool_action = _local_mcp_action_name(parsed_params)
-    if exposure_mode == "read-only" and action_spec is not None and not action_spec.read_only:
+    if (
+        exposure_mode == "read-only"
+        and action_spec is not None
+        and not action_spec.read_only
+    ):
         return {
             "ok": False,
             "data": None,
             "error": "Connector action is not exposed in read-only mode",
-            "metadata": {"connector": connector, "action": action_spec.name, "exposure": exposure_mode},
+            "metadata": {
+                "connector": connector,
+                "action": action_spec.name,
+                "exposure": exposure_mode,
+            },
         }
     if (
         exposure_mode == "read-only"
@@ -225,11 +279,15 @@ async def mcp_connectors(
             },
         }
 
-    local_confirmation = _local_mcp_confirmation_status(connector, connector_action, parsed_params)
+    local_confirmation = _local_mcp_confirmation_status(
+        connector, connector_action, parsed_params
+    )
     if local_confirmation is not None:
         needs_confirmation, confirmation_metadata = local_confirmation
     else:
-        needs_confirmation, confirmation_metadata = _connector_confirmation_status(connector, connector_action)
+        needs_confirmation, confirmation_metadata = _connector_confirmation_status(
+            connector, connector_action
+        )
     if needs_confirmation and not confirmed:
         return {
             "ok": False,

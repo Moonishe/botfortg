@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
@@ -108,7 +108,14 @@ def _retry_wrapper(send_fn):
     return wrapper
 
 
-async def run_bot(userbot_manager: UserbotManager) -> None:
+def _setup_bot_and_dispatcher(
+    userbot_manager: UserbotManager,
+) -> tuple[Bot, Dispatcher]:
+    """Собирает Bot + Dispatcher со всеми роутерами и middleware.
+
+    Вынесено в отдельную функцию чтобы переиспользовать
+    и для polling, и для webhook.
+    """
     session = AiohttpSession(proxy=settings.proxy_url) if settings.proxy_url else None
 
     bot = Bot(
@@ -188,7 +195,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
         try:
             await message.answer("💡 Хочешь чтобы я запомнил важное? Сделай /sync.")
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
         return
 
     # Inline-режим — самый первый, чтобы ловить @botname до команд
@@ -243,8 +250,15 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text.router)
 
+    return bot, dp
+
+
+async def run_bot(userbot_manager: UserbotManager) -> None:
+    """Запуск бота в режиме long-polling."""
+    bot, dp = _setup_bot_and_dispatcher(userbot_manager)
+
     me = await bot.get_me()
-    logger.info("Control bot started as @%s", me.username)
+    logger.info("Control bot started as @%s (polling)", me.username)
 
     try:
         # close_bot_session=False — сессией управляем явно в finally
@@ -254,4 +268,79 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
             close_bot_session=False,
         )
     finally:
+        await bot.session.close()
+
+
+async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
+    """Запуск бота в режиме webhook (задайте WEBHOOK_URL в .env).
+
+    Использует aiohttp + feed_webhook_update — нативный подход aiogram 3.17+.
+    """
+    from aiohttp import web
+
+    bot, dp = _setup_bot_and_dispatcher(userbot_manager)
+
+    webhook_url = (settings.webhook_url or "").rstrip("/")
+    webhook_path = settings.webhook_path or "/webhook"
+    webhook_port = settings.webhook_port
+
+    if not webhook_url:
+        logger.error("webhook_url is empty — falling back to polling")
+        return await run_bot(userbot_manager)
+
+    # Set Telegram webhook
+    full_webhook_url = f"{webhook_url}{webhook_path}"
+    if settings.webhook_secret_token:
+        await bot.set_webhook(
+            full_webhook_url, secret_token=settings.webhook_secret_token
+        )
+    else:
+        await bot.set_webhook(full_webhook_url)
+    logger.info(
+        "Webhook set to %s (port %d, path %s, secret_token=%s)",
+        full_webhook_url,
+        webhook_port,
+        webhook_path,
+        "configured" if settings.webhook_secret_token else "not set",
+    )
+
+    me = await bot.get_me()
+    logger.info("Control bot started as @%s (webhook)", me.username)
+
+    # Build minimal aiohttp app for webhook ingestion
+    aiohttp_app = web.Application()
+
+    async def _handle_update(request: web.Request) -> web.Response:
+        # Validate secret token if configured (prevents fake updates from non-Telegram sources)
+        if settings.webhook_secret_token:
+            header_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if header_token != settings.webhook_secret_token:
+                return web.Response(status=403, text="Forbidden")
+        try:
+            data = await request.json()
+            update = types.Update(**data)
+            await dp.feed_webhook_update(bot, update)
+        except Exception:
+            logger.debug("Webhook update processing failed", exc_info=True)
+        return web.Response(status=200)
+
+    aiohttp_app.router.add_post(webhook_path, _handle_update)
+
+    runner = web.AppRunner(aiohttp_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", webhook_port)
+    await site.start()
+
+    logger.info(
+        "Webhook server listening on 127.0.0.1:%d%s",
+        webhook_port,
+        webhook_path,
+    )
+
+    try:
+        # Keep running until cancelled (handled by main() shutdown)
+        stop_event = asyncio.Event()
+        await stop_event.wait()
+    finally:
+        await runner.cleanup()
         await bot.session.close()

@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import or_, select
 
 from src.bot.filters import OwnerOnly
-from src.bot.handlers.rate_limiter import check_rate_limit
+from src.core.infra.rate_limiter import check_rate_limit
 from src.core.contacts.chat_service import load_chat
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.contacts.contact_resolver import resolve

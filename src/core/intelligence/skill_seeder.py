@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,7 +72,7 @@ async def seed_skills_from_docs(
         body = _parse_body(content)
         trigger_patterns = _parse_trigger_patterns(content)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         skill = Skill(
             user_id=user_id,
             name=name.strip(),

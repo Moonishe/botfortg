@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-from src.bot.classifier import (
+from src.core.classification.message_classifier import (
     MessageClassifier,
     _AHO_AVAILABLE,
     _ManualAhoCorasick,
@@ -27,7 +27,10 @@ from src.bot.classifier import (
     classify_message,
     get_classifier,
 )
-from src.bot.routing_wordlists import CATEGORY_PATTERNS, CATEGORY_PRIORITY
+from src.core.classification.routing_wordlists import (
+    CATEGORY_PATTERNS,
+    CATEGORY_PRIORITY,
+)
 
 
 # ── Helper: create a fresh classifier for testing ─────────────────────

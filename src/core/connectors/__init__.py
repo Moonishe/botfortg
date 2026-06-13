@@ -30,13 +30,16 @@ def register_builtin_connectors() -> None:
 
     register_tool_registry_connector(connector_registry)
     register_site_connectors(connector_registry)
+    from .telegram_public import register_telegram_public
+
+    register_telegram_public(connector_registry)
     _BUILTINS_REGISTERED = True
     return None
 
 
 __all__ = [
-    "ConnectorActionSpec",
     "ConnectorActionAnnotations",
+    "ConnectorActionSpec",
     "ConnectorRegistry",
     "ConnectorResult",
     "ConnectorRuntime",

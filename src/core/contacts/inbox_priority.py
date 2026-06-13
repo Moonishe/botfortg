@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.core.infra.text_sanitizer import sanitize_html
 from sqlalchemy import func, select, desc
@@ -27,7 +27,7 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Get active conversations where user hasn't replied
         convs = await list_active_conversations(
@@ -97,12 +97,12 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
             # Skip if user already replied
             if c.last_outgoing_at and c.last_incoming_at:
                 last_out = (
-                    c.last_outgoing_at.replace(tzinfo=timezone.utc)
+                    c.last_outgoing_at.replace(tzinfo=UTC)
                     if c.last_outgoing_at.tzinfo is None
                     else c.last_outgoing_at
                 )
                 last_in = (
-                    c.last_incoming_at.replace(tzinfo=timezone.utc)
+                    c.last_incoming_at.replace(tzinfo=UTC)
                     if c.last_incoming_at.tzinfo is None
                     else c.last_incoming_at
                 )
@@ -114,7 +114,7 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
                 continue
 
             last_in = (
-                c.last_incoming_at.replace(tzinfo=timezone.utc)
+                c.last_incoming_at.replace(tzinfo=UTC)
                 if c.last_incoming_at.tzinfo is None
                 else c.last_incoming_at
             )
@@ -162,8 +162,8 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
 
                 if max_date:
                     if max_date.tzinfo is None:
-                        max_date = max_date.replace(tzinfo=timezone.utc)
-                    days_gap = (datetime.now(timezone.utc) - max_date).days
+                        max_date = max_date.replace(tzinfo=UTC)
+                    days_gap = (datetime.now(UTC) - max_date).days
                 else:
                     days_gap = 365
 

@@ -30,9 +30,8 @@ os.environ["API_HASH"] = "0123456789abcdef0123456789abcdef"
 from src.bot.prefetch import (
     _CachedEntry,
     _contact_cache,
-    _cache_ttl,
     _CACHE_LOCK,
-    _refresh_ttl,
+    _get_cache_ttl,
     get_cached_contact,
     invalidate_contact,
     invalidate_all,
@@ -424,58 +423,32 @@ def test_invalidate_all():
 
 
 @pytest.mark.asyncio
-async def test_cache_ttl_expiry():
+async def test_cache_ttl_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
     """After TTL, entry is expired and get_cached_contact returns None."""
     contacts = [_make_contact(1, "Alice")]
-    # Set a very short TTL for this test
-    old_ttl = None
-    try:
-        old_ttl = _cache_ttl
-        import src.bot.prefetch as prefetch_mod
-
-        prefetch_mod._cache_ttl = 0.01  # 10ms TTL
-
-        async with _CACHE_LOCK:
-            _contact_cache[100] = _make_cached_entry(contacts=contacts)
-
-        # Wait for TTL to expire
-        await asyncio.sleep(0.02)
-
-        result = await get_cached_contact(100, "Alice")
-        assert result is None
-    finally:
-        if old_ttl is not None:
-            import src.bot.prefetch as prefetch_mod
-
-            prefetch_mod._cache_ttl = old_ttl
+    monkeypatch.setattr("src.bot.prefetch.settings.contact_cache_ttl", 0.01)
+    async with _CACHE_LOCK:
+        _contact_cache[100] = _make_cached_entry(contacts=contacts)
+    # Wait for TTL to expire
+    await asyncio.sleep(0.02)
+    result = await get_cached_contact(100, "Alice")
+    assert result is None
 
 
 @pytest.mark.asyncio
-async def test_cleanup_stale_removes_expired():
+async def test_cleanup_stale_removes_expired(monkeypatch: pytest.MonkeyPatch) -> None:
     """get_cached_contact cleanups stale entries before checking."""
     contacts = [_make_contact(1, "Alice")]
-    old_ttl = None
-    try:
-        old_ttl = _cache_ttl
-        import src.bot.prefetch as prefetch_mod
-
-        prefetch_mod._cache_ttl = 0.01
-
-        async with _CACHE_LOCK:
-            _contact_cache[100] = _CachedEntry(
-                contacts=contacts, resolved={}, ts=time.monotonic() - 9999
-            )
-
-        result = await get_cached_contact(100, "Alice")
-        assert result is None
-        # The stale entry should have been cleaned up
-        async with _CACHE_LOCK:
-            assert 100 not in _contact_cache
-    finally:
-        if old_ttl is not None:
-            import src.bot.prefetch as prefetch_mod
-
-            prefetch_mod._cache_ttl = old_ttl
+    monkeypatch.setattr("src.bot.prefetch.settings.contact_cache_ttl", 0.01)
+    async with _CACHE_LOCK:
+        _contact_cache[100] = _CachedEntry(
+            contacts=contacts, resolved={}, ts=time.monotonic() - 9999
+        )
+    result = await get_cached_contact(100, "Alice")
+    assert result is None
+    # The stale entry should have been cleaned up
+    async with _CACHE_LOCK:
+        assert 100 not in _contact_cache
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -638,19 +611,16 @@ def test_extract_contact_hint_none():
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_refresh_ttl():
-    """_refresh_ttl updates cache TTL from settings."""
-    old = _cache_ttl
+def test_get_cache_ttl() -> None:
+    """_get_cache_ttl returns current settings value."""
+    from src.config import settings
+
+    original = settings.contact_cache_ttl
     try:
-        import src.bot.prefetch as prefetch_mod
-
-        prefetch_mod.settings.contact_cache_ttl = 600
-        _refresh_ttl()
-        assert prefetch_mod._cache_ttl == 600.0
+        settings.contact_cache_ttl = 42
+        assert _get_cache_ttl() == 42.0
     finally:
-        import src.bot.prefetch as prefetch_mod
-
-        prefetch_mod._cache_ttl = old
+        settings.contact_cache_ttl = original
 
 
 # ══════════════════════════════════════════════════════════════════════

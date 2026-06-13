@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
+from collections.abc import Awaitable, Callable
 
 
 ConnectorRisk = Literal["low", "medium", "high", "critical"]

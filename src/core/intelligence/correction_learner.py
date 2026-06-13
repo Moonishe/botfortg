@@ -76,7 +76,7 @@ async def learn_correction(
             accepted=False,
         )
     except Exception:
-        pass  # humanizer feedback is optional
+        logger.debug("Non-critical error", exc_info=True)  # humanizer feedback is optional
 
     # ── 3. Update adaptive persona if style correction ──
     if feedback_type == "style" and corrected_text:

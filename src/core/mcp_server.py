@@ -255,7 +255,7 @@ class MCPServer:
             else:
                 return self._error(req_id, -32601, f"Method not found: {method}")
 
-        except Exception as exc:
+        except Exception:
             logger.exception("MCP request error")
             return self._error(req_id, -32603, "Internal error. Check server logs.")
 
@@ -297,7 +297,7 @@ class MCPServer:
                     }
                 ]
             }
-        except Exception as exc:
+        except Exception:
             logger.exception("MCP tool %r failed", name)
             return {
                 "content": [
@@ -337,7 +337,7 @@ async def run_stdio_server(telegram_id: int) -> None:
         telegram_id: The Telegram user ID that scopes all tool operations.
     """
     # Ensure all internal tools are registered.
-    bootstrap.register_builtin_tools()
+    await asyncio.to_thread(bootstrap.register_builtin_tools)
 
     server = MCPServer(telegram_id)
     loop = asyncio.get_running_loop()

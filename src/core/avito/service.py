@@ -162,7 +162,7 @@ async def _get_stealth_session(proxy_url: str | None = None):
                     try:
                         await _stealth_session.close()  # type: ignore[attr-defined]
                     except Exception:
-                        pass
+                        logger.debug("Non-critical error", exc_info=True)
                 _stealth_session = None
 
     if _stealth_session is None:
@@ -187,7 +187,7 @@ async def _close_stealth_session() -> None:
             try:
                 await _stealth_session.close()  # type: ignore[attr-defined]
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
             _stealth_session = None
 
 
@@ -218,7 +218,7 @@ async def _fetch_page(url: str) -> str:
                 try:
                     await rotator.mark_failure(proxy_entry)  # type: ignore[attr-defined]
                 except Exception:
-                    pass
+                    logger.debug("Non-critical error", exc_info=True)
             raise RuntimeError(f"HTTP {resp.status_code}: страница не загружена")
 
         # Успех — сбрасываем счётчик ошибок прокси
@@ -226,7 +226,7 @@ async def _fetch_page(url: str) -> str:
             try:
                 await rotator.mark_success(proxy_entry)  # type: ignore[attr-defined]
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
 
         return resp.text
     except RuntimeError:
@@ -237,7 +237,7 @@ async def _fetch_page(url: str) -> str:
             try:
                 await rotator.mark_failure(proxy_entry)  # type: ignore[attr-defined]
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
         raise
 
 
@@ -364,7 +364,7 @@ async def scan_avito_cached(params: SearchParams) -> ScanResult:
         _SCAN_CACHE[key] = (now, result)
         # Очистка старых записей
         if len(_SCAN_CACHE) > 100:
-            for k in list(_SCAN_CACHE.keys()):
+            for k in list(_SCAN_CACHE):
                 if now - _SCAN_CACHE[k][0] > _SCAN_CACHE_TTL * 2:
                     del _SCAN_CACHE[k]
     return result
@@ -416,7 +416,7 @@ async def scan_avito(
         result.error = str(exc)
         logger.error("scan_avito: ошибка загрузки — %s", exc)
         return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result.error = "Таймаут загрузки страницы"
         logger.error("scan_avito: timeout")
         return result

@@ -10,7 +10,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from functools import partial
 
 from src.config import settings
@@ -49,7 +49,7 @@ async def _proactive_scan(telegram_id: int) -> None:
             )
 
         # Выбираем контакты с наибольшим числом входящих сообщений за 24ч
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
         peer_ids = [c.peer_id for c in all_contacts]
         if not peer_ids:
             return
@@ -64,7 +64,7 @@ async def _proactive_scan(telegram_id: int) -> None:
                     Message.user_id == owner.id,
                     Message.peer_id.in_(peer_ids),
                     Message.date >= cutoff,
-                    Message.is_outgoing == False,  # noqa: E712 — только входящие
+                    Message.is_outgoing == False,
                 )
                 .group_by(Message.peer_id)
             )

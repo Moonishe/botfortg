@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from functools import partial
 
 from sqlalchemy import select, desc
@@ -33,7 +33,7 @@ async def collect_nudges(owner_telegram_id: int, limit: int = 5) -> list[dict]:
     """Scan conversations and collect nudges — contacts you should reply to."""
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
-        now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive, project style
+        now = datetime.now(UTC).replace(tzinfo=None)  # naive, project style
 
         conversations = await list_active_conversations(session, owner, limit=50)
         nudges: list[dict] = []
@@ -124,7 +124,7 @@ def format_nudge(nudges: list[dict]) -> str:
 
         result = humanize_response(result) or result
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
     return result
 
 

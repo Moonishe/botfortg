@@ -17,7 +17,7 @@ import hashlib
 import logging
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
@@ -76,7 +76,7 @@ class SkillGatekeeper:
         """Количество успешных траекторий за последние COOLDOWN_HOURS часов."""
         from src.db.models import Trajectory
 
-        since = datetime.now(timezone.utc) - timedelta(hours=COOLDOWN_HOURS)
+        since = datetime.now(UTC) - timedelta(hours=COOLDOWN_HOURS)
         async with get_session() as session:
             result = await session.execute(
                 select(func.count(Trajectory.id)).where(
@@ -110,7 +110,7 @@ class SkillGatekeeper:
         # Check 0: прошло ли MIN_DAYS_SINCE_START с первого сообщения?
         earliest = await self._get_earliest_message_date(owner_id)
         if earliest is not None:
-            days_since_start = (datetime.now(timezone.utc) - earliest).days
+            days_since_start = (datetime.now(UTC) - earliest).days
             if days_since_start < MIN_DAYS_SINCE_START:
                 return (
                     False,
@@ -118,7 +118,7 @@ class SkillGatekeeper:
                 )
 
         # Check 1: cooldown — не анализировать слишком часто
-        now_ts = datetime.now(timezone.utc).timestamp()
+        now_ts = datetime.now(UTC).timestamp()
         snap = self._snapshots.get(owner_id)
         if snap is not None:
             elapsed_h = (now_ts - snap["ts"]) / 3600

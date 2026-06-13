@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import hashlib
 import sys
 import time
 import uuid
@@ -217,10 +218,31 @@ async def _humanize_assistant_response(
 def _cleanup_stale_pending() -> None:
     """Remove entries older than ``_PENDING_TTL`` seconds."""
     now = time.monotonic()
-    for uid in list(_pending_confirmations.keys()):
+    for uid in list(_pending_confirmations):
         entry = _pending_confirmations[uid]
         if now - entry.get("ts", 0) > _PENDING_TTL:
             del _pending_confirmations[uid]
+
+
+# PERF-018: background timer that evicts stale pending confirmations every 60s
+_BACKGROUND_CLEANUP_INTERVAL = 60
+
+
+async def _background_cleanup_stale_pending() -> None:
+    """Periodic cleanup task — runs every ``_BACKGROUND_CLEANUP_INTERVAL`` seconds."""
+    while True:
+        await asyncio.sleep(_BACKGROUND_CLEANUP_INTERVAL)
+        async with _pending_confirmations_lock:
+            _cleanup_stale_pending()
+
+
+def register_cleanup_timer() -> None:
+    """Register the background stale-pending cleanup timer (fire-and-forget)."""
+    try:
+        loop = asyncio.get_running_loop()
+        track_ff(loop.create_task(_background_cleanup_stale_pending()))
+    except RuntimeError:
+        pass  # no running event loop — skip
 
 
 def _confirm_tool_keyboard(uid: str) -> InlineKeyboardMarkup:
@@ -407,6 +429,45 @@ _MULTI_KEYWORDS = ("и не забудь", "заодно", "и ещё")
 
 # ── Auto-save facts about user ───────────────────────────────────────
 
+# ── Dedup cache: prevents repeated LLM extraction for same (user, text) ──
+_dedup_cache: dict[tuple[int, str], float] = {}  # (owner_id, hash) → timestamp
+_DEDUP_CACHE_MAX = 200
+_DEDUP_CACHE_TTL = 60.0  # seconds
+
+
+def _should_skip_auto_save(owner_id: int, text: str) -> bool:
+    """Check if we've already extracted facts from this text recently.
+
+    Uses SHA-256 hash of the first 500 characters of text as a content
+    fingerprint. Within the TTL window (60s), identical content from
+    the same user is skipped to save LLM tokens.
+    """
+    now = time.monotonic()
+    key = (owner_id, hashlib.sha256(text[:500].encode()).hexdigest())
+    if key in _dedup_cache and now - _dedup_cache[key] < _DEDUP_CACHE_TTL:
+        return True
+    # Evict old entries if cache too big
+    if len(_dedup_cache) >= _DEDUP_CACHE_MAX:
+        stale = [k for k, ts in _dedup_cache.items() if now - ts > _DEDUP_CACHE_TTL * 2]
+        if stale:
+            for k in stale[:50]:
+                _dedup_cache.pop(k, None)
+        else:
+            # All entries are fresh — forced eviction of oldest 25%
+            force_evict = max(_DEDUP_CACHE_MAX // 4, 1)
+            oldest = sorted(_dedup_cache.items(), key=lambda x: x[1])[:force_evict]
+            for k, _ in oldest:
+                _dedup_cache.pop(k, None)
+            logger.debug(
+                "Dedup cache forced eviction: removed %d fresh entries "
+                "(all %d were within TTL)",
+                len(oldest),
+                _DEDUP_CACHE_MAX,
+            )
+    _dedup_cache[key] = now
+    return False
+
+
 _AUTO_SAVE_PROMPT = (
     "You are a fact extractor. Given a user message and assistant reply, "
     "extract ANY personal facts the user revealed about themselves. "
@@ -502,6 +563,15 @@ async def _maybe_auto_save_facts(
       - Scoring приоритетности
       - Выбор лёгкой/тяжёлой модели
     """
+    # ── Dedup: skip if we already processed this (user, text) recently ──
+    if _should_skip_auto_save(telegram_id, user_text):
+        logger.debug(
+            "Auto-save facts DEDUP: skip duplicate for user %d (text %.60s…)",
+            telegram_id,
+            user_text,
+        )
+        return
+
     # ── Оптимизация: SmartExtractor решает, извлекать ли ──
     try:
         from src.config import settings
@@ -509,8 +579,6 @@ async def _maybe_auto_save_facts(
         if getattr(settings, "smart_extract_optimized", True):
             from src.core.memory.smart_extractor import (
                 make_extract_decision,
-                cache_extraction_result,
-                ExtractPriority,
             )
 
             decision = await make_extract_decision(user_text, user_id=telegram_id)
@@ -1369,10 +1437,13 @@ async def execute_instant(
     # ── Smart Model Routing: логгирование решения ──────────────────
     _log_smart_routing(plan, raw)
 
+    # Import track_ff once for fire-and-forget session logging tasks
+    from src.core.infra.task_manager import track_ff
+
     # Log user message to session (fire-and-forget)
     from src.core.scheduling.session_logger import log_user_message
 
-    asyncio.ensure_future(log_user_message(message.from_user.id, raw))
+    track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
 
     # ── S2-T5: RouteCache hit — быстрый путь без recall/DB ───────────
     _route_cache_hit = (
@@ -1406,7 +1477,11 @@ async def execute_instant(
         # Log assistant response to session
         from src.core.scheduling.session_logger import log_assistant_response
 
-        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
+        track_ff(
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, response)
+            )
+        )
         return True
 
     # ── S2-T5 быстрый путь: кэш-hit → пропускаем recall, сразу humanize ──
@@ -1435,7 +1510,11 @@ async def execute_instant(
         await _post_turn_optimize(owner_telegram_id, raw, response)
         from src.core.scheduling.session_logger import log_assistant_response
 
-        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
+        track_ff(
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, response)
+            )
+        )
         return True
 
     # Динамическое приветствие с учётом наличия памяти и сессии
@@ -1521,7 +1600,9 @@ async def execute_instant(
     # Log assistant response to session
     from src.core.scheduling.session_logger import log_assistant_response
 
-    asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
+    track_ff(
+        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
+    )
     return True
 
 
@@ -1690,7 +1771,11 @@ async def execute_maestro(
         # Log assistant response to session
         from src.core.scheduling.session_logger import log_assistant_response
 
-        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
+        track_ff(
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, response)
+            )
+        )
         return True
 
     # 🧠 LLM Response Cache: проверяем кэш перед LLM-вызовом
@@ -1729,8 +1814,10 @@ async def execute_maestro(
         # Log assistant response to session
         from src.core.scheduling.session_logger import log_assistant_response
 
-        asyncio.ensure_future(
-            log_assistant_response(message.from_user.id, response_text)
+        track_ff(
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, response_text)
+            )
         )
         logger.debug("LLM response cache HIT, bypassed LLM call: %.60s", raw)
         return True
@@ -1844,8 +1931,10 @@ async def execute_maestro(
             # Log assistant response to session
             from src.core.scheduling.session_logger import log_assistant_response
 
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, confirm_msg)
+            track_ff(
+                asyncio.ensure_future(
+                    log_assistant_response(message.from_user.id, confirm_msg)
+                )
             )
             return True
 
@@ -2057,8 +2146,10 @@ async def execute_maestro(
             # Log assistant response to session
             from src.core.scheduling.session_logger import log_assistant_response
 
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, response_text)
+            track_ff(
+                asyncio.ensure_future(
+                    log_assistant_response(message.from_user.id, response_text)
+                )
             )
             return True
 
@@ -2275,8 +2366,10 @@ async def execute_maestro(
             # Log assistant response to session
             from src.core.scheduling.session_logger import log_assistant_response
 
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, response_text)
+            track_ff(
+                asyncio.ensure_future(
+                    log_assistant_response(message.from_user.id, response_text)
+                )
             )
             return True
         return False

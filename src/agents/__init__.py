@@ -9,11 +9,11 @@ from src.agents.skill_creator_agent import propose as skill_creator_propose
 from src.agents.summarizer_agent import summarize as agent_summarize
 
 __all__ = [
-    "search_resolve",
-    "memory_recall",
-    "commitment_extract",
-    "agent_summarize",
-    "agent_draft",
     "agent_build_digest",
+    "agent_draft",
+    "agent_summarize",
+    "commitment_extract",
+    "memory_recall",
+    "search_resolve",
     "skill_creator_propose",
 ]

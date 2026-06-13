@@ -532,7 +532,7 @@ async def route_intent(
             "intent": "chat",
             "reply": "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ...",
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("route_intent TimeoutError")
         return {
             "intent": "chat",

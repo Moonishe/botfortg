@@ -178,7 +178,7 @@ async def make_plan(
                     plan.metrics["recall_mode"] = "light"
                     _prefetched_used = True
             except Exception:
-                pass  # prefetch — оптимизация, не критично
+                logger.debug("Non-critical error", exc_info=True)  # prefetch — оптимизация, не критично
 
     # ---------- Общая сессия для recall + self-profile ----------
     async with get_session() as session:
@@ -479,7 +479,7 @@ async def make_plan(
 
                     contacts = await cache_get(cache_key)
                 except Exception:
-                    pass
+                    logger.debug("Non-critical error", exc_info=True)
 
                 if contacts is None:
                     client = _get_active_telethon_client(telegram_id)
@@ -489,7 +489,7 @@ async def make_plan(
                             try:
                                 await cache_put(cache_key, contacts, ttl=300)
                             except Exception:
-                                pass
+                                logger.debug("Non-critical error", exc_info=True)
 
                 if contacts and contacts[0].score >= 60:
                     peer_id = contacts[0].peer_id

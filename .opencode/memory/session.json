@@ -1,0 +1,9 @@
+{
+  "session_boot_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "started_at": "2026-06-11T15:00:00Z",
+  "last_checkpoint_at": "2026-06-11T15:30:00Z",
+  "checkpoint_count": 1,
+  "prev_session_boot_id": null,
+  "project": "C:\\Users\\My\\Desktop\\asist\\TelegramHelper-main",
+  "branch": "main"
+}

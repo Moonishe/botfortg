@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +29,7 @@ class DeepFact:
     tier: int
     confidence: float
     reason: str  # "semantic", "graph_bfs", "cluster_match", "distilled"
-    contact_id: Optional[int] = None
+    contact_id: int | None = None
     tags: list = field(default_factory=list)
 
 

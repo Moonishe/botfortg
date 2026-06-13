@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +42,7 @@ async def add_pending_question(
         PendingQuestion(
             owner_id=owner_id,
             question=question,
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            expires_at=datetime.now(UTC) + timedelta(hours=24),
         )
     )
     await session.flush()
@@ -158,7 +158,7 @@ async def create_pending_action(
     session.add(pa)
     await session.flush()  # получаем pa.id
     # Устанавливаем TTL и HMAC после flush (нужен id)
-    pa.expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
+    pa.expires_at = datetime.now(UTC) + timedelta(minutes=ttl_minutes)
     pa.hmac_signature = _compute_hmac(pa.id)
     await session.flush()
     return pa
@@ -189,7 +189,7 @@ def is_pending_action_expired(action: PendingAction) -> bool:
     """Проверяет, истёк ли срок действия PendingAction."""
     if action.expires_at is None:
         return False  # старые записи без TTL — считаем не истёкшими
-    return action.expires_at < datetime.now(timezone.utc)
+    return action.expires_at < datetime.now(UTC)
 
 
 async def delete_pending_action(session: AsyncSession, action_id: int, user) -> None:
@@ -201,7 +201,7 @@ async def delete_pending_action(session: AsyncSession, action_id: int, user) -> 
 
 async def cleanup_expired_actions(session: AsyncSession) -> int:
     """Удаляет просроченные PendingAction (старше TTL + 1 час). Возвращает количество удалённых."""
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=_PENDING_TTL_MINUTES + 60)
+    cutoff = datetime.now(UTC) - timedelta(minutes=_PENDING_TTL_MINUTES + 60)
     result = await session.execute(
         delete(PendingAction).where(
             PendingAction.expires_at.is_not(None),

@@ -91,17 +91,12 @@ async def mcp_reasoning(
     context.update({k: v for k, v in kwargs.items() if not k.startswith("_")})
 
     # Резолвим план, если передан plan_id
-    plan: dict | None = None
+    plan: Any = None
     if plan_id:
         try:
-            from src.core.reasoning.htn_planner import HTNPlanner  # type: ignore[import-untyped]
-
             from src.core.reasoning.htn_planner import get_plan as _get_plan
-            from src.db.repo import get_or_create_user
 
-            plan_store = await _get_plan(
-                owner_id=user.id if hasattr(user, "id") else user
-            )
+            plan = await _get_plan(owner_id=user.id if hasattr(user, "id") else user)
         except Exception:
             logger.debug("Не удалось загрузить план %s, продолжаем без плана", plan_id)
             plan = None

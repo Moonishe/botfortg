@@ -115,7 +115,7 @@ class BaseLLMProvider(ABC):
         *,
         heavy: bool = False,
         task_type: str = "default",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str]:
         """Стриминг chat completion (если поддерживается).
 
         Raises:

@@ -11,6 +11,7 @@ import json
 import logging
 from collections import OrderedDict
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
@@ -141,7 +142,7 @@ async def get(text: str, model: str = "") -> list[float] | None:
                 )
                 await conn.commit()
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
             return embedding
     except Exception:
         logger.warning("SQLite read failed for embedding cache", exc_info=True)
@@ -214,3 +215,51 @@ async def aget(text: str, model: str = "") -> list[float] | None:
 async def aset(text: str, embedding: list[float], model: str = "") -> None:
     """Async wrapper around ``set`` — kept for backward compatibility."""
     await set(text, embedding, model)
+
+
+# ── Resource cleanup ────────────────────────────────────────────────────────
+
+
+async def close() -> None:
+    """Close the shared aiosqlite connection (call during application shutdown).
+
+    Safe to call multiple times — idempotent.
+    """
+    global _async_conn
+    async with _conn_lock:
+        if _async_conn is not None:
+            try:
+                await _async_conn.close()
+            except Exception:
+                logger.warning("Failed to close embedding cache DB", exc_info=True)
+            finally:
+                _async_conn = None
+
+
+async def health_check() -> dict[str, Any]:
+    """Return health status of the embedding cache.
+
+    Returns:
+        Dict with ``ok`` (bool), ``l1_size`` (int), ``l2_connected`` (bool),
+        and ``error`` (str|None).
+    """
+    try:
+        conn = await _get_conn()
+        async with conn.execute("SELECT COUNT(*) FROM embedding_cache") as cursor:
+            row = await cursor.fetchone()
+            l2_count = row[0] if row else 0
+        return {
+            "ok": True,
+            "l1_size": size(),
+            "l2_count": l2_count,
+            "l2_connected": True,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "l1_size": size(),
+            "l2_count": 0,
+            "l2_connected": False,
+            "error": str(exc),
+        }

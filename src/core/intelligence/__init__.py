@@ -1,5 +1,9 @@
 # Intelligence: LLM interaction, prompt building, agent orchestration
 
+from src.core.intelligence.kanban_board import (
+    KanbanBoard,
+    KanbanTask,
+)
 from src.core.intelligence.llm_response_cache import (
     LLMResponseCache,
     response_cache,
@@ -13,12 +17,14 @@ from src.core.intelligence.skill_yaml import (
 )
 
 __all__ = [
+    "KanbanBoard",
+    "KanbanTask",
     "LLMResponseCache",
-    "response_cache",
     "PatternCache",
-    "pattern_cache",
-    "parse_skill_frontmatter",
-    "format_skill_frontmatter",
-    "extract_frontmatter_metadata",
     "build_skill_description",
+    "extract_frontmatter_metadata",
+    "format_skill_frontmatter",
+    "parse_skill_frontmatter",
+    "pattern_cache",
+    "response_cache",
 ]

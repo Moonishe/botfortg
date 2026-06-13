@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from typing import Any
+from datetime import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +336,7 @@ async def check_contradiction_response(
         old_memory_id = pending.get("memory_id")
         if old_memory_id:
             try:
-                from datetime import datetime, timedelta, timezone
+                from datetime import datetime, timedelta
 
                 from sqlalchemy import select
 
@@ -391,7 +392,7 @@ async def check_contradiction_response(
                             window_min = getattr(
                                 settings, "contradiction_supersedes_window_minutes", 30
                             )
-                            threshold = datetime.now(timezone.utc) - timedelta(
+                            threshold = datetime.now(UTC) - timedelta(
                                 minutes=window_min
                             )
                             contact_filter = (
@@ -477,7 +478,7 @@ async def check_contradiction_response(
 
             await memory_metrics.record_contradiction()
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         return (
             f"🧠 Понял! Запомню, что «{pending['contradicted_fact']}» "
@@ -565,7 +566,7 @@ async def _scan_contradictions_batch(
                                 weight=0.8,
                             )
                         except Exception:
-                            pass
+                            logger.debug("Non-critical error", exc_info=True)
                     break
             # Check 2: Negation mismatch
             if found < 100:
@@ -597,7 +598,7 @@ async def _scan_contradictions_batch(
                                     weight=0.7,
                                 )
                             except Exception:
-                                pass
+                                logger.debug("Non-critical error", exc_info=True)
             if found >= 100:
                 return found
     return found

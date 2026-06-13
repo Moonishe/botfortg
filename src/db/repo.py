@@ -57,7 +57,6 @@ from src.db.repos.message_repo import (
     get_conversation_state,
     list_active_conversations,
     list_recent_auto_replies,
-    save_reaction,
     upsert_conversation_state,
     upsert_message,
 )

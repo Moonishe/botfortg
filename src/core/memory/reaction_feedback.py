@@ -76,11 +76,8 @@ async def process_reaction(reaction_data: dict[str, Any]) -> None:
     if not reaction_emoji or reactor_id is None:
         return
 
-    # Определить тип сигнала и фактор
+    # Определить тип сигнала
     signal_type, base_factor = REACTION_SIGNALS.get(reaction_emoji, _DEFAULT_SIGNAL)
-    # Применить feedback_weight (1.0 = реакция на сообщение бота, 0.5 = на сообщение контакта)
-    weight = reaction_data.get("feedback_weight", 1.0)
-    factor = base_factor * weight
 
     # Построить контекст для PreferenceLearner
     # Ищем факты, связанные с этим чатом и сообщением
@@ -179,7 +176,6 @@ async def _find_related_memory_ids(
         return []
 
     from src.db.models._memory import Memory
-    from src.db.repos.memory_repo import get_cluster_members
     from src.db.session import get_session
     from sqlalchemy import select
 

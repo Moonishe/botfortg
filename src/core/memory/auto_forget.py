@@ -1,7 +1,7 @@
 """Auto-forget: deactivate memories with retention below Ebbinghaus threshold."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select, update as sa_update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,7 @@ async def auto_forget_sweep(session: AsyncSession, user_id: int) -> int:
         return 0
 
     threshold = settings.auto_forget_threshold
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Load active, non-pinned, non-task memories for user
     # M9: Memory.memory_type != "task" исключает NULL из sweep —

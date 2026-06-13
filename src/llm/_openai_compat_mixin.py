@@ -23,6 +23,10 @@ from typing import Any
 from openai import APIConnectionError, AuthenticationError, PermissionDeniedError
 
 from src.core.actions.embedding_cache import aget, aset
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICompatBaseMixin:
@@ -45,7 +49,8 @@ class OpenAICompatBaseMixin:
         except APIConnectionError:
             raise
         except Exception:
-            pass  # fall through to chat-based fallback
+            # fall through to chat-based fallback
+            logger.debug("Non-critical error", exc_info=True)
 
         # Fallback: try a minimal chat completion for endpoints without /models
         try:
@@ -101,7 +106,7 @@ class OpenAICompatEmbedMixin(OpenAICompatBaseMixin):
                 model=self._embed_model, input=uncached_texts
             )
             api_results = [d.embedding for d in resp.data]
-            for idx, emb in zip(uncached_indices, api_results):
+            for idx, emb in zip(uncached_indices, api_results, strict=True):
                 await aset(texts[idx], emb, self._embed_model)
                 results[idx] = emb
 

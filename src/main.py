@@ -6,7 +6,7 @@ import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
-from src.bot.app import run_bot
+from src.bot.app import run_bot, run_bot_webhook
 from src.bot.handlers.free_text import start_voice_worker, stop_voice_worker
 from src.core.infra.app_context import get_app_context
 from src.core.memory.memory_queue import start_worker, stop_worker
@@ -15,6 +15,7 @@ from src.core.infra.update_notifier import check_and_notify_update
 from src.config import PROJECT_ROOT, settings
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
+from datetime import UTC
 
 # ── Module constants ─────────────────────────────────────────────────────
 _SHUTDOWN_TASK_TIMEOUT = 5.0  # секунд — таймаут отмены одной фоновой задачи
@@ -63,37 +64,10 @@ def _setup_json_logging() -> None:
 
 def _register_background_tasks() -> None:
     """Импортирует модули с background-задачами — декораторы авторегистрируют их."""
-    # noqa — импорты триггерят @task_manager.task() декораторы
-    import src.core.infra.system_tasks  # noqa: F401
-    import src.core.scheduling.digest  # noqa: F401
-    import src.core.scheduling.reminders  # noqa: F401
-    import src.core.scheduling.news  # noqa: F401
-    import src.core.infra.auto_sync  # noqa: F401
-    import src.core.memory.memory_checker  # noqa: F401
-    import src.core.memory.memory_consolidator  # noqa: F401
-    import src.core.scheduling.smart_digest  # noqa: F401
-    import src.core.scheduling.proactive_briefing  # noqa: F401
-    import src.core.scheduling.follow_up  # noqa: F401
-    import src.core.scheduling.sleep_tracker  # noqa: F401
-    import src.core.scheduling.weekly_summarizer  # noqa: F401
-    import src.core.scheduling.weekly_digest  # noqa: F401
-    import src.core.memory.memory_patterns  # noqa: F401
-    import src.core.memory.knowledge_distiller  # noqa: F401
-    import src.core.memory.temporal_layers  # noqa: F401
-    import src.core.actions.conflict_resolver  # noqa: F401
-    import src.core.actions.conflict_predictor  # noqa: F401
-    import src.core.scheduling.habit_tracker  # noqa: F401
-    import src.core.memory.memory_clusterer  # noqa: F401
-    import src.core.intelligence.skills  # noqa: F401
-    import src.core.intelligence.skills_curator  # noqa: F401
-    import src.core.intelligence.auto_evolve  # noqa: F401
-    import src.core.intelligence.burnout_detector  # noqa: F401
-    import src.core.scheduling.dream_cycle  # noqa: F401
-    import src.core.scheduling.proactive_nudge  # noqa: F401
-    import src.core.scheduling.avito  # noqa: F401
-    import src.core.scheduling.message_scheduler  # noqa: F401
-    import src.core.rag.ingest  # noqa: F401 — rag_watchdog
-    import src.core.crypto.rotation_task  # noqa: F401 — key_rotation_loop
+    # PERF-018: background timer for stale pending confirmation cleanup
+    from src.bot.handlers.free_text_pipeline import register_cleanup_timer
+
+    register_cleanup_timer()
 
 
 async def main() -> None:
@@ -135,7 +109,9 @@ async def main() -> None:
 
         await load_humanizer_feedback()
     except Exception:
-        pass  # non-critical — humanizer работает и без БД-фидбека
+        logger.debug(
+            "Non-critical error", exc_info=True
+        )  # non-critical — humanizer работает и без БД-фидбека
 
     # --- LLM router: initialize global locks (safe: inside event loop) ---
     from src.llm.router import ensure_locks_initialized
@@ -277,7 +253,7 @@ async def main() -> None:
                 logger.debug("pending_action cleanup failed", exc_info=True)
             # --- WorkingMemory cleanup ---
             try:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
                 from sqlalchemy import delete
 
@@ -285,7 +261,7 @@ async def main() -> None:
                 from src.db.session import get_session
 
                 async with get_session() as _wm_sess:
-                    now = datetime.now(timezone.utc)
+                    now = datetime.now(UTC)
                     result = await _wm_sess.execute(
                         delete(WorkingMemory).where(
                             WorkingMemory.expires_at.isnot(None),
@@ -322,12 +298,12 @@ async def main() -> None:
             logger.exception("Ошибка инициализации KeyRotationManager")
 
     _register_background_tasks()
-    task_manager.start_all()
+    await task_manager.start_all()
 
     # Phase 2: регистрация MCP-инструментов в tool_registry
     from src.core.actions import register_builtin_tools
 
-    register_builtin_tools()
+    await asyncio.to_thread(register_builtin_tools)
 
     # --- Predictive Prefetch: warm caches for frequently accessed data ---
     # Runs in background (non-blocking) after DB init + workers are ready.
@@ -392,7 +368,6 @@ async def main() -> None:
                 async def _do_warmup() -> None:
                     try:
                         from src.core.memory.memory_recall import (
-                            _make_recall_cache_key,
                             _recall_cache,
                             recall,
                         )
@@ -454,7 +429,11 @@ async def main() -> None:
     _prefetch_task = asyncio.create_task(_startup_prefetch())
 
     try:
-        await run_bot(userbot_manager)
+        if settings.webhook_url:
+            logger.info("Webhook mode: %s", settings.webhook_url)
+            await run_bot_webhook(userbot_manager)
+        else:
+            await run_bot(userbot_manager)
     except asyncio.CancelledError:
         logger.info("Main task cancelled, shutting down...")
     finally:
@@ -469,7 +448,7 @@ async def main() -> None:
             _t.cancel()
             try:
                 await asyncio.wait_for(_t, timeout=_SHUTDOWN_TASK_TIMEOUT)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
             except Exception:
                 logger.exception("%s task cancellation failed", _name)
@@ -485,7 +464,7 @@ async def main() -> None:
             try:
                 logger.debug("Stopping %s…", step)
                 await asyncio.wait_for(coro, timeout=_SHUTDOWN_STEP_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("%s shutdown timed out — forcing", step)
             except Exception:
                 logger.exception("%s shutdown failed", step)
@@ -494,7 +473,7 @@ async def main() -> None:
         # to finish so in-flight DB writes are not lost.
         try:
             await asyncio.wait_for(stop_ff_tasks(), timeout=_SHUTDOWN_FF_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("fire-and-forget tasks shutdown timed out")
         except Exception:
             logger.exception("fire-and-forget tasks shutdown failed")
@@ -505,7 +484,7 @@ async def main() -> None:
             await asyncio.wait_for(
                 (await get_vector_store()).shutdown(), timeout=_SHUTDOWN_VECTOR_TIMEOUT
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("vector_store shutdown timed out")
         except Exception:
             logger.exception("vector_store shutdown failed")
@@ -514,18 +493,21 @@ async def main() -> None:
         # Without this explicit close, the Chromium process leaks across
         # reloads in dev and only gets killed when the interpreter exits.
         try:
-            from src.core.actions.mcp_playwright import _browser_manager
+            from src.core.actions.mcp_playwright import _close_browser
 
-            await asyncio.wait_for(
-                _browser_manager.close(), timeout=_SHUTDOWN_BROWSER_TIMEOUT
-            )
-        except asyncio.TimeoutError:
+            await asyncio.wait_for(_close_browser(), timeout=_SHUTDOWN_BROWSER_TIMEOUT)
+        except TimeoutError:
             logger.warning("playwright browser shutdown timed out")
         except Exception:
             logger.debug(
                 "playwright browser shutdown failed (likely never started)",
                 exc_info=True,
             )
+
+        # ── Close persistent connections (httpx, aiosqlite, sqlite3) ──
+        # These are global singletons that must be explicitly closed to avoid
+        # resource leaks (file descriptors, connection pools, WAL files).
+        await _close_shared_resources()
 
         try:
             from src.core.infra.hooks import hooks
@@ -535,6 +517,59 @@ async def main() -> None:
             pass  # hooks are optional, never break core flow
 
         logger.info("Shutdown complete")
+
+
+async def _close_shared_resources() -> None:
+    """Close globally-shared persistent connections on shutdown.
+
+    These are module-level singletons that maintain long-lived connections
+    (httpx.AsyncClient, aiosqlite.Connection, sqlite3.Connection). Without
+    explicit close, file descriptors and WAL/SHM sidecar files leak until
+    the interpreter exits.
+    """
+    # embedding_cache aiosqlite connection
+    try:
+        from src.core.actions.embedding_cache import close as ec_close
+
+        await asyncio.wait_for(ec_close(), timeout=5.0)
+        logger.debug("embedding_cache connection closed")
+    except TimeoutError:
+        logger.warning("embedding_cache close timed out")
+    except Exception:
+        logger.debug("embedding_cache close failed (non-critical)", exc_info=True)
+
+    # mcp_timer sqlite3 connection (sync — run in thread)
+    try:
+        from src.core.actions.mcp_timer import close_timer_db
+
+        await asyncio.wait_for(asyncio.to_thread(close_timer_db), timeout=3.0)
+        logger.debug("mcp_timer DB connection closed")
+    except TimeoutError:
+        logger.warning("mcp_timer DB close timed out")
+    except Exception:
+        logger.debug("mcp_timer DB close failed (non-critical)", exc_info=True)
+
+    # pubmed httpx client
+    try:
+        from src.core.actions.pubmed_client import close_client
+
+        await asyncio.wait_for(close_client(), timeout=5.0)
+        logger.debug("pubmed HTTP client closed")
+    except TimeoutError:
+        logger.warning("pubmed client close timed out")
+    except Exception:
+        logger.debug("pubmed client close failed (non-critical)", exc_info=True)
+
+    # mcp_oauth httpx client
+    try:
+        from src.core.actions.mcp_oauth import mcp_oauth
+
+        await asyncio.wait_for(mcp_oauth.close(), timeout=5.0)
+        logger.debug("mcp_oauth HTTP client closed")
+    except TimeoutError:
+        logger.warning("mcp_oauth close timed out")
+    except Exception:
+        logger.debug("mcp_oauth close failed (non-critical)", exc_info=True)
 
 
 def run() -> None:

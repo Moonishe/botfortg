@@ -12,7 +12,7 @@ from ``src.db.repo``.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,7 +143,7 @@ async def _create_reminder(
             deadline_at = datetime.fromisoformat(deadline.strip())
             # Ensure timezone-aware — default to UTC if naive
             if deadline_at.tzinfo is None:
-                deadline_at = deadline_at.replace(tzinfo=timezone.utc)
+                deadline_at = deadline_at.replace(tzinfo=UTC)
         except ValueError as exc:
             return {"error": f"Invalid deadline format (expected ISO 8601): {exc}"}
 

@@ -257,7 +257,7 @@ async def _grep_file(file_path: Path, pattern: str, lines: int) -> dict[str, Any
 
         matches: list[dict[str, Any]] = []
         try:
-            with open(str(file_path), "r", encoding="utf-8", errors="replace") as f:
+            with open(str(file_path), encoding="utf-8", errors="replace") as f:
                 for line_no, line in enumerate(f, 1):
                     if regex.search(line):
                         matches.append(

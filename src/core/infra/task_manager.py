@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from enum import Enum
-from typing import Any, Callable, Coroutine
+from typing import Any
+from collections.abc import Callable, Coroutine
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ class BackgroundTaskManager:
             max_restarts=10, backoff_base=5.0, backoff_max=300.0,
         )
         manager.register("my-other", lambda: other_loop(arg))
-        manager.start_all()
+        await manager.start_all()
         # ... later ...
         await manager.stop_all(timeout=30.0)
 
@@ -110,10 +112,34 @@ class BackgroundTaskManager:
             backoff_max=backoff_max,
         )
 
-    def start_all(self) -> None:
-        """Launch all registered tasks."""
-        for task in self._tasks.values():
+    async def start_all(self) -> None:
+        """Launch all registered tasks with staggered starts to avoid contention.
+
+        Idempotent: if a task is already RUNNING (from a previous start_all call),
+        it is skipped to prevent duplicate infinite loops.
+        """
+        for i, task in enumerate(self._tasks.values()):
+            # Guard: skip already-running tasks to prevent duplicate wrappers
+            if (
+                task.status == TaskStatus.RUNNING
+                and task.task is not None
+                and not task.task.done()
+            ):
+                logger.debug(
+                    "Task '%s' is already running — skipping duplicate start",
+                    task.name,
+                )
+                continue
+            if i > 0:
+                await asyncio.sleep(random.uniform(0.5, 2.0))
             self._start_single(task)
+
+    def active_count(self) -> int:
+        """Return the number of tasks currently in RUNNING status.
+
+        Reserved for /health endpoint and tests.
+        """
+        return sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
 
     def _start_single(self, task: RegisteredTask) -> None:
         """Create and start an asyncio Task that wraps *task.factory*.
@@ -134,7 +160,7 @@ class BackgroundTaskManager:
                     task.status = TaskStatus.STOPPED
                     logger.info("Background task '%s' cancelled", task.name)
                     break
-                except Exception:  # noqa: BLE001
+                except Exception:
                     task.status = TaskStatus.FAILED
                     task.restart_count += 1
                     consecutive += 1
@@ -233,7 +259,7 @@ class BackgroundTaskManager:
         )
         try:
             await asyncio.wait_for(gather, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "Timed out waiting for %d background tasks to stop after %.1fs",
                 sum(
@@ -436,7 +462,7 @@ async def stop_ff_tasks(*, timeout: float = 10.0) -> None:
             asyncio.gather(*tasks, return_exceptions=True),
             timeout=timeout,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "Timed out waiting for %d fire-and-forget tasks after %.1fs",
             sum(1 for t in tasks if not t.done()),

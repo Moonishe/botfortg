@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.timeutil import get_user_tz, now_in_tz
@@ -42,7 +42,7 @@ async def sleep_tracker_loop(owner_id: int) -> None:
                     if is_night:
                         last_seen = owner.last_seen_online
                         if last_seen is not None:
-                            dt_now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                            dt_now_utc = datetime.now(UTC).replace(tzinfo=None)
                             offline_minutes = (
                                 dt_now_utc - last_seen
                             ).total_seconds() / 60

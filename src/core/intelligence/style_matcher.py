@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select, desc
 
@@ -169,7 +169,7 @@ async def analyze_user_style(owner_id: int) -> dict:
             "directness": directness,
             "water_tolerance": water_tolerance,
             "examples": examples,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
 
 
@@ -295,7 +295,7 @@ async def get_or_update_style_profile(owner_id: int) -> str | None:
         # Проверяем свежесть БД‑профиля
         if persona.style_profile and persona.style_profile_updated_at:
             age_sec = (
-                datetime.now(timezone.utc) - persona.style_profile_updated_at
+                datetime.now(UTC) - persona.style_profile_updated_at
             ).total_seconds()
             if age_sec < _STYLE_CACHE_TTL:
                 # кешируем и возвращаем
@@ -318,7 +318,7 @@ async def get_or_update_style_profile(owner_id: int) -> str | None:
             session,
             persona,
             style_profile=json.dumps(style_data, ensure_ascii=False),
-            style_profile_updated_at=datetime.now(timezone.utc),
+            style_profile_updated_at=datetime.now(UTC),
         )
         await session.commit()
 

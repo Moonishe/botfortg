@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.bot.handlers.rate_limiter import check_rate_limit
+from src.core.infra.rate_limiter import check_rate_limit
 from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
 from src.core.contacts.contact_resolver import ContactCandidate, resolve
 from src.core.infra.text_sanitizer import sanitize_html

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections import defaultdict
-from typing import Callable, Any, Optional
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class EventBus:
 
         await asyncio.gather(*[_safe_call(h) for h in handlers], return_exceptions=True)
 
-    def handler_count(self, event_type: Optional[str] = None) -> int:
+    def handler_count(self, event_type: str | None = None) -> int:
         """Return number of handlers. If event_type is None, return total."""
         if event_type:
             return len(self._handlers.get(event_type, []))

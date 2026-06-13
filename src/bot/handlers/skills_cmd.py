@@ -17,6 +17,7 @@ from src.db.repo import (
 from src.db.session import get_session
 from src.core.intelligence.skill_editor import bump_version
 from src.core.context_cache import invalidate as cache_invalidate
+from datetime import UTC
 
 router = Router(name="skills_cmd")
 router.message.filter(OwnerOnly())
@@ -149,7 +150,7 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
                     )
                     return
 
-                from datetime import datetime, timezone
+                from datetime import datetime
 
                 old_version = skill.version or "1.0.0"
                 skill.body = skill.best_body
@@ -161,7 +162,7 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
                 history.append(
                     {
                         "op": "rollback",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                         "reason": "Manual rollback to best_body",
                     }
                 )

@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 
 from src.core.infra.text_sanitizer import sanitize_html
 

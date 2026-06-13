@@ -52,6 +52,9 @@ async def test_get_slot_models_empty():
 async def test_set_slot_models_replaces():
     """set_slot_models удаляет старые и добавляет новые."""
     mock_session = AsyncMock()
+    # AsyncSession.add() is sync — mock accordingly to avoid
+    # Python 3.13 RuntimeWarning about unawaited coroutine.
+    mock_session.add = MagicMock()
 
     await set_slot_models(mock_session, slot_id=1, model_names=["gpt-4o", "claude-3"])
 
@@ -146,9 +149,14 @@ def test_multiselect_keyboard_structure():
     keyboard = markup.inline_keyboard
     assert len(keyboard) > 0
 
-    # Первая строка должна содержать ✅ для выбранных моделей
-    first_row_text = keyboard[0][0].text
-    assert "✅" in first_row_text or "⬜" in first_row_text
+    # Модели идут со второй строки (первая — фильтры).
+    # Проверяем что модель содержит ✅/⬜
+    model_row_texts = [
+        row[0].text
+        for row in keyboard
+        if row[0].text and ("✅" in row[0].text or "⬜" in row[0].text)
+    ]
+    assert model_row_texts, "Ни одна модель не содержит чекбокс ✅/⬜"
 
     # Должны быть кнопки «Готово» и «Ввести вручную»
     all_texts = [btn.text for row in keyboard for btn in row]

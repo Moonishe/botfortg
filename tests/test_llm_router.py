@@ -68,6 +68,28 @@ class SlowProvider(FakeProvider):
 
 
 @pytest.fixture(autouse=True)
+def _init_locks():
+    """Initialize purpose semaphores and provider metrics lock."""
+    import src.llm.provider_manager as pm
+
+    if not pm._locks_initialized:
+        pm._PROVIDER_METRICS_LOCK = asyncio.Lock()
+        pm._CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
+        pm._PURPOSE_SEMAPHORES = {
+            "main": asyncio.Semaphore(2),
+            "draft": asyncio.Semaphore(1),
+            "memory": asyncio.Semaphore(1),
+            "background": asyncio.Semaphore(3),
+            "analysis": asyncio.Semaphore(1),
+            "urgent": asyncio.Semaphore(2),
+            "search": asyncio.Semaphore(2),
+            "summarize": asyncio.Semaphore(2),
+            "fallback": asyncio.Semaphore(2),
+        }
+        pm._locks_initialized = True
+
+
+@pytest.fixture(autouse=True)
 def _cleanup_fake_providers():
     """Очистить shared mutable state после каждого теста."""
     FakeProvider.clear_calls()
@@ -210,7 +232,7 @@ async def test_provider_fallback_exhausted_error():
 @pytest.mark.asyncio
 async def test_cooldown_until_handles_naive_datetime():
     """_ensure_utc нормализует naive datetime как UTC-aware — без TypeError."""
-    from src.llm.router import _ensure_utc
+    from src.core.infra.timeutil import ensure_utc as _ensure_utc
     from datetime import datetime, timezone
 
     # naive datetime (как из старых записей SQLite)

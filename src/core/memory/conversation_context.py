@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from time import time
 
 from src.config import settings
+from datetime import UTC
 
 MAX_TURNS = (
     settings.context_max_turns
@@ -207,7 +208,7 @@ async def _save_summary_to_db(user_id: int, ctx: _Ctx) -> None:
 async def load_recent_summaries(user_id: int) -> str | None:
     """Load recent summaries from DB and combine into one context string."""
     try:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from sqlalchemy import desc, select
 
@@ -215,7 +216,7 @@ async def load_recent_summaries(user_id: int) -> str | None:
         from src.db.models._messaging import ConversationSummary
 
         async with get_session() as session:
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            cutoff = datetime.now(UTC) - timedelta(hours=24)
             result = await session.execute(
                 select(ConversationSummary)
                 .where(
@@ -263,7 +264,7 @@ async def get_and_clear_transcription_meta(user_id: int) -> dict | None:
 async def cleanup_old_summaries() -> None:
     """Delete conversation summaries older than 7 days."""
     try:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from sqlalchemy import delete
 
@@ -271,7 +272,7 @@ async def cleanup_old_summaries() -> None:
         from src.db.models._messaging import ConversationSummary
 
         async with get_session() as session:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+            cutoff = datetime.now(UTC) - timedelta(days=7)
             await session.execute(
                 delete(ConversationSummary).where(
                     ConversationSummary.created_at < cutoff

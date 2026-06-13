@@ -121,20 +121,9 @@ async def _get_embeddings(texts: list[str]) -> list[list[float]]:
     """Get embeddings for text chunks using the primary provider."""
     from src.core.actions.embedding_cache import aget as cache_get
     from src.core.actions.embedding_cache import aset as cache_set
-    from src.llm.router import build_provider
-    from src.llm.base import TaskType
-    from src.db.session import get_session
-    from src.db.repo import get_or_create_user
+    from src.core.rag._provider import get_rag_provider
 
-    # Get session + user for build_provider
-    try:
-        async with get_session() as session:
-            user = await get_or_create_user(session, settings.owner_telegram_id)
-            provider = await build_provider(
-                session, user, task_type=TaskType.BACKGROUND
-            )
-    except Exception:
-        provider = None
+    provider = await get_rag_provider(purpose="background")
 
     if provider is None:
         logger.warning("No embedding provider available — aborting ingest")
@@ -382,7 +371,6 @@ async def _watch_and_reindex():
     while True:
         try:
             files = await _scan_directory(directory)
-            changed = False
 
             for fpath in files:
                 try:
@@ -397,7 +385,6 @@ async def _watch_and_reindex():
                                 fname,
                                 result.get("chunks", 0),
                             )
-                            changed = True
                         known_hashes[fname] = fhash
                 except Exception:
                     continue

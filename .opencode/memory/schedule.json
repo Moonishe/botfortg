@@ -1,0 +1,6 @@
+{
+  "_description": "Dream/Distill schedule. Each agent updates its own field as LAST step.",
+  "last_dream_at": 1781177960052,
+  "last_distill_at": 0,
+  "last_checkpoint_at": 1753390500000
+}

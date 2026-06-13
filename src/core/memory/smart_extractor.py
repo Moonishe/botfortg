@@ -21,7 +21,7 @@ import hashlib
 import logging
 import re
 import string
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 from src.config import settings

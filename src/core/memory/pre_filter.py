@@ -11,6 +11,10 @@
 from __future__ import annotations
 
 import re
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 # ── Маркеры личных местоимений (русские) ──────────────────────────
 # Указывают на то, что говорящий рассказывает о себе.
@@ -169,8 +173,8 @@ def should_extract(transcript: str, *, min_score: float = _MIN_SCORE_DEFAULT) ->
                     ):
                         return False
             except Exception:
-                pass  # classifier недоступен — продолжаем без него
+                logger.debug("Non-critical error", exc_info=True)  # classifier недоступен — продолжаем без него
     except Exception:
-        pass  # настройки недоступны — продолжаем без оптимизаций
+        logger.debug("Non-critical error", exc_info=True)  # настройки недоступны — продолжаем без оптимизаций
 
     return score_transcript(transcript) >= min_score

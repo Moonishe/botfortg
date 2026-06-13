@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -61,7 +61,7 @@ def now_in_tz(tz_name: str | None) -> datetime:
 
 def utc_to_local(dt: datetime, tz_name: str | None) -> datetime:
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(parse_tz(tz_name))
 
 
@@ -83,7 +83,7 @@ def ensure_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 

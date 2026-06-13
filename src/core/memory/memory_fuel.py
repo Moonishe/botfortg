@@ -1,7 +1,7 @@
 """Memory Fuel Gauge — отслеживает «истощение» памяти по контактам."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from src.db.repo import get_or_create_user, list_contacts, list_memories
 from src.db.session import get_session
@@ -33,7 +33,7 @@ async def get_fuel_stats(owner_id: int) -> dict:
             session, owner, kinds=("user",), include_bots=False
         )
         memories = await list_memories(session, owner)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Группировка памяти по contact_id (peer_id)
         per_contact: dict[int, list] = {}

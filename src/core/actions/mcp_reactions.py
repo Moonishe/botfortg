@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from datetime import datetime, UTC
+from typing import Any
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji, User as TlUser
+from telethon.tl.types import ReactionEmoji
 
 from src.core.actions.tool_registry import tool
 
@@ -132,7 +132,6 @@ _REACTION_ALIASES: dict[str, str] = {
     "eyes": "\U0001f440",
     "thanks": "\U0001f64f",
     "ok": "\U0001f44c",
-    "100": "\U0001f4af",
 }
 
 # Человекочитаемые имена для ошибок и логов
@@ -415,9 +414,9 @@ async def _remove_all_reactions(
     },
 )
 async def find_message(
-    contact_name: Optional[str] = None,
-    user_id: Optional[int] = None,
-    chat_id: Optional[int] = None,
+    contact_name: str | None = None,
+    user_id: int | None = None,
+    chat_id: int | None = None,
     position: str = "last",
     user: Any = None,
     **kwargs: Any,
@@ -556,7 +555,7 @@ async def find_message(
 
         elif position_lower == "first":
             # Первое сообщение за сегодня
-            today_start = datetime.now(timezone.utc).replace(
+            today_start = datetime.now(UTC).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
             result = await client.get_messages(

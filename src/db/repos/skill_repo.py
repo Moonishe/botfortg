@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -130,7 +130,7 @@ async def upsert_skill(
         skill.body = body
         skill.enabled = enabled
         skill.review_status = review_status
-        skill.updated_at = datetime.now(timezone.utc)
+        skill.updated_at = datetime.now(UTC)
     await session.flush()
     try:
         from src.core.infra.hooks import hooks
@@ -146,7 +146,7 @@ async def upsert_skill(
 
         await cache_invalidate(f"skills:{user.telegram_id}:")
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
     return skill
 
 
@@ -192,7 +192,7 @@ async def set_skill_enabled(
     skill.enabled = enabled
     if review_status is not None:
         skill.review_status = review_status
-    skill.updated_at = datetime.now(timezone.utc)
+    skill.updated_at = datetime.now(UTC)
     await session.flush()
     # Invalidate skill index cache so next prompt picks up changes
     try:
@@ -200,7 +200,7 @@ async def set_skill_enabled(
 
         await cache_invalidate(f"skills:{user.telegram_id}:")
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
     return skill
 
 
@@ -223,7 +223,7 @@ async def add_skill_usage(
         skill.success_count = (skill.success_count or 0) + 1
     else:
         skill.failure_count = (skill.failure_count or 0) + 1
-    skill.last_used_at = datetime.now(timezone.utc)
-    skill.updated_at = datetime.now(timezone.utc)
+    skill.last_used_at = datetime.now(UTC)
+    skill.updated_at = datetime.now(UTC)
     await session.flush()
     return usage

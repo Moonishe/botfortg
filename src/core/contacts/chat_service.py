@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -153,7 +153,7 @@ async def _process_one(
             is_outgoing=bool(msg.out),
             date=msg.date.replace(tzinfo=None)
             if msg.date
-            else datetime.now(timezone.utc).replace(tzinfo=None),
+            else datetime.now(UTC).replace(tzinfo=None),
             kind=kind,
             text=text,
             transcript=transcript,
@@ -172,7 +172,7 @@ async def _process_one(
                 is_outgoing=bool(msg.out),
                 date=msg.date.replace(tzinfo=None)
                 if msg.date
-                else datetime.now(timezone.utc).replace(tzinfo=None),
+                else datetime.now(UTC).replace(tzinfo=None),
                 kind=kind,
                 text=text,
                 transcript=transcript,
@@ -345,7 +345,7 @@ async def load_chat(
                 is_outgoing=bool(msg.out),
                 date=msg.date.replace(tzinfo=None)
                 if msg.date
-                else datetime.now(timezone.utc).replace(tzinfo=None),
+                else datetime.now(UTC).replace(tzinfo=None),
                 kind=item["kind"],
                 text=item["text"],
                 transcript=item["transcript"],

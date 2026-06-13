@@ -19,7 +19,7 @@ from aiogram.exceptions import AiogramError
 
 from src.config import settings
 from src.bot.filters import OwnerOnly
-from src.bot.states import CustomProviderStates, LoginStates, OnboardingStates
+from src.bot.states import LoginStates, OnboardingStates
 from src.db.repo import (
     delete_telegram_session,
     get_or_create_user,

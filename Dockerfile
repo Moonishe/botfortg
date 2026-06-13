@@ -53,7 +53,13 @@ WORKDIR /app
 # Copy virtual env from builder (all pip packages)
 COPY --from=builder /venv /venv
 
-# Copy application code
+# ── Playwright system deps (cached layer — rarely changes) ──
+# System libraries for Chromium (~150MB). Installed BEFORE app code
+# so Docker caches this layer independently of src/ changes.
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/data/playwright-browsers
+RUN playwright install-deps chromium
+
+# Copy application code (frequently changes — keep AFTER heavy layers)
 COPY src/ ./src/
 COPY skills/ ./skills/
 COPY docs/ ./docs/
@@ -61,22 +67,27 @@ COPY main.py healthcheck.py ./
 COPY alembic.ini .
 COPY alembic/ alembic/
 
+# Copy entrypoint script
+COPY scripts/docker-entrypoint.sh /entrypoint.sh
+
+# Safety: ensure .env did NOT accidentally leak into the image
+RUN test ! -f /app/.env || (echo "ERROR: .env in image!" && exit 1)
+
 # data — mounted as volume (DB, sessions, qdrant, media, model cache)
 RUN mkdir -p /app/data \
-    && useradd -m appuser
-
-# Install Playwright Chromium browser + system deps (must be in /app for appuser access)
-# NOTE: Chromium for Playwright adds ~300MB to the image size.
-# Consider using a slim base image or installing only the needed browser:
-#   `playwright install chromium --with-deps`
-ENV PLAYWRIGHT_BROWSERS_PATH=/app/data/playwright-browsers
-RUN playwright install-deps chromium \
-    && playwright install chromium \
+    && useradd -m appuser \
+    && chmod +x /entrypoint.sh \
     && chown -R appuser:appuser /app
+
+# NOTE: Chromium browser (~300MB) is installed at first run by entrypoint.sh
+# into PLAYWRIGHT_BROWSERS_PATH (mounted volume), keeping the image slim.
 
 USER appuser
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD python healthcheck.py || exit 1
 
+STOPSIGNAL SIGTERM
+
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "main.py"]

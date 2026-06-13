@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -469,7 +469,7 @@ async def _status() -> dict[str, Any]:
                 "node_kinds": {r["kind"]: r["cnt"] for r in node_kinds},
                 "db_size_mb": db_size_mb,
                 "last_indexed": datetime.fromtimestamp(
-                    last_indexed_ts, tz=timezone.utc
+                    last_indexed_ts, tz=UTC
                 ).isoformat(),
             }
         finally:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 
@@ -46,7 +46,7 @@ async def save_offload_state(
             "mermaid_graph": mermaid_graph,
             "drilldown_refs": drilldown_refs or {},
             "tokens_saved": tokens_saved,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(UTC),
         }
 
         # Evict oldest entries when cache exceeds max size
@@ -81,7 +81,7 @@ async def load_offload_state(user_id: int) -> dict[str, Any] | None:
             return None
 
         # Stale check: TTL
-        age = (datetime.now(timezone.utc) - state["updated_at"]).total_seconds()
+        age = (datetime.now(UTC) - state["updated_at"]).total_seconds()
         if age > _CHECKPOINT_TTL_SEC:
             logger.debug(
                 "Offload checkpoint expired for user %d (%.0fs old)", user_id, age
@@ -105,7 +105,7 @@ async def clear_offload_state(user_id: int) -> None:
 
 
 __all__ = [
-    "save_offload_state",
-    "load_offload_state",
     "clear_offload_state",
+    "load_offload_state",
+    "save_offload_state",
 ]

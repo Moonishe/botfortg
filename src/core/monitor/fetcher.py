@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select, update
 from telethon.errors import FloodWaitError
 
-from src.db.models._monitor import MonitoredSource, MonitorRule, MonitoredMessage
+from src.db.models._monitor import MonitoredSource, MonitorRule
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -85,7 +84,7 @@ async def fetch_history(
         views, forwards.
     """
     offset_id = source.last_message_id or 0
-    since_date = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    since_date = datetime.now(UTC) - timedelta(hours=since_hours)
 
     messages: list[dict] = []
     max_retries = 3
@@ -238,12 +237,12 @@ async def fetch_history(
                 update(MonitoredSource)
                 .where(MonitoredSource.id == source.id)
                 .values(
-                    last_fetched_at=datetime.now(timezone.utc),
+                    last_fetched_at=datetime.now(UTC),
                     last_message_id=new_last_id,
                 )
             )
             # Обновляем in-memory объект
-            source.last_fetched_at = datetime.now(timezone.utc)
+            source.last_fetched_at = datetime.now(UTC)
             source.last_message_id = new_last_id
 
     return messages
@@ -338,7 +337,6 @@ async def check_periodic(user_id: int) -> list[dict]:
         return []
 
     # Lazy import — избегаем циркулярного импорта с userbot
-    from src.config import settings
     from src.userbot.manager import _MANAGER_SINGLETON
 
     client = _MANAGER_SINGLETON.get_client(user_id) if _MANAGER_SINGLETON else None

@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, UTC
 from typing import Any
 
 from src.config import settings
@@ -255,7 +255,7 @@ class DreamingConsolidator:
 
         from src.db.models._memory import Memory
 
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+        cutoff_date = datetime.now(UTC) - timedelta(days=7)
 
         # Получаем группы по cluster_topic
         result = await session.execute(
@@ -302,7 +302,7 @@ class DreamingConsolidator:
                     id=f"cand_{topic}_{len(candidates)}",
                     memory_ids=memory_ids,
                     summary=summary_text,
-                    created_at=mem_rows[0][4] or datetime.now(timezone.utc),
+                    created_at=mem_rows[0][4] or datetime.now(UTC),
                     importance=round(avg_importance, 3),
                 )
             )
@@ -794,7 +794,7 @@ class DreamingConsolidator:
 
         from src.db.models._memory import Memory
 
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+        cutoff_date = datetime.now(UTC) - timedelta(days=7)
 
         result = await session.execute(
             select(Memory.id, Memory.fact)

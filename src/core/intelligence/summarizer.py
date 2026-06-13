@@ -101,7 +101,7 @@ async def summarize_chat(
             ),
             timeout=60.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("Summarizer LLM timeout")
         return "⏱️ Таймаут генерации."
     except Exception as e:
@@ -166,7 +166,7 @@ async def draft_reply(
             ),
             timeout=60.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("Summarizer LLM timeout")
         return "⏱️ Таймаут генерации."
     except Exception as e:
@@ -224,7 +224,7 @@ async def catchup(
             ),
             timeout=60.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("Summarizer LLM timeout")
         return "⏱️ Таймаут генерации."
     except Exception as e:
@@ -313,7 +313,7 @@ async def ask_chat(
             ),
             timeout=90.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("ask_chat LLM timeout")
         return "⏱️ Таймаут генерации. Чат большой — попробуй с меньшим количеством сообщений."
     except Exception as e:

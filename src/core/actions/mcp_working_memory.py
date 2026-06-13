@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -73,7 +73,7 @@ async def write_working_memory(
 
     key = key.strip()[:64]
     expires_at = (
-        datetime.now(timezone.utc) + timedelta(minutes=max(1, ttl_minutes))
+        datetime.now(UTC) + timedelta(minutes=max(1, ttl_minutes))
         if ttl_minutes > 0
         else None
     )
@@ -129,7 +129,7 @@ async def read_working_memory(
         return {"ok": False, "error": "key обязателен"}
 
     key = key.strip()[:64]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         async with get_session() as session:
@@ -170,7 +170,7 @@ async def list_working_memory(
     if user_id is None:
         return {"ok": False, "error": "user_id не определён"}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         async with get_session() as session:

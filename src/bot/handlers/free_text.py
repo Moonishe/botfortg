@@ -10,14 +10,14 @@ import random
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from src.bot.filters import OwnerOnly
 from src.config import settings
@@ -56,7 +56,6 @@ from src.core.intelligence.character_evolution import maybe_evolve_after_turn
 # ── Session Context (P2) ──────────────────────────────────────────────
 from src.core.memory.session_context import (
     save_session_context,
-    load_session_context,
     resume_session,
 )
 from src.config import settings as _settings
@@ -73,7 +72,7 @@ from .free_text_pipeline import (
     execute_maestro,
 )
 from src.core.humanizer import record_humanizer_feedback, _pop_last_humanized
-from .rate_limiter import check_rate_limit
+from src.core.infra.rate_limiter import check_rate_limit
 from src.bot.classifier import classify_message as _classify_message
 from src.core.security.prompt_injection_scanner import scan_content
 from httpx import RequestError, HTTPStatusError
@@ -100,16 +99,14 @@ def _is_safe_url(url: str) -> bool:
         return False
     try:
         addr = ipaddress.ip_address(host)
-        if addr.is_loopback or addr.is_private or addr.is_link_local:
-            return False
-        return True
+        return not (addr.is_loopback or addr.is_private or addr.is_link_local)
     except ValueError:
         # Невалидный IP — вероятно домен, проверяем DNS
         import socket as _socket
 
         try:
             addrinfo = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC)
-            for family, _, _, _, sockaddr in addrinfo:
+            for _family, _, _, _, sockaddr in addrinfo:
                 ip = ipaddress.ip_address(sockaddr[0])
                 if (
                     ip.is_private
@@ -194,7 +191,7 @@ def _extract_correction_pattern(original: str, edited: str) -> tuple[str, str] |
     """Извлекает паттерн исправления: (что_было, что_стало)."""
     if len(original) < 10 or len(edited) < 10:
         return None
-    common = sum(1 for a, b in zip(original, edited) if a == b)
+    common = sum(1 for a, b in zip(original, edited, strict=False) if a == b)
     similarity = common / max(len(original), len(edited))
     if similarity > 0.5:
         return (original[:200], edited[:200])
@@ -219,9 +216,8 @@ async def _pop_singalong_search(key: int) -> list | None:
 
 def _now_utc() -> datetime:
     """Текущее UTC-время (для вычисления gap между сообщениями)."""
-    from datetime import timezone as _tz
 
-    return datetime.now(_tz.utc)
+    return datetime.now(UTC)
 
 
 async def _check_session_resume(user_id: int) -> str | None:
@@ -323,13 +319,13 @@ async def _do_prefetch_contact(
             try:
                 telethon_client = userbot_manager.get_client(user_id)
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
             if telethon_client is not None:
                 try:
                     async with get_session() as session:
                         owner = await get_or_create_user(session, user_id)
                 except Exception:
-                    pass
+                    logger.debug("Non-critical error", exc_info=True)
 
         await prefetch_contact(
             user_id,
@@ -344,6 +340,39 @@ async def _do_prefetch_contact(
             contact_hint,
             exc_info=True,
         )
+
+
+_QUESTION_STARTS = (
+    "что",
+    "как",
+    "почему",
+    "кто",
+    "где",
+    "когда",
+    "зачем",
+    "сколько",
+    "какой",
+    "какая",
+    "какое",
+    "какие",
+    "чей",
+)
+
+
+_QUESTION_PUNCTUATION = set(",.!;:…«»\"'()[]{}—–-")
+
+
+def _is_question(text: str) -> bool:
+    """Определяет, является ли текст вопросом (есть '?' или вопросительное слово)."""
+    if "?" in text:
+        return True
+    stripped = text.strip()
+    if not stripped:
+        return False
+    first_word = stripped.lower().split()[0]
+    # Удаляем прилипшую пунктуацию: «что,» → «что», «как...» → «как»
+    first_word_clean = first_word.rstrip("".join(_QUESTION_PUNCTUATION))
+    return first_word_clean in _QUESTION_STARTS
 
 
 class VoiceJob(NamedTuple):
@@ -447,7 +476,7 @@ async def _voice_worker() -> None:
                     # _state_str зарезервирован для будущего использования:
                     # может понадобиться при асинхронном восстановлении FSM-контекста
                     # после транскрипции голосового сообщения.
-                    _state_str = (  # noqa: F841
+                    _state_str = (
                         job.state_str
                     )  # string | None — FSMContext value, NOT the FSMContext object
                     userbot_manager = job.userbot_manager
@@ -500,9 +529,36 @@ async def _voice_worker() -> None:
                             continue
 
                         try:
+                            # Определяем, вопрос ли это — для кнопки-подсказки
+                            _is_q = _is_question(text)
+                            _voice_kb = None
+                            if _is_q:
+                                from aiogram.types import (
+                                    InlineKeyboardButton as _IKB,
+                                    InlineKeyboardMarkup as _IKM,
+                                )
+
+                                _voice_kb = _IKM(
+                                    inline_keyboard=[
+                                        [
+                                            _IKB(
+                                                text="🔍 Исследовать это",
+                                                callback_data=f"voice_research:{message.from_user.id}",
+                                            )
+                                        ]
+                                    ]
+                                )
                             await message.answer(
-                                sanitize_html(f"🎙 <i>Услышал:</i> {text}")
+                                sanitize_html(f"🎙 <i>Услышал:</i> {text}"),
+                                reply_markup=_voice_kb,
                             )
+                            if not _is_q:
+                                try:
+                                    from aiogram.types import ReactionTypeEmoji
+
+                                    await message.react([ReactionTypeEmoji(emoji="✅")])
+                                except Exception:
+                                    pass  # реакция не критична
                         except TelegramAPIError:
                             logger.exception("failed to send transcription result")
 
@@ -975,7 +1031,7 @@ async def _process_text(
 
                 await memory_metrics.record_pre_filter(accepted=True)
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
         else:
             # ---- Phase 2: record pre-filter reject ----
             try:
@@ -983,7 +1039,7 @@ async def _process_text(
 
                 await memory_metrics.record_pre_filter(accepted=False)
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
     except Exception:
         logger.debug("Background extract enqueue failed", exc_info=True)
 
@@ -2154,7 +2210,7 @@ async def free_voice(
             ),
             timeout=settings.voice_queue_timeout,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "Voice queue full for user %d, dropping voice message",
             message.from_user.id,
@@ -2165,6 +2221,25 @@ async def free_voice(
 
     # 4. Мгновенный ответ — пользователь не ждёт транскрипцию
     await message.answer("🎙 Принял, расшифровываю…")
+
+
+# ── Voice research callback ────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("voice_research:"))
+async def _cb_voice_research(
+    callback: CallbackQuery,
+    state: FSMContext,
+    userbot_manager: UserbotManager,
+) -> None:
+    """Callback: кнопка «Исследовать это» после голосового вопроса."""
+    uid = int(callback.data.split(":")[1])
+    if callback.from_user.id != uid:
+        await callback.answer("⛔ Не ваш запрос", show_alert=True)
+        return
+    await callback.answer()
+    # Отправляем как новое текстовое сообщение, которое попадёт в free_text
+    await callback.message.answer("🔍 Исследуй это подробно")
 
 
 # ── C3: Photo cache ──────────────────────────────────────────────────────

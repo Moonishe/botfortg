@@ -202,9 +202,7 @@ def apply_edits(
                 applied.append(edit)
 
                 # Determine version bump type
-                if edit.op == EditOp.REPLACE and len(edit.content) > 100:
-                    version_bump = "minor"
-                elif edit.op == EditOp.DELETE:
+                if (edit.op == EditOp.REPLACE and len(edit.content) > 100) or edit.op == EditOp.DELETE:
                     version_bump = "minor"
             else:
                 rejected.append((edit, "edit could not be applied (target not found)"))

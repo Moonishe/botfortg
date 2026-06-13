@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
@@ -73,8 +73,8 @@ def _format_time_ago(dt: datetime | None) -> str:
         return "?"
     # Make naive datetime offset-aware for subtraction
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
     diff = now - dt
     seconds = int(diff.total_seconds())
     if seconds < 0:

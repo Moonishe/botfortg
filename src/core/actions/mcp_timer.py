@@ -16,7 +16,7 @@ import asyncio
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Any
 
@@ -84,14 +84,12 @@ def _get_timer_db() -> sqlite3.Connection:
 def _load_timers_from_db() -> None:
     """Load pending timers from DB, removing expired ones."""
     global _timer_counter
-    now_str = datetime.now(timezone.utc).isoformat()
+    now_str = datetime.now(UTC).isoformat()
     with _timer_db_lock:
         db = _get_timer_db()
         db.execute("DELETE FROM timers WHERE fire_at <= ?", (now_str,))
         db.commit()
-        rows = db.execute(
-            "SELECT timer_id, fire_at, label FROM timers"
-        ).fetchall()
+        rows = db.execute("SELECT timer_id, fire_at, label FROM timers").fetchall()
         for tid, fire_at, label in rows:
             _timer_store[tid] = {"fire_at": fire_at, "label": label}
         if rows:
@@ -253,12 +251,12 @@ async def _timer_set(duration_sec: int, label: str) -> dict[str, Any]:
 
     _ensure_timer_db_loaded()
 
-    fire_at = datetime.now(timezone.utc).timestamp() + duration_sec
-    fire_dt = datetime.fromtimestamp(fire_at, tz=timezone.utc)
+    fire_at = datetime.now(UTC).timestamp() + duration_sec
+    fire_dt = datetime.fromtimestamp(fire_at, tz=UTC)
     lbl = label.strip() if label else f"Timer ({duration_sec}s)"
 
     async with _timer_lock:
-        global _timer_counter  # noqa: PLW0603
+        global _timer_counter
         _timer_counter += 1
         tid = _timer_counter
 
@@ -270,7 +268,7 @@ async def _timer_set(duration_sec: int, label: str) -> dict[str, Any]:
         _active_timers[tid] = {
             "task": task,
             "label": lbl,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "duration_sec": duration_sec,
             "fire_at": fire_dt.isoformat(),
         }
@@ -301,7 +299,7 @@ async def _timer_alarm(time_str: str, label: str) -> dict[str, Any]:
 
     _ensure_timer_db_loaded()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     fire_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     # If the time has already passed today, schedule for tomorrow
@@ -312,7 +310,7 @@ async def _timer_alarm(time_str: str, label: str) -> dict[str, Any]:
     lbl = label.strip() if label else f"Alarm at {time_str}"
 
     async with _timer_lock:
-        global _timer_counter  # noqa: PLW0603
+        global _timer_counter
         _timer_counter += 1
         tid = _timer_counter
 
@@ -341,7 +339,7 @@ async def _timer_alarm(time_str: str, label: str) -> dict[str, Any]:
 
 def _timer_list() -> dict[str, Any]:
     """Return all active timers with remaining time."""
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     items: list[dict[str, Any]] = []
 
     # Work on a snapshot outside the lock to avoid blocking
@@ -398,6 +396,25 @@ async def _timer_cancel(index: int) -> dict[str, Any]:
 # ══════════════════════════════════════════════════════════════════════════
 # Timer task
 # ══════════════════════════════════════════════════════════════════════════
+
+
+def close_timer_db() -> None:
+    """Close the shared SQLite connection for timer persistence.
+
+    Safe to call multiple times — idempotent.
+    Intended to be called during application shutdown.
+    """
+    global _timer_db, _timer_db_loaded
+    with _timer_db_lock:
+        if _timer_db is not None:
+            try:
+                _timer_db.close()
+            except Exception:
+                logger.warning("Failed to close timer DB", exc_info=True)
+            finally:
+                _timer_db = None
+        _timer_db_loaded = False
+        _timer_store.clear()
 
 
 async def _timer_task(tid: int, duration_sec: int, label: str) -> None:

@@ -72,7 +72,7 @@ async def pubmed_search(
                 return await asyncio.wait_for(
                     pubmed_client.fetch_abstract(pmid), timeout=10.0
                 )
-            except (asyncio.TimeoutError, Exception) as e:
+            except (TimeoutError, Exception) as e:
                 logger.warning("Failed to fetch abstract for PMID %s: %s", pmid, e)
                 return None
 
@@ -97,7 +97,7 @@ async def pubmed_search(
     except httpx.RequestError as e:
         logger.error("PubMed request failed: %s", e)
         return {"error": "PubMed service temporarily unavailable"}
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("PubMed request timeout")
         return {"error": "PubMed request timeout"}
     except Exception as e:

@@ -22,12 +22,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, UTC
 
 from sqlalchemy import select
 
@@ -138,7 +136,7 @@ async def analyze(
         System2Analysis с найденными фактами, связями и инсайтами.
     """
     analysis = System2Analysis(user_id=owner_id)
-    analysis.generated_at = datetime.now(timezone.utc).isoformat()
+    analysis.generated_at = datetime.now(UTC).isoformat()
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)

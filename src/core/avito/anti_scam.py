@@ -46,7 +46,7 @@ _SHORT_DESCRIPTION_LEN = 20
 class ScamCheckResult:
     """Результат проверки на мошенничество."""
 
-    __slots__ = ("risk", "reasons", "is_suspicious")
+    __slots__ = ("is_suspicious", "reasons", "risk")
 
     def __init__(self) -> None:
         self.risk: str = "low"  # low / medium / high

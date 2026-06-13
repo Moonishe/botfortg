@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -152,7 +152,7 @@ async def _llm_estimate_quality(
 async def _llm_validate_skill(
     skill_body: str,
     trajectories: list[TrajectoryData],
-    provider: "LLMProvider",
+    provider: LLMProvider,
 ) -> float | None:
     """Lightweight LLM second opinion for uncertain heuristic scores.
 
@@ -203,7 +203,7 @@ async def validate_skill_candidate(
     *,
     is_edit: bool = False,
     original_body: str | None = None,
-    provider: "LLMProvider | None" = None,
+    provider: LLMProvider | None = None,
 ) -> ValidationResult:
     """Validate a skill candidate against held-out trajectories.
 
@@ -225,7 +225,7 @@ async def validate_skill_candidate(
     """
     async with get_session() as session:
         # 1. Get held-out trajectories: successful, recent, NOT using this skill
-        since = datetime.now(timezone.utc) - timedelta(days=7)
+        since = datetime.now(UTC) - timedelta(days=7)
 
         # Get trajectory IDs that already used this skill (to exclude from validation)
         used_trajectory_ids: set[int] = set()
@@ -451,7 +451,7 @@ async def validate_and_update_skill(
     *,
     new_description: str | None = None,
     is_edit: bool = False,
-    provider: "LLMProvider | None" = None,
+    provider: LLMProvider | None = None,
 ) -> tuple[bool, ValidationResult]:
     """Validate a skill candidate and update if accepted.
 

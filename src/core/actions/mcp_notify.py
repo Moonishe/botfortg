@@ -119,11 +119,11 @@ def _notify_beep(count: int) -> dict[str, Any]:
                 winsound.Beep(1000, 300)  # type: ignore[union-attr]
             return {"ok": True, "method": "winsound", "count": count}
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
     # Fallback: print bell character
     beeps = "\a" * count
-    print(beeps, end="", flush=True)  # noqa: T201
+    print(beeps, end="", flush=True)
 
     return {
         "ok": True,

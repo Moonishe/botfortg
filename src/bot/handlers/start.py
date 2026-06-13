@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 
 from src.bot.callbacks import OnboardingCB, SettingsCB
 from src.bot.filters import OwnerOnly, is_onboarded
+from src.bot.handlers.greeting import generate_personalized_greeting
 from src.bot.states import CustomProviderStates, OnboardingStates
 from src.db.models._contacts import Contact
 from src.db.models._learning import AdaptivePersona
@@ -182,6 +183,16 @@ async def _show_regular_greeting(message: Message) -> None:
 
     is_new = (persona is None) or (persona.total_interactions == 0)
 
+    # Персонализированный контекст: память + инбокс + задачи
+    try:
+        personalized = await generate_personalized_greeting(message.from_user.id)
+    except Exception:
+        logger.debug("personalized greeting failed for /start", exc_info=True)
+        personalized = ""
+    context_section = ""
+    if personalized:
+        context_section = f"{personalized}\n\n"
+
     auth_status = "Ты авторизован ✅" if has_session else "Не авторизован ❌"
 
     header = (
@@ -202,7 +213,8 @@ async def _show_regular_greeting(message: Message) -> None:
         )
 
     await message.answer(
-        header + WELCOME + onboarding_text, reply_markup=_greeting_kb()
+        header + context_section + WELCOME + onboarding_text,
+        reply_markup=_greeting_kb(),
     )
 
 
@@ -256,7 +268,7 @@ async def cb_skip_onboarding(callback: CallbackQuery) -> None:
         try:
             await callback.message.delete()
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -280,7 +292,7 @@ async def cb_onboarding_start(callback: CallbackQuery, state: FSMContext) -> Non
                 "Давай настроим всё за 5 шагов 🚀"
             )
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
     if callback.message is None:
         await callback.answer("Сообщение недоступно.")
@@ -546,7 +558,7 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
 
     # MiMo: спросить регион перед сохранением в БД
     if provider == "mimo":
@@ -739,7 +751,7 @@ async def handle_stt_key_input(message: Message, state: FSMContext) -> None:
     try:
         async with get_session() as session:
             user = await get_or_create_user(session, message.from_user.id)
-            slot, is_new = await add_key_slot(
+            _slot, is_new = await add_key_slot(
                 session,
                 user,
                 provider,
@@ -760,7 +772,7 @@ async def handle_stt_key_input(message: Message, state: FSMContext) -> None:
         if is_new:
             text = f"✅ <b>Ключ для {provider_name} успешно сохранён!</b>\n\n"
         else:
-            text = f"ℹ️ <b>Этот ключ уже был добавлен ранее.</b>\n\n"
+            text = "ℹ️ <b>Этот ключ уже был добавлен ранее.</b>\n\n"
 
         text += "Теперь можешь продолжить настройку или завершить.\n\n"
         text += "Что дальше?"
@@ -878,7 +890,7 @@ async def step_custom_provider_key(message: Message, state: FSMContext) -> None:
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.debug("Non-critical error", exc_info=True)
     await state.update_data(custom_provider_key=key)
     await state.set_state(CustomProviderStates.waiting_model)
     await message.answer(
@@ -1057,7 +1069,7 @@ async def cb_onboarding_tz(callback: CallbackQuery, state: FSMContext) -> None:
                 f"✅ Часовой пояс: <b>{tz_short(tz_value)}</b>"
             )
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
 
 @router.message(OnboardingStates.waiting_timezone)
@@ -1165,7 +1177,7 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
         try:
             await callback.message.edit_text("📱 Синхронизация запущена ✅")
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
 
 @router.callback_query(F.data == OnboardingCB.sync("folders"))
@@ -1248,7 +1260,7 @@ async def cb_onboarding_sync_skip(callback: CallbackQuery, state: FSMContext) ->
         try:
             await callback.message.edit_text("⏭ Синхронизация пропущена")
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
     if callback.message is None:
         await callback.answer("Сообщение недоступно.")
@@ -1282,7 +1294,7 @@ async def cb_onboarding_go_settings(call: CallbackQuery, state: FSMContext) -> N
         try:
             await call.message.edit_text(text, reply_markup=kb)
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
 
 # ─── Finish ────────────────────────────────────────────────────────────

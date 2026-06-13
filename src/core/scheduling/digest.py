@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 from sqlalchemy import func as sa_func
@@ -53,7 +53,7 @@ DIGEST_SYSTEM = (
 
 
 async def _gather_payload(owner: User) -> dict:
-    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=14)
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=14)
 
     async with get_session() as session:
         # входящие за период
@@ -115,7 +115,7 @@ async def _gather_payload(owner: User) -> dict:
         )
         autoreplies = list(autoreplies_result.scalars().all())
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     soon = now + timedelta(hours=24)
 
     def _hot(items: list[Commitment]) -> list[Commitment]:
@@ -123,9 +123,7 @@ async def _gather_payload(owner: User) -> dict:
         for c in items:
             deadline_at = ensure_utc(c.deadline_at)
             created_at = ensure_utc(c.created_at)
-            if deadline_at and (deadline_at < now or deadline_at <= soon):
-                out.append(c)
-            elif (
+            if (deadline_at and (deadline_at < now or deadline_at <= soon)) or (
                 deadline_at is None
                 and created_at
                 and (now - created_at) > timedelta(days=2)

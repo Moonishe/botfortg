@@ -15,8 +15,8 @@ In tests:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ class AppContext:
 
 # ── Global singleton for backward compatibility ───────────────────────────
 
-_app_context: Optional[AppContext] = None
+_app_context: AppContext | None = None
 
 
 def get_app_context() -> AppContext:

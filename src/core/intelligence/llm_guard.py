@@ -80,7 +80,7 @@ async def safe_llm_call(
             error="Все API-ключи исчерпаны",
             error_type="exhausted",
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("LLM call timed out after %.0fs", timeout)
         return LLMResponse(
             ok=False,

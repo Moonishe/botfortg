@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from functools import partial
 from typing import Any
 
@@ -158,7 +158,7 @@ async def auto_approve_high_confidence() -> int:
 
                 skill.review_status = "approved"
                 skill.enabled = True
-                skill.updated_at = datetime.now(timezone.utc)
+                skill.updated_at = datetime.now(UTC)
                 approved_count += 1
 
         await session.flush()
@@ -236,7 +236,7 @@ async def approve_skill(owner_id: int, skill_name: str) -> bool:
             return False
         skill.review_status = "approved"
         skill.enabled = True
-        skill.updated_at = datetime.now(timezone.utc)
+        skill.updated_at = datetime.now(UTC)
         await session.flush()
 
     logger.info("curator: approved skill %r (owner=%d)", skill_name, owner_id)
@@ -279,13 +279,13 @@ async def reject_skill(owner_id: int, skill_name: str, reason: str = "") -> bool
                     "target": skill_name,
                     "content": (skill.body or "")[:200],
                     "reason": reason,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                 }
             )
             # Keep only last 10 rejections
             skill.rejected_edits_json = rejected[-10:]
 
-        skill.updated_at = datetime.now(timezone.utc)
+        skill.updated_at = datetime.now(UTC)
         await session.flush()
 
     logger.info("curator: rejected skill %r (owner=%d)", skill_name, owner_id)
@@ -331,7 +331,7 @@ async def apply_skill_edit(
 
     # Rate limiting: prevent rapid-fire edits to the same skill
     cooldown_key = (owner_id, skill_name.lower())
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with _cooldown_lock:
         # TTL eviction: remove stale entries to prevent unbounded growth
@@ -391,7 +391,7 @@ async def apply_skill_edit(
                     {
                         **rejected_edit.to_dict(),
                         "reason": reason,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
             skill.rejected_edits_json = rejected[-10:]
@@ -427,7 +427,7 @@ async def apply_skill_edit(
                     {
                         **edit.to_dict(),
                         "reason": f"Validation failed: {validation.reason}",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
                 skill.rejected_edits_json = rejected[-10:]
@@ -459,7 +459,7 @@ async def apply_skill_edit(
                 history.append(
                     {
                         "op": "auto-rollback",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                         "reason": f"Score dropped to {validation.score_after:.2f} (< 0.3 threshold)",
                     }
                 )
@@ -489,7 +489,7 @@ async def apply_skill_edit(
             history.append(
                 {
                     **applied_edit.to_dict(),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                     "version_before": old_version,
                     "version_after": new_version,
                 }
@@ -499,7 +499,7 @@ async def apply_skill_edit(
         # Apply changes
         skill.body = result.new_body
         skill.version = new_version
-        skill.updated_at = datetime.now(timezone.utc)
+        skill.updated_at = datetime.now(UTC)
         await session.flush()
 
         # Hot-reload: invalidate skill cache so next prompt uses updated skill

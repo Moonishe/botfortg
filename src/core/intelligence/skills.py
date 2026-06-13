@@ -10,8 +10,8 @@ import asyncio
 import logging
 import re
 from collections import Counter
-from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from datetime import datetime, timedelta, UTC
+from collections.abc import Iterable
 
 from src.config import settings
 from src.core.scheduling.notification_queue import notification_queue
@@ -185,11 +185,18 @@ def _safe_skill_name(route_mode: str, intent_name: str) -> str:
     return base[:96] or "general_chat"
 
 
-async def suggest_skills_from_trajectories(telegram_id: int) -> int:
-    """Create low-risk pending skills from repeated successful trajectories."""
+async def suggest_skills_from_trajectories(
+    telegram_id: int, force: bool = False
+) -> int:
+    """Create low-risk pending skills from repeated successful trajectories.
+
+    Args:
+        telegram_id: Owner's Telegram ID.
+        force: If True, scan up to 90 days of trajectories instead of 1 day.
+    """
     from sqlalchemy import select
 
-    since = datetime.now(timezone.utc) - timedelta(days=1)
+    since = datetime.now(UTC) - timedelta(days=90 if force else 1)
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         rows = (

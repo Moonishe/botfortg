@@ -9,9 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import time
+from dataclasses import dataclass, field
+from datetime import datetime, UTC
 
 from src.core.memory.memory_mode import MemoryMode
 
@@ -32,7 +32,7 @@ from src.core.cache.prefetch import prefetch_tracker
 
 _RECALL_CACHE_RESULT_TTL = settings.recall_cache_result_ttl
 _RECALL_CACHE_EMPTY_TTL = settings.recall_cache_empty_ttl
-_recall_cache: "ManagedCache[str, RecallResult]" = cache_manager.register(
+_recall_cache: ManagedCache[str, RecallResult] = cache_manager.register(
     ManagedCache(
         name="recall",
         max_size=settings.recall_cache_max_size,
@@ -105,7 +105,7 @@ async def bump_recall_version(telegram_id: int) -> None:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _make_recall_cache_key(
@@ -245,24 +245,70 @@ class RecallResult:
     meta: dict = field(default_factory=dict)
 
 
+# Debounce-кеш для _bump_use_counts: memory_id → timestamp (time.monotonic)
+_bump_queue: dict[int, float] = {}
+_BUMP_DEBOUNCE: float = 5.0  # секунд между bump одного и того же факта
+_BUMP_FLUSH_SIZE: int = 20
+_BUMP_MAX_NEW_IDS: int = 100  # cap IN clause to prevent huge SQL on first call
+
+
 async def _bump_use_counts(fact_ids: list[int]) -> None:
     """Инкрементирует use_count и last_used_at для фактов в отдельной сессии.
 
     Используется и для cache-hit, и для fresh-result путей.
     Bulk UPDATE — одна SQL-операция вместо N.
+
+    Debounce: если fact_id уже bumped в течение _BUMP_DEBOUNCE секунд — пропускаем.
+    При накоплении _BUMP_FLUSH_SIZE записей — сбрасываем старейшие.
     """
+    if not fact_ids:
+        return
+
+    now_ts = time.monotonic()
+    new_ids: list[int] = []
+    for fid in fact_ids:
+        last = _bump_queue.get(fid)
+        if last is not None and now_ts - last < _BUMP_DEBOUNCE:
+            continue  # skip, recently bumped
+        _bump_queue[fid] = now_ts
+        new_ids.append(fid)
+
+    # Периодическая очистка: удаляем старейшие записи при превышении лимита
+    if len(_bump_queue) >= _BUMP_FLUSH_SIZE:
+        oldest = sorted(_bump_queue.items(), key=lambda item: item[1])
+        keep = max(_BUMP_FLUSH_SIZE // 2, 1)
+        for k, _v in oldest[: len(oldest) - keep]:
+            _bump_queue.pop(k, None)
+
+    if not new_ids:
+        return  # всё в пределах debounce-окна
+
+    # Cap new_ids to prevent huge SQL IN clauses (e.g. first call with
+    # 1000+ fact_ids).  Excess IDs will be picked up on the next call
+    # after the debounce window expires.
+    if len(new_ids) > _BUMP_MAX_NEW_IDS:
+        logger.debug(
+            "_bump_use_counts: capping new_ids from %d to %d",
+            len(new_ids),
+            _BUMP_MAX_NEW_IDS,
+        )
+        # Remove excess entries from _bump_queue too so they can retry later
+        for fid in new_ids[_BUMP_MAX_NEW_IDS:]:
+            _bump_queue.pop(fid, None)
+        new_ids = new_ids[:_BUMP_MAX_NEW_IDS]
+
     try:
         from src.db.models._memory import Memory
         from sqlalchemy import update as sa_update
 
-        now = datetime.now(timezone.utc)
+        now_dt = datetime.now(UTC)
         async with get_session() as session:
             await session.execute(
                 sa_update(Memory)
-                .where(Memory.id.in_(fact_ids))
+                .where(Memory.id.in_(new_ids))
                 .values(
                     use_count=Memory.use_count + 1,
-                    last_used_at=now,
+                    last_used_at=now_dt,
                 )
             )
             await session.commit()
@@ -647,21 +693,17 @@ async def recall(
                     )
 
                     # Build embedding lookup from Qdrant results (+ BFS graph facts)
+                    # PERF-013: build complete index O(N) once, then O(1) lookups
                     embedding_map: dict[int, list[float]] = {}
                     for hit in vector_hits_raw:
                         mid = hit.get("memory_id")
                         emb = hit.get("embedding")
-                        if mid and emb:
+                        if mid is not None and emb is not None:
                             embedding_map[mid] = emb
                     if graph_results:
                         for bfs_id, _ in graph_results:
                             if bfs_id not in embedding_map:
-                                for hit in vector_hits_raw:
-                                    if hit.get("memory_id") == bfs_id and hit.get(
-                                        "embedding"
-                                    ):
-                                        embedding_map[bfs_id] = hit["embedding"]
-                                        break
+                                continue  # no embedding available for this bfs_id
 
                     # Apply Ebbinghaus retention weighting
                     if fused:

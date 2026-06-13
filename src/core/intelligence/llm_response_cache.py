@@ -171,7 +171,6 @@ _COMMON_RUSSIAN_NAMES: Final[frozenset[str]] = frozenset(
         "зоя",
         "галя",
         "римма",
-        "вера",
         "надя",
         "люба",
         "лида",

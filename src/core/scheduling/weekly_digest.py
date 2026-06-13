@@ -6,7 +6,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select, func
 
@@ -92,7 +92,7 @@ class WeeklyDigestBuilder:
         db_user_id = owner.id
         telegram_id = owner.telegram_id
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         week_ago = now - timedelta(days=7)
 
         stats = WeeklyStats(
@@ -300,7 +300,7 @@ class WeeklyDigestBuilder:
                 topic_str = ", ".join(topic) if topic else "привычка"
                 stats.habits_improved.append(f"{topic_str}: +{h.get('count', 0)}")
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         # === Distilled knowledge ===
         distilled_result = await session.execute(

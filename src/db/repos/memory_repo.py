@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import case, distinct, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -384,7 +383,7 @@ async def add_memory(
     cluster_topic: str | None = None,
     deduplicate: bool = True,
     embedding: list[float] | None = None,
-    vector_store_obj: "VectorStore | None" = None,
+    vector_store_obj: VectorStore | None = None,
     importance: float | None = None,
     decay_rate: float | None = None,
     memory_tier: int = 1,
@@ -460,8 +459,8 @@ async def add_memory(
                 existing.confidence = min(1.0, existing.confidence + source_weight)
                 # Meta-Memory: corroboration — факт подтверждён повторно
                 existing.corroboration_count = (existing.corroboration_count or 0) + 1
-                existing.last_corroborated_at = datetime.now(timezone.utc)
-                existing.updated_at = datetime.now(timezone.utc)
+                existing.last_corroborated_at = datetime.now(UTC)
+                existing.updated_at = datetime.now(UTC)
                 if sentiment and existing.sentiment != sentiment:
                     existing.sentiment = "contradictory"  # маркируем противоречие
                 await session.flush()
@@ -487,7 +486,7 @@ async def add_memory(
                     existing = await session.get(Memory, best["memory_id"])
                     if existing and existing.user_id == user.id:
                         # Динамический порог
-                        now = datetime.now(timezone.utc)
+                        now = datetime.now(UTC)
                         age_days = (
                             (now - existing.created_at).days
                             if existing.created_at
@@ -983,7 +982,7 @@ async def delete_memory(session: AsyncSession, user, memory_id: int) -> bool:
         return False
     # Soft delete — данные не удаляются безвозвратно
     m.is_active = False
-    m.validity_end = datetime.now(timezone.utc)
+    m.validity_end = datetime.now(UTC)
     await invalidate("mem_")
     await session.flush()
     from src.core.memory.memory_recall import bump_recall_version
@@ -1711,9 +1710,7 @@ async def get_graph_stats(session: AsyncSession, user_id: int) -> dict:
     # ── 5. Average degree ───────────────────────────────────────────
     avg_degree = round(total_edges / max(node_count, 1), 2)
 
-    # ── 6. Isolated nodes (active nodes with no edges) ──────────────
-    connected = len(visited)
-
+    # ── 6. Return stats ────────────────────────────────────────────
     return {
         "node_count": node_count,
         "total_edges": total_edges,
@@ -1762,7 +1759,7 @@ async def contact_impact(
                 select(Memory).where(
                     Memory.user_id == user_id,
                     Memory.contact_id == contact_id,
-                    Memory.is_active == True,  # noqa: E712
+                    Memory.is_active == True,
                 )
             )
         )
@@ -1796,7 +1793,7 @@ async def contact_impact(
             neighbor_mems_result = await session.execute(
                 select(Memory).where(
                     Memory.id.in_(list(neighbor_ids)),
-                    Memory.is_active == True,  # noqa: E712
+                    Memory.is_active == True,
                     Memory.contact_id.isnot(None),
                     Memory.contact_id != contact_id,
                 )
@@ -2009,7 +2006,7 @@ async def rollback_memory(
         return None
 
     mem.fact = ver.fact_text
-    mem.updated_at = datetime.now(timezone.utc)
+    mem.updated_at = datetime.now(UTC)
 
     # Сохраняем откат как новую версию
     await save_memory_version(

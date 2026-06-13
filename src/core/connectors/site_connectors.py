@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+import feedparser
 
 from .base import (
     ConnectorActionAnnotations,
@@ -25,6 +27,7 @@ from .http import ConnectorHttpError, MAX_REDIRECTS, validate_public_url
 from .registry import ConnectorRegistry
 from .sanitize import sanitize_text
 
+logger = logging.getLogger(__name__)
 
 USER_AGENT = "asist-connectors/1.0 (+https://github.com/)"
 DOWNLOAD_ROOT = Path("data/connectors").resolve()
@@ -40,6 +43,8 @@ GITHUB_DOWNLOAD_HOSTS = {
 FOURPDA_HOSTS = {"4pda.to", "www.4pda.to"}
 X_API_HOSTS = {"api.x.com"}
 X_MEDIA_HOSTS = {"pbs.twimg.com", "video.twimg.com"}
+NITTER_HOSTS = {"nitter.net"}
+GENIUS_API_HOSTS = {"api.genius.com"}
 
 
 def register_site_connectors(registry: ConnectorRegistry) -> None:
@@ -47,18 +52,24 @@ def register_site_connectors(registry: ConnectorRegistry) -> None:
         (_github_spec(), _github_handler),
         (_fourpda_spec(), _fourpda_handler),
         (_x_spec(), _x_handler),
+        (_x_rss_spec(), _x_rss_handler),
+        (_genius_spec(), _genius_handler),
     ):
         if registry.get(spec.name) is None:
             registry.register(spec, handler)
 
 
-def _standard_actions(*, attachments_auth_note: str = "") -> tuple[ConnectorActionSpec, ...]:
+def _standard_actions(
+    *, attachments_auth_note: str = ""
+) -> tuple[ConnectorActionSpec, ...]:
     return (
         ConnectorActionSpec(
             name="search_topics",
             description="Search topics, repositories, issues, posts, or conversations.",
             risk="low",
-            annotations=ConnectorActionAnnotations(title="Search Topics", read_only=True),
+            annotations=ConnectorActionAnnotations(
+                title="Search Topics", read_only=True
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -127,8 +138,15 @@ def _github_spec() -> ConnectorSpec:
         category="developer",
         auth_mode="api_key",
         docs_url="https://docs.github.com/rest",
-        capabilities=("search_topics", "read_topic", "read_post", "download_attachments"),
-        actions=_standard_actions(attachments_auth_note="Downloads release assets when a repo/release URL is provided."),
+        capabilities=(
+            "search_topics",
+            "read_topic",
+            "read_post",
+            "download_attachments",
+        ),
+        actions=_standard_actions(
+            attachments_auth_note="Downloads release assets when a repo/release URL is provided."
+        ),
     )
 
 
@@ -139,8 +157,15 @@ def _fourpda_spec() -> ConnectorSpec:
         category="forum",
         auth_mode="cookie",
         docs_url="https://4pda.to/forum/index.php?act=idx",
-        capabilities=("search_topics", "read_topic", "read_post", "download_attachments"),
-        actions=_standard_actions(attachments_auth_note="Some attachments require logged-in FOURPDA_COOKIE."),
+        capabilities=(
+            "search_topics",
+            "read_topic",
+            "read_post",
+            "download_attachments",
+        ),
+        actions=_standard_actions(
+            attachments_auth_note="Some attachments require logged-in FOURPDA_COOKIE."
+        ),
     )
 
 
@@ -151,8 +176,34 @@ def _x_spec() -> ConnectorSpec:
         category="social",
         auth_mode="api_key",
         docs_url="https://developer.x.com/en/docs/x-api",
-        capabilities=("search_topics", "read_topic", "read_post", "download_attachments"),
-        actions=_standard_actions(attachments_auth_note="Downloads media URLs returned by X API when available."),
+        capabilities=(
+            "search_topics",
+            "read_topic",
+            "read_post",
+            "download_attachments",
+        ),
+        actions=_standard_actions(
+            attachments_auth_note="Downloads media URLs returned by X API when available."
+        ),
+    )
+
+
+def _x_rss_spec() -> ConnectorSpec:
+    return ConnectorSpec(
+        name="x_rss",
+        description="X/Twitter RSS connector via Nitter. No authentication required. Read-only public tweets.",
+        category="social",
+        auth_mode="none",
+        docs_url="https://github.com/zedeus/nitter",
+        capabilities=(
+            "search_topics",
+            "read_topic",
+            "read_post",
+            "download_attachments",
+        ),
+        actions=_standard_actions(
+            attachments_auth_note="Downloads media from tweet RSS entries when available."
+        ),
     )
 
 
@@ -164,12 +215,21 @@ def _limit(params: dict[str, Any], default: int = 10, maximum: int = 50) -> int:
     return max(1, min(maximum, value))
 
 
-def _headers(token_env: str | None = None, cookie_env: str | None = None) -> dict[str, str]:
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/json, text/html;q=0.9, */*;q=0.8"}
-    if token_env and os.getenv(token_env):
-        headers["Authorization"] = f"Bearer {os.environ[token_env]}"
-    if cookie_env and os.getenv(cookie_env):
-        headers["Cookie"] = os.environ[cookie_env]
+def _headers(
+    token_env: str | None = None, cookie_env: str | None = None
+) -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
+    }
+    if token_env:
+        token_value = os.getenv(token_env)
+        if token_value:
+            headers["Authorization"] = f"Bearer {token_value}"
+    if cookie_env:
+        cookie_value = os.getenv(cookie_env)
+        if cookie_value:
+            headers["Cookie"] = cookie_value
     return headers
 
 
@@ -181,10 +241,18 @@ def _validate_connector_url(url: str, *, allowed_hosts: set[str] | None = None) 
     return validated
 
 
-def _redirect_headers(headers: dict[str, str], source_url: str, target_url: str) -> dict[str, str]:
-    if (urlparse(source_url).hostname or "").lower() == (urlparse(target_url).hostname or "").lower():
+def _redirect_headers(
+    headers: dict[str, str], source_url: str, target_url: str
+) -> dict[str, str]:
+    if (urlparse(source_url).hostname or "").lower() == (
+        urlparse(target_url).hostname or ""
+    ).lower():
         return headers
-    return {key: value for key, value in headers.items() if key.lower() not in SENSITIVE_REDIRECT_HEADERS}
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in SENSITIVE_REDIRECT_HEADERS
+    }
 
 
 async def _fetch_response(
@@ -201,13 +269,19 @@ async def _fetch_response(
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         for _ in range(MAX_REDIRECTS + 1):
-            response = await client.get(current_url, params=current_params, headers=current_headers)
+            response = await client.get(
+                current_url, params=current_params, headers=current_headers
+            )
             if response.is_redirect:
                 location = response.headers.get("location")
                 if not location:
                     raise ConnectorHttpError("Redirect response has no Location header")
-                next_url = _validate_connector_url(urljoin(str(response.url), location), allowed_hosts=allowed_hosts)
-                current_headers = _redirect_headers(current_headers, str(response.url), next_url)
+                next_url = _validate_connector_url(
+                    urljoin(str(response.url), location), allowed_hosts=allowed_hosts
+                )
+                current_headers = _redirect_headers(
+                    current_headers, str(response.url), next_url
+                )
                 current_url = next_url
                 current_params = None
                 continue
@@ -223,7 +297,9 @@ async def _fetch_json(
     headers: dict[str, str] | None = None,
     allowed_hosts: set[str] | None = None,
 ) -> Any:
-    response = await _fetch_response(url, params=params, headers=headers, allowed_hosts=allowed_hosts)
+    response = await _fetch_response(
+        url, params=params, headers=headers, allowed_hosts=allowed_hosts
+    )
     response.raise_for_status()
     return response.json()
 
@@ -235,9 +311,13 @@ async def _fetch_text(
     headers: dict[str, str] | None = None,
     allowed_hosts: set[str] | None = None,
 ) -> str:
-    response = await _fetch_response(url, params=params, headers=headers, allowed_hosts=allowed_hosts)
+    response = await _fetch_response(
+        url, params=params, headers=headers, allowed_hosts=allowed_hosts
+    )
     if response.status_code in {401, 403}:
-        raise PermissionError(f"HTTP {response.status_code}: source requires auth/cookies or blocked automated access")
+        raise PermissionError(
+            f"HTTP {response.status_code}: source requires auth/cookies or blocked automated access"
+        )
     response.raise_for_status()
     if "charset=windows-1251" in response.headers.get("content-type", "").lower():
         response.encoding = "cp1251"
@@ -265,7 +345,9 @@ def _parse_github_repo(value: str) -> tuple[str, str] | None:
     return None
 
 
-async def _github_handler(action: str, params: dict[str, Any], runtime: ConnectorRuntime) -> ConnectorResult:
+async def _github_handler(
+    action: str, params: dict[str, Any], runtime: ConnectorRuntime
+) -> ConnectorResult:
     if action == "search_topics":
         query = str(params.get("query") or "").strip()
         if not query:
@@ -314,10 +396,14 @@ async def _github_handler(action: str, params: dict[str, Any], runtime: Connecto
         )
 
     if action == "read_topic":
-        value = str(params.get("repo") or params.get("url") or params.get("id") or "").strip()
+        value = str(
+            params.get("repo") or params.get("url") or params.get("id") or ""
+        ).strip()
         repo = _parse_github_repo(value)
         if not repo:
-            return ConnectorResult(False, error="repo/url/id must identify a GitHub repository")
+            return ConnectorResult(
+                False, error="repo/url/id must identify a GitHub repository"
+            )
         owner, name = repo
         repo_data = await _fetch_json(
             f"https://api.github.com/repos/{owner}/{name}",
@@ -354,7 +440,9 @@ async def _github_handler(action: str, params: dict[str, Any], runtime: Connecto
         parsed = urlparse(value)
         match = re.match(r"^/([^/]+)/([^/]+)/(issues|pull)/(\d+)", parsed.path)
         if not match:
-            return ConnectorResult(False, error="url/id must be a GitHub issue or pull request URL")
+            return ConnectorResult(
+                False, error="url/id must be a GitHub issue or pull request URL"
+            )
         owner, repo, kind, number = match.groups()
         issue = await _fetch_json(
             f"https://api.github.com/repos/{owner}/{repo}/issues/{number}",
@@ -377,10 +465,15 @@ async def _github_handler(action: str, params: dict[str, Any], runtime: Connecto
         )
 
     if action == "download_attachments":
-        value = str(params.get("repo") or params.get("url") or params.get("id") or "").strip()
+        value = str(
+            params.get("repo") or params.get("url") or params.get("id") or ""
+        ).strip()
         repo = _parse_github_repo(value)
         if not repo:
-            return ConnectorResult(False, error="repo/url/id must identify a GitHub repository or release URL")
+            return ConnectorResult(
+                False,
+                error="repo/url/id must identify a GitHub repository or release URL",
+            )
         owner, name = repo
         limit = _limit(params, maximum=20)
         releases = await _fetch_json(
@@ -392,7 +485,9 @@ async def _github_handler(action: str, params: dict[str, Any], runtime: Connecto
         urls: list[tuple[str, str]] = []
         for release in releases:
             for asset in release.get("assets", []):
-                urls.append((asset.get("browser_download_url"), asset.get("name") or "asset"))
+                urls.append(
+                    (asset.get("browser_download_url"), asset.get("name") or "asset")
+                )
                 if len(urls) >= limit:
                     break
             if len(urls) >= limit:
@@ -450,23 +545,40 @@ def _extract_4pda_posts(html: str, base_url: str, limit: int) -> list[dict[str, 
         return posts
 
     text = sanitize_text(soup.get_text("\n", strip=True), max_length=12000)
-    return [{"id": "", "text": text, "attachments": _extract_links(soup, base_url, attachment_only=True)}] if text else []
+    return (
+        [
+            {
+                "id": "",
+                "text": text,
+                "attachments": _extract_links(soup, base_url, attachment_only=True),
+            }
+        ]
+        if text
+        else []
+    )
 
 
-def _extract_links(soup: BeautifulSoup, base_url: str, *, attachment_only: bool = False) -> list[dict[str, str]]:
+def _extract_links(
+    soup: BeautifulSoup, base_url: str, *, attachment_only: bool = False
+) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
     for anchor in soup.find_all("a", href=True):
         href = urljoin(base_url, anchor["href"])
         text = sanitize_text(anchor.get_text(" ", strip=True), max_length=200)
         lowered = href.lower()
-        is_attachment = any(marker in lowered for marker in ("act=attach", "attach_id=", "dl=1", "/forum/dl/post/"))
+        is_attachment = any(
+            marker in lowered
+            for marker in ("act=attach", "attach_id=", "dl=1", "/forum/dl/post/")
+        )
         if attachment_only and not is_attachment:
             continue
         links.append({"url": href, "text": text})
     return links[:100]
 
 
-async def _fourpda_handler(action: str, params: dict[str, Any], runtime: ConnectorRuntime) -> ConnectorResult:
+async def _fourpda_handler(
+    action: str, params: dict[str, Any], runtime: ConnectorRuntime
+) -> ConnectorResult:
     headers = _headers(cookie_env="FOURPDA_COOKIE")
     if action == "search_topics":
         query = str(params.get("query") or "").strip()
@@ -475,7 +587,13 @@ async def _fourpda_handler(action: str, params: dict[str, Any], runtime: Connect
         limit = _limit(params)
         html = await _fetch_text(
             "https://4pda.to/forum/index.php",
-            params={"act": "search", "source": "all", "forums": "all", "subforums": "1", "query": query},
+            params={
+                "act": "search",
+                "source": "all",
+                "forums": "all",
+                "subforums": "1",
+                "query": query,
+            },
             headers=headers,
             allowed_hosts=FOURPDA_HOSTS,
         )
@@ -483,7 +601,11 @@ async def _fourpda_handler(action: str, params: dict[str, Any], runtime: Connect
         topics = []
         for link in _extract_links(soup, "https://4pda.to/forum/index.php"):
             href = link["url"]
-            if "showtopic=" not in href and "act=findpost" not in href and "showpost=" not in href:
+            if (
+                "showtopic=" not in href
+                and "act=findpost" not in href
+                and "showpost=" not in href
+            ):
                 continue
             if not link["text"]:
                 continue
@@ -502,8 +624,22 @@ async def _fourpda_handler(action: str, params: dict[str, Any], runtime: Connect
         limit = _limit(params, default=20, maximum=100)
         html = await _fetch_text(url, headers=headers, allowed_hosts=FOURPDA_HOSTS)
         soup = BeautifulSoup(html, "html.parser")
-        title = sanitize_text((soup.find("title").get_text(" ", strip=True) if soup.find("title") else ""), max_length=300)
-        return ConnectorResult(True, data={"title": title, "url": url, "posts": _extract_4pda_posts(html, url, limit)})
+        title = sanitize_text(
+            (
+                soup.find("title").get_text(" ", strip=True)
+                if soup.find("title")
+                else ""
+            ),
+            max_length=300,
+        )
+        return ConnectorResult(
+            True,
+            data={
+                "title": title,
+                "url": url,
+                "posts": _extract_4pda_posts(html, url, limit),
+            },
+        )
 
     if action == "read_post":
         try:
@@ -514,7 +650,9 @@ async def _fourpda_handler(action: str, params: dict[str, Any], runtime: Connect
             return ConnectorResult(False, error=str(exc))
         html = await _fetch_text(url, headers=headers, allowed_hosts=FOURPDA_HOSTS)
         posts = _extract_4pda_posts(html, url, 1)
-        return ConnectorResult(True, data={"url": url, "post": posts[0] if posts else None})
+        return ConnectorResult(
+            True, data={"url": url, "post": posts[0] if posts else None}
+        )
 
     if action == "download_attachments":
         try:
@@ -551,15 +689,21 @@ async def _fourpda_handler(action: str, params: dict[str, Any], runtime: Connect
             )
             for item in attachments
         ]
-        return ConnectorResult(True, data={"files": files, "count": len(files), "attachments": attachments})
+        return ConnectorResult(
+            True, data={"files": files, "count": len(files), "attachments": attachments}
+        )
 
     return ConnectorResult(False, error=f"Unsupported 4PDA action: {action}")
 
 
-async def _x_handler(action: str, params: dict[str, Any], runtime: ConnectorRuntime) -> ConnectorResult:
+async def _x_handler(
+    action: str, params: dict[str, Any], runtime: ConnectorRuntime
+) -> ConnectorResult:
     token = os.getenv("X_BEARER_TOKEN")
     if not token:
-        return ConnectorResult(False, error="X_BEARER_TOKEN is required for X/Grok connector")
+        return ConnectorResult(
+            False, error="X_BEARER_TOKEN is required for X/Grok connector"
+        )
     headers = _headers("X_BEARER_TOKEN")
     if action == "search_topics":
         query = str(params.get("query") or "").strip()
@@ -618,7 +762,9 @@ async def _x_handler(action: str, params: dict[str, Any], runtime: ConnectorRunt
                         allowed_hosts=X_MEDIA_HOSTS,
                     )
                 )
-        return ConnectorResult(True, data={"files": files, "count": len(files), "tweet": payload.data})
+        return ConnectorResult(
+            True, data={"files": files, "count": len(files), "tweet": payload.data}
+        )
 
     return ConnectorResult(False, error=f"Unsupported X action: {action}")
 
@@ -630,6 +776,355 @@ def _x_tweet_id(value: str) -> str:
     parsed = urlparse(value)
     match = re.search(r"/status(?:es)?/(\d+)", parsed.path)
     return match.group(1) if match else ""
+
+
+def _nitter_rss_url(value: str) -> str | None:
+    """Extract @username from URL/handle; return Nitter RSS timeline URL."""
+    value = value.strip()
+    if not value:
+        return None
+    username = value.lstrip("@")
+    parsed = urlparse(username)
+    if parsed.netloc:
+        if parsed.netloc.lower() not in {
+            "x.com",
+            "twitter.com",
+            "nitter.net",
+            *NITTER_HOSTS,
+        }:
+            return None
+        parts = [p for p in parsed.path.split("/") if p]
+        username = parts[0] if parts else ""
+    username = username.split("?")[0].split("#")[0].rstrip("/")
+    if not username or not re.match(r"^[A-Za-z0-9_]+$", username):
+        return None
+    return f"https://nitter.net/{username}/rss"
+
+
+def _parse_tweet_ref(value: str) -> tuple[str, str]:
+    """Parse a tweet URL/value into (username, tweet_id). Returns ("", "") on failure."""
+    value = value.strip()
+    if not value:
+        return "", ""
+    parsed = urlparse(value)
+    if parsed.netloc and parsed.netloc.lower() in {
+        "x.com",
+        "twitter.com",
+        "nitter.net",
+        *NITTER_HOSTS,
+    }:
+        match = re.search(r"/([A-Za-z0-9_]+)/status(?:es)?/(\d+)", parsed.path)
+        if match:
+            return match.group(1), match.group(2)
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts and re.match(r"^[A-Za-z0-9_]+$", parts[0]):
+            return parts[0], ""
+    m = re.match(r"^@?([A-Za-z0-9_]+)/status(?:es)?/(\d+)$", value)
+    if m:
+        return m.group(1), m.group(2)
+    if value.isdigit():
+        return "", value
+    return "", ""
+
+
+async def _parse_rss_entries(rss_url: str, limit: int) -> list[dict[str, Any]]:
+    """Fetch RSS via httpx (SSRF-safe) and parse with feedparser in thread."""
+    xml_text = await _fetch_text(rss_url, allowed_hosts=NITTER_HOSTS)
+    parsed = await asyncio.to_thread(feedparser.parse, xml_text)
+    entries: list[dict[str, Any]] = []
+    for entry in parsed.entries[:limit]:
+        media: list[str] = []
+        for enc in entry.get("enclosures", []) or []:
+            if isinstance(enc, dict):
+                href = enc.get("href")
+                if isinstance(href, str):
+                    media.append(href)
+        for mc in entry.get("media_content", []) or []:
+            if isinstance(mc, dict):
+                url_mc = mc.get("url")
+                if isinstance(url_mc, str):
+                    media.append(url_mc)
+        entries.append(
+            {
+                "id": entry.get("id", ""),
+                "title": entry.get("title", ""),
+                "link": entry.get("link", ""),
+                "summary": entry.get("summary", ""),
+                "published": entry.get("published", ""),
+                "author": entry.get("author", ""),
+                "media": media,
+            }
+        )
+    return entries
+
+
+async def _x_rss_handler(
+    action: str, params: dict[str, Any], runtime: ConnectorRuntime
+) -> ConnectorResult:
+    if action == "search_topics":
+        query = str(params.get("query") or "").strip()
+        if not query:
+            return ConnectorResult(False, error="query is required")
+        limit = _limit(params)
+        rss_url = f"https://nitter.net/search/rss?f=tweets&q={quote(query)}"
+        entries = await _parse_rss_entries(rss_url, limit)
+        return ConnectorResult(True, data={"results": entries, "query": query})
+
+    if action == "read_topic":
+        rss_url = _nitter_rss_url(str(params.get("url") or params.get("id") or ""))
+        if not rss_url:
+            return ConnectorResult(
+                False,
+                error="url or id must be an X/Twitter profile URL or @username",
+            )
+        limit = _limit(params, default=20)
+        entries = await _parse_rss_entries(rss_url, limit)
+        username = rss_url.rsplit("/", 2)[-2]
+        return ConnectorResult(
+            True,
+            data={
+                "username": username,
+                "url": f"https://nitter.net/{username}",
+                "results": entries,
+            },
+        )
+
+    if action == "read_post":
+        value = str(params.get("url") or params.get("id") or "").strip()
+        username, tweet_id = _parse_tweet_ref(value)
+        if not username or not tweet_id:
+            return ConnectorResult(
+                False,
+                error="url must be an X/Twitter tweet URL (https://x.com/user/status/ID)",
+            )
+        rss_url = f"https://nitter.net/{username}/rss"
+        entries = await _parse_rss_entries(rss_url, 200)
+        for entry in entries:
+            eid = entry.get("id", "")
+            link = entry.get("link", "")
+            if tweet_id in eid or tweet_id in link:
+                return ConnectorResult(True, data=entry)
+        return ConnectorResult(
+            False,
+            error=f"Tweet {tweet_id} not found in @{username}'s recent timeline RSS",
+        )
+
+    if action == "download_attachments":
+        value = str(params.get("url") or params.get("id") or "").strip()
+        limit = _limit(params, maximum=20)
+        username, tweet_id = _parse_tweet_ref(value)
+        if username:
+            rss_url = f"https://nitter.net/{username}/rss"
+            entries = await _parse_rss_entries(rss_url, max(200, limit * 10))
+            if tweet_id:
+                entries = [
+                    e
+                    for e in entries
+                    if tweet_id in e.get("id", "") or tweet_id in e.get("link", "")
+                ]
+            entries = entries[:limit]
+        else:
+            query = value
+            if not query:
+                return ConnectorResult(
+                    False, error="url, id, or search query is required"
+                )
+            rss_url = f"https://nitter.net/search/rss?f=tweets&q={quote(query)}"
+            entries = await _parse_rss_entries(rss_url, limit)
+        files = []
+        headers = _headers()
+        for entry in entries:
+            for media_url in entry.get("media", []):
+                if media_url:
+                    try:
+                        fdata = await _download_url(
+                            media_url,
+                            "x_rss",
+                            Path(urlparse(media_url).path).name or "media",
+                            headers,
+                            allowed_hosts=X_MEDIA_HOSTS,
+                        )
+                        files.append(fdata)
+                    except Exception:
+                        logger.debug(
+                            "Failed to download x_rss attachment", exc_info=True
+                        )
+        return ConnectorResult(
+            True,
+            data={"files": files, "count": len(files), "source": value},
+        )
+
+    return ConnectorResult(False, error=f"Unsupported x_rss action: {action}")
+
+
+# ── Genius Lyrics ──────────────────────────────────────────────────────
+
+
+def _genius_token_headers() -> dict[str, str]:
+    """Заголовки с Genius-токеном."""
+    headers = _headers()
+    token = os.getenv("GENIUS_ACCESS_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _genius_spec() -> ConnectorSpec:
+    """Спецификация Genuis-коннектора."""
+    return ConnectorSpec(
+        name="genius",
+        description="Genius Lyrics connector. Установи GENIUS_ACCESS_TOKEN для поиска текстов песен.",
+        category="music",
+        auth_mode="api_key",
+        docs_url="https://docs.genius.com/",
+        capabilities=("search_songs", "get_lyrics", "search_by_lyrics"),
+        actions=(
+            ConnectorActionSpec(
+                name="search_songs",
+                description="Поиск песен по названию или исполнителю через Genius API.",
+                risk="low",
+                annotations=ConnectorActionAnnotations(
+                    title="Поиск песен", read_only=True
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "default": 5},
+                    },
+                    "required": ["query"],
+                },
+            ),
+            ConnectorActionSpec(
+                name="get_lyrics",
+                description="Получить текст песни по ссылке на Genius или ID трека.",
+                risk="low",
+                annotations=ConnectorActionAnnotations(
+                    title="Текст песни", read_only=True
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "id": {"type": "string"},
+                    },
+                },
+            ),
+            ConnectorActionSpec(
+                name="search_by_lyrics",
+                description="Поиск песен по фрагменту текста (ищет совпадения в лирике).",
+                risk="low",
+                annotations=ConnectorActionAnnotations(
+                    title="Поиск по тексту", read_only=True
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "default": 5},
+                    },
+                    "required": ["query"],
+                },
+            ),
+        ),
+    )
+
+
+async def _scrape_genius_lyrics(song_url: str) -> str | None:
+    """Извлечь текст песни из HTML-страницы Genius."""
+    try:
+        html = await _fetch_text(song_url, headers=_headers())
+        soup = BeautifulSoup(html, "html.parser")
+        containers = soup.select('[data-lyrics-container="true"]')
+        if not containers:
+            return None
+        parts = [
+            c.get_text("\n", strip=True) for c in containers if c.get_text(strip=True)
+        ]
+        return "\n\n".join(parts) or None
+    except Exception:
+        logger.debug("Не удалось извлечь текст из %s", song_url, exc_info=True)
+        return None
+
+
+async def _genius_handler(
+    action: str, params: dict[str, Any], runtime: ConnectorRuntime
+) -> ConnectorResult:
+    token = os.getenv("GENIUS_ACCESS_TOKEN")
+    if not token:
+        return ConnectorResult(False, error="GENIUS_ACCESS_TOKEN не задан")
+
+    headers = _genius_token_headers()
+
+    if action in {"search_songs", "search_by_lyrics"}:
+        query = str(params.get("query") or "").strip()
+        if not query:
+            return ConnectorResult(False, error="query обязателен")
+        limit = _limit(params, default=5, maximum=10)
+        data = await _fetch_json(
+            "https://api.genius.com/search",
+            params={"q": query},
+            headers=headers,
+            allowed_hosts=GENIUS_API_HOSTS,
+        )
+        hits: list[dict[str, Any]] = []
+        for hit in data.get("response", {}).get("hits", [])[:limit]:
+            r = hit.get("result", {})
+            artist = r.get("primary_artist", {})
+            hits.append(
+                {
+                    "title": r.get("title"),
+                    "artist": artist.get("name"),
+                    "url": r.get("url"),
+                    "thumbnail": r.get("song_art_image_thumbnail_url")
+                    or r.get("header_image_thumbnail_url"),
+                    "id": r.get("id"),
+                }
+            )
+        field = "songs" if action == "search_songs" else "lyrics_matches"
+        return ConnectorResult(True, data={field: hits, "query": query})
+
+    if action == "get_lyrics":
+        value = str(params.get("url") or params.get("id") or "").strip()
+        if not value:
+            return ConnectorResult(False, error="url или id обязателен")
+        song_url = value
+        title = artist = thumbnail = ""
+        song_id = ""
+        if value.isdigit():
+            song_id = value
+        else:
+            m = re.search(r"/songs/(\d+)", value)
+            if m:
+                song_id = m.group(1)
+        if song_id:
+            sd = await _fetch_json(
+                f"https://api.genius.com/songs/{song_id}",
+                headers=headers,
+                allowed_hosts=GENIUS_API_HOSTS,
+            )
+            song = sd.get("response", {}).get("song", {})
+            song_url = song.get("url") or song_url
+            title = song.get("title", "")
+            artist = (song.get("primary_artist") or {}).get("name", "")
+            thumbnail = (
+                song.get("song_art_image_thumbnail_url")
+                or song.get("header_image_thumbnail_url")
+                or ""
+            )
+        lyrics = await _scrape_genius_lyrics(song_url) if song_url else None
+        return ConnectorResult(
+            True,
+            data={
+                "title": title,
+                "artist": artist,
+                "url": song_url,
+                "thumbnail": thumbnail,
+                "lyrics": (lyrics or "")[:3000],
+            },
+        )
+
+    return ConnectorResult(False, error=f"Неподдерживаемое действие genius: {action}")
 
 
 async def _download_url(
@@ -648,27 +1143,39 @@ async def _download_url(
     target = (target_dir / safe_name).resolve()
     try:
         target.relative_to(target_dir)
-    except ValueError:
-        raise ValueError("Unsafe download target")
+    except ValueError as err:
+        raise ValueError("Unsafe download target") from err
     current_headers = headers or _headers()
     content_type = ""
 
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         for _ in range(MAX_REDIRECTS + 1):
-            async with client.stream("GET", current_url, headers=current_headers) as response:
+            async with client.stream(
+                "GET", current_url, headers=current_headers
+            ) as response:
                 if response.is_redirect:
                     location = response.headers.get("location")
                     if not location:
-                        raise ConnectorHttpError("Redirect response has no Location header")
-                    next_url = _validate_connector_url(urljoin(str(response.url), location), allowed_hosts=allowed_hosts)
-                    current_headers = _redirect_headers(current_headers, str(response.url), next_url)
+                        raise ConnectorHttpError(
+                            "Redirect response has no Location header"
+                        )
+                    next_url = _validate_connector_url(
+                        urljoin(str(response.url), location),
+                        allowed_hosts=allowed_hosts,
+                    )
+                    current_headers = _redirect_headers(
+                        current_headers, str(response.url), next_url
+                    )
                     current_url = next_url
                     continue
 
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "")
                 if "." not in target.name:
-                    ext = mimetypes.guess_extension(content_type.split(";")[0].strip()) or ".bin"
+                    ext = (
+                        mimetypes.guess_extension(content_type.split(";")[0].strip())
+                        or ".bin"
+                    )
                     target = target.with_suffix(ext)
                 total = 0
                 with target.open("wb") as fh:

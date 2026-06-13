@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import asyncio
-import importlib
 
 import json
 import logging
@@ -12,12 +11,11 @@ from typing import Any
 from src.config import settings
 from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
-from src.core.actions.vector_store import get_vector_store
 from src.core.intelligence.agent_orchestrator import (
     AgentOrchestrator,
     AGENT_SPECS,
 )
-from src.db.repo import get_or_create_user, list_contacts, search_memories
+from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import ChatMessage, TaskType
 from src.llm.router import ExhaustedError
@@ -34,6 +32,7 @@ from src.core.intelligence.context_gatherer import (
     _fetch_transcription,
     _fetch_dsm,
     _fetch_contact_graph,
+    _fetch_self_profile,
     _set_skill_index,
     _set_frozen,
     _gather_context,
@@ -211,7 +210,7 @@ async def process(
     userbot_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
-    register_builtin_tools()
+    await asyncio.to_thread(register_builtin_tools)
 
     # Override provider model if maestro_model is configured
     maestro_model = getattr(settings, "maestro_model", None)
@@ -221,27 +220,13 @@ async def process(
         except (AttributeError, TypeError):
             pass
 
-    ctx_parts = []
-    if global_style:
-        ctx_parts.append(f"Твой стиль общения:\n{global_style}")
-    if self_profile:
-        ctx_parts.append(f"ТВОЙ ПРОФИЛЬ (владелец):\n{self_profile}")
-    if history_block:
-        ctx_parts.append(f"История диалога:\n{history_block}")
-
-    context_str = "\n\n".join(ctx_parts) if ctx_parts else ""
-    user_msg = (
-        f"{context_str}\n\nПользователь: {user_text}"
-        if context_str
-        else f"Пользователь: {user_text}"
-    )
-
     # ═══════════════════════════════════════════════════════════════════
-    # Phase 1 — 9 fully independent context sources (parallelised)
+    # Phase 1 — 10 fully independent context sources (parallelised)
     # Each stage only requires owner_id and/or user_text, no mutual deps.
+    # self_profile also fetched here (was previously sequential in run_pipeline).
     # ═══════════════════════════════════════════════════════════════════
 
-    # ── Execute all 9 Phase-1 tasks in parallel ──
+    # ── Execute all 10 Phase-1 tasks in parallel ──
     raw_results = await asyncio.gather(
         _fetch_rag(owner_id, user_text, rag_enabled, provider),
         _fetch_persona(owner_id),
@@ -252,6 +237,7 @@ async def process(
         _fetch_transcription(owner_id),
         _fetch_dsm(),
         _fetch_contact_graph(owner_id),
+        _fetch_self_profile(owner_id),
         return_exceptions=True,
     )
 
@@ -269,6 +255,34 @@ async def process(
     _transcription_meta = _safe(raw_results[6], None)
     dsm_context_val = _safe(raw_results[7], "")
     contact_graph_val = _safe(raw_results[8], "")
+    fetched_self_profile = _safe(raw_results[9], "")
+
+    # Use fetched self_profile if not explicitly provided by caller
+    _resolved_self_profile = (
+        self_profile
+        if self_profile is not None
+        else (
+            fetched_self_profile
+            if not isinstance(fetched_self_profile, BaseException)
+            else ""
+        )
+    )
+
+    # Build user message context (now after Phase 1 — self_profile is resolved)
+    ctx_parts = []
+    if global_style:
+        ctx_parts.append(f"Твой стиль общения:\n{global_style}")
+    if _resolved_self_profile:
+        ctx_parts.append(f"ТВОЙ ПРОФИЛЬ (владелец):\n{_resolved_self_profile}")
+    if history_block:
+        ctx_parts.append(f"История диалога:\n{history_block}")
+
+    context_str = "\n\n".join(ctx_parts) if ctx_parts else ""
+    user_msg = (
+        f"{context_str}\n\nПользователь: {user_text}"
+        if context_str
+        else f"Пользователь: {user_text}"
+    )
 
     # ═══════════════════════════════════════════════════════════════════
     # Phase 2 — AssemblyContext creation (sequential, uses Phase 1 results)
@@ -299,7 +313,7 @@ async def process(
             anti_ai=anti_ai,
             history_block=history_block or "",
             memory_context=memory_context or "",
-            self_profile=self_profile or "",
+            self_profile=_resolved_self_profile,
             correction_context=correction_context,
             transcription_meta=_transcription_meta,
         )
@@ -545,7 +559,7 @@ async def process(
                 "agents_to_call": [],
                 "final_response": "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ...",
             }
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("Maestro TimeoutError during process")
             return {
                 "understood": "таймаут",
@@ -750,7 +764,7 @@ async def process(
                                 ),
                                 timeout=30.0,
                             )
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             logger.warning(
                                 "admit_ignorance synthesis timeout after 30s"
                             )
@@ -953,18 +967,9 @@ async def run_pipeline(
           - used_agents: list[str] (какие агенты сработали)
           - agent_errors: list[str] (ошибки агентов)
     """
-    # --- Загружаем self-profile, если не передан ---
-    if self_profile is None:
-        try:
-            from src.core.intelligence.prompt_assembler import (
-                assemble_self_profile_prompt,
-            )
-
-            self_profile = await assemble_self_profile_prompt(owner_id)
-        except (SQLAlchemyError, RequestError, HTTPStatusError):
-            logger.debug("Failed to load self_profile, continuing without")
-
     # --- Шаг 1: Maestro планирует ---
+    # self_profile is fetched in parallel inside process() Phase 1 — no
+    # need for a sequential pre-fetch here.
     plan = await process(
         provider,
         user_text,
@@ -1111,7 +1116,7 @@ async def run_pipeline(
                     "agent_errors": agent_errors,
                 }
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("maestro fallback_request TimeoutError")
             return _wrap(
                 {

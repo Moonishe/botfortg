@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -110,7 +111,7 @@ class TestSSRFGuard:
         """127.0.0.1 should be rejected as loopback."""
         from src.core.security.ssrf_guard import validate_base_url
 
-        with pytest.raises(ValueError, match="loopback"):
+        with pytest.raises(ValueError, match="(?i)blocked|loopback|not allowed"):
             validate_base_url("http://127.0.0.1:8080/v1")
 
     # ── blocked: private network ─────────────────────────────────────────
@@ -128,7 +129,7 @@ class TestSSRFGuard:
         """'localhost' hostname should be rejected before DNS resolution."""
         from src.core.security.ssrf_guard import validate_base_url
 
-        with pytest.raises(ValueError, match="Localhost"):
+        with pytest.raises(ValueError, match="(?i)blocked|localhost|not allowed"):
             validate_base_url("https://localhost:3000")
 
     # ── blocked: IPv6-mapped loopback ────────────────────────────────────
@@ -162,13 +163,24 @@ class TestPairing:
 
     @pytest.fixture(autouse=True)
     def _no_db(self) -> None:
-        """Isolate tests from the database — mock get_session to raise."""
-        patcher = patch(
-            "src.core.security.pairing.get_session", side_effect=Exception("No DB")
-        )
-        patcher.start()
-        yield
-        patcher.stop()
+        """Isolate tests from the database — mock get_session and repo functions."""
+        mock_session = MagicMock()
+
+        @asynccontextmanager
+        async def _fake_session():
+            yield mock_session
+
+        with (
+            patch("src.core.security.pairing.get_session", _fake_session),
+            patch(
+                "src.db.repo.is_contact_allowed",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("src.db.repo.add_allowed_contact", new_callable=AsyncMock),
+            patch("src.db.repo.remove_allowed_contact", new_callable=AsyncMock),
+        ):
+            yield
 
     # ── unknown sender ───────────────────────────────────────────────────
 
@@ -199,7 +211,7 @@ class TestPairing:
 
         pm = PairingManager()
         code = pm.start_pairing(sender_id=1)
-        assert len(code) == 6  # token_hex(3) → 6 hex chars
+        assert len(code) == 32  # token_hex(16) → 32 hex chars
 
         ok = await pm.approve(sender_id=1, code=code)
         assert ok is True

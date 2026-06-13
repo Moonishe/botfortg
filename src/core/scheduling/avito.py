@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select
 
@@ -209,7 +209,7 @@ async def _save_listings(
 
             if existing_listing:
                 # Обновляем last_seen_at
-                existing_listing.last_seen_at = datetime.now(timezone.utc)
+                existing_listing.last_seen_at = datetime.now(UTC)
                 continue
 
             # Создаём новый
@@ -261,8 +261,8 @@ async def _save_listings(
                 new_price = listing_data.get("price")
                 if old_price != new_price and new_price is not None:
                     existing.price = new_price
-                    existing.price_changed_at = datetime.now(timezone.utc)
-                    existing.last_seen_at = datetime.now(timezone.utc)
+                    existing.price_changed_at = datetime.now(UTC)
+                    existing.last_seen_at = datetime.now(UTC)
 
                     # Записываем историю цен
                     from src.db.models._avito import AvitoPriceHistory

@@ -1,6 +1,6 @@
 """Contact relationship health scoring — 0-100 metric."""
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,8 +27,8 @@ async def get_contact_health(owner_id: int, peer_id: int) -> dict:
 
         if last_date:
             if last_date.tzinfo is None:
-                last_date = last_date.replace(tzinfo=timezone.utc)
-            days_gap = (datetime.now(timezone.utc) - last_date).days
+                last_date = last_date.replace(tzinfo=UTC)
+            days_gap = (datetime.now(UTC) - last_date).days
         else:
             days_gap = 365  # never messaged
 

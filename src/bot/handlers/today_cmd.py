@@ -1,7 +1,7 @@
 """/today — главный пульт управления ответами. /radar — быстрый срез."""
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -283,7 +283,7 @@ async def _daily_reply_streak(telegram_id: int) -> str:
     if not convos:
         return ""
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     streak = 0
     for i in range(14):  # макс 14 дней назад
         day = (now - timedelta(days=i)).date()

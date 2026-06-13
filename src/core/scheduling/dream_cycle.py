@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from src.config import settings
 from src.db.session import get_session
@@ -70,7 +70,6 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         "dreaming_forgotten": 0,
         "mood_alert_details": [],
     }
-    mood_alert_details: list[str] = summary["mood_alert_details"]  # type: ignore[assignment]
 
     from src.db.repo import get_or_create_user
 
@@ -173,7 +172,7 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                     await get_contact_digest(owner.telegram_id, contact.peer_id)
                     summary["digests"] += 1
                 except Exception:
-                    pass
+                    logger.debug("Non-critical error", exc_info=True)
 
             logger.info(
                 "Dream cycle: phase 4 (digests) — %d rebuilt",
@@ -187,7 +186,7 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 await cleanup_old_summaries()
                 logger.info("Dream cycle: cleaned up old conversation summaries")
             except Exception:
-                pass
+                logger.debug("Non-critical error", exc_info=True)
         except Exception:
             logger.exception("Dream cycle: phase 4 (digests) failed")
 
@@ -536,7 +535,7 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 priority=3,  # PRIORITY_LOW — информационное
             )
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         # ── Proactive pings ────────────────────────────────────────────
         try:
@@ -571,7 +570,7 @@ async def dream_loop(owner_telegram_id: int) -> None:
     cycle, then repeats.  On fatal error sleeps 1 hour before retry.
     """
     while True:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Calculate seconds until next 03:00 UTC
         next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
         if next_run <= now:

@@ -23,7 +23,7 @@ import enum
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -421,7 +421,7 @@ async def acquire_purpose_slot(
     try:
         await asyncio.wait_for(sem.acquire(), timeout=timeout)
         return sem
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "Timed out waiting for '%s' purpose slot (%.0fs), using fallback",
             purpose,
@@ -462,7 +462,7 @@ async def _restore_cooldowns(slot_ids: list[int]) -> None:
         from src.db.models import LlmKeySlot
 
         async with get_session() as session:
-            now_utc = datetime.now(timezone.utc)
+            now_utc = datetime.now(UTC)
 
             # Запрашиваем конкретные слоты с активным кулдауном на уровне SQL
             # (DateTime(timezone=True) гарантирует корректное сравнение для новых записей)
@@ -548,7 +548,7 @@ async def _restore_cooldowns(slot_ids: list[int]) -> None:
 
 
 # Lazy import for get_session used by _restore_cooldowns
-from src.db.session import get_session  # noqa: E402
+from src.db.session import get_session
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Маппинг имён провайдеров → классы
@@ -705,9 +705,7 @@ def auto_select_model(
         # Tier preference (±30 for matching preferred tier)
         pref_tier: str | None = profile.get("prefer_tier")
         info_tier: str = getattr(info, "tier", "")
-        if pref_tier == "paid" and info_tier == "paid":
-            score += 30.0
-        elif pref_tier == "free" and info_tier == "free":
+        if (pref_tier == "paid" and info_tier == "paid") or (pref_tier == "free" and info_tier == "free"):
             score += 30.0
         elif pref_tier is not None and info_tier != pref_tier:
             score -= 10.0  # slight penalty for wrong tier
@@ -942,7 +940,7 @@ async def build_provider(
                 s
                 for s in all_slots
                 if (cooldown := _ensure_utc(s.cooldown_until))
-                and cooldown > datetime.now(timezone.utc)
+                and cooldown > datetime.now(UTC)
             ]
             if in_cooldown:
                 min_cooldown = min(
@@ -957,7 +955,7 @@ async def build_provider(
                     wait_sec = max(
                         1,
                         int(
-                            (min_cooldown - datetime.now(timezone.utc)).total_seconds()
+                            (min_cooldown - datetime.now(UTC)).total_seconds()
                         ),
                     )
                 else:

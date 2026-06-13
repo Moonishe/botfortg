@@ -19,6 +19,7 @@ from typing import Any
 
 from src.core.actions.tool_registry import tool
 from src.config import settings
+from datetime import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +263,6 @@ def _format_uptime(seconds: float) -> str:
 
 def _timestamp_iso(ts: float) -> str:
     """Convert Unix timestamp to ISO 8601 string."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat()

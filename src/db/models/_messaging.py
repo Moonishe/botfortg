@@ -3,7 +3,7 @@ Notification, NewsTopic, Commitment, IndexJob, Folder."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import (
     BigInteger,
@@ -83,7 +83,7 @@ class Commitment(Base):
     )  # open | done | cancelled | reminded
     last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
 
@@ -104,7 +104,7 @@ class AutoReplyLog(Base):
     incoming_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     reply_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+        DateTime, default=lambda: datetime.now(UTC), index=True
     )
 
 
@@ -123,7 +123,7 @@ class IndexJob(Base):
     peer_id: Mapped[int] = mapped_column(BigInteger, index=True)
     last_indexed_message_id: Mapped[int] = mapped_column(BigInteger, default=0)
     last_indexed_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -136,7 +136,7 @@ class TranscriptionCache(Base):
     text: Mapped[str] = mapped_column(Text)
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -154,7 +154,7 @@ class PendingAction(Base):
     )  # send_message | catchup_reply | ...
     payload: Mapped[str] = mapped_column(Text)  # JSON
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
     # Безопасность: TTL + HMAC-подпись (nullable для обратной совместимости)
     expires_at: Mapped[datetime | None] = mapped_column(
@@ -177,7 +177,7 @@ class NewsTopic(Base):
     hours: Mapped[int] = mapped_column(Integer, default=24)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -200,7 +200,7 @@ class Notification(Base):
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     flushed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -226,7 +226,7 @@ class Folder(Base):
     title: Mapped[str] = mapped_column(String(128))
     emoji: Mapped[str | None] = mapped_column(String(8), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -244,11 +244,11 @@ class ConversationSummary(Base):
     summary_text: Mapped[str] = mapped_column(Text)
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
     # Relationship to User
-    user: Mapped["User"] = relationship("User", back_populates="conversation_summaries")
+    user: Mapped[User] = relationship("User", back_populates="conversation_summaries")
 
 
 class ScheduledMessage(Base):
@@ -271,7 +271,7 @@ class ScheduledMessage(Base):
         String(16), default="pending", comment="pending | sent | failed | cancelled"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -281,7 +281,7 @@ class ScheduledMessage(Base):
         Boolean, default=True, comment="Отправить через userbot"
     )
 
-    user: Mapped["User"] = relationship("User", back_populates="scheduled_messages")
+    user: Mapped[User] = relationship("User", back_populates="scheduled_messages")
 
 
 class MessageReaction(Base):
@@ -302,7 +302,7 @@ class MessageReaction(Base):
         default=False
     )  # реакция на сообщение бота?
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )
 
 
@@ -319,5 +319,5 @@ class HumanizerFeedback(Base):
     replacement: Mapped[str | None] = mapped_column(String(256), nullable=True)
     action: Mapped[str] = mapped_column(String(16))  # "accept" | "reject"
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(UTC)
     )

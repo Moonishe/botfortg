@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 from pathlib import Path
 
 from src.core.intelligence.soul_blocks import ANTI_AI_BLOCK, _load_blocks
@@ -94,7 +93,7 @@ class AssemblyContext:
 
     target: str  # "maestro" | "agent" | "summarizer"
     user_id: int
-    contact_id: Optional[int] = None
+    contact_id: int | None = None
     conversation_history: list = field(default_factory=list)
     memory_context: str = ""
     deep_memory: str = ""

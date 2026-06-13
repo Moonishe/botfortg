@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 async def resolve_contact_fast(
-    client: "TelegramClient",
-    owner: "User",
+    client: TelegramClient,
+    owner: User,
     query: str,
     *,
     user_id: int | None = None,
@@ -88,6 +88,6 @@ async def resolve_contact_fast(
 __all__ = [
     "ContactCandidate",
     "resolve",
-    "resolve_with_llm",
     "resolve_contact_fast",
+    "resolve_with_llm",
 ]

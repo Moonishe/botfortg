@@ -311,7 +311,7 @@ def validate_base_url(url: str | None) -> str | None:
 
     # Try to parse as IP address — catches dotted, IPv6-mapped
     try:
-        ip = ipaddress.ip_address(hostname)
+        _ = ipaddress.ip_address(hostname)
     except ValueError:
         # hostname is a domain name — resolve via DNS and check all IPs
         try:

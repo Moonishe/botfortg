@@ -18,7 +18,7 @@ import re
 from typing import Any
 
 from src.core.actions.tool_registry import tool
-from src.core.security.ssrf_guard import _check_ssrf_async, _check_ssrf
+from src.core.security.ssrf_guard import _check_ssrf_async
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ async def _read_feed(url: str, limit: int) -> dict[str, Any]:
         except ImportError:
             raise ImportError("feedparser not installed: pip install feedparser")
 
-        import requests  # noqa: PLC0415 — nested import
+        import requests
 
         headers = {"User-Agent": _USER_AGENT}
         try:
@@ -198,8 +198,8 @@ async def _discover_feed(url: str) -> dict[str, Any]:
 
     def _discover() -> list[dict[str, str]]:
         try:
-            import requests  # noqa: PLC0415 — nested import
-            from bs4 import BeautifulSoup  # noqa: PLC0415 — nested import
+            import requests
+            from bs4 import BeautifulSoup
         except ImportError:
             raise ImportError(
                 "requests and beautifulsoup4 are required for feed discovery: "

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ _draft_lock = asyncio.Lock()
 
 async def _check_rate_limit(user_id: int, max_per_hour: int) -> bool:
     async with _draft_lock:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
         if user_id not in _draft_timestamps:
             _draft_timestamps[user_id] = deque()
         q = _draft_timestamps[user_id]
@@ -35,7 +35,7 @@ async def _check_rate_limit(user_id: int, max_per_hour: int) -> bool:
         q.append(now)
         # Очистка stale-ключей: удаляем user_id с пустыми или устаревшими deque
         stale_threshold = timedelta(hours=2)
-        for uid in list(_draft_timestamps.keys()):
+        for uid in list(_draft_timestamps):
             dq = _draft_timestamps[uid]
             if not dq or (now - dq[-1]) > stale_threshold:
                 del _draft_timestamps[uid]
@@ -43,7 +43,7 @@ async def _check_rate_limit(user_id: int, max_per_hour: int) -> bool:
 
 
 async def should_suggest(
-    settings: "UserSettings", user_id: int, text: str, provider=None
+    settings: UserSettings, user_id: int, text: str, provider=None
 ) -> bool:
     """Проверяет, нужно ли предлагать черновик на это входящее сообщение."""
     if not settings.draft_suggestions_enabled:
@@ -58,13 +58,13 @@ async def should_suggest(
 
 
 async def suggest_draft(
-    provider: "LLMProvider",
+    provider: LLMProvider,
     owner_id: int,
     peer_id: int,
-    contact: "Contact",
+    contact: Contact,
     incoming_text: str,
     sender_name: str,
-    messages: list["Message"],
+    messages: list[Message],
 ) -> str | None:
     """Генерирует черновик ответа через LLM."""
     from src.core.intelligence.summarizer import draft_reply

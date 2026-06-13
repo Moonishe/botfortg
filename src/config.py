@@ -141,6 +141,20 @@ class Settings(BaseSettings):
     owner_telegram_id: int = Field(
         ..., description="Telegram user_id единственного владельца"
     )
+    # Webhook mode (вместо long-polling). Если задано WEBHOOK_URL — бот запускается
+    # в webhook-режиме на порту WEBHOOK_PORT (по умолчанию 8080).
+    webhook_url: str = Field(
+        "",
+        description="Полный URL webhook (https://example.com/webhook). Пустая строка = polling.",
+    )
+    webhook_port: int = Field(8080, description="Порт для встроенного webhook-сервера")
+    webhook_path: str = Field(
+        "/webhook", description="Путь webhook (относительно webhook_url)"
+    )
+    webhook_secret_token: str = Field(
+        "",
+        description="Secret token for webhook validation. Set to random string.",
+    )
     encryption_key: str = Field(..., description="Fernet-ключ (base64)")
     database_url: str = Field("sqlite+aiosqlite:///data/app.db")
     proxy_url: str = Field(
@@ -267,6 +281,11 @@ class Settings(BaseSettings):
         description="Context7 API key for documentation search (https://context7.com)",
     )
 
+    genius_access_token: str = Field(
+        "",
+        description="Genius API access token для поиска текстов песен (https://genius.com/api-clients)",
+    )
+
     embedding_dim: int = Field(
         1536,
         description="Размерность эмбеддингов (OpenAI text-embedding-3-small: 1536, BGE-M3: 1024, Gemini text-embedding-004: 768)",
@@ -301,6 +320,10 @@ class Settings(BaseSettings):
     smart_routing_enabled: bool = Field(
         True,
         description="Включить умный выбор лёгкой/тяжёлой модели по сложности запроса",
+    )
+    personalized_greeting_enabled: bool = Field(
+        False,
+        description="Включить персонализированные приветствия при /start на основе памяти",
     )
 
     # ── Ambient Intelligence (Phase 6) ──
@@ -641,6 +664,26 @@ class Settings(BaseSettings):
     background_model: str = Field("", description="Model override for background tasks")
     vision_model: str = Field("", description="Model override for vision tasks")
     stt_model: str = Field("", description="STT model override")
+
+    # ── Deep Research (C2 Clean Architecture) ──
+    deep_research_kg_enabled: bool = Field(
+        True, description="Knowledge Graph в deep research"
+    )
+    deep_research_auto_tools_enabled: bool = Field(
+        True, description="Auto-tool selection"
+    )
+    deep_research_swarm_enabled: bool = Field(True, description="Swarm orchestrator")
+    deep_research_memory_seed_enabled: bool = Field(
+        True, description="Memory-seeded research"
+    )
+    deep_research_timeline_enabled: bool = Field(
+        True, description="Timeline extraction"
+    )
+    tool_selector_max_tools: int = Field(
+        3, description="Максимум инструментов на пробел"
+    )
+    swarm_max_parallel: int = Field(3, description="Максимум параллельных sub-agent'ов")
+    memory_seed_max_facts: int = Field(5, description="Максимум prior facts для seed'а")
 
     @property
     def data_dir(self) -> Path:

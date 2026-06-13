@@ -2,9 +2,8 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from enum import Enum
-from typing import Optional
 from sqlalchemy import func, select
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, list_memories, list_contacts
@@ -45,7 +44,7 @@ async def calculate_health_score(owner_id: int) -> dict:
 
         active = [m for m in memories if m.is_active]
         all_contacts = len(contacts)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         diagnostics = []
 
@@ -226,7 +225,7 @@ async def calculate_health_score(owner_id: int) -> dict:
                 components=result,
             )
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
         return result
 
@@ -280,7 +279,7 @@ async def compute_emotional_trend(owner_id: int) -> str | None:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         memories = await list_memories(session, owner)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     recent_cutoff = now - timedelta(days=7)
     prior_cutoff = now - timedelta(days=14)
 
@@ -359,9 +358,9 @@ class HealthRecommendation:
 def generate_recommendations(
     health: dict,
     *,
-    stale_fact_ratio: Optional[float] = None,
-    graph_density: Optional[float] = None,
-    orphan_ratio: Optional[float] = None,
+    stale_fact_ratio: float | None = None,
+    graph_density: float | None = None,
+    orphan_ratio: float | None = None,
 ) -> list[HealthRecommendation]:
     """Генерирует actionable-рекомендации на основе метрик здоровья памяти.
 

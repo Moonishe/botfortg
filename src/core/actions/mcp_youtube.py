@@ -384,7 +384,7 @@ async def _youtube_audio(url: str) -> dict[str, Any]:
         )
     except ImportError as exc:
         return {"error": str(exc)}
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"error": "Audio download timed out"}
     except Exception as exc:
         logger.warning("yt-dlp audio download error: %s", exc)
@@ -451,7 +451,7 @@ async def _youtube_subtitles(url: str, lang: str) -> dict[str, Any]:
                 return {"error": f"No subtitles found for lang={lang}"}
 
             srt_path = os.path.join(workdir, srt_files[0])
-            with open(srt_path, "r", encoding="utf-8") as f:
+            with open(srt_path, encoding="utf-8") as f:
                 raw = f.read()
 
             # Parse SRT: skip index lines (short digit-only ≤4 chars),

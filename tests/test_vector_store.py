@@ -49,7 +49,8 @@ def test_point_id_no_collisions():
 # ---------------------------------------------------------------------------
 
 
-def test_get_vector_store_lazy():
+@pytest.mark.asyncio
+async def test_get_vector_store_lazy():
     """get_vector_store is a lazy singleton: None at import, same instance on repeat calls."""
     import src.core.actions.vector_store as vs
 
@@ -66,8 +67,8 @@ def test_get_vector_store_lazy():
             Settings, "data_dir", new_callable=PropertyMock
         ) as mock_data_dir:
             mock_data_dir.return_value = Path(tmpdir)
-            vs1 = get_vector_store()
-            vs2 = get_vector_store()
+            vs1 = await get_vector_store()
+            vs2 = await get_vector_store()
             vs_instance = vs1
             assert vs1 is vs2, (
                 "get_vector_store() must return the same instance on repeated calls"
@@ -75,7 +76,7 @@ def test_get_vector_store_lazy():
     # Ensure Qdrant client is closed BEFORE tempdir cleanup
     if vs_instance is not None:
         try:
-            vs_instance._client.close()
+            await vs_instance.shutdown()
         except Exception:
             pass
     # Reset singleton to prevent stale closed-client singleton from leaking

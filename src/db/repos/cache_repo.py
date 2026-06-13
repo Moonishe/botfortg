@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,14 +20,13 @@ async def get_agent_cache(session: AsyncSession, cache_key: str) -> str | None:
     )
     row = result.scalar_one_or_none()
     if row:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Handle both old naive and new aware datetimes
         try:
             age = (now - row.created_at).total_seconds()
         except TypeError:
-            from datetime import timezone as tz
 
-            age = (now - row.created_at.replace(tzinfo=tz.utc)).total_seconds()
+            age = (now - row.created_at.replace(tzinfo=UTC)).total_seconds()
         if age < row.ttl_seconds:
             return row.result_json
         await session.delete(row)
@@ -45,7 +44,7 @@ async def upsert_agent_cache(
     row = result.scalar_one_or_none()
     if row:
         row.result_json = result_json
-        row.created_at = datetime.now(timezone.utc)
+        row.created_at = datetime.now(UTC)
         row.ttl_seconds = ttl_seconds
     else:
         session.add(

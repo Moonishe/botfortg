@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _minimal_env() -> dict[str, str]:
     """Return the bare env vars needed for project code to import cleanly."""
     return {
-        "BOT_TOKEN": "test:token",
+        "BOT_TOKEN": "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef",
         "OWNER_TELEGRAM_ID": "123456789",
         "ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         "PYTHONUNBUFFERED": "1",

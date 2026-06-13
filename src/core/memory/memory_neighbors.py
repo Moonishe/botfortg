@@ -263,7 +263,6 @@ async def get_contact_graph(user_id: int, limit: int = 20) -> dict:
     Возвращает:
         {"nodes": ["Маша", "Петя", ...], "edges": [{"from": "...", "to": "...", "relation": "..."}, ...]}
     """
-    from collections import defaultdict
     from sqlalchemy import select
 
     from src.db.models import MemoryLink

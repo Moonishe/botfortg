@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, Message
 from src.config import settings
 from src.core.onboarding import get_onboarding_phase, is_onboarded  # re-export
 
-__all__ = ["OwnerOnly", "is_onboarded", "get_onboarding_phase"]
+__all__ = ["OwnerOnly", "get_onboarding_phase", "is_onboarded"]
 
 logger = logging.getLogger(__name__)
 
