@@ -1,6 +1,11 @@
-"""Backward-compatible re-export stub. All logic in src.bot.handlers.free_text/."""
+"""Free-text pipeline — backward-compatible re-export facade.
 
-from src.bot.handlers.free_text import (
+All implementation in _core.py. This package exists so future splits
+(_stages.py, _executors.py, _dispatch.py etc.) can be imported here
+without breaking existing callers.
+"""
+
+from src.bot.handlers.free_text._core import (
     _dispatch,
     _save_intent_context,
     check_contact_rules,
