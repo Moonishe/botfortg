@@ -1,5 +1,6 @@
 """Утилиты для работы с диалогами Telethon."""
 
+import asyncio
 import logging
 
 from sqlalchemy import select as sa_select
@@ -342,10 +343,18 @@ async def prefetch_recent_messages(
     skip_bots: bool = True,
     skip_channels: bool = False,
 ) -> dict[str, int]:
-    # один разовый прогон при /sync — заполняет БД и FTS5 для холодного старта
+    """Один разовый прогон при /sync — заполняет БД и FTS5 для холодного старта.
+
+    Фаза 1: собрать top_n диалогов (быстро, только фильтрация).
+    Фаза 2: параллельная загрузка через asyncio.gather + Semaphore(5),
+            устраняющая N+1 sequential bottleneck.
+    """
     stats = {"chats": 0, "messages": 0, "skipped": 0}
+
+    # --- Фаза 1: сбор подходящих диалогов ---
+    targets: list[int] = []
     async for dialog in client.iter_dialogs(limit=top_n * 3, archived=False):
-        if stats["chats"] >= top_n:
+        if len(targets) >= top_n:
             break
         entity = dialog.entity
         is_bot = isinstance(entity, TgUser) and bool(getattr(entity, "bot", False))
@@ -358,19 +367,38 @@ async def prefetch_recent_messages(
         if skip_channels and is_channel_only:
             stats["skipped"] += 1
             continue
-        try:
-            msgs = await load_chat(
-                client,
-                owner_telegram_id,
-                entity.id,
-                limit=per_chat,
-                transcribe=False,
-                parse_docs=False,
-                incremental=True,
-            )
+        targets.append(entity.id)
+
+    if not targets:
+        return stats
+
+    # --- Фаза 2: параллельная загрузка с семафором ---
+    sem = asyncio.Semaphore(5)
+
+    async def _load_one(peer_id: int) -> tuple[str, int]:
+        async with sem:
+            try:
+                msgs = await load_chat(
+                    client,
+                    owner_telegram_id,
+                    peer_id,
+                    limit=per_chat,
+                    transcribe=False,
+                    parse_docs=False,
+                    incremental=True,
+                )
+                return ("ok", len(msgs))
+            except Exception:
+                logger.exception("prefetch failed for peer %s", peer_id)
+                return ("err", 0)
+
+    results = await asyncio.gather(*(_load_one(pid) for pid in targets))
+
+    for status, msg_count in results:
+        if status == "ok":
             stats["chats"] += 1
-            stats["messages"] += len(msgs)
-        except Exception:
-            logger.exception("prefetch failed for peer %s", entity.id)
+            stats["messages"] += msg_count
+        else:
             stats["skipped"] += 1
+
     return stats
