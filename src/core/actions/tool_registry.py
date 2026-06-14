@@ -202,6 +202,9 @@ class ToolRegistry:
         if spec.name in self._tools:
             logger.warning("Tool %r already registered, overwriting", spec.name)
         self._tools[spec.name] = spec
+        # Invalidate FTS5 cache so search() picks up the new/updated tool
+        if hasattr(self, "_fts5_conn"):
+            del self._fts5_conn
 
     # ------------------------------------------------------------------
     # Lookup
@@ -220,6 +223,49 @@ class ToolRegistry:
         for spec in self._tools.values():
             categories.setdefault(spec.category, []).append(spec)
         return categories
+
+    def search(self, query: str, top_k: int = 5) -> list[ToolSpec]:
+        """FTS5 full-text search over tool names + descriptions.
+
+        Builds an in-memory FTS5 index on first call (cached).
+        """
+        import sqlite3
+
+        _FTS5_KW = frozenset({"or", "and", "not", "near"})
+        parts: list[str] = []
+        for raw in query.split():
+            clean = "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
+            if len(clean) < 2:
+                continue
+            lower = clean.lower()
+            parts.append(f'"{lower}"' if lower in _FTS5_KW else lower + "*")
+        if not parts:
+            return []
+        fts5_query = " OR ".join(parts)
+
+        if not hasattr(self, "_fts5_conn"):
+            self._fts5_conn = sqlite3.connect(":memory:")
+            self._fts5_conn.execute(
+                "CREATE VIRTUAL TABLE tools_fts USING fts5("
+                "name, description, tokenize='unicode61 remove_diacritics 2')"
+            )
+            self._fts5_conn.execute("BEGIN")
+            for spec in self._tools.values():
+                self._fts5_conn.execute(
+                    "INSERT INTO tools_fts(name, description) VALUES (?, ?)",
+                    (spec.name, spec.description),
+                )
+            self._fts5_conn.execute("COMMIT")
+
+        try:
+            rows = self._fts5_conn.execute(
+                "SELECT name FROM tools_fts WHERE tools_fts MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                (fts5_query, top_k),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [self._tools[r[0]] for r in rows if r[0] in self._tools]
 
     def list_for_prompt(self) -> str:
         """Format all tools as a prompt-friendly string for LLM system prompts.
