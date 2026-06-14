@@ -400,7 +400,7 @@ async def cb_research_save_memory(callback: CallbackQuery) -> None:
         try:
             await msg.edit_reply_markup(reply_markup=None)
         except Exception:
-            pass
+            logger.debug("Non-critical error", exc_info=True)
 
     await callback.answer("✅ Сохранено в память!")
 

@@ -558,7 +558,7 @@ async def _voice_worker() -> None:
 
                                     await message.react([ReactionTypeEmoji(emoji="✅")])
                                 except Exception:
-                                    pass  # реакция не критична
+                                    logger.debug("Non-critical error", exc_info=True)  # реакция не критична
                         except TelegramAPIError:
                             logger.exception("failed to send transcription result")
 
