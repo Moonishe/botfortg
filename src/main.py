@@ -305,6 +305,7 @@ async def main() -> None:
     _health_check_task = asyncio.create_task(userbot_manager.health_check_loop())
 
     # --- Key Rotation: инициализация KEK/DEK менеджера ---
+    _dek_rotation_task: asyncio.Task | None = None
     if settings.key_rotation_enabled:
         try:
             from src.core.crypto.key_rotation import init_rotation_manager
@@ -312,6 +313,21 @@ async def main() -> None:
             _kek = settings.encryption_key.encode()
             _mgr = init_rotation_manager(_kek)
             logger.info("KeyRotationManager инициализирован (KEK/DEK)")
+
+            # Auto-rotate DEK every 30 days (background)
+            async def _auto_rotate_dek():
+                while True:
+                    await asyncio.sleep(86400 * 30)
+                    try:
+                        async with get_session() as _rot_sess:
+                            await _mgr.load_from_db(_rot_sess)
+                            await _mgr.rotate()
+                            await _rot_sess.commit()
+                            logger.info("DEK rotation completed successfully")
+                    except Exception:
+                        logger.exception("DEK auto-rotation failed")
+
+            _dek_rotation_task = asyncio.create_task(_auto_rotate_dek())
         except Exception:
             logger.exception("Ошибка инициализации KeyRotationManager")
 
@@ -458,13 +474,16 @@ async def main() -> None:
         logger.info("Shutting down…")
 
         # Cancel background tasks first
-        for _t, _name in [
+        _shutdown_tasks = [
             (_cleanup_task, "cleanup"),
             (_update_check_task, "update_check"),
             (_prefetch_task, "startup_prefetch"),
             (_pending_cleanup_task, "pending_cleanup"),
             (_health_check_task, "health_check"),
-        ]:
+        ]
+        if _dek_rotation_task:
+            _shutdown_tasks.append((_dek_rotation_task, "dek_rotation"))
+        for _t, _name in _shutdown_tasks:
             _t.cancel()
             try:
                 await asyncio.wait_for(_t, timeout=_SHUTDOWN_TASK_TIMEOUT)

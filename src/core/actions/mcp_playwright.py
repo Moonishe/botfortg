@@ -44,7 +44,9 @@ _SCREENSHOTS_DIR: Path = settings.data_dir / "screenshots"
 _NAVIGATE_TIMEOUT: int = 30_000  # ms (30 s)
 _OPERATION_TIMEOUT: int = 30  # seconds for asyncio.wait_for
 _IDLE_TIMEOUT: int = 300  # seconds (5 min) before closing idle page
-_MAX_REUSE: int = 50  # recycle browser after N calls to prevent memory leak
+_MAX_REUSE: int = (
+    10_000  # recycle after 10K calls (was 50 — prevents excessive Chromium restarts)
+)
 
 # Платформенно-зависимые аргументы Chromium:
 #   - Windows: песочница Chromium не поддерживается — нужен --no-sandbox.
@@ -118,7 +120,7 @@ class _BrowserManager:
             if self._playwright is None:
                 await self._init_browser()
 
-            if self._page is None:
+            if self._page is None or self._page.is_closed():
                 self._page = await self._browser.new_page()
 
             self._touch()
