@@ -43,6 +43,31 @@ class MemoryJob:
 # Очередь заданий (configurable maxsize — защита от переполнения памяти)
 _queue: asyncio.Queue[MemoryJob] = asyncio.Queue(maxsize=settings.memory_queue_maxsize)
 
+# Dead Letter Queue — задания, не поместившиеся в основную очередь.
+# Периодически ре-инжектируются при освобождении места.
+_dlq: list[MemoryJob] = []
+_DLQ_MAX = 50
+_dlq_lock = asyncio.Lock()
+
+
+async def _retry_dlq() -> None:
+    """Фоновый retry: перекладывает задания из DLQ в основную очередь."""
+    while True:
+        await asyncio.sleep(30)
+        async with _dlq_lock:
+            retried = 0
+            while _dlq and not _queue.full():
+                job = _dlq.pop(0)
+                _queue.put_nowait(job)
+                retried += 1
+            if _dlq:
+                # Trim oldest if DLQ overflows
+                while len(_dlq) > _DLQ_MAX:
+                    _dlq.pop(0)
+                    retried -= 1
+        if retried:
+            logger.info("DLQ: re-injected %d jobs, %d remaining", retried, len(_dlq))
+
 
 async def enqueue(job: MemoryJob) -> None:
     """Добавить задание в очередь (с таймаутом из settings.memory_queue_put_timeout).
@@ -56,13 +81,14 @@ async def enqueue(job: MemoryJob) -> None:
         await asyncio.wait_for(_queue.put(job), timeout=timeout)
     except TimeoutError:
         logger.warning(
-            "Queue full (size=%d, max=%d), dropping job %s after %.0fs timeout "
-            "(not critical: memory extraction is best-effort)",
+            "Queue full (size=%d, max=%d), moving job %s to DLQ",
             _queue.qsize(),
             _queue.maxsize,
             job.job_type,
-            timeout,
         )
-        # Best-effort: don't raise — memory extraction is non-critical.
-        # Callers already handle this via fire-and-forget (track_ff).
-        return
+        # Move to Dead Letter Queue — will be retried when space frees up
+        async with _dlq_lock:
+            if len(_dlq) < _DLQ_MAX:
+                _dlq.append(job)
+            else:
+                logger.error("DLQ overflow — job %s permanently dropped", job.job_type)

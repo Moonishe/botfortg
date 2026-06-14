@@ -506,21 +506,40 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             logger.exception("mirror handler failed")
 
     async def _on_message_edited(event: events.MessageEdited.Event) -> None:
-        """Обработка редактирования сообщения — детекция реакций пользователей.
+        """Обработка редактирования сообщения.
 
-        Когда пользователь ставит реакцию на сообщение, Telegram отправляет
-        событие MessageEdited с обновлённым списком реакций.
-        Извлекаем recent_reactions и сохраняем в БД (fire-and-forget).
+        - Обновляет текст сообщения в БД.
+        - Детектит реакции пользователей (recent_reactions).
         """
         try:
             msg: TgMessage = event.message
-            # Проверяем, есть ли реакции на сообщении
-            if not hasattr(msg, "reactions") or not msg.reactions:
-                return
-
             peer_id = _peer_id_of(msg)
             if not peer_id:
                 return
+
+            # Update message text in DB
+            edited_text = msg.text or msg.message or None
+            if edited_text:
+                try:
+                    async with get_session() as _ed_session:
+                        owner = await get_or_create_user(_ed_session, owner_telegram_id)
+                        await upsert_message(
+                            _ed_session,
+                            user_id=owner.id,
+                            peer_id=peer_id,
+                            message_id=msg.id,
+                            sender_id=msg.sender_id,
+                            sender_name="",
+                            is_outgoing=bool(msg.out),
+                            date=msg.date.replace(tzinfo=None) if msg.date else None,
+                            kind="text",
+                            text=edited_text,
+                            transcript=None,
+                            media_path=None,
+                            extracted_text=None,
+                        )
+                except Exception:
+                    logger.debug("Failed to update edited message text", exc_info=True)
 
             reactions_obj = msg.reactions
             # recent_reactions — список MessagePeerReaction (кто какую реакцию поставил)

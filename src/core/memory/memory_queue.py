@@ -9,7 +9,13 @@ import logging
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.core.memory._queue_core import MemoryJob, MemoryQueueFullError, _queue, enqueue
+from src.core.memory._queue_core import (
+    MemoryJob,
+    MemoryQueueFullError,
+    _queue,
+    _retry_dlq,
+    enqueue,
+)
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import TaskType
@@ -248,14 +254,13 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
 
 
 async def start_worker() -> asyncio.Task:
-    """Запустить фонового worker'а (если ещё не запущен).
-
-    Вызывается при старте приложения (main.py).
-    """
+    """Запустить фонового worker'а и DLQ retry loop (если ещё не запущены)."""
     global _worker_task
     async with _worker_lock:
         if _worker_task is None or _worker_task.done():
             _worker_task = asyncio.create_task(_worker(), name="memory-queue-worker")
+            # DLQ retry loop — re-injects overflowed jobs every 30s
+            asyncio.create_task(_retry_dlq(), name="memory-dlq-retry")
         return _worker_task
 
 
