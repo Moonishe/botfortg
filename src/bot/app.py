@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from time import time
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
@@ -171,7 +172,17 @@ def _setup_bot_and_dispatcher(
 
         from src.bot.filters import get_onboarding_phase
 
-        phase = await get_onboarding_phase(tg_id)
+        # ── Cache onboarding phase (TTL 60s) — avoids DB query per message ──
+        _phase_cache: dict[int, tuple[int, float]] = {}
+        _phase_cache_ttl = 60.0
+        now = time()
+
+        cached = _phase_cache.get(tg_id)
+        if cached and now - cached[1] < _phase_cache_ttl:
+            phase = cached[0]
+        else:
+            phase = await get_onboarding_phase(tg_id)
+            _phase_cache[tg_id] = (phase, now)
 
         # Фаза 4 — всё настроено, пропускаем
         if phase == 4:
@@ -179,14 +190,20 @@ def _setup_bot_and_dispatcher(
 
         # Фаза 1 — нет сессии: только /start, /login, /cancel (уже пропущены выше)
         if phase == 1:
-            await message.answer("Сначала сделай /login")
+            try:
+                await message.answer("Сначала сделай /login")
+            except Exception:
+                logger.debug("Non-critical error", exc_info=True)
             return
 
         # Фаза 2 — нет LLM-ключа: разрешаем /keys и /settings
         if phase == 2:
             if text.startswith(("/keys", "/settings")):
                 return await handler(message, data)
-            await message.answer("Теперь добавь API-ключ для LLM. Жми /keys add.")
+            try:
+                await message.answer("Теперь добавь API-ключ для LLM. Жми /keys add.")
+            except Exception:
+                logger.debug("Non-critical error", exc_info=True)
             return
 
         # Фаза 3 — нет часового пояса / синхронизации:

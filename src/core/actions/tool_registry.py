@@ -489,6 +489,16 @@ class ToolRegistry:
         if _handler_accepts_kwarg(spec.handler, "_confirmed"):
             params["_confirmed"] = confirmed
 
+        # ── Tool Loop Guard — prevent LLM infinite loops ──
+        from src.core.actions.tool_guardrails import ToolLoopGuard
+
+        if not hasattr(self, "_loop_guard"):
+            self._loop_guard = ToolLoopGuard()
+        loop = self._loop_guard.check(name, params)
+        if loop.blocked:
+            return {"error": loop.reason, "blocked_by": "tool_loop_guard"}
+        self._loop_guard.record(name, params)
+
         try:
             result = await spec.handler(**params)
             # Normalise None return to a success dict
