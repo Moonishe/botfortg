@@ -1,7 +1,7 @@
 """LLM package — re-exports provider builder and core types."""
 
 from src.llm.base import ChatMessage, LLMProvider, TaskType, VisionProvider
-from src.llm.router import build_provider
+from src.llm.provider_manager import build_provider
 from src.llm.vision_provider import OpenAIVisionProvider, VisionResult
 
 __all__ = [
