@@ -111,6 +111,32 @@ _ALLOWED_COMMANDS_SSH: set[tuple[str, ...]] = {
     ("journalctl",),
 }
 
+# Admin mode — расширенный доступ (требует подтверждения владельца).
+# Включает pip, git push/pull, docker управление, systemctl restart.
+_ALLOWED_COMMANDS_ADMIN: set[tuple[str, ...]] = {
+    *_ALLOWED_COMMANDS,
+    ("pip", "install"),
+    ("pip", "uninstall"),
+    ("pip", "freeze"),
+    ("python", "-m"),
+    ("git", "pull"),
+    ("git", "checkout"),
+    ("git", "add"),
+    ("git", "commit"),
+    ("git", "push"),
+    ("git", "fetch"),
+    ("git", "merge"),
+    ("docker", "restart"),
+    ("docker", "stop"),
+    ("docker", "start"),
+    ("docker-compose", "restart"),
+    ("docker-compose", "stop"),
+    ("docker-compose", "start"),
+    ("systemctl", "restart"),
+    ("systemctl", "start"),
+    ("systemctl", "stop"),
+}
+
 # Characters rejected even with shell=False.
 # Shell metacharacters (|, ;, &&, ||, >, <, `, $(, &, #, $) are harmless
 # with shell=False — they are passed literally to the command binary.
@@ -241,12 +267,14 @@ def _is_command_allowed(
         "action": "str — 'run', 'check', or 'list_backends'",
         "command": "str — shell command to execute or check",
         "backend": "str — 'local' (default), 'docker', or 'ssh'",
+        "admin_mode": "bool — True для расширенного доступа (pip, git push, systemctl). Только для local backend.",
     },
 )
 async def mcp_shell(
     action: str,
     command: str = "",
     backend: str = "local",
+    admin_mode: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Shell command execution tool.
@@ -255,6 +283,8 @@ async def mcp_shell(
         action: ``"run"``, ``"check"``, or ``"list_backends"``.
         command: Shell command to execute or check.
         backend: ``"local"`` (default), ``"docker"``, or ``"ssh"``.
+        admin_mode: If True, allows extended commands (pip install, git push,
+            systemctl). Requires owner confirmation.
 
     Returns:
         A dict with ``stdout``, ``stderr``, ``returncode`` on success,
@@ -277,12 +307,16 @@ async def mcp_shell(
 
         command = command.strip()
 
-        # ── Select allowlist based on backend ─────────────────────────
+        # ── Select allowlist based on backend + admin_mode ────────────
         if backend == "local":
-            allowlist = _ALLOWED_COMMANDS
+            allowlist = _ALLOWED_COMMANDS_ADMIN if admin_mode else _ALLOWED_COMMANDS
         elif backend == "docker":
+            if admin_mode:
+                return {"error": "admin_mode is not supported for docker backend"}
             allowlist = _ALLOWED_COMMANDS_DOCKER
         elif backend == "ssh":
+            if admin_mode:
+                return {"error": "admin_mode is not supported for ssh backend"}
             allowlist = _ALLOWED_COMMANDS_SSH
         else:
             return {"error": f"Unknown backend {backend!r}. Valid: local, docker, ssh"}
