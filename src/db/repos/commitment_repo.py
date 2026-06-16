@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
 import hmac
+import json
 import logging
 from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import settings
 from src.db.models import (
     Commitment,
     PendingAction,
@@ -24,11 +23,26 @@ logger = logging.getLogger(__name__)
 _PENDING_TTL_MINUTES = 10  # TTL по умолчанию для PendingAction
 
 
-def _compute_hmac(action_id: int) -> str:
-    """Вычисляет HMAC-подпись для action_id.
-    Использует первые 32 байта Fernet-ключа в качестве секрета."""
-    secret = settings.encryption_key.encode()[:32]
-    return hmac.new(secret, str(action_id).encode(), hashlib.sha256).hexdigest()[:16]
+def _compute_action_signature(action: PendingAction) -> str:
+    """Вычисляет unified HMAC-подпись для PendingAction.
+
+    Единый формат для DB-route: action_key:id, user_id (DB id), verb,
+    expires_at (UTC timestamp), payload_hash. Используется тот же алгоритм,
+    что и в src.core.security.approval.
+    """
+    from src.core.security import approval
+
+    payload = json.loads(action.payload)
+    expires_at = (
+        action.expires_at.replace(tzinfo=UTC).timestamp() if action.expires_at else None
+    )
+    return approval.compute_hmac(
+        action_key=str(action.id),
+        user_id=action.user_id,
+        verb=action.verb,
+        expires_at=expires_at,
+        payload_hash=approval._hash_payload(payload),
+    )
 
 
 # ─── Pending Questions ─────────────────────────────────────────────────
@@ -152,14 +166,26 @@ async def create_pending_action(
     kind: str,
     payload: str,
     ttl_minutes: int = _PENDING_TTL_MINUTES,
+    route: str = "db",
+    verb: str = "send",
+    risk: str = "low",
+    human_summary: str | None = None,
 ) -> PendingAction:
-    """Создаёт PendingAction с TTL и HMAC-подписью."""
-    pa = PendingAction(user_id=user_id, kind=kind, payload=payload)
+    """Создаёт PendingAction с TTL и unified HMAC-подписью."""
+    pa = PendingAction(
+        user_id=user_id,
+        kind=kind,
+        payload=payload,
+        route=route,
+        verb=verb,
+        risk=risk,
+        human_summary=human_summary,
+    )
     session.add(pa)
     await session.flush()  # получаем pa.id
     # Устанавливаем TTL и HMAC после flush (нужен id)
     pa.expires_at = datetime.now(UTC) + timedelta(minutes=ttl_minutes)
-    pa.hmac_signature = _compute_hmac(pa.id)
+    pa.hmac_signature = _compute_action_signature(pa)
     await session.flush()
     return pa
 
@@ -176,12 +202,27 @@ async def get_pending_action(
     return result.scalar_one_or_none()
 
 
-async def verify_pending_action_hmac(action_id: int, signature: str) -> bool:
-    """Проверяет HMAC-подпись из callback_data.
-    Если signature пустая — пропускаем проверку (обратная совместимость)."""
+def verify_pending_action_hmac(action: PendingAction, signature: str) -> bool:
+    """Проверяет unified HMAC-подпись из callback_data.
+
+    Empty signatures are always rejected. No legacy fallback.
+    """
     if not signature:
-        return True  # старые callback_data без подписи
-    expected = _compute_hmac(action_id)
+        return False
+    if not action.payload:
+        logger.warning(
+            "verify_pending_action_hmac: empty payload for action_id=%d", action.id
+        )
+        return False
+    try:
+        expected = _compute_action_signature(action)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning(
+            "verify_pending_action_hmac: corrupt payload for action_id=%d: %s",
+            action.id,
+            exc,
+        )
+        return False
     return hmac.compare_digest(expected, signature)
 
 
@@ -189,7 +230,10 @@ def is_pending_action_expired(action: PendingAction) -> bool:
     """Проверяет, истёк ли срок действия PendingAction."""
     if action.expires_at is None:
         return False  # старые записи без TTL — считаем не истёкшими
-    return action.expires_at < datetime.now(UTC)
+    expires_at = action.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at < datetime.now(UTC)
 
 
 async def delete_pending_action(session: AsyncSession, action_id: int, user) -> None:
@@ -200,7 +244,10 @@ async def delete_pending_action(session: AsyncSession, action_id: int, user) -> 
 
 
 async def cleanup_expired_actions(session: AsyncSession) -> int:
-    """Удаляет просроченные PendingAction (старше TTL + 1 час). Возвращает количество удалённых."""
+    """Удаляет просроченные PendingAction (старше TTL + 1 час).
+
+    Возвращает количество удалённых.
+    """
     cutoff = datetime.now(UTC) - timedelta(minutes=_PENDING_TTL_MINUTES + 60)
     result = await session.execute(
         delete(PendingAction).where(

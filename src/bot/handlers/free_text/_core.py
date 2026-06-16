@@ -13,7 +13,7 @@ import re
 import hashlib
 import sys
 import time
-import uuid
+from collections.abc import Callable
 
 # ── Module constants ─────────────────────────────────────────────────────
 _DEFAULT_SEARCH_LIMIT = 5  # элементов — лимит deep recall по умолчанию
@@ -60,7 +60,7 @@ from src.core.memory import conversation_context as ctx_store
 from src.core.memory.memory_recall import recall
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.db.repo import add_memory, get_or_create_user
+from src.db.repo import add_memory, create_pending_action, get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
 
@@ -69,7 +69,7 @@ from src.llm.base import ChatMessage, TaskType
 from src.core.infra.timeutil import now_in_tz
 from src.core.observability.response_trace import log_response_trace
 
-from .free_text_common import (
+from src.bot.handlers.free_text_common import (
     _fire_record_trajectory,
     _post_turn_optimize,
     _summarize_intent_for_memory,
@@ -90,7 +90,7 @@ from src.core.humanizer import (
     normalize_anti_ai_mode,
 )
 
-from .free_text_exec import (
+from src.bot.handlers.free_text_exec import (
     exec_add_api_key,
     exec_add_news_topic,
     exec_add_reminder,
@@ -178,7 +178,46 @@ _LAST_INTENT_TTL = 900.0
 #                    "tool_params": dict, "ts": float}}
 _pending_confirmations: dict[str, dict] = {}
 _pending_confirmations_lock = asyncio.Lock()
-_PENDING_TTL = settings.pending_ttl_sec  # 5 минут — удаляем stale записи
+_PENDING_TTL = float(
+    getattr(settings, "pending_ttl_sec", 300)
+)  # 5 минут — удаляем stale записи
+
+# ── Per-user confirm-tool lock ─────────────────────────────────────────
+# Prevents double-execution race: two concurrent callbacks for the same user
+# on the same DB PendingAction could both pass HMAC before either deletes it.
+# ponytail: dict never evicted, bounded by unique telegram_id count;
+#           add TTL-based cleanup if per-process memory matters.
+_tool_confirm_locks: dict[int, asyncio.Lock] = {}
+_tool_confirm_locks_last_used: dict[int, float] = {}
+_tool_confirm_locks_lock = asyncio.Lock()
+_TOOL_CONFIRM_LOCK_TTL_SEC = 300  # 5 minutes
+
+
+async def _get_tool_confirm_lock(telegram_id: int) -> asyncio.Lock:
+    """Return a per-user lock; serialize creation to avoid duplicate locks."""
+    now = time.monotonic()
+    async with _tool_confirm_locks_lock:
+        _cleanup_tool_confirm_locks(now)
+        lock = _tool_confirm_locks.get(telegram_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _tool_confirm_locks[telegram_id] = lock
+        _tool_confirm_locks_last_used[telegram_id] = now
+        return lock
+
+
+def _cleanup_tool_confirm_locks(now: float) -> None:
+    """Remove stale locks that are not currently held."""
+    stale = [
+        tid
+        for tid, ts in _tool_confirm_locks_last_used.items()
+        if now - ts > _TOOL_CONFIRM_LOCK_TTL_SEC
+    ]
+    for tid in stale:
+        lock = _tool_confirm_locks.get(tid)
+        if lock is None or not lock.locked():
+            _tool_confirm_locks.pop(tid, None)
+            _tool_confirm_locks_last_used.pop(tid, None)
 
 
 async def _get_anti_ai_mode(owner_telegram_id: int) -> str:
@@ -230,27 +269,48 @@ _BACKGROUND_CLEANUP_INTERVAL = 60
 
 async def _background_cleanup_stale_pending() -> None:
     """Periodic cleanup task — runs every ``_BACKGROUND_CLEANUP_INTERVAL`` seconds."""
-    while True:
-        await asyncio.sleep(_BACKGROUND_CLEANUP_INTERVAL)
-        async with _pending_confirmations_lock:
-            _cleanup_stale_pending()
+    try:
+        while True:
+            await asyncio.sleep(_BACKGROUND_CLEANUP_INTERVAL)
+            async with _pending_confirmations_lock:
+                _cleanup_stale_pending()
+    except asyncio.CancelledError:
+        logger.debug("Stale-pending cleanup timer stopped (cancelled)")
+        raise
+
+
+_cleanup_timer_registered: bool = False
 
 
 def register_cleanup_timer() -> None:
-    """Register the background stale-pending cleanup timer (fire-and-forget)."""
+    """Register the background stale-pending cleanup timer (fire-and-forget).
+
+    Idempotent: only registers once, even if called multiple times.
+    """
+    global _cleanup_timer_registered
+    if _cleanup_timer_registered:
+        return
+    _cleanup_timer_registered = True
     try:
         loop = asyncio.get_running_loop()
         track_ff(loop.create_task(_background_cleanup_stale_pending()))
     except RuntimeError:
-        pass  # no running event loop — skip
+        _cleanup_timer_registered = False  # rollback — no loop, can retry later
+        pass
 
 
-def _confirm_tool_keyboard(uid: str) -> InlineKeyboardMarkup:
-    """Inline-кнопки для подтверждения/отмены действия."""
+def _confirm_tool_keyboard(
+    callback_data: str, cancel_data: str
+) -> InlineKeyboardMarkup:
+    """Inline-кнопки для подтверждения/отмены действия.
+
+    Week 2: accepts pre-formatted unified callback strings
+    (``ap:tool:{action_key}:{signature}`` and ``ap:cancel:tool:{action_key}``).
+    """
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="✅ Выполнить", callback_data=f"tool:confirm:{uid}"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"tool:cancel:{uid}"),
+        InlineKeyboardButton(text="✅ Выполнить", callback_data=callback_data),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_data),
     )
     return kb.as_markup()
 
@@ -277,51 +337,235 @@ def _redact_confirmation_params(params: dict) -> dict:
 
 
 async def _store_tool_confirmation(
-    telegram_id: int, tool: str, tool_params: dict
-) -> str:
-    """Сохраняет ожидающее подтверждение и возвращает uid для callback."""
-    uid = uuid.uuid4().hex[:12]
-    async with _pending_confirmations_lock:
-        _cleanup_stale_pending()
-        _pending_confirmations[uid] = {
-            "telegram_id": telegram_id,
-            "kind": "tool",
-            "tool": tool,
-            "tool_params": dict(tool_params),
-            "ts": time.monotonic(),
-        }
-    return uid
+    telegram_id: int,
+    tool: str,
+    tool_params: dict,
+    *,
+    human_summary: str = "",
+    risk: str | None = None,
+) -> tuple[str, str]:
+    """Store a tool confirmation and return (confirm_callback, cancel_callback).
+
+    Week 2: hybrid routing. HIGH/CRITICAL tools are persisted to the DB;
+    medium/read-only tools are kept in memory with HMAC-signed callbacks.
+    """
+    from src.core.security import approval
+    from src.core.actions import tool_registry
+
+    if risk is None:
+        spec = tool_registry.get(tool)
+        risk = "medium"
+        if spec is not None:
+            risk = spec.effective_risk(tool_params.get("action")) or "medium"
+
+    route = approval.route_for(risk)
+    summary = human_summary or f"Выполнить {tool}"
+    payload = dict(tool_params)
+
+    if route == "db":
+        async with get_session() as session:
+            user = await get_or_create_user(session, telegram_id)
+            action = await create_pending_action(
+                session,
+                user_id=user.id,
+                kind=tool,
+                payload=json.dumps(payload, ensure_ascii=False),
+                route="db",
+                verb="tool",
+                risk=risk,
+                human_summary=summary,
+            )
+        action_key = str(action.id)
+        sig = action.hmac_signature or ""
+    else:
+        action_key, entry = approval.memory_entry(
+            user_id=telegram_id,
+            verb="tool",
+            risk=risk,
+            human_summary=summary,
+            payload=payload,
+            metadata={"tool": tool},
+        )
+        async with _pending_confirmations_lock:
+            _cleanup_stale_pending()
+            _pending_confirmations[action_key] = entry
+        sig = entry["signature"]
+
+    confirm_cb = approval.format_callback("tool", action_key, sig)
+    cancel_cb = approval.format_cancel_callback("tool", action_key)
+    return confirm_cb, cancel_cb
 
 
 async def _store_intent_confirmation(
-    telegram_id: int, intent_name: str, intent: dict
-) -> str:
-    uid = uuid.uuid4().hex[:12]
-    async with _pending_confirmations_lock:
-        _cleanup_stale_pending()
-        _pending_confirmations[uid] = {
-            "telegram_id": telegram_id,
-            "kind": "intent",
-            "tool": intent_name,
-            "tool_params": dict(intent),
-            "ts": time.monotonic(),
-        }
-    return uid
+    telegram_id: int,
+    intent_name: str,
+    intent: dict,
+    *,
+    human_summary: str = "",
+    risk: str | None = None,
+) -> tuple[str, str]:
+    """Store an intent confirmation and return (confirm_callback, cancel_callback)."""
+    from src.core.security import approval
+    from src.core.intelligence.guardrails import get_action_risk
 
+    if risk is None:
+        risk = get_action_risk(intent_name).value
 
-async def _pop_tool_confirmation(uid: str, telegram_id: int) -> dict | None:
-    """Извлекает и удаляет подтверждение. Возвращает None если не найдено."""
-    async with _pending_confirmations_lock:
-        _cleanup_stale_pending()
-        pending = _pending_confirmations.pop(uid, None)
-    if pending is None:
-        return None
-    if pending.get("telegram_id") != telegram_id:
-        # Не совпадает владелец — кладём обратно
+    route = approval.route_for(risk)
+    summary = human_summary or f"Выполнить {intent_name}"
+    payload = dict(intent)
+
+    if route == "db":
+        async with get_session() as session:
+            user = await get_or_create_user(session, telegram_id)
+            action = await create_pending_action(
+                session,
+                user_id=user.id,
+                kind=intent_name,
+                payload=json.dumps(payload, ensure_ascii=False),
+                route="db",
+                verb="intent",
+                risk=risk,
+                human_summary=summary,
+            )
+        action_key = str(action.id)
+        sig = action.hmac_signature or ""
+    else:
+        action_key, entry = approval.memory_entry(
+            user_id=telegram_id,
+            verb="intent",
+            risk=risk,
+            human_summary=summary,
+            payload=payload,
+            metadata={"intent": intent_name},
+        )
         async with _pending_confirmations_lock:
-            _pending_confirmations[uid] = pending
+            _cleanup_stale_pending()
+            _pending_confirmations[action_key] = entry
+        sig = entry["signature"]
+
+    confirm_cb = approval.format_callback("intent", action_key, sig)
+    cancel_cb = approval.format_cancel_callback("intent", action_key)
+    return confirm_cb, cancel_cb
+
+
+async def _pop_tool_confirmation(
+    action_key: str, telegram_id: int, signature: str, *, legacy: bool = False
+) -> dict | None:
+    """Extract and remove a confirmation. Returns None if missing/invalid.
+
+    When ``legacy=True``, HMAC signature verification is skipped (old callbacks
+    that pre-date the Hybrid Approval Kernel don't carry signatures). Legacy is
+    only supported for the DB route; memory-route confirmations always require
+    HMAC, otherwise anyone with the action_key could consume another user's
+    pending confirmation.
+    """
+    from src.core.security import approval
+    from src.db.session import get_session
+
+    # DB route: numeric action_key refers to a PendingAction row.
+    if action_key.isdigit():
+        lock = await _get_tool_confirm_lock(telegram_id)
+        try:
+            async with asyncio.timeout(_TOOL_CONFIRM_LOCK_TTL_SEC):
+                async with lock:
+                    async with get_session() as session:
+                        from src.db.models import PendingAction
+                        from sqlalchemy import select
+
+                        user = await get_or_create_user(session, telegram_id)
+                        result = await session.execute(
+                            select(PendingAction).where(
+                                PendingAction.id == int(action_key),
+                                PendingAction.user_id == user.id,
+                            )
+                        )
+                        action = result.scalar_one_or_none()
+                        if action is None:
+                            return None
+                        from src.db.repos.commitment_repo import (
+                            is_pending_action_expired,
+                            verify_pending_action_hmac,
+                        )
+
+                        if is_pending_action_expired(action):
+                            logger.info(
+                                "_pop_tool_confirmation: expired action_id=%s",
+                                action_key,
+                            )
+                            await session.delete(action)
+                            await session.flush()
+                            return None
+                        if not legacy and not verify_pending_action_hmac(
+                            action, signature
+                        ):
+                            logger.warning(
+                                "_pop_tool_confirmation: HMAC mismatch action_id=%s",
+                                action_key,
+                            )
+                            return None
+                        try:
+                            payload = json.loads(action.payload)
+                        except (json.JSONDecodeError, TypeError) as exc:
+                            logger.warning(
+                                "_pop_tool_confirmation: corrupt payload "
+                                "action_id=%s: %s",
+                                action_key,
+                                exc,
+                            )
+                            await session.delete(action)
+                            await session.flush()
+                            return None
+                        await session.delete(action)
+                        await session.flush()
+                        return {
+                            "user_id": telegram_id,
+                            "kind": action.verb,
+                            "tool": action.kind,
+                            "tool_params": payload,
+                        }
+        except TimeoutError:
+            async with _tool_confirm_locks_lock:
+                if _tool_confirm_locks.get(telegram_id) is lock:
+                    _tool_confirm_locks[telegram_id] = asyncio.Lock()
+                    _tool_confirm_locks_last_used[telegram_id] = time.monotonic()
+            logger.warning(
+                "_pop_tool_confirmation: lock timeout for user %d", telegram_id
+            )
+            return None
+
+    # Memory route: legacy callbacks are unsupported (no signature = no security).
+    if legacy:
+        logger.warning(
+            "_pop_tool_confirmation: legacy memory callback rejected for action_key=%s",
+            action_key,
+        )
         return None
-    return pending
+
+    # Memory route: lookup in the in-memory dict and verify HMAC/TTL.
+    async with _pending_confirmations_lock:
+        _cleanup_stale_pending()
+        pending = _pending_confirmations.pop(action_key, None)
+        if pending is None:
+            return None
+        if not approval.verify_memory_entry(pending, telegram_id, signature):
+            # Ownership or HMAC mismatch — put it back if not expired.
+            try:
+                if time.monotonic() <= float(pending.get("expires_at", 0)):
+                    _pending_confirmations[action_key] = pending
+            except (TypeError, ValueError):
+                pass  # expired or corrupt entry — don't put it back
+            return None
+        metadata = pending.get("metadata") or {}
+        tool_name = (
+            metadata.get("tool") or metadata.get("intent") or pending.get("tool")
+        )
+        return {
+            "user_id": telegram_id,
+            "kind": pending.get("verb", "tool"),
+            "tool": tool_name,
+            "tool_params": pending.get("payload", {}),
+        }
 
 
 # ── Tool confirmation callback router ─────────────────────────────────
@@ -330,15 +574,41 @@ confirm_router = Router(name="free_text_tool_confirm")
 confirm_router.callback_query.filter(OwnerOnly())
 
 
-@confirm_router.callback_query(F.data.startswith("tool:confirm:"))
+@confirm_router.callback_query(
+    F.data.startswith("tool:confirm:")
+    | F.data.startswith("ap:tool:")
+    | F.data.startswith("ap:intent:")
+)
 async def _cb_tool_confirm(
     callback: CallbackQuery,
     state: FSMContext,
     userbot_manager: UserbotManager,
 ) -> None:
-    """Callback: пользователь подтвердил выполнение инструмента."""
-    uid = callback.data.split(":", 2)[2]
-    pending = await _pop_tool_confirmation(uid, callback.from_user.id)
+    """Callback: пользователь подтвердил выполнение инструмента.
+
+    Week 2: accepts unified ``ap:tool:{action_key}:{signature}`` and legacy
+    ``tool:confirm:{uid}`` callbacks.
+    """
+    from src.core.security import approval
+
+    data = callback.data or ""
+    legacy = data.startswith("tool:confirm:")
+    action_key = ""
+    signature = ""
+
+    if not legacy:
+        parsed = approval.parse_callback(data)
+        if parsed is None:
+            await callback.answer("⏳ Действие устарело", show_alert=True)
+            return
+        _, action_key, signature = parsed
+    else:
+        action_key = data.split(":", 2)[2]
+        signature = ""
+
+    pending = await _pop_tool_confirmation(
+        action_key, callback.from_user.id, signature, legacy=legacy
+    )
     if pending is None:
         await callback.answer("⏳ Действие устарело или уже выполнено", show_alert=True)
         return
@@ -360,12 +630,15 @@ async def _cb_tool_confirm(
             if handler_info is None:
                 raise RuntimeError(f"Intent {tool_name!r} not found")
             handler, _ = handler_info
+            # Avoid double-confirmation: the guardrail already asked the user.
+            confirmed_params = dict(tool_params)
+            confirmed_params["_confirmed"] = True
             await handler(
-                tool_params,
+                confirmed_params,
                 callback.message,
                 state,
                 userbot_manager,
-                tz_name=tool_params.get("tz_name", "UTC"),
+                tz_name=confirmed_params.get("tz_name", "UTC"),
             )
             ok = True
         else:
@@ -388,7 +661,7 @@ async def _cb_tool_confirm(
             if isinstance(result, dict) and result.get("error"):
                 raise RuntimeError(str(result["error"]))
             ok = result.get("ok", True) if isinstance(result, dict) else True
-        if callback.message:
+        if isinstance(callback.message, Message):
             if ok:
                 await callback.message.edit_text(
                     sanitize_html(f"✅ {tool_name}: выполнено")
@@ -401,24 +674,94 @@ async def _cb_tool_confirm(
     except Exception as e:
         logger.warning("tool_confirm_execution failed: %s", e)
         await callback.answer("❌ Произошла ошибка. Попробуй ещё раз", show_alert=True)
-        if callback.message:
+        if isinstance(callback.message, Message):
             await callback.message.edit_text(
                 sanitize_html("❌ Произошла ошибка. Попробуй ещё раз")
             )
 
 
-@confirm_router.callback_query(F.data.startswith("tool:cancel:"))
+@confirm_router.callback_query(
+    F.data.startswith("tool:cancel:")
+    | F.data.startswith("ap:cancel:tool:")
+    | F.data.startswith("ap:cancel:intent:")
+)
 async def _cb_tool_cancel(
     callback: CallbackQuery,
     state: FSMContext,
     userbot_manager: UserbotManager,
 ) -> None:
-    """Callback: пользователь отменил выполнение инструмента."""
-    uid = callback.data.split(":", 2)[2]
-    async with _pending_confirmations_lock:
-        _pending_confirmations.pop(uid, None)
+    """Callback: пользователь отменил выполнение инструмента.
+
+    Week 2: accepts unified ``ap:cancel:tool:{action_key}`` and legacy
+    ``tool:cancel:{uid}`` callbacks. Unified cancel callbacks do NOT carry a
+    signature (they are intentionally short), so we verify ownership via
+    user_id for DB-route and by matching the stored telegram_id for memory-route.
+    Legacy memory-route cancel callbacks are rejected to prevent action-key
+    guessing attacks.
+    """
+    from src.core.security import approval
+
+    data = callback.data or ""
+    legacy = data.startswith("tool:cancel:")
+    action_key = ""
+    if data.startswith("ap:cancel:"):
+        parsed = approval.parse_cancel_callback(data)
+        if parsed:
+            action_key = parsed[1]
+    else:
+        action_key = data.split(":", 2)[2]
+
+    if not action_key:
+        await callback.answer("⏳ Действие устарело", show_alert=True)
+        return
+
+    # DB-route: numeric action_key — delete PendingAction if it belongs to user.
+    if action_key.isdigit():
+        from src.db.session import get_session
+        from src.db.models import PendingAction
+        from sqlalchemy import select
+
+        async with get_session() as session:
+            user = await get_or_create_user(session, callback.from_user.id)
+            result = await session.execute(
+                select(PendingAction).where(
+                    PendingAction.id == int(action_key),
+                    PendingAction.user_id == user.id,
+                )
+            )
+            action = result.scalar_one_or_none()
+            if action is not None:
+                await session.delete(action)
+                await session.flush()
+                logger.info(
+                    "User %d cancelled DB action %s", callback.from_user.id, action_key
+                )
+    else:
+        # Memory route: legacy cancel without signature is rejected.
+        if legacy:
+            logger.warning(
+                "_cb_tool_cancel: legacy memory cancel rejected for action_key=%s",
+                action_key,
+            )
+            await callback.answer("⏳ Действие устарело", show_alert=True)
+            return
+
+        async with _pending_confirmations_lock:
+            _cleanup_stale_pending()
+            pending = _pending_confirmations.pop(action_key, None)
+            if pending is not None and pending.get("user_id") != callback.from_user.id:
+                # Ownership mismatch — put it back.
+                _pending_confirmations[action_key] = pending
+                pending = None
+            if pending is not None:
+                logger.info(
+                    "User %d cancelled memory action %s",
+                    callback.from_user.id,
+                    action_key,
+                )
+
     await callback.answer("❌ Отменено")
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.edit_text("❌ Действие отменено.")
 
 
@@ -431,40 +774,47 @@ _MULTI_KEYWORDS = ("и не забудь", "заодно", "и ещё")
 
 # ── Dedup cache: prevents repeated LLM extraction for same (user, text) ──
 _dedup_cache: dict[tuple[int, str], float] = {}  # (owner_id, hash) → timestamp
+_dedup_cache_lock = asyncio.Lock()
 _DEDUP_CACHE_MAX = 200
 _DEDUP_CACHE_TTL = 60.0  # seconds
 
 
-def _should_skip_auto_save(owner_id: int, text: str) -> bool:
+async def _should_skip_auto_save(owner_id: int, text: str) -> bool:
     """Check if we've already extracted facts from this text recently.
 
     Uses SHA-256 hash of the first 500 characters of text as a content
     fingerprint. Within the TTL window (60s), identical content from
     the same user is skipped to save LLM tokens.
+
+    Protected by _dedup_cache_lock to prevent race conditions
+    from concurrent fire-and-forget tasks.
     """
     now = time.monotonic()
     key = (owner_id, hashlib.sha256(text[:500].encode()).hexdigest())
-    if key in _dedup_cache and now - _dedup_cache[key] < _DEDUP_CACHE_TTL:
-        return True
-    # Evict old entries if cache too big
-    if len(_dedup_cache) >= _DEDUP_CACHE_MAX:
-        stale = [k for k, ts in _dedup_cache.items() if now - ts > _DEDUP_CACHE_TTL * 2]
-        if stale:
-            for k in stale[:50]:
-                _dedup_cache.pop(k, None)
-        else:
-            # All entries are fresh — forced eviction of oldest 25%
-            force_evict = max(_DEDUP_CACHE_MAX // 4, 1)
-            oldest = sorted(_dedup_cache.items(), key=lambda x: x[1])[:force_evict]
-            for k, _ in oldest:
-                _dedup_cache.pop(k, None)
-            logger.debug(
-                "Dedup cache forced eviction: removed %d fresh entries "
-                "(all %d were within TTL)",
-                len(oldest),
-                _DEDUP_CACHE_MAX,
-            )
-    _dedup_cache[key] = now
+    async with _dedup_cache_lock:
+        if key in _dedup_cache and now - _dedup_cache[key] < _DEDUP_CACHE_TTL:
+            return True
+        # Evict old entries if cache too big
+        if len(_dedup_cache) >= _DEDUP_CACHE_MAX:
+            stale = [
+                k for k, ts in _dedup_cache.items() if now - ts > _DEDUP_CACHE_TTL * 2
+            ]
+            if stale:
+                for k in stale[:50]:
+                    _dedup_cache.pop(k, None)
+            else:
+                # All entries are fresh — forced eviction of oldest 25%
+                force_evict = max(_DEDUP_CACHE_MAX // 4, 1)
+                oldest = sorted(_dedup_cache.items(), key=lambda x: x[1])[:force_evict]
+                for k, _ in oldest:
+                    _dedup_cache.pop(k, None)
+                logger.debug(
+                    "Dedup cache forced eviction: removed %d fresh entries "
+                    "(all %d were within TTL)",
+                    len(oldest),
+                    _DEDUP_CACHE_MAX,
+                )
+        _dedup_cache[key] = now
     return False
 
 
@@ -564,7 +914,7 @@ async def _maybe_auto_save_facts(
       - Выбор лёгкой/тяжёлой модели
     """
     # ── Dedup: skip if we already processed this (user, text) recently ──
-    if _should_skip_auto_save(telegram_id, user_text):
+    if await _should_skip_auto_save(telegram_id, user_text):
         logger.debug(
             "Auto-save facts DEDUP: skip duplicate for user %d (text %.60s…)",
             telegram_id,
@@ -838,10 +1188,34 @@ async def _detect_followup(raw: str, tg_id: int) -> tuple[dict, str] | None:
 async def _execute_intent(
     intent, message, state, userbot_manager, *, tz_name: str
 ) -> None:
+    if not isinstance(intent, dict):
+        logger.error(
+            "_execute_intent called with non-dict intent: %r (type=%s)",
+            intent,
+            type(intent).__name__,
+        )
+        await message.answer("⚠️ Internal routing error (invalid intent).")
+        return
+    # Strip any LLM-injected confirmation bypass; _confirmed is only legal
+    # when injected by the verified callback path in _cb_tool_confirm.
+    intent = dict(intent)
+    intent.pop("_confirmed", None)
     kind = intent.get("intent")
+    if not isinstance(kind, str):
+        logger.error("_execute_intent: missing or invalid 'intent' key: %r", kind)
+        await message.answer("⚠️ Internal routing error (invalid intent key).")
+        return
     handler_info = CLASSIC_INTENT_HANDLERS.get(kind)
     if handler_info is not None:
         handler, _ = handler_info
+        if handler is None:
+            logger.error(
+                "Intent handler for %r returned None callable — "
+                "CLASSIC_INTENT_HANDLERS entry is corrupted",
+                kind,
+            )
+            await message.answer("⚠️ Internal routing error (missing handler).")
+            return
         await handler(intent, message, state, userbot_manager, tz_name=tz_name)
         return
     await message.answer("❓ Неизвестный intent.")
@@ -849,7 +1223,7 @@ async def _execute_intent(
 
 # ── Intent handler registries ────────────────────────────────────────
 
-INTENT_HANDLERS: dict[str, tuple[callable, str]] = {
+INTENT_HANDLERS: dict[str, tuple[Callable, str]] = {
     "set_setting": (h_adapter(exec_set_setting), "Изменить настройку"),
     "add_news_topic": (h_adapter(exec_add_news_topic), "Добавить новостную тему"),
     "remove_news_topic": (h_adapter(exec_remove_news_topic), "Удалить новостную тему"),
@@ -893,7 +1267,7 @@ INTENT_HANDLERS: dict[str, tuple[callable, str]] = {
     "clarify": (h_adapter(exec_clarify), "Уточнить"),
 }
 
-CLASSIC_INTENT_HANDLERS: dict[str, tuple[callable, str]] = {
+CLASSIC_INTENT_HANDLERS: dict[str, tuple[Callable, str]] = {
     "chat": (exec_classic_chat, "Чат"),
     "unknown": (exec_classic_unknown, "Неизвестный"),
     "list_todos": (exec_classic_list_todos, "Список задач"),
@@ -932,6 +1306,18 @@ async def _dag_dispatch(
     if not sub_intents:
         await message.answer("Не понял, что сделать.")
         return
+
+    # Guard: validate all sub-intents are dicts
+    for i, sub in enumerate(sub_intents):
+        if not isinstance(sub, dict):
+            logger.error(
+                "_dag_dispatch: sub_intents[%d] is not a dict: %r (type=%s)",
+                i,
+                sub,
+                type(sub).__name__,
+            )
+            await message.answer("⚠️ Internal routing error (malformed sub-intent).")
+            return
 
     n = len(sub_intents)
     if n == 1:
@@ -1027,6 +1413,14 @@ async def _run_dag_level(
 
 
 async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) -> None:
+    if not isinstance(intent, dict):
+        logger.error(
+            "_dispatch called with non-dict intent: %r (type=%s)",
+            intent,
+            type(intent).__name__,
+        )
+        await message.answer("⚠️ Internal routing error (invalid intent).")
+        return
     guard = guard_intent(intent)
     if not guard.allowed:
         _fire_record_trajectory(
@@ -1046,6 +1440,15 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     intent = guard.intent
     kind = intent.get("intent")
+    if not isinstance(kind, str):
+        logger.error("_dispatch: invalid intent key: %r", kind)
+        await message.answer("⚠️ Internal routing error (invalid intent).")
+        return
+
+    # Strip any LLM-injected confirmation bypass before dispatch.
+    # The verified callback path in _cb_tool_confirm re-adds _confirmed.
+    intent = dict(intent)
+    intent.pop("_confirmed", None)
 
     # ── Risk-based guardrail check for HIGH/CRITICAL actions ────────
     if kind:
@@ -1053,13 +1456,13 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         if gr.needs_confirm:
             intent_with_tz = dict(intent)
             intent_with_tz["tz_name"] = tz_name
-            uid = await _store_intent_confirmation(
+            confirm_cb, cancel_cb = await _store_intent_confirmation(
                 message.from_user.id, kind, intent_with_tz
             )
             await safe_answer(
                 message,
                 sanitize_html(f"🤔 {gr.confirm_message}"),
-                reply_markup=_confirm_tool_keyboard(uid),
+                reply_markup=_confirm_tool_keyboard(confirm_cb, cancel_cb),
             )
             _fire_record_trajectory(
                 message.from_user.id,
@@ -1493,7 +1896,7 @@ async def execute_instant(
             plan.final_response,
             owner_telegram_id=owner_telegram_id,
             context_hint=context_hint,
-            source="free_text_pipeline.execute_instant.cached",
+            source="free_text.execute_instant.cached",
         )
         _cache_last_humanized(owner_telegram_id, response)
         await safe_answer(message, sanitize_html(response))
@@ -1567,7 +1970,7 @@ async def execute_instant(
         response,
         owner_telegram_id=owner_telegram_id,
         context_hint=context_hint,
-        source="free_text_pipeline.execute_instant",
+        source="free_text.execute_instant",
     )
     _cache_last_humanized(owner_telegram_id, response)
 
@@ -1794,7 +2197,7 @@ async def execute_maestro(
             owner_telegram_id=owner_telegram_id,
             context_hint=context_hint,
             style_profile="",
-            source="free_text_pipeline.cached",
+            source="free_text.cached",
             mode=anti_ai_mode,
         )
         response_text = sanitize_html(humanized)
@@ -1892,13 +2295,13 @@ async def execute_maestro(
             )
             tool_name = pipeline_result.get("tool", "")
             tool_params = pipeline_result.get("tool_params", {})
-            uid = await _store_tool_confirmation(
+            confirm_cb, cancel_cb = await _store_tool_confirmation(
                 owner_telegram_id, tool_name, tool_params
             )
             await safe_answer(
                 message,
                 sanitize_html(f"🤔 {confirm_msg}"),
-                reply_markup=_confirm_tool_keyboard(uid),
+                reply_markup=_confirm_tool_keyboard(confirm_cb, cancel_cb),
             )
             _fire_record_trajectory(
                 owner_telegram_id,
@@ -2023,7 +2426,7 @@ async def execute_maestro(
                 owner_telegram_id=owner_telegram_id,
                 context_hint=context_hint,
                 style_profile=style_block or "",
-                source="free_text_pipeline.stream",
+                source="free_text.stream",
                 mode=anti_ai_mode,
             )
             # Deep humanize if needed
@@ -2190,7 +2593,7 @@ async def execute_maestro(
                 owner_telegram_id=owner_telegram_id,
                 context_hint=context_hint,
                 style_profile=style_block or "",
-                source="free_text_pipeline.final_response",
+                source="free_text.final_response",
                 mode=anti_ai_mode,
             )
 
@@ -2382,7 +2785,7 @@ async def execute_maestro(
                 error=str(sys.exc_info()[1])
                 if sys.exc_info()[1]
                 else "maestro pipeline failed",
-                context="free_text_pipeline.execute_maestro",
+                context="free_text.execute_maestro",
             )
         except Exception:
             logger.debug(
@@ -2406,3 +2809,35 @@ async def _check_intent_confidence(intent: dict, message: Message) -> bool:
     question = intent.get("question") or "Не совсем понял. Что именно сделать?"
     await message.answer(sanitize_html(f"🤔 {question}"))
     return True
+
+
+def _extract_contact_hint(message: Message) -> str | None:
+    """Extract a contact hint from message entities and reply context.
+
+    Checks:
+    1. @mention entities (type='mention' or type='text_mention')
+    2. Reply context (reply_to_message author name)
+
+    Returns the hint string or None.
+    """
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "mention" and entity.offset is not None and message.text:
+                mention = message.text[entity.offset : entity.offset + entity.length]
+                return mention.lstrip("@").strip()
+            if entity.type == "text_mention" and entity.user:
+                # text_mention has a User object — use first_name or username
+                if entity.user.username:
+                    return entity.user.username
+                if entity.user.first_name:
+                    return entity.user.first_name
+
+    # Reply context
+    if message.reply_to_message and message.reply_to_message.from_user:
+        replied = message.reply_to_message.from_user
+        if replied.username:
+            return replied.username
+        if replied.first_name:
+            return replied.first_name
+
+    return None
