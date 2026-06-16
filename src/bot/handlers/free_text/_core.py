@@ -377,6 +377,11 @@ async def _store_tool_confirmation(
             )
         action_key = str(action.id)
         sig = action.hmac_signature or ""
+        if not sig:
+            logger.error(
+                "Pending action %s created with empty HMAC signature", action_key
+            )
+            raise RuntimeError("Failed to create confirmable action: empty signature")
     else:
         action_key, entry = approval.memory_entry(
             user_id=telegram_id,
@@ -390,6 +395,11 @@ async def _store_tool_confirmation(
             _cleanup_stale_pending()
             _pending_confirmations[action_key] = entry
         sig = entry["signature"]
+        if not sig:
+            logger.error(
+                "Memory confirmation entry %s created with empty signature", action_key
+            )
+            raise RuntimeError("Failed to create confirmable action: empty signature")
 
     confirm_cb = approval.format_callback("tool", action_key, sig)
     cancel_cb = approval.format_cancel_callback("tool", action_key)
@@ -430,6 +440,11 @@ async def _store_intent_confirmation(
             )
         action_key = str(action.id)
         sig = action.hmac_signature or ""
+        if not sig:
+            logger.error(
+                "Pending action %s created with empty HMAC signature", action_key
+            )
+            raise RuntimeError("Failed to create confirmable action: empty signature")
     else:
         action_key, entry = approval.memory_entry(
             user_id=telegram_id,
@@ -443,6 +458,11 @@ async def _store_intent_confirmation(
             _cleanup_stale_pending()
             _pending_confirmations[action_key] = entry
         sig = entry["signature"]
+        if not sig:
+            logger.error(
+                "Memory confirmation entry %s created with empty signature", action_key
+            )
+            raise RuntimeError("Failed to create confirmable action: empty signature")
 
     confirm_cb = approval.format_callback("intent", action_key, sig)
     cancel_cb = approval.format_cancel_callback("intent", action_key)
@@ -621,6 +641,10 @@ async def _cb_tool_confirm(
         tool_name,
         _redact_confirmation_params(tool_params),
     )
+
+    if callback.message is None:
+        await callback.answer("⏳ Сообщение устарело", show_alert=True)
+        return
 
     try:
         if pending.get("kind") == "intent":

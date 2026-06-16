@@ -46,6 +46,11 @@ _FORBIDDEN_HEADERS: frozenset[str] = frozenset(
         "authorization",
         "proxy-authorization",
         "set-cookie",
+        "x-api-key",
+        "api-key",
+        "token",
+        "x-token",
+        "apikey",
     }
 )
 

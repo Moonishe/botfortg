@@ -24,15 +24,19 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, UTC
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from src.llm.router import ProviderFallback
 
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
 from src.crypto import decrypt_async
 from src.db.models import User
 from src.db.repo import get_active_keys, get_api_keys
-from src.llm.base import LLMProvider, TaskType
+from src.llm.base import TaskType
 
 # ── Импорты классов провайдеров (нужны для _provider_class_for) ─────
 from src.llm.anthropic_provider import AnthropicProvider
@@ -80,6 +84,11 @@ class _KeyCircuitBreaker:
             return now
         timeout = self._base_timeout * (2**self._tripped_count)
         return self._last_failure_time + min(timeout, 3600.0)
+
+    @property
+    def cooldown_seconds(self) -> float:
+        """Текущий экспоненциальный cooldown в секундах (capped 1h)."""
+        return min(self._base_timeout * (2**self._tripped_count), 3600.0)
 
     def is_ready(self, now: float) -> bool:
         if self._state == _CircuitState.CLOSED:
@@ -258,6 +267,7 @@ PROVIDER_ORDER = (
 KEY_COOLDOWN_SECONDS = 90.0
 MAX_RETRIES_PER_KEY = 3
 RETRY_BASE_DELAY = 1.0  # seconds
+_CIRCUIT_BREAKERS_MAX_SIZE = 1000
 
 # NOTE: Circuit breaker состояние хранится только в памяти и сбрасывается при рестарте.
 # Ключи, которые были в cooldown на момент останова, будут повторно запрошены после
@@ -406,6 +416,24 @@ async def ensure_locks_initialized() -> None:
             "fallback": asyncio.Semaphore(2),
         }
         _locks_initialized = True
+
+
+def _trim_circuit_breakers_if_needed() -> None:
+    """Cap in-memory breaker cache to prevent unbounded growth.
+
+    Called by router.py before inserting a new breaker. Removes the oldest
+    CLOSED entries first; preserves OPEN/HALF_OPEN entries.
+    """
+    excess = len(_CIRCUIT_BREAKERS) - _CIRCUIT_BREAKERS_MAX_SIZE
+    if excess <= 0:
+        return
+    # Sort by last access time; remove oldest CLOSED entries first.
+    ordered = sorted(
+        _CIRCUIT_BREAKERS.items(),
+        key=lambda item: (item[1].state != _CircuitState.CLOSED, item[1]._last_touched),
+    )
+    for key, _ in ordered[:excess]:
+        del _CIRCUIT_BREAKERS[key]
 
 
 async def acquire_purpose_slot(
@@ -827,7 +855,7 @@ async def build_provider(
     purpose: str = "main",
     task_type: str = TaskType.DEFAULT,
     embed_model: str | None = None,
-) -> LLMProvider | None:
+) -> ProviderFallback | None:
     """Строит провайдер с авто-ротацией ключей из LlmKeySlot.
 
     Сначала пробует получить активные слоты (LlmKeySlot) для нужного провайдера

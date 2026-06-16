@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import sqlite3
@@ -28,61 +29,33 @@ router = Router(name="avito_cmd")
 router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
 
-# Persisted query cache for callback_data (query_hash → query_string)
-# Uses SQLite so cache survives bot restart.
-_QUERY_CACHE: dict[str, str] = {}
+# Persisted query cache for callback_data (query_hash → (query_string, ts))
+# Uses SQLite so cache survives bot restart. In-memory entries are TTL-capped.
+_QUERY_CACHE: dict[str, tuple[str, float]] = {}
 # threading.Lock: sync-функции с блокирующим SQLite не могут использовать asyncio.Lock.
 # В asyncio single-threaded модели этот lock защищает от гипотетических гонок
 # при будущем переходе на многопоточный executor для SQLite.
 import threading as _threading
 
 _cache_lock = _threading.Lock()
+_QUERY_CACHE_TTL_SEC = 3600
+
+
+def _evict_expired_cache_entries() -> None:
+    """Drop in-memory cache entries older than TTL."""
+    cutoff = time.time() - _QUERY_CACHE_TTL_SEC
+    with _cache_lock:
+        stale = [h for h, (_, ts) in _QUERY_CACHE.items() if ts < cutoff]
+        for h in stale:
+            del _QUERY_CACHE[h]
 
 
 def _cache_put_query(hash_str: str, query: str) -> None:
     """Сохраняет маппинг хэша в SQLite и in-memory."""
+    now = time.time()
     with _cache_lock:
-        _QUERY_CACHE[hash_str] = query
-    try:
-        conn = sqlite3.connect(str(_get_db_path()))
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS avito_query_cache("
-            "hash TEXT PRIMARY KEY, query TEXT NOT NULL, created_at REAL)"
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO avito_query_cache(hash, query, created_at) "
-            "VALUES (?, ?, ?)",
-            (hash_str, query, time.time()),
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        logger.exception("_cache_put_query failed for hash=%s", hash_str)
-
-
-def _cache_get_query(hash_str: str) -> str | None:
-    """Извлекает запрос из in-memory или SQLite по хэшу."""
-    with _cache_lock:
-        cached = _QUERY_CACHE.get(hash_str)
-        if cached is not None:
-            return cached
-    try:
-        conn = sqlite3.connect(str(_get_db_path()))
-        row = conn.execute(
-            "SELECT query FROM avito_query_cache WHERE hash = ?", (hash_str,)
-        ).fetchone()
-        conn.close()
-        if row:
-            with _cache_lock:
-                _QUERY_CACHE[hash_str] = row[0]  # warm in-memory
-            return row[0]
-    except Exception:
-        logger.exception("_cache_get_query failed for hash=%s", hash_str)
-    return None
-
-
-def _cache_cleanup() -> None:
-    """Удаляет записи старше 24 часов."""
+        _QUERY_CACHE[hash_str] = (query, now)
+    _evict_expired_cache_entries()
     try:
         with sqlite3.connect(str(_get_db_path())) as conn:
             conn.execute(
@@ -90,23 +63,47 @@ def _cache_cleanup() -> None:
                 "hash TEXT PRIMARY KEY, query TEXT NOT NULL, created_at REAL)"
             )
             conn.execute(
-                "DELETE FROM avito_query_cache WHERE created_at < ?",
-                (time.time() - 86400,),
+                "INSERT OR REPLACE INTO avito_query_cache(hash, query, created_at) "
+                "VALUES (?, ?, ?)",
+                (hash_str, query, now),
             )
+            conn.commit()
     except Exception:
-        logger.exception("_cache_cleanup failed")
+        logger.exception("_cache_put_query failed for hash=%s", hash_str)
 
 
-def _cb_hash(query: str) -> str:
+def _cache_get_query(hash_str: str) -> str | None:
+    """Извлекает запрос из in-memory или SQLite по хэшу."""
+    _evict_expired_cache_entries()
+    with _cache_lock:
+        cached = _QUERY_CACHE.get(hash_str)
+        if cached is not None:
+            query, _ = cached
+            return query
+    try:
+        with sqlite3.connect(str(_get_db_path())) as conn:
+            row = conn.execute(
+                "SELECT query FROM avito_query_cache WHERE hash = ?", (hash_str,)
+            ).fetchone()
+        if row:
+            with _cache_lock:
+                _QUERY_CACHE[hash_str] = (row[0], time.time())  # warm in-memory
+            return row[0]
+    except Exception:
+        logger.exception("_cache_get_query failed for hash=%s", hash_str)
+    return None
+
+
+async def _cb_hash(query: str) -> str:
     """Короткий хэш запроса для callback_data (макс 16 символов)."""
     h = hashlib.md5(query.encode()).hexdigest()[:16]
-    _cache_put_query(h, query)
+    await asyncio.to_thread(_cache_put_query, h, query)
     return h
 
 
-def _cb_query(hash_str: str) -> str | None:
+async def _cb_query(hash_str: str) -> str | None:
     """Извлекает запрос из кэша по хэшу (in-memory + SQLite fallback)."""
-    return _cache_get_query(hash_str)
+    return await asyncio.to_thread(_cache_get_query, hash_str)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -283,7 +280,7 @@ async def cmd_avito(message: Message, command: CommandObject) -> None:
     text = "\n".join(summary_parts)
 
     # Клавиатура
-    qh = _cb_hash(query)
+    qh = await _cb_hash(query)
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
@@ -422,7 +419,7 @@ async def cmd_avito_remove(message: Message, command: CommandObject) -> None:
 async def cb_avito_table(callback: CallbackQuery) -> None:
     """Показывает полную таблицу объявлений, отсортированных по deal_score."""
     qh = callback.data.split(":", 2)[2] if callback.data.count(":") >= 2 else ""
-    query = _cb_query(qh)
+    query = await _cb_query(qh)
     if not query:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
@@ -484,7 +481,7 @@ async def cb_avito_table(callback: CallbackQuery) -> None:
 async def cb_avito_stats(callback: CallbackQuery) -> None:
     """Показывает статистику цен по запросу."""
     qh = callback.data.split(":", 2)[2] if callback.data.count(":") >= 2 else ""
-    query = _cb_query(qh)
+    query = await _cb_query(qh)
     if not query:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
@@ -573,7 +570,7 @@ async def cb_avito_stats(callback: CallbackQuery) -> None:
 async def cb_avito_watch(callback: CallbackQuery) -> None:
     """Добавляет запрос в список отслеживания."""
     qh = callback.data.split(":", 2)[2] if callback.data.count(":") >= 2 else ""
-    query = _cb_query(qh)
+    query = await _cb_query(qh)
     if not query:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
@@ -845,7 +842,7 @@ async def cb_avito_detail(callback: CallbackQuery) -> None:
 async def cb_avito_all(callback: CallbackQuery) -> None:
     """Показывает все найденные объявления."""
     qh = callback.data.split(":", 2)[2] if callback.data.count(":") >= 2 else ""
-    query = _cb_query(qh)
+    query = await _cb_query(qh)
     if not query:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
@@ -906,7 +903,7 @@ async def cb_avito_page(callback: CallbackQuery) -> None:
     except ValueError:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    query = _cb_query(qh)
+    query = await _cb_query(qh)
     if not query:
         await callback.answer("Ошибка данных.", show_alert=True)
         return

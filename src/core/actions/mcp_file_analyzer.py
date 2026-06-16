@@ -14,6 +14,7 @@ Safety:
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -22,6 +23,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 from xml.parsers.expat import ExpatError
+
+_FATAL_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    asyncio.CancelledError,
+    KeyboardInterrupt,
+    SystemExit,
+)
 
 from src.config import settings
 from src.core.actions.tool_registry import tool
@@ -35,9 +42,13 @@ logger = logging.getLogger(__name__)
 def _safe_resolve(root_str: str) -> Path | None:
     """Resolve *root_str* to an absolute path, returning ``None`` if unsafe.
 
-    Only paths under ``settings.data_dir`` are allowed.
+    Only paths under ``settings.data_dir`` are allowed. Symlinks are resolved,
+    and ``..`` components are rejected explicitly.
     """
-    root = Path(root_str).resolve()
+    raw = Path(root_str)
+    if any(part == ".." for part in raw.parts):
+        return None
+    root = Path(raw).resolve(strict=False)
     allowed = [settings.data_dir.resolve()]
     for a in allowed:
         try:
@@ -73,7 +84,7 @@ _READ_CHARS_LIMIT = 2000
         "- 'read' — return first 2000 characters of a text file.\n"
         "- 'analyze' — detect format by extension and return parsed structure.\n"
         "- 'stats' — return line/word/char/size counts.\n"
-        "Supported formats: .txt, .md, .py, .log, .json, .csv, .yaml/.yml, .xml. "
+        "Supported formats: .txt, .md, .log, .json, .csv, .yaml/.yml, .xml. "
         "Path is restricted to data/ directory."
     ),
     category="utility",
@@ -98,15 +109,15 @@ async def mcp_file_analyzer(
         A dict with the result data or an ``"error"`` key on failure.
     """
     try:
-        # Validate path first
-        resolved = _safe_resolve(path)
+        # Validate path first — offload to thread (resolve may access filesystem)
+        resolved = await asyncio.to_thread(_safe_resolve, path)
         if resolved is None:
             return {
                 "error": (
                     f"Path {path!r} is outside allowed directories or contains '..'"
                 )
             }
-        if not resolved.is_file():
+        if not await asyncio.to_thread(resolved.is_file):
             return {"error": f"Path {path!r} is not a file"}
 
         # Защита: явно запрещаем чувствительные расширения (.py, .env, ключи)
@@ -130,6 +141,8 @@ async def mcp_file_analyzer(
                     f"Unknown action {action!r}. Valid actions: read, analyze, stats"
                 )
             }
+    except _FATAL_EXCEPTIONS:
+        raise
     except Exception as exc:
         logger.exception("mcp_file_analyzer(%r, path=%r) failed", action, path)
         return {"error": str(exc)}
@@ -149,7 +162,9 @@ async def _file_read(resolved: Path) -> dict[str, Any]:
         return {"error": f"Unsupported file extension: {resolved.suffix}"}
 
     try:
-        text = resolved.read_text(encoding="utf-8", errors="replace")
+        text = await asyncio.to_thread(
+            resolved.read_text, encoding="utf-8", errors="replace"
+        )
     except PermissionError:
         return {"error": f"Permission denied: {resolved}"}
     except OSError as exc:
@@ -174,7 +189,9 @@ async def _file_analyze(resolved: Path) -> dict[str, Any]:
     if ext in _TEXT_EXTENSIONS:
         # Plain text — just read first 2000 chars
         try:
-            text = resolved.read_text(encoding="utf-8", errors="replace")
+            text = await asyncio.to_thread(
+                resolved.read_text, encoding="utf-8", errors="replace"
+            )
         except PermissionError:
             return {"error": f"Permission denied: {resolved}"}
         except OSError as exc:
@@ -189,17 +206,18 @@ async def _file_analyze(resolved: Path) -> dict[str, Any]:
         }
 
     elif ext == ".json":
-        return _analyze_json(resolved)
+        return await asyncio.to_thread(_analyze_json, resolved)
     elif ext == ".csv":
-        return _analyze_csv(resolved)
+        return await asyncio.to_thread(_analyze_csv, resolved)
     elif ext in (".yaml", ".yml"):
-        return _analyze_yaml(resolved)
+        return await asyncio.to_thread(_analyze_yaml, resolved)
     elif ext == ".xml":
-        return _analyze_xml(resolved)
+        return await asyncio.to_thread(_analyze_xml, resolved)
     else:
         # Unknown format — return size info
         try:
-            size = resolved.stat().st_size
+            stat_result = await asyncio.to_thread(resolved.stat)
+            size = stat_result.st_size
         except OSError:
             size = -1
         return {
@@ -213,8 +231,10 @@ async def _file_analyze(resolved: Path) -> dict[str, Any]:
 async def _file_stats(resolved: Path) -> dict[str, Any]:
     """Return lines, words, chars, and size for a file."""
     try:
-        stat = resolved.stat()
-        text = resolved.read_text(encoding="utf-8", errors="replace")
+        stat_result = await asyncio.to_thread(resolved.stat)
+        text = await asyncio.to_thread(
+            resolved.read_text, encoding="utf-8", errors="replace"
+        )
     except PermissionError:
         return {"error": f"Permission denied: {resolved}"}
     except OSError as exc:
@@ -222,7 +242,8 @@ async def _file_stats(resolved: Path) -> dict[str, Any]:
     except UnicodeDecodeError:
         # Binary file — only size is available
         try:
-            size = resolved.stat().st_size
+            stat_result = await asyncio.to_thread(resolved.stat)
+            size = stat_result.st_size
         except OSError:
             size = -1
         return {
@@ -242,7 +263,7 @@ async def _file_stats(resolved: Path) -> dict[str, Any]:
         "lines": len(lines),
         "words": words,
         "chars": chars,
-        "size_bytes": stat.st_size,
+        "size_bytes": stat_result.st_size,
     }
 
 

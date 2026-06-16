@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from src.config import settings
 from src.core.infra.key_guard import safe_str
@@ -48,6 +48,19 @@ logger = logging.getLogger(__name__)
 # Ограничивает одновременные вызовы инструментов (макс. 4 конкурентных),
 # чтобы не перегружать внешние API и не создавать избыточных соединений.
 _TOOL_SEMAPHORE = asyncio.Semaphore(4)
+
+# ── Lock for shared provider model mutation ──
+# The same provider instance may be used concurrently across process() calls.
+_MAESTRO_MODEL_LOCK = asyncio.Lock()
+
+_T = TypeVar("_T")
+
+# Exceptions that must never be swallowed by broad catch-all handlers.
+_FATAL_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    asyncio.CancelledError,
+    KeyboardInterrupt,
+    SystemExit,
+)
 
 # ── Fallback chains для инструментов ──
 # При ошибке выполнения тула пробуем альтернативы по порядку.
@@ -140,6 +153,8 @@ async def _execute_one_tool(
                         **sanitized_params,
                         **runtime_kwargs,
                     )
+            except _FATAL_EXCEPTIONS:
+                raise
             except Exception:
                 tool_result = {"error": f"DB/ORM error for tool '{tool_name}'"}
 
@@ -159,6 +174,8 @@ async def _execute_one_tool(
                     **sanitized_params,
                     **runtime_kwargs,
                 )
+            except _FATAL_EXCEPTIONS:
+                raise
             except Exception as e:
                 tool_result = {"error": str(e)}
 
@@ -188,6 +205,8 @@ async def _execute_one_tool(
                         continue
                     logger.info("Fallback '%s' succeeded for '%s'", fb, tool_name)
                     return fb_result
+                except _FATAL_EXCEPTIONS:
+                    raise
                 except Exception:
                     logger.debug(
                         "Fallback '%s' failed for '%s'", fb, tool_name, exc_info=True
@@ -215,14 +234,21 @@ async def process(
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     await asyncio.to_thread(register_builtin_tools)
 
-    # Override provider model if maestro_model is configured
+    # Override provider model if maestro_model is configured.
+    # Use a lock because the same provider instance may be shared across
+    # concurrent process() calls.
     maestro_model = getattr(settings, "maestro_model", None)
-    if maestro_model and not getattr(provider, "_model", None):
-        try:
-            provider._model = maestro_model
-            logger.debug("Maestro overriding provider model to %s", maestro_model)
-        except (AttributeError, TypeError) as e:
-            logger.debug("Cannot override provider model to %s: %s", maestro_model, e)
+    if maestro_model:
+        async with _MAESTRO_MODEL_LOCK:
+            try:
+                # Provider may not declare _model on its class; cast to Any
+                # so pyright allows the dynamic override.
+                cast(Any, provider)._model = maestro_model
+                logger.debug("Maestro overriding provider model to %s", maestro_model)
+            except (AttributeError, TypeError) as e:
+                logger.debug(
+                    "Cannot override provider model to %s: %s", maestro_model, e
+                )
 
     # ═══════════════════════════════════════════════════════════════════
     # Phase 1 — 10 fully independent context sources (parallelised)
@@ -246,9 +272,14 @@ async def process(
     )
 
     # ── Unpack Phase 1 results (inner try/except already logged errors) ──
-    def _safe(result, default):
-        """Return default if result is an unhandled Exception, else the result."""
-        return default if isinstance(result, BaseException) else result
+    def _safe(result: Any, default: _T) -> _T:
+        """Return default if result is an unhandled Exception, else the result.
+
+        Re-raises cancellation and fatal signals so graceful shutdown is not masked.
+        """
+        if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise result
+        return default if isinstance(result, Exception) else result
 
     rag_context = _safe(raw_results[0], "")
     persona_block = _safe(raw_results[1], "")
@@ -370,6 +401,8 @@ async def process(
 
         # ── Phase 5: Terminal assemble ──
         system = prompt_assembler.assemble(ctx)
+    except _FATAL_EXCEPTIONS:
+        raise
     except (
         Exception
     ):  # NOTE: assembly involves many subsystems (prompt_assembler, rag, memory).
@@ -879,6 +912,8 @@ async def process(
                     final_response, _modified = apply_guard(
                         final_response, verify_result, confidence
                     )
+            except _FATAL_EXCEPTIONS:
+                raise
             except Exception:  # NOTE: verify_claims/apply_guard используют LLM-вызовы
                 # и сложную AI-логику. Best-effort: ошибка не должна ломать ответ.
                 pass  # best-effort
@@ -939,6 +974,8 @@ def _estimate_plan_suggestion(user_text: str) -> tuple[float, bool]:
             suggest,
         )
         return score, suggest
+    except _FATAL_EXCEPTIONS:
+        raise
     except Exception:
         return 0.0, False
 

@@ -3,6 +3,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from cryptography.fernet import Fernet
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
@@ -15,6 +16,22 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 
 
+def _encrypt_sensitive(value: str) -> str:
+    key = settings.encryption_key
+    if not key:
+        return value
+    return Fernet(key.encode()).encrypt(value.encode()).decode()
+
+
+def _decrypt_sensitive(value: str | None) -> str | None:
+    if value is None:
+        return None
+    key = settings.encryption_key
+    if not key:
+        return value
+    return Fernet(key.encode()).decrypt(value.encode()).decode()
+
+
 @dataclass
 class PendingLogin:
     # Промежуточное состояние логина: между запросами кода и 2FA-пароля
@@ -23,8 +40,19 @@ class PendingLogin:
     api_id: int
     api_hash: str
     phone: str | None = None
-    phone_code_hash: str | None = None
+    _phone_code_hash: str | None = None
     created_at: float = field(default_factory=time.monotonic)
+
+    @property
+    def phone_code_hash(self) -> str | None:
+        return _decrypt_sensitive(self._phone_code_hash)
+
+    @phone_code_hash.setter
+    def phone_code_hash(self, value: str | None) -> None:
+        if value is None:
+            self._phone_code_hash = None
+        else:
+            self._phone_code_hash = _encrypt_sensitive(value)
 
 
 _MANAGER_SINGLETON: "UserbotManager | None" = None
@@ -220,7 +248,15 @@ class UserbotManager:
         for task in self._retry_tasks:
             task.cancel()
         if self._retry_tasks:
-            await asyncio.gather(*self._retry_tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._retry_tasks, return_exceptions=True),
+                    timeout=30.0,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Timeout waiting for retry tasks to finish during shutdown"
+                )
         self._retry_tasks.clear()
 
         # 2. Disconnect all active clients

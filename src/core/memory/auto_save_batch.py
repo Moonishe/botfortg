@@ -334,8 +334,9 @@ class FactBatchBuffer:
                         return
                 batch = list(self._buffer)
                 self._buffer.clear()
-                # Запустить фоновую обработку ПОСЛЕ очистки буфера —
-                # буфер освобождён, новые сообщения могут накапливаться сразу
+                # Mark flushing before creating the task so concurrent add()
+                # calls see the flag while still holding the lock.
+                self._is_flushing = True
                 self._flush_task = asyncio.create_task(
                     self._flush_batch(batch), name="auto-save-flush-batch"
                 )
@@ -404,6 +405,9 @@ class FactBatchBuffer:
                         elapsed,
                     )
             batch = list(self._buffer)
+            # Mark flushing before creating the task so concurrent add() calls
+            # see the flag while still holding the lock.
+            self._is_flushing = True
             # Создаём задачу ДО очистки буфера: если create_task упадёт,
             # данные останутся в буфере и не будут потеряны
             task = asyncio.create_task(
@@ -418,12 +422,12 @@ class FactBatchBuffer:
 
         B4: retry-цикл (до 3 попыток) при LLM-ошибках (сеть, таймаут, rate-limit).
         После 3 неудач — батч теряется, но логируется warning."""
-        if not batch:
-            return
-
-        self._is_flushing = True
         try:
+            # The caller already marked _is_flushing = True before creating the task.
+            if not batch:
+                return
             provider = batch[0]["provider"]
+
             prompt = _build_batch_prompt(batch)
 
             # B4: retry loop — network/rate-limit errors shouldn't silently drop the batch
@@ -514,13 +518,18 @@ class FactBatchBuffer:
                     "Unexpected error during batch auto-save (%d messages)", len(batch)
                 )
         finally:
-            self._is_flushing = False
             # M1: если во время flush в буфер добавились новые сообщения —
-            # запускаем таймер для их сброса (раньше буфер «зависал» до следующего add)
-            if self._buffer:
-                self._flush_task = asyncio.create_task(
-                    self._timeout_flush(), name="auto-save-flush-post-flush"
-                )
+            # запускаем таймер для их сброса (раньше буфер «зависал» до следующего add).
+            # Hold the lock while resetting _is_flushing AND checking _buffer to
+            # avoid a race with concurrent add() that could create a duplicate timer.
+            async with self._lock:
+                self._is_flushing = False
+                if self._buffer and (
+                    self._flush_task is None or self._flush_task.done()
+                ):
+                    self._flush_task = asyncio.create_task(
+                        self._timeout_flush(), name="auto-save-flush-post-flush"
+                    )
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -10,14 +10,14 @@ from src.core.infra.telemetry import start_span
 from src.core.infra.key_guard import safe_str
 from src.db.repo import mark_key_failure, mark_key_used
 from src.db.session import get_session
-from collections.abc import AsyncGenerator
-
-from src.llm.base import ChatMessage, LLMProvider, TaskType
+from src.llm.base import ChatMessage, TaskType
 
 # ── Импорты из выделенного provider_manager ────────────────────────────
 from src.llm.provider_manager import (
     _CircuitState,
     _KeyCircuitBreaker,
+    _PURPOSE_SEMAPHORES,  # pyright: ignore[reportUnusedImport] — re-export for memory_admin_cmds
+    _provider_class_for,  # pyright: ignore[reportUnusedImport] — re-export for keys_cmd + free_text_exec
     _record_provider_success,
     _record_provider_failure,
     _score_provider,
@@ -26,7 +26,11 @@ from src.llm.provider_manager import (
     RETRY_BASE_DELAY,
     _CIRCUIT_BREAKERS,
     _CIRCUIT_BREAKERS_LOCK,
+    _trim_circuit_breakers_if_needed,
     acquire_purpose_slot,
+    build_provider,  # pyright: ignore[reportUnusedImport] — re-export for 64 existing consumers
+    cleanup_circuit_breakers,  # pyright: ignore[reportUnusedImport] — re-export for main.py cleanup loop
+    ensure_locks_initialized,  # pyright: ignore[reportUnusedImport] — re-export for main.py
     release_purpose_slot,
 )
 
@@ -35,6 +39,44 @@ logger = logging.getLogger(__name__)
 # Sentinel to distinguish "heavy not passed" from "heavy=False".
 # Used so that `_default_heavy` (from user's use_heavy_model setting)
 # is respected when callers don't explicitly specify heavy/light.
+
+# ── Account Usage Tracking helper ─────────────────────────────────────────
+
+
+async def _track_llm_usage(
+    provider_name: str,
+    model: str | None,
+    messages: list,
+    result_text: str,
+) -> None:
+    """Estimate and record LLM usage after a successful chat call."""
+    try:
+        from src.core.context.token_tracker import estimate_tokens
+        from src.core.observability.account_usage import get_tracker
+
+        model_name = model or "unknown"
+        input_text = ""
+        for m in messages:
+            content = (
+                m.content
+                if hasattr(m, "content")
+                else m.get("content", "")
+                if isinstance(m, dict)
+                else str(m)
+            )
+            input_text += content + "\n"
+        tokens_in = estimate_tokens(input_text)
+        tokens_out = estimate_tokens(result_text)
+        await get_tracker().record_usage(
+            provider_name,
+            model_name,
+            tokens_in,
+            tokens_out,
+        )
+    except Exception:
+        logger.debug("Failed to record LLM usage", exc_info=True)
+
+
 _UNSET = object()
 
 # ── Module constants ─────────────────────────────────────────────────────
@@ -178,6 +220,14 @@ class MultiKeyProvider:
         last_error: Exception | None = None
         now = start_time
 
+        # ── Iteration Budget — prevent runaway LLM calls ──
+        from src.core.intelligence.iteration_budget import IterationBudget
+
+        if not hasattr(self, "_llm_budget"):
+            self._llm_budget = IterationBudget()
+        if not self._llm_budget.record_llm_call():
+            raise RuntimeError("LLM call budget exhausted — too many calls in window")
+
         # Round-robin: reserve a unique start index for concurrent calls.
         start_idx = await self._reserve_start_idx()
 
@@ -288,11 +338,34 @@ class MultiKeyProvider:
                         return result
             except Exception as exc:
                 if _is_retryable_llm_error(exc):
+                    # ── Error Classifier: more nuanced retry decision ──
+                    from src.core.intelligence.error_classifier import (
+                        classify_llm_error,
+                        should_retry,
+                    )
+
+                    category = classify_llm_error(exc)
+                    if not should_retry(category):
+                        logger.info(
+                            "LLM error category %r is not retryable — aborting key",
+                            category,
+                        )
+                        raise
+                    logger.debug("LLM error category=%r — retrying", category)
                     if _CIRCUIT_BREAKERS_LOCK is not None:
                         async with _CIRCUIT_BREAKERS_LOCK:
                             if cache_key not in _CIRCUIT_BREAKERS:
+                                _trim_circuit_breakers_if_needed()
                                 _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
                             _CIRCUIT_BREAKERS[cache_key].record_failure(now)
+                            # Persist actual exponential backoff to DB.
+                            # Use the *capped* cooldown property (max 1h) —
+                            # consistent with the circuit breaker's own
+                            # ready_at() which also caps at 3600s.
+                            _cb = _CIRCUIT_BREAKERS[cache_key]
+                            _cb_cooldown = int(_cb.cooldown_seconds)
+                    else:
+                        _cb_cooldown = int(KEY_COOLDOWN_SECONDS)
                     last_error = exc
                     logger.warning(
                         "LLM %s key %s temporarily failed, rotating: %s",
@@ -308,7 +381,10 @@ class MultiKeyProvider:
                                     f"{type(exc).__name__}: {safe_str(exc).split(chr(10))[0]}"
                                 )[:256]
                                 await mark_key_failure(
-                                    fresh_s, self._slot_ids[idx], error_msg
+                                    fresh_s,
+                                    self._slot_ids[idx],
+                                    error_msg,
+                                    cooldown_sec=_cb_cooldown,
                                 )
                         except SQLAlchemyError:
                             logger.exception(
@@ -387,16 +463,27 @@ class MultiKeyProvider:
         # (set from user's use_heavy_model setting by build_provider).
         effective_heavy = self._default_heavy if heavy is _UNSET else heavy
         model_override = self._resolve_model_for_task(task_type)
-        return await self._try_with_retry(
+        result = await self._try_with_retry(
             lambda p: p.chat(messages, heavy=effective_heavy),
             model_override=model_override,
         )
+        await _track_llm_usage(
+            self.provider_name,
+            model_override or self._model,
+            messages,
+            result,
+        )
+        return result
 
     def _resolve_model_for_task(self, task_type: str) -> str | None:
         """Resolve model for task type.
 
         Returns model name or None to use provider default.
         Priority: _model (set by build_provider from task overrides) > None
+
+        Note: ``task_type`` is intentionally unused — model selection
+        happens at provider-build time via ``_model``. Per-task routing
+        can be added here later if dynamic model switching is needed.
         """
         if self._model:
             return self._model
@@ -498,6 +585,19 @@ class MultiKeyProvider:
                             )
                         # _reserve_start_idx already advanced the round-robin index;
                         # no separate advance needed — avoids double-increment race.
+                        # ── Account Usage Tracking ──
+                        try:
+                            await _track_llm_usage(
+                                self.provider_name,
+                                model_override or self._model,
+                                messages,
+                                total_text,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to track usage in stream",
+                                exc_info=True,
+                            )
                         return
                     except (AttributeError, NotImplementedError):
                         continue
@@ -507,12 +607,17 @@ class MultiKeyProvider:
                             if _CIRCUIT_BREAKERS_LOCK is not None:
                                 async with _CIRCUIT_BREAKERS_LOCK:
                                     if cache_key not in _CIRCUIT_BREAKERS:
+                                        _trim_circuit_breakers_if_needed()
                                         _CIRCUIT_BREAKERS[cache_key] = (
                                             _KeyCircuitBreaker()
                                         )
                                     _CIRCUIT_BREAKERS[cache_key].record_failure(
                                         asyncio.get_running_loop().time()
                                     )
+                                    _cb = _CIRCUIT_BREAKERS[cache_key]
+                                    _cb_cooldown = int(_cb.cooldown_seconds)
+                            else:
+                                _cb_cooldown = int(KEY_COOLDOWN_SECONDS)
                             last_error = e
                             logger.warning(
                                 "Stream key %s failed: %s",
@@ -527,7 +632,10 @@ class MultiKeyProvider:
                                             f"{type(e).__name__}: {safe_str(e).split(chr(10))[0]}"
                                         )[:256]
                                         await mark_key_failure(
-                                            fresh_s, self._slot_ids[idx], error_msg
+                                            fresh_s,
+                                            self._slot_ids[idx],
+                                            error_msg,
+                                            cooldown_sec=_cb_cooldown,
                                         )
                                 except SQLAlchemyError:
                                     logger.exception(
@@ -607,17 +715,17 @@ class MultiKeyProvider:
         enabled = set()
         if self._slot_ids:
             from src.db.session import get_session
+            from src.db.repos.key_repo import get_enabled_models_for_slots
 
-            for slot_id in self._slot_ids:
-                try:
-                    async with get_session() as session:
-                        from src.db.repos.key_repo import get_enabled_models
-
-                        enabled.update(await get_enabled_models(session, slot_id))
-                except SQLAlchemyError:
-                    logger.exception(
-                        "Failed to get enabled models for slot %d", slot_id
+            try:
+                async with get_session() as session:
+                    enabled = set(
+                        await get_enabled_models_for_slots(session, self._slot_ids)
                     )
+            except SQLAlchemyError:
+                logger.exception(
+                    "Failed to get enabled models for slots %s", self._slot_ids
+                )
         # Проверяем старые single-model слоты (slot.model без LlmKeySlotModel)
         for model_list in self._models:
             for m in model_list:
@@ -686,7 +794,7 @@ class ProviderFallback:
         self,
         messages: list[ChatMessage],
         *,
-        heavy=_UNSET,
+        heavy: bool | None = None,
         task_type: str = TaskType.DEFAULT,
     ) -> str:
         """Chat c адаптивным выбором провайдера.
@@ -702,6 +810,8 @@ class ProviderFallback:
             key=lambda p: _score_provider(p.provider_name, now),
             reverse=True,
         )
+        # Map None → _UNSET for MultiKeyProvider (preserves "use _default_heavy" semantic)
+        mkp_heavy = _UNSET if heavy is None else heavy
         for provider in sorted_providers:
             try:
                 with start_span(
@@ -711,7 +821,7 @@ class ProviderFallback:
                     msg_count=len(messages),
                 ):
                     return await provider.chat(
-                        messages, heavy=heavy, task_type=task_type
+                        messages, heavy=mkp_heavy, task_type=task_type
                     )
             except Exception as exc:
                 if not isinstance(exc, ExhaustedError) and not _is_retryable_llm_error(
@@ -730,7 +840,7 @@ class ProviderFallback:
         self,
         messages: list[ChatMessage],
         *,
-        heavy=_UNSET,
+        heavy: bool | None = None,
         task_type: str = TaskType.DEFAULT,
     ) -> AsyncGenerator[str]:
         """Stream chat with adaptive provider fallback. Falls back to regular chat."""
@@ -740,10 +850,12 @@ class ProviderFallback:
             key=lambda p: _score_provider(p.provider_name, now),
             reverse=True,
         )
+        # Map None → _UNSET for MultiKeyProvider (preserves "use _default_heavy" semantic)
+        mkp_heavy = _UNSET if heavy is None else heavy
         for provider in sorted_providers:
             try:
                 async for token in provider.chat_stream(
-                    messages, heavy=heavy, task_type=task_type
+                    messages, heavy=mkp_heavy, task_type=task_type
                 ):
                     yield token
                 return
@@ -770,7 +882,7 @@ class ProviderFallback:
         Fallback с несовпадающей размерностью вызывает ValueError.
         """
         last_error: Exception | None = None
-        for i, provider in enumerate(self.providers):
+        for provider in self.providers:
             try:
                 result = await provider.embed(text)
                 # M8: запоминаем размерность первого успешного эмбеддинга,
@@ -804,7 +916,7 @@ class ProviderFallback:
         с проверкой размерности векторов для предотвращения повреждения Qdrant.
         """
         last_error: Exception | None = None
-        for i, provider in enumerate(self.providers):
+        for provider in self.providers:
             try:
                 result = await provider.embed_batch(texts)
                 if result:

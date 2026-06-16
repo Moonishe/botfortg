@@ -743,10 +743,6 @@ class ToolRegistry:
         self._loop_guard.record(name, params)
 
         # ── Iteration Budget — prevent resource exhaustion ──
-        from src.core.intelligence.iteration_budget import IterationBudget
-
-        if not hasattr(self, "_tool_budget"):
-            self._tool_budget = IterationBudget()
         if not self._tool_budget.record_tool_call():
             return {
                 "error": "Tool call budget exhausted — too many tool calls in window",
