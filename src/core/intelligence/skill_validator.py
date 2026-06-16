@@ -126,26 +126,36 @@ async def _llm_estimate_quality(
             )
 
         prompt = (
-            f"Оцени качество навыка '{skill_name}' (0.0-1.0) на основе примеров диалогов.\n\n"
+            f"Оцени качество навыка '{skill_name}' (0.0-1.0) "
+            f"на основе примеров диалогов.\n\n"
             f"Тело навыка:\n{new_body[:1500]}\n\n"
             f"Примеры диалогов:\n" + "\n---\n".join(examples) + "\n\n"
-            "Ответь ТОЛЬКО числом от 0.0 до 1.0 (например: 0.75)."
+            "Ответь только числом от 0.0 до 1.0."
         )
 
         messages = [
             ChatMessage(
                 role="system",
-                content="Ты — оценщик качества навыков для AI-ассистента. Отвечай только числом.",
+                content=(
+                    "Ты — оценщик качества навыков для AI-ассистента. "
+                    "Отвечай только числом."
+                ),
             ),
             ChatMessage(role="user", content=prompt),
         ]
 
         response = await provider.chat(messages, task_type=TaskType.SKILLS)
-        score = float(response.strip().split()[0])  # Extract first number
+        words = response.strip().split()
+        if not words:
+            logger.debug("LLM validation returned empty response")
+            return None
+        score = float(words[0])  # Extract first number
         return max(0.0, min(1.0, score))
 
     except Exception as e:
-        logger.debug("LLM validation failed, falling back to heuristic: %s", e)
+        logger.warning(
+            "LLM validation failed, falling back to heuristic: %s", e, exc_info=True
+        )
         return None
 
 
@@ -204,10 +214,16 @@ async def validate_skill_candidate(
     is_edit: bool = False,
     original_body: str | None = None,
     provider: LLMProvider | None = None,
+    # V3: pre-fetched data to eliminate N+1 in batch auto-approve
+    pre_fetched_trajectories: list[TrajectoryData] | None = None,
+    pre_fetched_used_ids: set[int] | None = None,
+    existing_skill_name: str | None = None,
 ) -> ValidationResult:
     """Validate a skill candidate against held-out trajectories.
 
     V2.1: Uses LLM-based quality estimation with heuristic fallback.
+    V3: Accepts pre-fetched trajectory data to eliminate N+1 queries in
+        batch operations (auto_approve_high_confidence).
 
     Args:
         user_id: Owner user ID
@@ -219,55 +235,69 @@ async def validate_skill_candidate(
                   When passed and heuristic score_delta is within
                   UNCERTAIN_DELTA_THRESHOLD, a light LLM call is made
                   as a second opinion.
+        pre_fetched_trajectories: Optional pre-fetched TrajectoryData list.
+            When provided, the DB trajectory query is skipped.
+        pre_fetched_used_ids: Optional pre-fetched set of trajectory IDs
+            that already used this skill. When provided, the SkillUsage
+            query is skipped.
+        existing_skill_name: Optional existing skill name (case-sensitive).
+            When provided, the Skill lookup is skipped.
 
     Returns:
         ValidationResult with accept/reject decision
     """
-    async with get_session() as session:
-        # 1. Get held-out trajectories: successful, recent, NOT using this skill
-        since = datetime.now(UTC) - timedelta(days=7)
+    # ── V3: fast path with pre-fetched data ──
+    if pre_fetched_trajectories is not None:
+        used_ids = pre_fetched_used_ids or set()
+        held_out = [t for t in pre_fetched_trajectories if t.id not in used_ids][:10]
+        eff_existing_name = existing_skill_name
+    else:
+        async with get_session() as session:
+            # 1. Get held-out trajectories: successful, recent, NOT using this skill
+            since = datetime.now(UTC) - timedelta(days=7)
 
-        # Get trajectory IDs that already used this skill (to exclude from validation)
-        used_trajectory_ids: set[int] = set()
-        skill_result = await session.execute(
-            select(Skill).where(
-                Skill.user_id == user_id,
-                func.lower(Skill.name) == skill_name.lower(),
-            )
-        )
-        existing_skill = skill_result.scalar_one_or_none()
-        existing_skill_name: str | None = (
-            existing_skill.name if existing_skill else None
-        )
-
-        if existing_skill:
-            usages = await session.execute(
-                select(SkillUsage.trajectory_id).where(
-                    SkillUsage.skill_id == existing_skill.id,
-                    SkillUsage.trajectory_id.isnot(None),
+            # Get trajectory IDs that already used this skill
+            # (to exclude from validation)
+            used_trajectory_ids: set[int] = set()
+            skill_result = await session.execute(
+                select(Skill).where(
+                    Skill.user_id == user_id,
+                    func.lower(Skill.name) == skill_name.lower(),
                 )
             )
-            used_trajectory_ids = {row[0] for row in usages.all()}
-
-        # Get held-out trajectories (successful, recent, not using this skill)
-        query = (
-            select(Trajectory)
-            .where(
-                Trajectory.user_id == user_id,
-                Trajectory.success.is_(True),
-                Trajectory.created_at >= since,
+            existing_skill = skill_result.scalar_one_or_none()
+            eff_existing_name: str | None = (
+                existing_skill.name if existing_skill else None
             )
-            .order_by(Trajectory.created_at.desc())
-            .limit(20)
-        )
-        result = await session.execute(query)
-        all_trajectories = list(result.scalars().all())
 
-        # CRITICAL FIX: Extract data into plain dataclasses BEFORE session closes
-        held_out_raw = [t for t in all_trajectories if t.id not in used_trajectory_ids][
-            :10
-        ]
-        held_out = [TrajectoryData.from_trajectory(t) for t in held_out_raw]
+            if existing_skill:
+                usages = await session.execute(
+                    select(SkillUsage.trajectory_id).where(
+                        SkillUsage.skill_id == existing_skill.id,
+                        SkillUsage.trajectory_id.isnot(None),
+                    )
+                )
+                used_trajectory_ids = {row[0] for row in usages.all()}
+
+            # Get held-out trajectories (successful, recent, not using this skill)
+            query = (
+                select(Trajectory)
+                .where(
+                    Trajectory.user_id == user_id,
+                    Trajectory.success.is_(True),
+                    Trajectory.created_at >= since,
+                )
+                .order_by(Trajectory.created_at.desc())
+                .limit(20)
+            )
+            result = await session.execute(query)
+            all_trajectories = list(result.scalars().all())
+
+            # CRITICAL FIX: Extract data into plain dataclasses BEFORE session closes
+            held_out_raw = [
+                t for t in all_trajectories if t.id not in used_trajectory_ids
+            ][:10]
+            held_out = [TrajectoryData.from_trajectory(t) for t in held_out_raw]
 
     if len(held_out) < MIN_TRAJECTORIES_FOR_VALIDATION:
         # Not enough data for validation — accept with warning
@@ -277,11 +307,14 @@ async def validate_skill_candidate(
             score_after=0.0,
             score_delta=0.0,
             trajectories_used=len(held_out),
-            reason=f"Insufficient validation data ({len(held_out)} < {MIN_TRAJECTORIES_FOR_VALIDATION}). Accepted with caution.",
+            reason=(
+                f"Insufficient validation data ({len(held_out)} < "
+                f"{MIN_TRAJECTORIES_FOR_VALIDATION}). Accepted with caution."
+            ),
         )
 
     # 2. Calculate baseline score (how well existing skill performs)
-    baseline_score = _calculate_baseline_score(held_out, existing_skill_name)
+    baseline_score = _calculate_baseline_score(held_out, eff_existing_name)
 
     # 3. Estimate new score — try LLM first, fall back to heuristic
     llm_score = await _llm_estimate_quality(new_body, held_out, skill_name)
@@ -318,7 +351,10 @@ async def validate_skill_candidate(
     reason = ""
 
     if not accepted:
-        reason = f"Score regression ({method}): {score_delta:+.2f} (tolerance: {MAX_REGRESSION_TOLERANCE:+.2f})"
+        reason = (
+            f"Score regression ({method}): {score_delta:+.2f} "
+            f"(tolerance: {MAX_REGRESSION_TOLERANCE:+.2f})"
+        )
     elif score_delta > 0:
         reason = f"Score improvement ({method}): {score_delta:+.2f}"
     else:

@@ -37,14 +37,15 @@ from src.bot.handlers.skills_callbacks import (
     cb_skills_evolve,
     cb_skills_page,
     cb_skills_stats,
-    _parse_callback_skill_id,
-    _status_filter_clauses,
 )
+from src.bot.handlers.skills_callbacks import _parse_callback_skill_id
+from src.bot.handlers.skills_data import _status_filter_clauses
 from src.bot.handlers.skills_ui import (
     _DECAY_MARKER,
     _SUCCESS_RATE_MARKER,
     _format_metrics,
     _format_skill_detail,
+    _is_stale,
     _skill_button,
     _skill_detail_keyboard,
     _skill_list_keyboard,
@@ -290,7 +291,7 @@ class TestCmdSkills:
             patches[2],
             patches[3],
             patch(
-                "src.bot.handlers.skills_callbacks.list_skills",
+                "src.bot.handlers.skills_data.list_skills",
                 AsyncMock(return_value=[_make_skill()]),
             ),
         ):
@@ -309,7 +310,7 @@ class TestCmdSkills:
             patches[2],
             patches[3],
             patch(
-                "src.bot.handlers.skills_callbacks.list_skills",
+                "src.bot.handlers.skills_data.list_skills",
                 AsyncMock(return_value=[]),
             ),
         ):
@@ -352,7 +353,7 @@ class TestCbSkillsPage:
             patches[2],
             patches[3],
             patch(
-                "src.bot.handlers.skills_callbacks.list_skills",
+                "src.bot.handlers.skills_data.list_skills",
                 AsyncMock(return_value=[_make_skill()]),
             ),
         ):
@@ -369,7 +370,7 @@ class TestCbSkillsPage:
             patches[2],
             patches[3],
             patch(
-                "src.bot.handlers.skills_callbacks.list_skills",
+                "src.bot.handlers.skills_data.list_skills",
                 AsyncMock(return_value=[]),
             ),
         ):
@@ -640,7 +641,29 @@ class TestCbSkillsEvolve:
             await cb_skills_evolve(cb)
         cb.message.edit_text.assert_called_once()
         text = cb.message.edit_text.call_args[0][0]
-        assert "не удалось" in text.lower()
+        # Failure now shown inline as warning, not a hard error page
+        assert "Auto-approve failed" in text
+        assert "Авто-одобрено: 0" in text
+
+    @pytest.mark.asyncio
+    async def test_evolve_partial_failure_preserves_approved(self):
+        """list_proposed fails after auto_approve succeeds — approved count kept."""
+        cb = _make_callback(data="skills:evolve:0")
+        with (
+            patch(
+                "src.bot.handlers.skills_callbacks.auto_approve_high_confidence",
+                AsyncMock(return_value=3),
+            ),
+            patch(
+                "src.bot.handlers.skills_callbacks.list_proposed",
+                AsyncMock(side_effect=RuntimeError("db fail")),
+            ),
+        ):
+            await cb_skills_evolve(cb)
+        cb.message.edit_text.assert_called_once()
+        text = cb.message.edit_text.call_args[0][0]
+        assert "Авто-одобрено: 3" in text
+        assert "Осталось proposed: 0" in text
 
 
 class TestCbSkillsStats:
@@ -699,33 +722,63 @@ class TestParseCallbackSkillId:
 
 
 class TestStatusFilterClauses:
-    def test_stale_and_archived_filters_are_different(self):
-        """Stale and archived must use different WHERE clauses."""
+    def test_stale_and_archived_filters_are_identical(self):
+        """Stale and archived now use identical SQL (split done in Python)."""
         owner = MagicMock()
         owner.id = 1
         stale = _status_filter_clauses("stale", owner)
         archived = _status_filter_clauses("archived", owner)
-        assert str(stale) != str(archived)
+        stale_sql = str(
+            select(1).where(*stale).compile(compile_kwargs={"literal_binds": True})
+        )
+        archived_sql = str(
+            select(1).where(*archived).compile(compile_kwargs={"literal_binds": True})
+        )
+        assert stale_sql == archived_sql
 
-    def test_stale_includes_decay_marker(self):
+    def test_stale_is_just_disabled_clauses(self):
+        """Stale no longer includes LIKE decay markers — uses Python filtering."""
         owner = MagicMock()
         owner.id = 1
         clauses = _status_filter_clauses("stale", owner)
         compiled = str(
             select(1).where(*clauses).compile(compile_kwargs={"literal_binds": True})
         ).lower()
-        assert _DECAY_MARKER.lower() in compiled
-        assert _SUCCESS_RATE_MARKER.lower() in compiled
+        # No LIKE scan on description
+        assert _DECAY_MARKER.lower() not in compiled
+        assert _SUCCESS_RATE_MARKER.lower() not in compiled
+        # Still has disabled + approved filter
+        assert "enabled" in compiled
+        assert "approved" in compiled
 
-    def test_archived_excludes_decay_marker(self):
+    def test_archived_is_just_disabled_clauses(self):
+        """Archived no longer includes NOT(decay) — uses Python filtering."""
         owner = MagicMock()
         owner.id = 1
         clauses = _status_filter_clauses("archived", owner)
         compiled = str(
             select(1).where(*clauses).compile(compile_kwargs={"literal_binds": True})
         ).lower()
-        assert "not" in compiled
-        assert _DECAY_MARKER.lower() in compiled
+        assert _DECAY_MARKER.lower() not in compiled
+        assert "not" not in compiled  # No NOT(decay_marker) clause
+        assert "enabled" in compiled
+
+    def test_python_split_stale_vs_archived(self):
+        """Verify Python-level split via _is_stale correctly separates skills."""
+        stale_skill = _make_skill(
+            review_status="approved",
+            enabled=False,
+            description="[DECAYED] low success_rate",
+            skill_id=1,
+        )
+        archived_skill = _make_skill(
+            review_status="approved",
+            enabled=False,
+            description="",
+            skill_id=2,
+        )
+        assert _is_stale(stale_skill)
+        assert not _is_stale(archived_skill)
 
 
 # ── Tests: skill detail formatting ───────────────────────────────────

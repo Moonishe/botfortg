@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from functools import partial
 from typing import Any
 
@@ -72,7 +72,7 @@ def _get_yaml_confidence(skill: Skill) -> float:
     return 0.0
 
 
-def _calibrate_confidence(skill) -> float:
+def _calibrate_confidence(skill: Skill) -> float:
     """Калибрует LLM-confidence на основе реального success_rate.
 
     Если usage_count < MIN_USAGE_FOR_CALIBRATION — возвращает raw confidence
@@ -131,13 +131,50 @@ async def auto_approve_high_confidence() -> int:
         Number of skills approved.
     """
     from src.config import settings
-    from src.core.intelligence.skill_validator import validate_skill_candidate
+    from src.core.intelligence.skill_validator import (
+        TrajectoryData,
+        validate_skill_candidate,
+    )
+    from src.db.models import SkillUsage, Trajectory
 
     async with get_session() as session:
         owner = await get_or_create_user(session, settings.owner_telegram_id)
         proposed = await list_skills(
             session, owner, review_status="proposed", limit=200
         )
+
+        if not proposed:
+            return 0
+
+        # V3: Batch pre-fetch to eliminate N+1 queries per skill
+        # ── Pre-fetch: recent successful trajectories ──
+        since = datetime.now(UTC) - timedelta(days=7)
+        traj_result = await session.execute(
+            select(Trajectory)
+            .where(
+                Trajectory.user_id == owner.id,
+                Trajectory.success.is_(True),
+                Trajectory.created_at >= since,
+            )
+            .order_by(Trajectory.created_at.desc())
+            .limit(200)
+        )
+        pre_fetched_trajs = [
+            TrajectoryData.from_trajectory(t) for t in traj_result.scalars().all()
+        ]
+
+        # ── Pre-fetch: SkillUsage for all proposed skill IDs ──
+        proposed_ids = [s.id for s in proposed]
+        usage_map: dict[int, set[int]] = {}
+        if proposed_ids:
+            usage_result = await session.execute(
+                select(SkillUsage.skill_id, SkillUsage.trajectory_id).where(
+                    SkillUsage.skill_id.in_(proposed_ids),
+                    SkillUsage.trajectory_id.isnot(None),
+                )
+            )
+            for skill_id, traj_id in usage_result.all():
+                usage_map.setdefault(skill_id, set()).add(traj_id)
 
         approved_count = 0
         rejected_count = 0
@@ -154,6 +191,9 @@ async def auto_approve_high_confidence() -> int:
                         owner.id,
                         skill.name,
                         skill.body,
+                        pre_fetched_trajectories=pre_fetched_trajs,
+                        pre_fetched_used_ids=usage_map.get(skill.id, set()),
+                        existing_skill_name=skill.name,
                     )
                     if not validation.accepted:
                         skill.review_status = "rejected"
@@ -684,7 +724,7 @@ async def curator_stats(owner_id: int) -> dict[str, int]:
     }
 
 
-async def decay_stale_skills(session, telegram_id: int) -> int:
+async def decay_stale_skills(session: AsyncSession, telegram_id: int) -> int:
     """Авто-отключение навыков с упавшим success_rate.
 
     Критерии отключения:

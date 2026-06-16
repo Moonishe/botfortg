@@ -1,7 +1,7 @@
 """Callback handlers for the skills inline panel.
 
-Data-access layer + callback registration.
-Depends on ``skills_ui`` for presentation.
+Callback registration and handler logic.
+Depends on ``skills_ui`` for presentation and ``skills_data`` for data access.
 """
 
 from __future__ import annotations
@@ -9,17 +9,13 @@ from __future__ import annotations
 import html
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import func, not_, or_, select
 
 from src.bot.filters import OwnerOnly
-from src.core.context_cache import invalidate as cache_invalidate
-from src.core.intelligence.skill_editor import bump_version
 from src.core.intelligence.skills_curator import (
     approve_skill,
     auto_approve_high_confidence,
@@ -29,18 +25,16 @@ from src.core.intelligence.skills_curator import (
     reject_skill,
 )
 from src.db.models import Skill
-from src.db.repo import (
-    get_or_create_user,
-    list_skills,
-    set_skill_enabled,
-)
+from src.db.repo import get_or_create_user, set_skill_enabled
 from src.db.session import get_session
+from .skills_data import (
+    _fetch_skills_by_status,
+    _get_skill_by_id,
+    _perform_rollback,
+)
 from .skills_ui import (
     CALLBACK_PREFIX,
-    _DECAY_MARKER,
-    _PAGE_SIZE,
     _STATUS_LABELS,
-    _SUCCESS_RATE_MARKER,
     _edit_callback_message,
     _format_skill_detail,
     _skill_detail_keyboard,
@@ -54,7 +48,11 @@ router.callback_query.filter(OwnerOnly())
 logger = logging.getLogger(__name__)
 
 
-# ── Data-access helpers ──────────────────────────────────────────────
+# ── Callback query handlers ──────────────────────────────────────────
+
+
+
+# ── Callback helpers ─────────────────────────────────────────────────
 
 
 def _parse_callback_skill_id(callback: CallbackQuery) -> int | None:
@@ -74,164 +72,6 @@ def _parse_callback_skill_id(callback: CallbackQuery) -> int | None:
     if skill_id <= 0:
         return None
     return skill_id
-
-
-def _status_filter_clauses(status: str, owner) -> list:
-    """Return SQLAlchemy WHERE clauses for a given UI status.
-
-    ``stale`` and ``archived`` are UI labels derived from decay markers in the
-    skill description; they must be kept in sync with ``_ui_status``.
-    """
-    base = [Skill.user_id == owner.id]
-    if status == "all":
-        return base
-    if status == "proposed":
-        return [*base, Skill.review_status == "proposed"]
-    if status == "active":
-        return [
-            *base,
-            Skill.review_status == "approved",
-            Skill.enabled == True,  # noqa: E712,
-        ]
-    if status == "rejected":
-        return [*base, Skill.review_status == "rejected"]
-
-    decay_marker = or_(
-        func.coalesce(Skill.description, "").contains(_DECAY_MARKER),
-        func.coalesce(Skill.description, "").contains(_SUCCESS_RATE_MARKER),
-    )
-    disabled = [*base, Skill.review_status == "approved", Skill.enabled == False]  # noqa: E712
-    if status == "stale":
-        return [*disabled, decay_marker]
-    if status == "archived":
-        return [*disabled, not_(decay_marker)]
-    return []
-
-
-async def _count_skills(session, status: str, owner) -> int:
-    """Return total count of skills for a UI status."""
-    clauses = _status_filter_clauses(status, owner)
-    if not clauses:
-        return 0
-    result = await session.execute(select(func.count()).where(*clauses))
-    return result.scalar() or 0
-
-
-async def _fetch_skills_by_status(
-    session, owner, status: str, page: int
-) -> tuple[list, int]:
-    """Fetch skills for a given UI status with server-side pagination.
-
-    Returns (page_skills, total_count).
-    """
-    offset = page * _PAGE_SIZE
-    total = await _count_skills(session, status, owner)
-
-    if status == "all":
-        skills = await list_skills(session, owner, limit=_PAGE_SIZE, offset=offset)
-    elif status == "proposed":
-        skills = await list_skills(
-            session, owner, review_status="proposed", limit=_PAGE_SIZE, offset=offset
-        )
-    elif status == "active":
-        skills = await list_skills(
-            session,
-            owner,
-            review_status="approved",
-            enabled=True,
-            limit=_PAGE_SIZE,
-            offset=offset,
-        )
-    elif status in ("stale", "archived"):
-        clauses = _status_filter_clauses(status, owner)
-        q = (
-            select(Skill)
-            .where(*clauses)
-            .order_by(Skill.success_count.desc(), Skill.updated_at.desc())
-            .limit(_PAGE_SIZE)
-            .offset(offset)
-        )
-        r = await session.execute(q)
-        skills = list(r.scalars().all())
-    elif status == "rejected":
-        skills = await list_skills(
-            session,
-            owner,
-            review_status="rejected",
-            limit=_PAGE_SIZE,
-            offset=offset,
-        )
-    else:
-        skills = []
-
-    return skills, total
-
-
-async def _get_skill_by_id(session, owner, skill_id: int):
-    """Fetch a skill by ID scoped to the owner."""
-    skill = await session.get(Skill, skill_id)
-    if skill is None or skill.user_id != owner.id:
-        return None
-    return skill
-
-
-async def _perform_rollback(session, skill, owner, reason: str) -> None:
-    """Mutate a skill to its best_body and record the rollback.
-
-    Caller must ensure ``skill.best_body`` is not None.
-    """
-    old_version = skill.version or "1.0.0"
-    skill.body = skill.best_body
-    skill.validation_score = None
-    skill.version = bump_version(old_version, "minor")
-    history = list(skill.edit_history_json or [])
-    history.append(
-        {
-            "op": "rollback",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "reason": reason,
-        }
-    )
-    skill.edit_history_json = history
-    await session.flush()
-    try:
-        await cache_invalidate(f"skills:{owner.telegram_id}:")
-    except Exception:
-        logger.warning("skills cache invalidate failed for owner %s", owner.telegram_id)
-
-
-# ── Callback query handlers ──────────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:page:"))
-async def cb_skills_page(callback: CallbackQuery) -> None:
-    """Render a paginated skill list for a status tab."""
-    data = callback.data or ""
-    parts = data.split(":")
-    if len(parts) < 4:
-        await callback.answer("Ошибка данных", show_alert=True)
-        return
-    status = parts[2]
-    if status not in _STATUS_LABELS:
-        status = "all"
-    try:
-        page = max(0, int(parts[3]))
-    except ValueError:
-        page = 0
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        page_skills, total = await _fetch_skills_by_status(session, owner, status, page)
-
-    text = f"<b>Skills</b> — {_STATUS_LABELS[status]} (всего {total}):\n"
-    text += _skills_summary(page_skills)
-
-    await callback.answer()
-    await _edit_callback_message(
-        callback,
-        text,
-        reply_markup=_skill_list_keyboard(page_skills, status, page, total),
-    )
 
 
 async def _skill_mutation(
@@ -276,7 +116,7 @@ async def _skill_mutation(
         try:
             result = await action(session, owner, skill)
         except Exception as e:
-            logger.warning("skill mutation failed: %s", e)
+            logger.warning("skill mutation failed: %s", e, exc_info=True)
             await callback.answer(error_message, show_alert=True)
             return
 
@@ -293,13 +133,43 @@ async def _skill_mutation(
     await callback.answer(msg)
     await cb_skill_detail(callback, skip_answer=True, skill=skill)
 
+@router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:page:"))
+async def cb_skills_page(callback: CallbackQuery) -> None:
+    """Render a paginated skill list for a status tab."""
+    data = callback.data or ""
+    parts = data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+    status = parts[2]
+    if status not in _STATUS_LABELS:
+        status = "all"
+    try:
+        page = max(0, int(parts[3]))
+    except ValueError:
+        page = 0
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        page_skills, total = await _fetch_skills_by_status(session, owner, status, page)
+
+    text = f"<b>Skills</b> — {_STATUS_LABELS[status]} (всего {total}):\n"
+    text += _skills_summary(page_skills)
+
+    await callback.answer()
+    await _edit_callback_message(
+        callback,
+        text,
+        reply_markup=_skill_list_keyboard(page_skills, status, page, total),
+    )
+
 
 @router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:detail:"))
 async def cb_skill_detail(
     callback: CallbackQuery,
     *,
     skip_answer: bool = False,
-    skill=None,
+    skill: Skill | None = None,
 ) -> None:
     """Show skill details with action buttons.
 
@@ -439,21 +309,23 @@ async def cb_skills_evolve(callback: CallbackQuery) -> None:
     """
     await callback.answer("🧬 Запускаю auto-evolve...")
 
+    approved = 0
+    evolve_error: str | None = None
     try:
         approved = await auto_approve_high_confidence()
+    except Exception as e:
+        logger.warning("auto_approve_high_confidence failed: %s", e)
+        evolve_error = "Auto-approve failed"
+
+    try:
         proposed = await list_proposed()
     except Exception as e:
-        logger.warning("skills evolve failed: %s", e)
-        text = "⚠️ Auto-evolve не удалось. Попробуй позже."
-        await _edit_callback_message(
-            callback,
-            text,
-            reply_markup=_skill_list_keyboard([], "all", 0, 0),
-        )
-        return
+        logger.warning("list_proposed failed: %s", e)
+        proposed = []
 
+    error_note = f"\n⚠️ {evolve_error}" if evolve_error else ""
     text = (
-        f"🧬 <b>Auto-evolve результат</b>\n\n"
+        f"🧬 <b>Auto-evolve результат</b>{error_note}\n\n"
         f"Авто-одобрено: {approved}\n"
         f"Осталось proposed: {len(proposed)}\n"
     )

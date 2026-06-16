@@ -28,9 +28,11 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 from .skills_callbacks import (
+    router as callbacks_router,
+)
+from .skills_data import (
     _fetch_skills_by_status,
     _perform_rollback,
-    router as callbacks_router,
 )
 from .skills_ui import (
     _format_skill_detail,
@@ -116,7 +118,7 @@ async def _legacy_text_command(message: Message, parts: Sequence[str]) -> None:
             return
 
         if sub == "rollback" and len(parts) > 1:
-            await _rollback_skill(message, owner, parts[1])
+            await _rollback_skill(message, message.from_user.id, parts[1])
             return
 
         if sub == "yaml" and len(parts) > 1:
@@ -133,9 +135,10 @@ async def _legacy_text_command(message: Message, parts: Sequence[str]) -> None:
     )
 
 
-async def _rollback_skill(message: Message, owner, name: str) -> None:
+async def _rollback_skill(message: Message, owner_id: int, name: str) -> None:
     """Rollback a skill to its best_body."""
     async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
         skill = await get_skill_by_name(session, owner, name)
         if not skill:
             await message.answer("Skill не найден.")
