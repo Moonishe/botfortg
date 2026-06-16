@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, UTC
 from functools import partial
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from httpx import HTTPStatusError, RequestError
 
 from src.config import settings
@@ -36,6 +38,22 @@ MIN_USAGE_FOR_CALIBRATION = 5  # less than 5 uses → raw confidence only
 
 
 # ── helpers ──────────────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def _curator_session(
+    session: AsyncSession | None = None,
+):
+    """Provide a session, reusing an existing one when available.
+
+    This lets curator functions be called both standalone (they open their own
+    session) and from handlers that already have a session open.
+    """
+    if session is not None:
+        yield session
+    else:
+        async with get_session() as s:
+            yield s
 
 
 def _get_yaml_confidence(skill: Skill) -> float:
@@ -126,7 +144,8 @@ async def auto_approve_high_confidence() -> int:
         for skill in proposed:
             confidence = _calibrate_confidence(skill)
             logger.debug(
-                f"Skill {skill.name}: raw={_get_yaml_confidence(skill):.2f}, calibrated={confidence:.2f}"
+                f"Skill {skill.name}: raw={_get_yaml_confidence(skill):.2f}, "
+                f"calibrated={confidence:.2f}"
             )
             if confidence > 0.85:
                 # V2: Validation gate — validate before approval
@@ -141,7 +160,8 @@ async def auto_approve_high_confidence() -> int:
                         skill.enabled = False
                         note = (
                             f"\n\n[Rejected by validation gate: {validation.reason}. "
-                            f"Score: {validation.score_before:.2f} → {validation.score_after:.2f}]"
+                            f"Score: {validation.score_before:.2f} → "
+                            f"{validation.score_after:.2f}]"
                         )
                         skill.description = (skill.description or "") + note
                         rejected_count += 1
@@ -216,15 +236,26 @@ async def list_proposed() -> list[dict[str, Any]]:
     return result
 
 
-async def approve_skill(owner_id: int, skill_name: str) -> bool:
+async def approve_skill(
+    owner_id: int,
+    skill_name: str,
+    *,
+    session: AsyncSession | None = None,
+) -> bool:
     """Approve a proposed skill by name.
 
     Sets ``review_status="approved"`` and ``enabled=True``.
 
+    Args:
+        owner_id: Owner Telegram user ID.
+        skill_name: Name of the skill to approve.
+        session: Optional existing session. If provided, the caller owns the
+            transaction and is responsible for committing it.
+
     Returns:
         True if the skill was found and updated, False otherwise.
     """
-    async with get_session() as session:
+    async with _curator_session(session) as session:
         owner = await get_or_create_user(session, owner_id)
         skill = await get_skill_by_name(session, owner, skill_name)
         if skill is None:
@@ -243,7 +274,13 @@ async def approve_skill(owner_id: int, skill_name: str) -> bool:
     return True
 
 
-async def reject_skill(owner_id: int, skill_name: str, reason: str = "") -> bool:
+async def reject_skill(
+    owner_id: int,
+    skill_name: str,
+    reason: str = "",
+    *,
+    session: AsyncSession | None = None,
+) -> bool:
     """Reject a proposed skill.
 
     Sets ``review_status="rejected"`` and ``enabled=False``.
@@ -252,10 +289,18 @@ async def reject_skill(owner_id: int, skill_name: str, reason: str = "") -> bool
     V2: Also saves the rejection to the rejected-edits buffer for negative
     feedback in future optimization cycles.
 
+    Args:
+        owner_id: Owner Telegram user ID.
+        skill_name: Name of the skill to reject.
+        reason: Optional reason, appended to description and stored in the
+            rejected-edits buffer.
+        session: Optional existing session. If provided, the caller owns the
+            transaction and is responsible for committing it.
+
     Returns:
         True if the skill was found and updated, False otherwise.
     """
-    async with get_session() as session:
+    async with _curator_session(session) as session:
         owner = await get_or_create_user(session, owner_id)
         skill = await get_skill_by_name(session, owner, skill_name)
         if skill is None:
@@ -351,7 +396,10 @@ async def apply_skill_edit(
                 remaining = int(cooldown_sec - elapsed)
                 return {
                     "success": False,
-                    "error": f"Rate limited: wait {remaining}s before editing {skill_name!r} again",
+                    "error": (
+                        f"Rate limited: wait {remaining}s before editing "
+                        f"{skill_name!r} again"
+                    ),
                     "cooldown_remaining": remaining,
                 }
         _edit_cooldowns[cooldown_key] = now
@@ -460,7 +508,10 @@ async def apply_skill_edit(
                     {
                         "op": "auto-rollback",
                         "timestamp": datetime.now(UTC).isoformat(),
-                        "reason": f"Score dropped to {validation.score_after:.2f} (< 0.3 threshold)",
+                        "reason": (
+                            f"Score dropped to {validation.score_after:.2f} "
+                            f"(< 0.3 threshold)"
+                        ),
                     }
                 )
                 skill.edit_history_json = history[-20:]
@@ -518,7 +569,12 @@ async def apply_skill_edit(
         }
 
 
-async def promote_to_global(owner_id: int, skill_name: str) -> bool:
+async def promote_to_global(
+    owner_id: int,
+    skill_name: str,
+    *,
+    session: AsyncSession | None = None,
+) -> bool:
     """Copy a user-scoped skill to global scope (``user_id=0``).
 
     A global skill is available to all users.  Only the original owner
@@ -527,10 +583,16 @@ async def promote_to_global(owner_id: int, skill_name: str) -> bool:
     If a global skill with the same name already exists, promotion is
     skipped.
 
+    Args:
+        owner_id: Owner Telegram user ID.
+        skill_name: Name of the skill to promote.
+        session: Optional existing session. If provided, the caller owns the
+            transaction and is responsible for committing it.
+
     Returns:
         True if the skill was promoted, False if not found or already global.
     """
-    async with get_session() as session:
+    async with _curator_session(session) as session:
         owner = await get_or_create_user(session, owner_id)
         skill = await get_skill_by_name(session, owner, skill_name)
         if skill is None:
@@ -590,19 +652,22 @@ async def curator_stats(owner_id: int) -> dict[str, int]:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
 
-        base = select(func.count(Skill.id)).where(Skill.user_id == owner.id)
+        q = select(
+            func.sum(func.case((Skill.review_status == "proposed", 1), else_=0)).label(
+                "proposed"
+            ),
+            func.sum(func.case((Skill.review_status == "approved", 1), else_=0)).label(
+                "approved"
+            ),
+            func.sum(func.case((Skill.review_status == "rejected", 1), else_=0)).label(
+                "rejected"
+            ),
+        ).where(Skill.user_id == owner.id)
 
-        proposed_cnt = (
-            await session.execute(base.where(Skill.review_status == "proposed"))
-        ).scalar() or 0
-
-        approved_cnt = (
-            await session.execute(base.where(Skill.review_status == "approved"))
-        ).scalar() or 0
-
-        rejected_cnt = (
-            await session.execute(base.where(Skill.review_status == "rejected"))
-        ).scalar() or 0
+        row = (await session.execute(q)).one()
+        proposed_cnt = int(row.proposed or 0)
+        approved_cnt = int(row.approved or 0)
+        rejected_cnt = int(row.rejected or 0)
 
         global_cnt = (
             await session.execute(
@@ -629,11 +694,10 @@ async def decay_stale_skills(session, telegram_id: int) -> int:
 
     Возвращает количество отключённых навыков.
     """
-    from src.db.models._learning import Skill
-
+    owner = await get_or_create_user(session, telegram_id)
     result = await session.execute(
         select(Skill).where(
-            Skill.user_id == telegram_id,
+            Skill.user_id == owner.id,
             Skill.enabled,
         )
     )
@@ -652,12 +716,12 @@ async def decay_stale_skills(session, telegram_id: int) -> int:
             skill.description = (
                 old_desc + f" [DECAYED: success_rate={success_rate:.0%}]"
             )
-
-            import logging
-
-            logger = logging.getLogger(__name__)
             logger.info(
-                f"Skill '{skill.name}' decayed: success_rate={success_rate:.0%} ({skill.success_count}/{usage_count})"
+                "Skill %r decayed: success_rate=%.0f%% (%d/%d)",
+                skill.name,
+                success_rate * 100,
+                skill.success_count or 0,
+                usage_count,
             )
             decayed += 1
 

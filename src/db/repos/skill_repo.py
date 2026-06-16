@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from datetime import datetime, UTC
 
 from sqlalchemy import func, select
@@ -13,6 +14,21 @@ from src.db.models import (
     SkillUsage,
     Trajectory,
 )
+
+try:
+    from src.core.intelligence.skill_yaml import extract_frontmatter_metadata
+except ImportError:  # pragma: no cover
+    extract_frontmatter_metadata = None
+
+try:
+    from src.core.infra.hooks import hooks
+except ImportError:  # pragma: no cover
+    hooks = None
+
+try:
+    from src.core.context_cache import invalidate as cache_invalidate
+except ImportError:  # pragma: no cover
+    cache_invalidate = None
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +97,12 @@ async def upsert_skill(
     # парсим метаданные и сохраняем в trigger_patterns_json как __yaml__
     clean_description = description
     yaml_metadata: dict[str, object] = {}
-    if description and description.strip().startswith("---"):
+    if (
+        description
+        and description.strip().startswith("---")
+        and extract_frontmatter_metadata is not None
+    ):
         try:
-            from src.core.intelligence.skill_yaml import extract_frontmatter_metadata
-
             yaml_metadata, clean_description = extract_frontmatter_metadata(description)
         except Exception:
             logger.debug("upsert_skill: YAML frontmatter parse skipped", exc_info=True)
@@ -132,21 +150,17 @@ async def upsert_skill(
         skill.review_status = review_status
         skill.updated_at = datetime.now(UTC)
     await session.flush()
-    try:
-        from src.core.infra.hooks import hooks
-
-        await hooks.emit(
-            "on_skill_created", skill_name=skill.name, user_id=user.telegram_id
-        )
-    except Exception:
-        pass  # hooks are optional, never break core flow
+    if hooks is not None:
+        with suppress(Exception):
+            await hooks.emit(
+                "on_skill_created", skill_name=skill.name, user_id=user.telegram_id
+            )
     # Invalidate skill index cache so next prompt picks up changes
-    try:
-        from src.core.context_cache import invalidate as cache_invalidate
-
-        await cache_invalidate(f"skills:{user.telegram_id}:")
-    except Exception:
-        logger.debug("Non-critical error", exc_info=True)
+    if cache_invalidate is not None:
+        try:
+            await cache_invalidate(f"skills:{user.telegram_id}:")
+        except Exception:
+            logger.debug("Non-critical error", exc_info=True)
     return skill
 
 
@@ -157,13 +171,18 @@ async def list_skills(
     enabled: bool | None = None,
     review_status: str | None = None,
     limit: int = 50,
+    offset: int | None = None,
 ) -> list[Skill]:
     q = select(Skill).where(Skill.user_id == user.id)
     if enabled is not None:
         q = q.where(Skill.enabled == enabled)
     if review_status:
         q = q.where(Skill.review_status == review_status)
-    q = q.order_by(Skill.success_count.desc(), Skill.updated_at.desc()).limit(limit)
+    q = q.order_by(Skill.success_count.desc(), Skill.updated_at.desc())
+    if limit is not None:
+        q = q.limit(limit)
+    if offset is not None:
+        q = q.offset(offset)
     r = await session.execute(q)
     return list(r.scalars().all())
 
@@ -195,12 +214,11 @@ async def set_skill_enabled(
     skill.updated_at = datetime.now(UTC)
     await session.flush()
     # Invalidate skill index cache so next prompt picks up changes
-    try:
-        from src.core.context_cache import invalidate as cache_invalidate
-
-        await cache_invalidate(f"skills:{user.telegram_id}:")
-    except Exception:
-        logger.debug("Non-critical error", exc_info=True)
+    if cache_invalidate is not None:
+        try:
+            await cache_invalidate(f"skills:{user.telegram_id}:")
+        except Exception:
+            logger.debug("Non-critical error", exc_info=True)
     return skill
 
 
