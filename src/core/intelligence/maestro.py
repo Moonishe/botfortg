@@ -17,7 +17,7 @@ from src.core.intelligence.agent_orchestrator import (
 )
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
-from src.llm.base import ChatMessage, TaskType
+from src.llm.base import ChatMessage, LLMProvider, TaskType
 from src.llm.router import ExhaustedError
 
 from src.core.actions import register_builtin_tools
@@ -189,6 +189,9 @@ async def _execute_one_tool(
                     logger.info("Fallback '%s' succeeded for '%s'", fb, tool_name)
                     return fb_result
                 except Exception:
+                    logger.debug(
+                        "Fallback '%s' failed for '%s'", fb, tool_name, exc_info=True
+                    )
                     continue
             # Все fallback'и исчерпаны
             return {"_fallback": "admit_ignorance", "tool": tool_name}
@@ -197,7 +200,7 @@ async def _execute_one_tool(
 
 
 async def process(
-    provider,  # LLMProvider
+    provider: LLMProvider,
     user_text: str,
     *,
     owner_id: int | None = None,
@@ -216,9 +219,10 @@ async def process(
     maestro_model = getattr(settings, "maestro_model", None)
     if maestro_model and not getattr(provider, "_model", None):
         try:
-            provider._model = maestro_model  # type: ignore[attr-defined]
-        except (AttributeError, TypeError):
-            pass
+            provider._model = maestro_model
+            logger.debug("Maestro overriding provider model to %s", maestro_model)
+        except (AttributeError, TypeError) as e:
+            logger.debug("Cannot override provider model to %s: %s", maestro_model, e)
 
     # ═══════════════════════════════════════════════════════════════════
     # Phase 1 — 10 fully independent context sources (parallelised)
@@ -415,7 +419,7 @@ async def process(
         '`{"tool": "имя", "params": {...}}`.\n'
         "### Для обычного ответа используй "
         '`{"final_response": "твой ответ"}`.\n\n'
-        + tool_registry.format_tools_for_task(user_text)
+        + tool_registry.format_tools_for_task(user_text, available_only=True)
         + "\n\n"
         "### Факт-чекинг\n"
         "Если тебя спрашивают о факте, который мог измениться"
@@ -545,7 +549,7 @@ async def process(
                 trace["context_sources"].append(marker)
 
     _searched_queries: set[str] = set()
-    for iteration in range(MAX_TOOL_ITERATIONS):
+    for _iteration in range(MAX_TOOL_ITERATIONS):
         try:
             raw = await asyncio.wait_for(
                 provider.chat(messages, task_type=TaskType.MAESTRO),
@@ -567,11 +571,9 @@ async def process(
                 "agents_to_call": [],
                 "final_response": "⏱️ Ответ занял слишком много времени. Попробуй короче.",
             }
-        except (RequestError, HTTPStatusError) as e:
-            if (
-                "context_length" in safe_str(e).lower()
-                or "token" in safe_str(e).lower()
-            ):
+        except (RequestError, HTTPStatusError, RuntimeError) as e:
+            msg = safe_str(e).lower()
+            if "context_length" in msg or "token" in msg:
                 logger.warning("Maestro context overflow: %s", e)
                 return {
                     "understood": "контекст переполнен",
@@ -579,7 +581,7 @@ async def process(
                     "agents_to_call": [],
                     "final_response": "📏 Контекст переполнен. Упрости запрос или уменьши историю.",
                 }
-            if "rate" in safe_str(e).lower():
+            if "rate" in msg:
                 logger.warning("Maestro rate limit: %s", e)
                 return {
                     "understood": "лимит",
@@ -874,7 +876,7 @@ async def process(
                     verify_result = await verify_claims(
                         final_response, memory_facts, []
                     )
-                    final_response, modified = apply_guard(
+                    final_response, _modified = apply_guard(
                         final_response, verify_result, confidence
                     )
             except Exception:  # NOTE: verify_claims/apply_guard используют LLM-вызовы
@@ -942,7 +944,7 @@ def _estimate_plan_suggestion(user_text: str) -> tuple[float, bool]:
 
 
 async def run_pipeline(
-    provider,
+    provider: LLMProvider,
     user_text: str,
     *,
     owner_id: int,

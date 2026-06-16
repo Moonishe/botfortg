@@ -28,17 +28,51 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from dataclasses import dataclass, field
-from functools import wraps
+from functools import lru_cache, wraps
 from typing import Any
 from collections.abc import Awaitable, Callable
+
+from src.core.actions.tool_middleware import (
+    init_default_middlewares,
+    middleware_chain,
+)
 
 logger = logging.getLogger(__name__)
 
 CONFIRMATION_RISKS = {"high", "critical"}
 
+# Keys whose values should be redacted in logs
+_REDACT_KEYS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "authorization",
+        "auth",
+        "bot_token",
+        "token",
+        "password",
+        "secret",
+        "credentials",
+        "credential",
+        "session_string",
+        "hash",
+        "access_token",
+        "refresh_token",
+        "private_key",
+        "ssh_key",
+    }
+)
 
+
+@lru_cache(maxsize=256)
 def _handler_accepts_kwarg(handler: Callable[..., Awaitable[dict]], name: str) -> bool:
+    """Check if handler accepts ``**kwargs`` or a specific keyword argument.
+
+    Results are cached via ``lru_cache`` to avoid repeated ``inspect.signature``
+    calls on the hot path (``execute()`` is called frequently).
+    """
     try:
         signature = inspect.signature(handler)
     except (TypeError, ValueError):
@@ -47,6 +81,13 @@ def _handler_accepts_kwarg(handler: Callable[..., Awaitable[dict]], name: str) -
         param.kind == inspect.Parameter.VAR_KEYWORD or param.name == name
         for param in signature.parameters.values()
     )
+
+
+def _redact_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *params* with sensitive values masked."""
+    return {
+        k: ("<REDACTED>" if k.lower() in _REDACT_KEYS else v) for k, v in params.items()
+    }
 
 
 # ── ToolSpec ─────────────────────────────────────────────────────────────
@@ -93,6 +134,9 @@ class ToolSpec:
         params: Dict mapping parameter name → type hint string.
                 Example: ``{"query": "str", "limit": "int|None"}``.
         handler: The async callable that implements the tool.
+        check_fn: Optional zero-argument callable that returns ``True`` if
+            the tool is currently available (e.g. env vars set).
+        requires_env: List of env var names this tool depends on.
     """
 
     name: str
@@ -105,6 +149,8 @@ class ToolSpec:
     input_schema: dict[str, Any] | None = None  # JSON Schema for params
     output_schema: dict[str, Any] | None = None  # JSON Schema for return value
     action_metadata: dict[str, ToolActionMetadata] = field(default_factory=dict)
+    check_fn: Callable[[], bool] | None = None
+    requires_env: list[str] = field(default_factory=list)
 
     def get_action_metadata(self, action: Any) -> ToolActionMetadata | None:
         action_spec = self.action_spec(action) if self.actions else None
@@ -188,6 +234,11 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
+        from src.core.actions.tool_guardrails import ToolLoopGuard
+        from src.core.intelligence.iteration_budget import IterationBudget
+
+        self._loop_guard = ToolLoopGuard()
+        self._tool_budget = IterationBudget()
 
     # ------------------------------------------------------------------
     # Registration
@@ -202,8 +253,16 @@ class ToolRegistry:
         if spec.name in self._tools:
             logger.warning("Tool %r already registered, overwriting", spec.name)
         self._tools[spec.name] = spec
-        # Invalidate FTS5 cache so search() picks up the new/updated tool
+        # Invalidate FTS5 cache so search() picks up the new/updated tool.
+        # Must close the sqlite3.Connection explicitly — ``del`` only drops the
+        # Python reference, leaving the underlying FD open (FD leak on reload).
         if hasattr(self, "_fts5_conn"):
+            try:
+                self._fts5_conn.close()
+            except Exception:
+                logger.debug(
+                    "FTS5 connection close failed on re-register", exc_info=True
+                )
             del self._fts5_conn
 
     # ------------------------------------------------------------------
@@ -217,17 +276,32 @@ class ToolRegistry:
         """
         return self._tools.get(name)
 
-    def list_by_category(self) -> dict[str, list[ToolSpec]]:
-        """Return all tools grouped by their ``category`` field."""
+    def list_by_category(
+        self, available_only: bool = False
+    ) -> dict[str, list[ToolSpec]]:
+        """Return all tools grouped by their ``category`` field.
+
+        Args:
+            available_only: When ``True``, skip tools whose ``check_fn``
+                returns ``False`` or raises.
+        """
         categories: dict[str, list[ToolSpec]] = {}
         for spec in self._tools.values():
+            if available_only and not self.is_available(spec.name):
+                continue
             categories.setdefault(spec.category, []).append(spec)
         return categories
 
-    def search(self, query: str, top_k: int = 5) -> list[ToolSpec]:
+    def search(
+        self, query: str, top_k: int = 5, available_only: bool = False
+    ) -> list[ToolSpec]:
         """FTS5 full-text search over tool names + descriptions.
 
         Builds an in-memory FTS5 index on first call (cached).
+
+        Args:
+            available_only: When ``True``, exclude tools whose ``check_fn``
+                returns ``False`` or raises.
         """
         import sqlite3
 
@@ -265,10 +339,44 @@ class ToolRegistry:
             ).fetchall()
         except sqlite3.OperationalError:
             return []
-        return [self._tools[r[0]] for r in rows if r[0] in self._tools]
+        results = [self._tools[r[0]] for r in rows if r[0] in self._tools]
+        if available_only:
+            results = [s for s in results if self.is_available(s.name)]
+        return results
 
-    def list_for_prompt(self) -> str:
+    def is_available(self, name: str) -> bool:
+        """Check whether a tool exists and its ``check_fn`` (if any) passes.
+
+        Returns ``False`` for:
+        - Unknown tools
+        - Tools whose ``check_fn`` returns a non-``True`` value
+        - Tools whose ``check_fn`` raises an exception
+
+        Returns ``True`` for tools without a ``check_fn``.
+        """
+        spec = self._tools.get(name)
+        if spec is None:
+            return False
+        if spec.check_fn is None:
+            return True
+        try:
+            return bool(spec.check_fn())
+        except Exception:
+            logger.debug("check_fn for %r raised exception", name, exc_info=True)
+            return False
+
+    def get_available_tools(self) -> list[ToolSpec]:
+        """Return all tools whose ``check_fn`` (if any) passes.
+
+        Convenience wrapper around :meth:`is_available`.
+        """
+        return [s for s in self._tools.values() if self.is_available(s.name)]
+
+    def list_for_prompt(self, available_only: bool = False) -> str:
         """Format all tools as a prompt-friendly string for LLM system prompts.
+
+        Args:
+            available_only: If ``True``, exclude unavailable tools.
 
         Example output::
 
@@ -282,7 +390,9 @@ class ToolRegistry:
               params: query: str, contact: str|None
         """
         lines: list[str] = []
-        for category, tools in sorted(self.list_by_category().items()):
+        for category, tools in sorted(
+            self.list_by_category(available_only=available_only).items()
+        ):
             lines.append(f"## {category}")
             for spec in sorted(tools, key=lambda s: s.name):
                 confirm = " ⚠️ confirmation" if spec.requires_confirmation else ""
@@ -299,15 +409,18 @@ class ToolRegistry:
             lines.append("")
         return "\n".join(lines).rstrip()
 
-    def _format_tools_for_categories(self, categories: set[str] | None = None) -> str:
+    def _format_tools_for_categories(
+        self, categories: set[str] | None = None, available_only: bool = False
+    ) -> str:
         """Format tool descriptions grouped by category.
 
         Args:
             categories: If provided, only format tools from these categories.
                         If None, format all tools.
+            available_only: If ``True``, exclude unavailable tools.
         """
         lines: list[str] = []
-        all_cats = sorted(self.list_by_category().items())
+        all_cats = sorted(self.list_by_category(available_only=available_only).items())
         for cat_name, tools in all_cats:
             if categories is not None and cat_name not in categories:
                 continue
@@ -367,19 +480,25 @@ class ToolRegistry:
                 lines.append("")
         return "\n".join(lines).rstrip()
 
-    def format_tools_with_schemas(self) -> str:
+    def format_tools_with_schemas(self, available_only: bool = False) -> str:
         """Generate a compact text description of each tool with its JSON schemas.
 
         The output is designed for LLM prompt injection — it describes what
         each tool returns (output schema) and expects as input (input schema).
 
+        Args:
+            available_only: When ``True``, exclude tools whose ``check_fn``
+                fails.
+
         Example::
 
             recall_memory (memory):
-              input:  {"query": "str", "limit": "int (default 8)", "mode": "normal|light|deep"}
-              output: {"ok": bool, "facts": [{fact, confidence, reason}], "found": int}
+              input:  {"query": "str", "limit": "int (default 8)",
+                       "mode": "normal|light|deep"}
+              output: {"ok": bool, "facts": [{fact, confidence, reason}],
+                       "found": int}
         """
-        return self._format_tools_for_categories()
+        return self._format_tools_for_categories(available_only=available_only)
 
     # ── Keyword → category mapping для format_tools_for_task ──
     _TASK_KEYWORD_MAP: dict[str, list[str]] = {
@@ -441,6 +560,8 @@ class ToolRegistry:
             "translate",
             "архив",
             "zip",
+            "таймер",
+            "timer",
         ],
         "system": [
             "система",
@@ -456,22 +577,57 @@ class ToolRegistry:
         "agent": ["агент", "agent", "делегируй"],
         "research": ["исследова", "research", "глубокий", "deep"],
         "vision": ["картинк", "фото", "изображени", "image", "picture", "photo"],
-        "productivity": ["задача", "task", "todo", "план", "plan"],
+        "productivity": ["задача", "task", "todo", "план", "plan", "список", "list"],
         "knowledge": ["документация", "docs", "знание", "документ"],
+        "scheduling": ["cron", "расписание", "schedule", "периодич", "periodic"],
+        "skills": ["skill", "навык", "умение", "skill_pipeline"],
+        "media": ["media", "медиа", "аудио", "audio", "видео", "video"],
+        "admin": ["admin", "админ", "настройка", "config", "перезапуск", "restart"],
+        "connectors": ["connector", "коннектор", "источник", "source", "feed"],
+        "email": ["email", "почта", "mail", "письмо"],
+        "telegram": ["telegram", "телеграм", "channel", "канал"],
     }
 
+    _WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
+
     def _infer_categories(self, task_context: str) -> set[str]:
-        """Determine relevant tool categories from task text via keyword matching."""
-        task_lower = task_context.lower()
+        """Determine relevant tool categories from task text via word-stem matching.
+
+        Splits the task into words and matches each word against keyword stems.
+        This avoids substring false positives such as 'log' matching 'dialog'
+        or 'git' matching 'digital'.
+        """
+        words = [w.lower() for w in self._WORD_RE.findall(task_context)]
         matched: set[str] = set()
         for category, keywords in self._TASK_KEYWORD_MAP.items():
             for kw in keywords:
-                if kw in task_lower:
-                    matched.add(category)
+                for word in words:
+                    if word.startswith(kw) or kw == word:
+                        matched.add(category)
+                        break
+                if category in matched:
                     break
         return matched
 
-    def format_tools_for_task(self, task_context: str) -> str:
+    @staticmethod
+    def _sanitize_task_context(task_context: str) -> str:
+        """Sanitize raw user text before embedding it in an LLM prompt header.
+
+        Replaces newlines, backticks, and comment markers that could be used to
+        break out of the prompt header.
+        """
+        sanitized = task_context.replace("\n", " ").replace("\r", " ")
+        # Collapse multiple spaces
+        sanitized = re.sub(r"\s+", " ", sanitized)
+        # Remove backticks and common prompt-injection markers
+        sanitized = sanitized.replace("`", "'")
+        sanitized = sanitized.replace("#", "")
+        sanitized = sanitized.replace("/*", "").replace("*/", "")
+        return sanitized[:120].strip()
+
+    def format_tools_for_task(
+        self, task_context: str, available_only: bool = False
+    ) -> str:
         """Return formatted tools relevant to the current task context.
 
         Фильтрует инструменты по категориям на основе ключевых слов в задаче.
@@ -480,6 +636,7 @@ class ToolRegistry:
 
         Args:
             task_context: Текст задачи пользователя (используется для keyword matching).
+            available_only: If ``True``, exclude unavailable tools.
         """
         categories = self._infer_categories(task_context)
 
@@ -488,14 +645,17 @@ class ToolRegistry:
 
         if not categories or len(categories) <= 1:
             # Только memory (или ничего) — недостаточно фильтрации, возвращаем всё
-            return self._format_tools_for_categories()
+            return self._format_tools_for_categories(available_only=available_only)
 
         # Формируем комментарий о выбранных категориях
+        safe_context = self._sanitize_task_context(task_context)
         header = (
             f"# Релевантные категории инструментов: {', '.join(sorted(categories))}\n"
-            f"# (отфильтровано по задаче: «{task_context[:120]}»)\n\n"
+            f"# (отфильтровано по задаче: {safe_context})\n\n"
         )
-        return header + self._format_tools_for_categories(categories=categories)
+        return header + self._format_tools_for_categories(
+            categories=categories, available_only=available_only
+        )
 
     # ------------------------------------------------------------------
     # Execution
@@ -524,35 +684,87 @@ class ToolRegistry:
         if spec is None:
             return {"error": f"Tool '{name}' not found"}
 
+        # ── HARDLINE BLOCKLIST — блок ВСЕГДА, до confirmation gate ──
+        # Защита от необратимых операций (rm -rf /, sudo, curl|sh, и т.п.).
+        # Срабатывает даже при _confirmed=True и approval_mode=off.
+        # Fail-safe: при ошибке внутри check_params → блокирует.
+        from src.core.security import check_params
+
+        hardline_block = check_params(name, params)
+        if hardline_block is not None:
+            safe_params = _redact_params(params)
+            logger.warning(
+                "Hardline blocklist blocked tool %r rule=%s params=%r",
+                name,
+                hardline_block.get("rule_id"),
+                safe_params,
+            )
+            return {"blocked_by": "hardline_blocklist", **hardline_block}
+
         # Enforce confirmation for declared high-risk tools even if a spec
         # forgot to set requires_confirmation.
-        confirmed = params.pop("_confirmed", False)
+        # БАГ-ФИКС: раньше было ``confirmed = params.pop("_confirmed", False)``
+        # без проверки типа → строка "true" обходила gate (``not "true"``→False).
+        # Теперь — каноническая проверка через is_confirmed_truthy (только True).
+        from src.core.security import is_confirmed_truthy
+
+        confirmed = is_confirmed_truthy(params.pop("_confirmed", False))
         action_name = params.get("action")
         risk = spec.effective_risk(action_name)
         requires_confirmation = spec.effective_requires_confirmation(action_name)
-        if (requires_confirmation or risk in CONFIRMATION_RISKS) and not confirmed:
-            return {"error": "requires confirmation"}
+
+        # ── Multi-mode approval (manual / smart / off) ──
+        # off — gate отключён (но hardline выше всё равно активен).
+        # smart — high/critical + requires_confirmation (текущее поведение,
+        #         сохраняет обратную совместимость; Tirith-интеграция — точка
+        #         расширения в Фиче 2).
+        # manual — дополнительно блокирует medium-risk (больше фрикции).
+        from src.config import settings
+
+        mode = getattr(settings, "approval_mode", "smart")
+        if mode == "off":
+            needs_confirm = False
+        elif mode == "manual":
+            needs_confirm = (
+                requires_confirmation or risk in CONFIRMATION_RISKS or risk == "medium"
+            )
+        else:  # "smart" (default) и любое неизвестное значение
+            needs_confirm = requires_confirmation or risk in CONFIRMATION_RISKS
+
+        if needs_confirm and not confirmed:
+            return {"error": "requires confirmation", "approval_mode": mode}
         if _handler_accepts_kwarg(spec.handler, "_confirmed"):
             params["_confirmed"] = confirmed
 
         # ── Tool Loop Guard — prevent LLM infinite loops ──
-        from src.core.actions.tool_guardrails import ToolLoopGuard
-
-        if not hasattr(self, "_loop_guard"):
-            self._loop_guard = ToolLoopGuard()
         loop = self._loop_guard.check(name, params)
         if loop.blocked:
             return {"error": loop.reason, "blocked_by": "tool_loop_guard"}
         self._loop_guard.record(name, params)
 
+        # ── Iteration Budget — prevent resource exhaustion ──
+        from src.core.intelligence.iteration_budget import IterationBudget
+
+        if not hasattr(self, "_tool_budget"):
+            self._tool_budget = IterationBudget()
+        if not self._tool_budget.record_tool_call():
+            return {
+                "error": "Tool call budget exhausted — too many tool calls in window",
+                "blocked_by": "iteration_budget",
+            }
+
+        # ── Execute through Middleware Chain ──
+        init_default_middlewares()  # no-op if already registered
+
+        async def _handler(tool_name: str, p: dict[str, Any]) -> dict[str, Any]:
+            result = await spec.handler(**p)
+            return {"ok": True} if result is None else result
+
         try:
-            result = await spec.handler(**params)
-            # Normalise None return to a success dict
-            if result is None:
-                return {"ok": True}
-            return result
+            return await middleware_chain.wrap(name, params, _handler)
         except Exception:
-            logger.exception("Tool %r failed with params %r", name, params)
+            safe_params = _redact_params(params)
+            logger.exception("Tool %r failed with params %r", name, safe_params)
             return {"error": f"Tool '{name}' execution failed"}
 
 
@@ -575,6 +787,8 @@ def tool(
     output_schema: dict[str, Any] | None = None,
     actions: dict[str, ToolActionSpec | dict[str, Any]] | None = None,
     action_metadata: dict[str, ToolActionMetadata | dict[str, Any]] | None = None,
+    check_fn: Callable[[], bool] | None = None,
+    requires_env: list[str] | None = None,
 ) -> Callable[[Callable[..., Awaitable[dict]]], Callable[..., Awaitable[dict]]]:
     """Decorator that registers an async function as a tool.
 
@@ -592,6 +806,9 @@ def tool(
                 Example: ``{"query": "str", "limit": "int|None"}``.
         input_schema: Optional JSON Schema describing input parameters.
         output_schema: Optional JSON Schema describing the return value.
+        check_fn: Optional zero-argument callable returning ``True`` if the
+            tool is currently available.
+        requires_env: Optional list of env var names this tool depends on.
 
     Example::
 
@@ -623,6 +840,8 @@ def tool(
             output_schema=output_schema,
             action_metadata=normalized_action_metadata,
             actions=tool_actions,
+            check_fn=check_fn,
+            requires_env=requires_env or [],
         )
         tool_registry.register(spec)
 
