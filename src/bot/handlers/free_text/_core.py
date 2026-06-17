@@ -2309,6 +2309,7 @@ async def execute_maestro(
                 else None
             ),
             userbot_manager=userbot_manager,
+            route="chat",
         )
 
         # ── Handle tool confirmation needed ──────────────────────────

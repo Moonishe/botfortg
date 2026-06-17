@@ -409,78 +409,9 @@ class ToolRegistry:
             lines.append("")
         return "\n".join(lines).rstrip()
 
-    def _format_tools_for_categories(
-        self, categories: set[str] | None = None, available_only: bool = False
+    def format_tools_with_schemas(
+        self, available_only: bool = False, route: str | None = None
     ) -> str:
-        """Format tool descriptions grouped by category.
-
-        Args:
-            categories: If provided, only format tools from these categories.
-                        If None, format all tools.
-            available_only: If ``True``, exclude unavailable tools.
-        """
-        lines: list[str] = []
-        all_cats = sorted(self.list_by_category(available_only=available_only).items())
-        for cat_name, tools in all_cats:
-            if categories is not None and cat_name not in categories:
-                continue
-            lines.append(f"## {cat_name}")
-            for spec in sorted(tools, key=lambda s: s.name):
-                confirm = " ⚠️ confirmation" if spec.requires_confirmation else ""
-                lines.append(
-                    f"### {spec.name} ({spec.risk}{confirm})\n{spec.description}"
-                )
-                if spec.params:
-                    params_str = ", ".join(f"{k}: {v}" for k, v in spec.params.items())
-                    lines.append(f"  params: {params_str}")
-                if spec.input_schema:
-                    # Compact input schema description
-                    props = spec.input_schema.get("properties", {})
-                    required = set(spec.input_schema.get("required", []))
-                    param_descs: list[str] = []
-                    for pname, pinfo in props.items():
-                        typ = pinfo.get("type", "any")
-                        desc = pinfo.get("description", "")
-                        default = pinfo.get("default", None)
-                        extras = []
-                        if pname in required:
-                            extras.append("required")
-                        if default is not None:
-                            extras.append(f"default={default}")
-                        if pinfo.get("enum"):
-                            extras.append(f"enum={pinfo['enum']}")
-                        suffix = f" ({', '.join(extras)})" if extras else ""
-                        param_descs.append(f"    {pname}: {typ}{suffix} — {desc}")
-                    if param_descs:
-                        lines.append("  input_schema:")
-                        lines.extend(param_descs)
-                if spec.output_schema:
-                    # Compact output schema description
-                    props = spec.output_schema.get("properties", {})
-                    required = set(spec.output_schema.get("required", []))
-                    out_descs: list[str] = []
-                    for pname, pinfo in props.items():
-                        typ = pinfo.get("type", "any")
-                        desc = pinfo.get("description", "")
-                        extras = []
-                        if pname in required:
-                            extras.append("required")
-                        if pinfo.get("items"):
-                            items = pinfo["items"]
-                            if isinstance(items, dict):
-                                item_props = items.get("properties", {})
-                                if item_props:
-                                    sub = ", ".join(item_props.keys())
-                                    extras.append(f"items: {{{sub}}}")
-                        suffix = f" ({', '.join(extras)})" if extras else ""
-                        out_descs.append(f"    {pname}: {typ}{suffix} — {desc}")
-                    if out_descs:
-                        lines.append("  output_schema:")
-                        lines.extend(out_descs)
-                lines.append("")
-        return "\n".join(lines).rstrip()
-
-    def format_tools_with_schemas(self, available_only: bool = False) -> str:
         """Generate a compact text description of each tool with its JSON schemas.
 
         The output is designed for LLM prompt injection — it describes what
@@ -498,7 +429,10 @@ class ToolRegistry:
               output: {"ok": bool, "facts": [{fact, confidence, reason}],
                        "found": int}
         """
-        return self._format_tools_for_categories(available_only=available_only)
+        return self._format_tools_for_categories(
+            available_only=available_only,
+            route=route,
+        )
 
     # ── Keyword → category mapping для format_tools_for_task ──
     _TASK_KEYWORD_MAP: dict[str, list[str]] = {
@@ -590,6 +524,152 @@ class ToolRegistry:
 
     _WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
 
+    # Route-specific toolset profiles — declarative, no new enum needed.
+    # Each profile defines which categories are included/excluded for a given
+    # execution context (e.g. headless cron must not send messages or run code).
+    TOOLSET_PROFILES: dict[str, dict[str, Any]] = {
+        "default_chat": {"include_all": True},
+        "cron_headless": {
+            "categories": {
+                "memory",
+                "scheduling",
+                "research",
+                "knowledge",
+                "web",
+                "search",
+                "utility",
+            },
+            "exclude_names": {"send_message", "code_exec", "mcp_telegram"},
+        },
+        "admin": {
+            "categories": {
+                "system",
+                "memory",
+                "scheduling",
+                "admin",
+                "config",
+            },
+        },
+        "research": {
+            "categories": {
+                "memory",
+                "search",
+                "web",
+                "research",
+                "knowledge",
+                "connectors",
+            },
+        },
+    }
+
+    def _categories_for_profile(self, route: str | None) -> set[str] | None:
+        """Return the category set for a route, or None for all categories."""
+        if not route:
+            return None
+        profile = self.TOOLSET_PROFILES.get(route)
+        if profile is None:
+            return None
+        if profile.get("include_all"):
+            return None
+        return set(profile.get("categories", []))
+
+    def _excluded_names_for_profile(self, route: str | None) -> set[str]:
+        """Return tool names excluded for a route."""
+        if not route:
+            return set()
+        profile = self.TOOLSET_PROFILES.get(route)
+        if profile is None:
+            return set()
+        return set(profile.get("exclude_names", set()))
+
+    def _filter_tools_by_profile(
+        self,
+        tools: list[ToolSpec],
+        route: str | None,
+    ) -> list[ToolSpec]:
+        """Apply route-specific exclusions to a list of tools."""
+        excluded = self._excluded_names_for_profile(route)
+        return [t for t in tools if t.name not in excluded]
+
+    def _format_tools_for_categories(
+        self,
+        categories: set[str] | None = None,
+        available_only: bool = False,
+        route: str | None = None,
+    ) -> str:
+        """Format tool descriptions grouped by category.
+
+        Args:
+            categories: If provided, only format tools from these categories.
+                        If None, format all tools.
+            available_only: If ``True``, exclude unavailable tools.
+            route: Optional route profile for additional exclusions.
+        """
+        lines: list[str] = []
+        excluded_names = self._excluded_names_for_profile(route)
+        all_cats = sorted(self.list_by_category(available_only=available_only).items())
+        for cat_name, tools in all_cats:
+            if categories is not None and cat_name not in categories:
+                continue
+            filtered_tools = [t for t in tools if t.name not in excluded_names]
+            if not filtered_tools:
+                continue
+            lines.append(f"## {cat_name}")
+            for spec in sorted(filtered_tools, key=lambda s: s.name):
+                confirm = " ⚠️ confirmation" if spec.requires_confirmation else ""
+                lines.append(
+                    f"### {spec.name} ({spec.risk}{confirm})\n{spec.description}"
+                )
+                if spec.params:
+                    params_str = ", ".join(f"{k}: {v}" for k, v in spec.params.items())
+                    lines.append(f"  params: {params_str}")
+                if spec.input_schema:
+                    # Compact input schema description
+                    props = spec.input_schema.get("properties", {})
+                    required = set(spec.input_schema.get("required", []))
+                    param_descs: list[str] = []
+                    for pname, pinfo in props.items():
+                        typ = pinfo.get("type", "any")
+                        desc = pinfo.get("description", "")
+                        default = pinfo.get("default", None)
+                        extras = []
+                        if pname in required:
+                            extras.append("required")
+                        if default is not None:
+                            extras.append(f"default={default}")
+                        if pinfo.get("enum"):
+                            extras.append(f"enum={pinfo['enum']}")
+                        suffix = f" ({', '.join(extras)})" if extras else ""
+                        param_descs.append(f"    {pname}: {typ}{suffix} — {desc}")
+                    if param_descs:
+                        lines.append("  input_schema:")
+                        lines.extend(param_descs)
+                if spec.output_schema:
+                    # Compact output schema description
+                    props = spec.output_schema.get("properties", {})
+                    required = set(spec.output_schema.get("required", []))
+                    out_descs: list[str] = []
+                    for pname, pinfo in props.items():
+                        typ = pinfo.get("type", "any")
+                        desc = pinfo.get("description", "")
+                        extras = []
+                        if pname in required:
+                            extras.append("required")
+                        if pinfo.get("items"):
+                            items = pinfo["items"]
+                            if isinstance(items, dict):
+                                item_props = items.get("properties", {})
+                                if item_props:
+                                    sub = ", ".join(item_props.keys())
+                                    extras.append(f"items: {{{sub}}}")
+                        suffix = f" ({', '.join(extras)})" if extras else ""
+                        out_descs.append(f"    {pname}: {typ}{suffix} — {desc}")
+                    if out_descs:
+                        lines.append("  output_schema:")
+                        lines.extend(out_descs)
+                lines.append("")
+        return "\n".join(lines).rstrip()
+
     def _infer_categories(self, task_context: str) -> set[str]:
         """Determine relevant tool categories from task text via word-stem matching.
 
@@ -626,7 +706,10 @@ class ToolRegistry:
         return sanitized[:120].strip()
 
     def format_tools_for_task(
-        self, task_context: str, available_only: bool = False
+        self,
+        task_context: str,
+        available_only: bool = False,
+        route: str | None = None,
     ) -> str:
         """Return formatted tools relevant to the current task context.
 
@@ -637,15 +720,24 @@ class ToolRegistry:
         Args:
             task_context: Текст задачи пользователя (используется для keyword matching).
             available_only: If ``True``, exclude unavailable tools.
+            route: Optional route profile for additional filtering.
         """
         categories = self._infer_categories(task_context)
+
+        # Route profile categories override inferred categories when provided.
+        profile_categories = self._categories_for_profile(route)
+        if profile_categories is not None:
+            categories = profile_categories.copy()
 
         # Всегда включаем memory — рабочая память и recall нужны в любом диалоге
         categories.add("memory")
 
         if not categories or len(categories) <= 1:
             # Только memory (или ничего) — недостаточно фильтрации, возвращаем всё
-            return self._format_tools_for_categories(available_only=available_only)
+            return self._format_tools_for_categories(
+                available_only=available_only,
+                route=route,
+            )
 
         # Формируем комментарий о выбранных категориях
         safe_context = self._sanitize_task_context(task_context)
@@ -654,7 +746,35 @@ class ToolRegistry:
             f"# (отфильтровано по задаче: {safe_context})\n\n"
         )
         return header + self._format_tools_for_categories(
-            categories=categories, available_only=available_only
+            categories=categories,
+            available_only=available_only,
+            route=route,
+        )
+
+    def format_tools_for_route(
+        self,
+        task_context: str,
+        route: str,
+        available_only: bool = False,
+    ) -> str:
+        """Return tools formatted for a specific route profile.
+
+        Unlike ``format_tools_for_task`` which infers categories from task text,
+        this method uses the route profile as the primary filter.
+        """
+        categories = self._categories_for_profile(route)
+        if categories is None:
+            categories = self._infer_categories(task_context)
+            categories.add("memory")
+
+        header = (
+            f"# Route profile: {route}\n"
+            f"# Релевантные категории инструментов: {', '.join(sorted(categories))}\n\n"
+        )
+        return header + self._format_tools_for_categories(
+            categories=categories,
+            available_only=available_only,
+            route=route,
         )
 
     # ------------------------------------------------------------------

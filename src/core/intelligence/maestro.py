@@ -230,6 +230,7 @@ async def process(
     rag_enabled: bool = True,
     contact_id: int | None = None,
     userbot_manager: Any | None = None,
+    route: str | None = None,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     await asyncio.to_thread(register_builtin_tools)
@@ -452,7 +453,9 @@ async def process(
         '`{"tool": "имя", "params": {...}}`.\n'
         "### Для обычного ответа используй "
         '`{"final_response": "твой ответ"}`.\n\n'
-        + tool_registry.format_tools_for_task(user_text, available_only=True)
+        + tool_registry.format_tools_for_task(
+            user_text, available_only=True, route=route
+        )
         + "\n\n"
         "### Факт-чекинг\n"
         "Если тебя спрашивают о факте, который мог измениться"
@@ -992,12 +995,14 @@ async def run_pipeline(
     rag_enabled: bool = True,
     contact_id: int | None = None,
     userbot_manager: Any | None = None,
+    route: str | None = None,
 ) -> dict[str, Any]:
     """Полный пайплайн: Maestro → агенты → финальный ответ.
 
     Args:
         contact_id: peer_id контакта, если пишем конкретному человеку.
                      Используется для инжекции per-contact правил.
+        route: Optional route profile for toolset filtering.
 
     Returns:
         dict с ключами:
@@ -1020,6 +1025,7 @@ async def run_pipeline(
         rag_enabled=rag_enabled,
         contact_id=contact_id,
         userbot_manager=userbot_manager,
+        route=route,
     )
 
     # ── Оценка сложности для HTN-планировщика ──

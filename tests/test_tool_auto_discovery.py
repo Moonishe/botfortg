@@ -561,3 +561,109 @@ class TestBackwardCompatibility:
         result = registry.format_tools_for_task("создай cron задачу")
         assert "scheduling" in result.lower()
         assert "cron_tool" in result
+
+
+# ── Test 17: route-specific toolset profiles ─────────────────────────────
+
+
+class TestRouteProfiles:
+    def test_format_tools_for_route_uses_profile_categories(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="memory_tool",
+                description="Memory tool",
+                category="memory",
+                handler=_noop_handler,
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="send_message",
+                description="Send a message",
+                category="messaging",
+                handler=_noop_handler,
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="code_exec",
+                description="Run code",
+                category="system",
+                handler=_noop_handler,
+            )
+        )
+
+        result = registry.format_tools_for_route(
+            "daily report", route="cron_headless", available_only=True
+        )
+        assert "memory_tool" in result
+        assert "send_message" not in result
+        assert "code_exec" not in result
+        assert "Route profile: cron_headless" in result
+
+    def test_format_tools_for_task_respects_route_profile(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="memory_tool",
+                description="Memory tool",
+                category="memory",
+                handler=_noop_handler,
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="send_message",
+                description="Send a message",
+                category="messaging",
+                handler=_noop_handler,
+            )
+        )
+
+        # With route="cron_headless" messaging tools are excluded even if the
+        # task text would normally include them.
+        result = registry.format_tools_for_task(
+            "send daily report", route="cron_headless", available_only=True
+        )
+        assert "memory_tool" in result
+        assert "send_message" not in result
+
+    def test_format_tools_with_schemas_respects_route(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="send_message",
+                description="Send a message",
+                category="messaging",
+                handler=_noop_handler,
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="recall_memory",
+                description="Recall memory",
+                category="memory",
+                handler=_noop_handler,
+            )
+        )
+
+        result = registry.format_tools_with_schemas(route="cron_headless")
+        assert "recall_memory" in result
+        assert "send_message" not in result
+
+    def test_unknown_route_falls_back_to_all_categories(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="tool",
+                description="Tool",
+                category="search",
+                handler=_noop_handler,
+            )
+        )
+
+        result = registry.format_tools_for_route(
+            "search", route="nonexistent", available_only=True
+        )
+        assert "tool" in result
