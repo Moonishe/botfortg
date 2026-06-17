@@ -135,36 +135,38 @@ async def _execute_one_tool(
     async with _TOOL_SEMAPHORE:
         tool_result = None
 
-        # Открываем сессию БД и резолвим пользователя
-        if owner_id is not None:
-            try:
-                async with session_factory() as session:
-                    owner = await get_or_create_user_fn(session, owner_id)
-                    runtime_kwargs["session"] = session
-                    runtime_kwargs["user"] = owner
-                    if userbot_manager is not None:
-                        client = userbot_manager.get_client(owner_id)
-                        if client is not None:
-                            runtime_kwargs["client"] = client
+        try:
+            # Открываем сессию БД и резолвим пользователя
+            if owner_id is not None:
+                try:
+                    async with session_factory() as session:
+                        owner = await get_or_create_user_fn(session, owner_id)
+                        runtime_kwargs["session"] = session
+                        runtime_kwargs["user"] = owner
+                        if userbot_manager is not None:
+                            client = userbot_manager.get_client(owner_id)
+                            if client is not None:
+                                runtime_kwargs["client"] = client
 
-                    tool_result = await tool_registry.execute(
-                        tool_name,
-                        _confirmed=False,
-                        **sanitized_params,
-                        **runtime_kwargs,
-                    )
-            except _FATAL_EXCEPTIONS:
-                raise
-            except Exception:
-                tool_result = {"error": f"DB/ORM error for tool '{tool_name}'"}
-
-        # Clean up closed session references after async with exits.
-        # The session is closed when the context manager exits, but
-        # runtime_kwargs still holds references.  The fallback below
-        # must NOT receive a closed session.
-        runtime_kwargs.pop("session", None)
-        runtime_kwargs.pop("user", None)
-        runtime_kwargs.pop("client", None)
+                        tool_result = await tool_registry.execute(
+                            tool_name,
+                            _confirmed=False,
+                            **sanitized_params,
+                            **runtime_kwargs,
+                        )
+                except _FATAL_EXCEPTIONS:
+                    raise
+                except Exception:
+                    tool_result = {"error": f"DB/ORM error for tool '{tool_name}'"}
+        finally:
+            # Clean up closed session references after async with exits.
+            # The session is closed when the context manager exits, but
+            # runtime_kwargs still holds references.  The fallback below
+            # must NOT receive a closed session.
+            # Using finally ensures cleanup even on CancelledError/KeyboardInterrupt.
+            runtime_kwargs.pop("session", None)
+            runtime_kwargs.pop("user", None)
+            runtime_kwargs.pop("client", None)
 
         if tool_result is None:
             try:

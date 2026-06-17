@@ -667,3 +667,182 @@ class TestRouteProfiles:
             "search", route="nonexistent", available_only=True
         )
         assert "tool" in result
+
+    def test_format_tools_for_route_empty_task_context(self) -> None:
+        """format_tools_for_route with empty task_context falls back to memory."""
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="memory_tool",
+                description="Memory tool",
+                category="memory",
+                handler=_noop_handler,
+            )
+        )
+
+        result = registry.format_tools_for_route("", route="nonexistent")
+        assert "memory" in result.lower()
+        assert "memory_tool" in result
+
+    def test_format_tools_for_route_no_route_categories_produces_guard(self) -> None:
+        """When route profile has empty categories, guard message appears."""
+        registry = ToolRegistry()
+
+        # Temporarily inject a profile with empty categories
+        registry.TOOLSET_PROFILES["empty_test"] = {"categories": []}
+        try:
+            result = registry.format_tools_for_route("test", route="empty_test")
+            assert "No tools available" in result
+            assert "empty_test" in result
+        finally:
+            del registry.TOOLSET_PROFILES["empty_test"]
+
+    def test_exclude_names_for_nonexistent_tools_is_harmless(self) -> None:
+        """Exclude_names containing non-existent tools shouldn't crash."""
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="real_tool",
+                description="A real tool",
+                category="memory",
+                handler=_noop_handler,
+            )
+        )
+
+        # cron_headless has exclude_names with "send_message", "code_exec", "mcp_telegram"
+        result = registry.format_tools_with_schemas(route="cron_headless")
+        assert "real_tool" in result
+        # No crash, no error
+
+    def test_categories_for_profile_empty_returns_none(self) -> None:
+        """_categories_for_profile returns None for empty categories set."""
+        registry = ToolRegistry()
+
+        # Test known profile with categories
+        result = registry._categories_for_profile("cron_headless")
+        assert result is not None
+        assert len(result) > 0
+
+        # Test unknown route
+        result = registry._categories_for_profile("nonexistent_xyz")
+        assert result is None
+
+        # Test default_chat with include_all
+        result = registry._categories_for_profile("default_chat")
+        assert result is None
+
+        # Test route=None
+        result = registry._categories_for_profile(None)
+        assert result is None
+
+        # Test route=""
+        result = registry._categories_for_profile("")
+        assert result is None
+
+    def test_excluded_names_for_profile_empty_route(self) -> None:
+        """_excluded_names_for_profile returns empty set for empty/None route."""
+        registry = ToolRegistry()
+        assert registry._excluded_names_for_profile(None) == set()
+        assert registry._excluded_names_for_profile("") == set()
+
+    def test_excluded_names_for_profile_nonexistent_route(self) -> None:
+        """_excluded_names_for_profile returns empty set for unknown route."""
+        registry = ToolRegistry()
+        assert registry._excluded_names_for_profile("nonexistent_xyz") == set()
+
+    def test_format_tools_for_task_route_none_backward_compat(self) -> None:
+        """format_tools_for_task with route=None works (backward compat)."""
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="search_tool",
+                description="Search tool",
+                category="search",
+                handler=_noop_handler,
+            )
+        )
+
+        result = registry.format_tools_for_task("поиск", route=None)
+        assert "search_tool" in result
+
+    def test_format_tools_with_schemas_route_none_backward_compat(self) -> None:
+        """format_tools_with_schemas with route=None works (backward compat)."""
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="test_tool",
+                description="Test",
+                category="test",
+                handler=_noop_handler,
+            )
+        )
+
+        result = registry.format_tools_with_schemas(route=None)
+        assert "test_tool" in result
+
+    def test_format_tools_for_route_empty_categories_after_inference(self) -> None:
+        """When _categories_for_profile returns None AND _infer_categories
+        returns empty set, 'memory' is added and tools display correctly."""
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="memory_tool",
+                description="Memory tool",
+                category="memory",
+                handler=_noop_handler,
+            )
+        )
+
+        # Empty task_context + unknown route → no inferred categories → memory added
+        result = registry.format_tools_for_route("", route="nonexistent_xyz")
+        assert "memory_tool" in result
+        assert "memory" in result.lower()
+
+    def test_format_tools_for_route_only_excluded_tools_in_category(self) -> None:
+        """When a category's only tools are all excluded, the category
+        header is not emitted (no empty sections)."""
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="send_message",
+                description="Send message",
+                category="messaging",
+                handler=_noop_handler,
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="memory_tool",
+                description="Memory tool",
+                category="memory",
+                handler=_noop_handler,
+            )
+        )
+
+        result = registry.format_tools_for_route("test", route="cron_headless")
+        assert "memory_tool" in result
+        # send_message is in cron_headless exclude_names — should NOT appear
+        assert "send_message" not in result
+        # And the messaging category section should not appear at all
+        # because all its tools were filtered out
+        assert "## messaging" not in result
+
+    def test_sanitize_task_context_edge_cases(self) -> None:
+        """_sanitize_task_context handles edge cases: empty, long, special chars."""
+        registry = ToolRegistry()
+        assert registry._sanitize_task_context("") == ""
+        assert registry._sanitize_task_context("   ") == ""
+        # Long text truncated to 120
+        long_text = "A" * 200
+        assert len(registry._sanitize_task_context(long_text)) == 120
+        # Newlines collapsed
+        result = registry._sanitize_task_context("hello\n\n\nworld")
+        assert "\n" not in result
+        assert "hello world" in result
+        # Backticks removed
+        assert "`" not in registry._sanitize_task_context("`code`")
+        # Hash removed
+        assert "#" not in registry._sanitize_task_context("## header")
+        # Comment markers removed
+        assert "/*" not in registry._sanitize_task_context("/* comment */")
+        assert "*/" not in registry._sanitize_task_context("/* comment */")

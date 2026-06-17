@@ -20,6 +20,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+
 from src.core.scheduling.cron.parser import get_next_run, validate_cron
 from src.core.scheduling.cron.delivery import close_delivery_bot, dispatch_cron_job
 
@@ -114,21 +115,37 @@ class CronScheduler:
     @staticmethod
     async def _resolve_llm_prompt_payload(
         user_id: int,
-        payload: str | None,
+        payload: str | dict[str, Any] | None,
     ) -> str:
         """Generate text for a headless cron ``llm_prompt`` task.
 
         Uses the ``cron_headless`` route profile so the LLM sees only
         safe tools and cannot send messages or execute code.
-        """
-        parsed: dict[str, Any] = {}
-        if payload:
-            try:
-                parsed = json.loads(payload)
-            except (json.JSONDecodeError, TypeError):
-                parsed = {"prompt": payload}
 
-        prompt = parsed.get("prompt") or parsed.get("text") or ""
+        Args:
+            user_id: Owner user ID for session resolution.
+            payload: JSON string, plain text, or ``None``.
+
+        Returns:
+            JSON string ``{"text": "..."}`` with the generated or error text.
+        """
+        prompt = ""
+        if payload:
+            # payload may be a dict from programmatic callers (e.g. tests)
+            if isinstance(payload, dict):
+                prompt = str(payload.get("prompt") or payload.get("text") or "")
+            else:
+                try:
+                    parsed = json.loads(payload)
+                except (json.JSONDecodeError, TypeError):
+                    prompt = str(payload)
+                else:
+                    # json.loads can return str/list/int/bool — guard against non-dict
+                    if isinstance(parsed, dict):
+                        prompt = str(parsed.get("prompt") or parsed.get("text") or "")
+                    else:
+                        prompt = str(parsed)
+
         if not prompt:
             return json.dumps({"text": "Пустой prompt для llm_prompt-задачи"})
 
@@ -136,6 +153,7 @@ class CronScheduler:
             from src.db.session import get_session
             from src.db.repos.session_repo import get_or_create_user
             from src.llm import build_provider
+            from src.llm.base import ChatMessage
             from src.core.actions.tool_registry import tool_registry
 
             async with get_session() as session:
@@ -158,12 +176,20 @@ class CronScheduler:
                     )
                     + "\n\nОтветь на запрос пользователя."
                 )
-                messages = [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
+                messages: list[ChatMessage] = [
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=prompt),
                 ]
-                text = await provider.chat(messages)
-                return json.dumps({"text": text})
+                text = await asyncio.wait_for(
+                    provider.chat(messages),
+                    timeout=60.0,
+                )
+                return json.dumps({"text": text or ""})
+        except asyncio.TimeoutError:
+            logger.warning(
+                "CronScheduler: LLM-запрос для llm_prompt превысил таймаут 60с"
+            )
+            return json.dumps({"text": "LLM-запрос превысил таймаут для cron-задачи"})
         except Exception:
             logger.exception(
                 "CronScheduler: ошибка генерации LLM для llm_prompt задачи"

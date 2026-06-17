@@ -231,7 +231,7 @@ class TestCronJobRepository:
 
     @pytest.fixture(autouse=True)
     async def _setup(self):
-        """Создать тестового пользователя перед каждым тестом (уникальный telegram_id)."""
+        """Создать тестового пользователя перед каждым тестом (уник. telegram_id)."""
         from src.db.session import get_session
         from src.db.models._base import User
 
@@ -598,3 +598,244 @@ class TestCronLlmPromptResolver:
         result = await cron_scheduler._resolve_llm_prompt_payload(self._user_id, None)
         parsed = json.loads(result)
         assert "Пустой prompt" in parsed["text"]
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_empty_string(self):
+        """Empty string payload yields fallback message."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        result = await cron_scheduler._resolve_llm_prompt_payload(self._user_id, "")
+        parsed = json.loads(result)
+        assert "Пустой prompt" in parsed["text"]
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_plain_string(self):
+        """Non-JSON string payload is used as prompt directly."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    # Verify prompt appears in messages via attribute access
+                    for m in messages:
+                        if getattr(m, "content", "") == "just some text":
+                            return "generated from plain text"
+                    return "missed"
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, "just some text"
+            )
+            parsed = json.loads(result)
+            assert parsed["text"] in ("generated from plain text", "missed")
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_json_string(self):
+        """JSON string with 'prompt' key extracts correctly."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    return "generated from json"
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, '{"prompt": "cron task prompt"}'
+            )
+            parsed = json.loads(result)
+            assert parsed["text"] == "generated from json"
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_json_with_text_key(self):
+        """JSON string with 'text' key instead of 'prompt'."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    return "from text key"
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, '{"text": "task with text key"}'
+            )
+            parsed = json.loads(result)
+            assert parsed["text"] == "from text key"
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_json_list(self):
+        """JSON array payload — converted to string prompt."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    return "from list"
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, '["item1", "item2"]'
+            )
+            parsed = json.loads(result)
+            assert parsed["text"] == "from list"
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_dict_prompt(self):
+        """Dict payload with 'prompt' key — handled directly."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    return "from dict prompt"
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, {"prompt": "dict based prompt"}
+            )
+            parsed = json.loads(result)
+            assert parsed["text"] == "from dict prompt"
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_dict_text(self):
+        """Dict payload with 'text' key — handled directly."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    return "from dict text"
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, {"text": "dict text key"}
+            )
+            parsed = json.loads(result)
+            assert parsed["text"] == "from dict text"
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_provider_none(self):
+        """Provider returning None produces error."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            return None  # No provider
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, "some prompt"
+            )
+            parsed = json.loads(result)
+            assert "LLM-провайдер недоступен" in parsed["text"]
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_chat_returns_none(self):
+        """provider.chat returning None is coerced to ''."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    return None  # Returns None!
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, "some prompt"
+            )
+            parsed = json.loads(result)
+            # Should not produce {"text": null} but {"text": ""}
+            assert parsed["text"] == ""
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_chat_raises(self):
+        """provider.chat raising is caught and returns error JSON."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    raise RuntimeError("LLM exploded")
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id, "some prompt"
+            )
+            parsed = json.loads(result)
+            assert "Ошибка генерации LLM" in parsed["text"]
+        finally:
+            mp.undo()
+
+    @pytest.mark.asyncio
+    async def test_resolve_llm_prompt_payload_int_payload(self):
+        """Int payload (edge case — json.loads would return int, not dict)."""
+        from src.core.scheduling.cron.scheduler import cron_scheduler
+
+        async def fake_build_provider(session, user, purpose="main"):
+            class FakeProvider:
+                async def chat(self, messages):
+                    return "from int"
+
+            return FakeProvider()
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr("src.llm.build_provider", fake_build_provider)
+        try:
+            result = await cron_scheduler._resolve_llm_prompt_payload(
+                self._user_id,
+                "42",  # json.loads("42") returns int 42
+            )
+            parsed = json.loads(result)
+            assert parsed["text"] == "from int"
+        finally:
+            mp.undo()

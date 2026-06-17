@@ -420,6 +420,7 @@ class ToolRegistry:
         Args:
             available_only: When ``True``, exclude tools whose ``check_fn``
                 fails.
+            route: Optional route profile for category + name filtering.
 
         Example::
 
@@ -429,7 +430,9 @@ class ToolRegistry:
               output: {"ok": bool, "facts": [{fact, confidence, reason}],
                        "found": int}
         """
+        categories = self._categories_for_profile(route)
         return self._format_tools_for_categories(
+            categories=categories,
             available_only=available_only,
             route=route,
         )
@@ -547,7 +550,6 @@ class ToolRegistry:
                 "memory",
                 "scheduling",
                 "admin",
-                "config",
             },
         },
         "research": {
@@ -563,14 +565,28 @@ class ToolRegistry:
     }
 
     def _categories_for_profile(self, route: str | None) -> set[str] | None:
-        """Return the category set for a route, or None for all categories."""
+        """Return the category set for a route, or None for all categories.
+
+        Returns:
+            A ``set`` of category names for the profile, an empty ``set`` if
+            the profile explicitly declares no categories, or ``None`` if the
+            route is unset, unknown, or marked ``include_all`` (meaning
+            «no restriction»).
+        """
         if not route:
             return None
         profile = self.TOOLSET_PROFILES.get(route)
         if profile is None:
+            logger.warning(
+                "ToolRegistry: неизвестный route-профиль %r — "
+                "будут использованы все категории (fallback)",
+                route,
+            )
             return None
         if profile.get("include_all"):
             return None
+        # Explicitly declared categories — return even if empty
+        # (empty = "no tools", distinct from None = "all tools")
         return set(profile.get("categories", []))
 
     def _excluded_names_for_profile(self, route: str | None) -> set[str]:
@@ -581,15 +597,6 @@ class ToolRegistry:
         if profile is None:
             return set()
         return set(profile.get("exclude_names", set()))
-
-    def _filter_tools_by_profile(
-        self,
-        tools: list[ToolSpec],
-        route: str | None,
-    ) -> list[ToolSpec]:
-        """Apply route-specific exclusions to a list of tools."""
-        excluded = self._excluded_names_for_profile(route)
-        return [t for t in tools if t.name not in excluded]
 
     def _format_tools_for_categories(
         self,
@@ -766,6 +773,15 @@ class ToolRegistry:
         if categories is None:
             categories = self._infer_categories(task_context)
             categories.add("memory")
+
+        # Guard: if no tools match after filtering (empty profile or
+        # all tools excluded), return descriptive message instead of
+        # an empty prompt that would confuse the LLM.
+        if not categories:
+            return (
+                f"# Route profile: {route}\n"
+                "# \u26a0\ufe0f No tools available for this route.\n"
+            )
 
         header = (
             f"# Route profile: {route}\n"
