@@ -254,7 +254,12 @@ async def _check_ssrf_async(url: str) -> dict[str, Any] | None:
         return error
 
     try:
-        addrinfo = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
+        addrinfo = await asyncio.wait_for(
+            asyncio.to_thread(socket.getaddrinfo, hostname, None),
+            timeout=5.0,
+        )
+    except TimeoutError:
+        return {"error": f"SSRF protection: DNS resolution timed out for {hostname!r}."}
     except socket.gaierror:
         return {"error": f"SSRF protection: cannot resolve hostname {hostname!r}."}
 

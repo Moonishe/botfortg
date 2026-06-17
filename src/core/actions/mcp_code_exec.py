@@ -120,6 +120,18 @@ def _check_sandbox_safety(code: str) -> str | None:
         if isinstance(node, ast.Attribute) and node.attr in _SANDBOX_BLACKLIST:
             return f"Access to attribute '.{node.attr}' is not allowed in sandbox"
 
+        # Block disallowed imports at AST level (defense in depth)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                module_name = alias.name.split(".")[0]
+                if module_name in _DISALLOWED_IMPORTS:
+                    return f"Import of '{module_name}' is not allowed in sandbox"
+            if (
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "") in _DISALLOWED_IMPORTS
+            ):
+                return f"Import from '{node.module}' is not allowed in sandbox"
+
         # Block any call through gc (gc.get_objects(), gc.get_referents(), etc.)
         if isinstance(node, ast.Call):
             func = node.func
@@ -166,6 +178,7 @@ _DISALLOWED_IMPORTS = {
     "multiprocessing",
     "threading",
     "signal",
+    "io",
 }
 
 # Места для подстановки: __DISALLOWED__ — repr(list) запрещённого,
@@ -254,7 +267,8 @@ except Exception as e:
         "Доступны: math, json, datetime, collections, itertools, random, statistics, re, csv."
     ),
     category="utility",
-    risk="medium",
+    risk="critical",
+    requires_confirmation=True,
     params={
         "code": "str — Python-код для выполнения. Вывод через print().",
         "timeout": "int — таймаут в секундах (1-30, по умолчанию 10)",
@@ -283,8 +297,8 @@ async def code_exec(
         "__DISALLOWED__", repr(list(_DISALLOWED_IMPORTS))
     ).replace("__USER_CODE__", indented)
 
+    # Запускаем в subprocess с ограничениями
     try:
-        # Запускаем в subprocess с ограничениями
         proc = await asyncio.create_subprocess_exec(
             "python",
             "-c",
@@ -292,15 +306,25 @@ async def code_exec(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+    except FileNotFoundError:
+        return {"error": "Python не найден. Убедись что python в PATH."}
 
+    try:
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
                 timeout=timeout,
             )
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
+                proc.kill()  # escalate: SIGKILL after SIGTERM didn't work
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except TimeoutError:
+                    pass  # process is zombie — let OS reap it
             return {"error": f"Превышен таймаут ({timeout}с)", "output": ""}
 
         output = stdout.decode("utf-8", errors="replace").strip()
@@ -318,7 +342,21 @@ async def code_exec(
             "output": output[:2000],
         }
 
-    except FileNotFoundError:
-        return {"error": "Python не найден. Убедись что python в PATH."}
     except Exception as e:
         return {"error": safe_str(e)[:300]}
+    finally:
+        # Гарантированная очистка subprocess: kill если ещё жив
+        # (покрывает CancelledError, decode-ошибки и прочие нештатные ситуации)
+        try:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except TimeoutError:
+                    proc.kill()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    except TimeoutError:
+                        pass  # zombie — let OS reap it
+        except (ProcessLookupError, OSError):
+            pass  # процесс уже завершился между проверкой и действием

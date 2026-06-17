@@ -103,6 +103,11 @@ async def mcp_zip(
 # ══════════════════════════════════════════════════════════════════════════
 
 
+# Security: zip bomb limits (shared between list and extract)
+_MAX_UNCOMPRESSED_SIZE = 1 * 1024 * 1024 * 1024  # 1 GB
+_MAX_FILES = 10_000
+
+
 async def _zip_list(file_path: str) -> dict[str, Any]:
     """List all files inside a zip archive with their sizes."""
     resolved = _safe_resolve(file_path)
@@ -120,7 +125,25 @@ async def _zip_list(file_path: str) -> dict[str, Any]:
         total_compressed = 0
         entries: list[dict[str, Any]] = []
         with zipfile.ZipFile(str(resolved), "r") as zf:
-            for info in zf.infolist():
+            infolist = zf.infolist()
+            if len(infolist) > _MAX_FILES:
+                return {
+                    "error": (
+                        f"Zip bomb protection: too many files "
+                        f"({len(infolist)} > {_MAX_FILES})"
+                    )
+                }
+
+            total_size = sum(info.file_size for info in infolist)
+            if total_size > _MAX_UNCOMPRESSED_SIZE:
+                return {
+                    "error": (
+                        f"Zip bomb protection: total uncompressed size "
+                        f"{total_size:,} bytes exceeds {_MAX_UNCOMPRESSED_SIZE:,} bytes"
+                    )
+                }
+
+            for info in infolist:
                 if info.filename.endswith("/"):
                     continue  # skip directories
                 entries.append(
@@ -180,9 +203,29 @@ async def _zip_extract(file_path: str, dest: str) -> dict[str, Any]:
         dest_resolved.mkdir(parents=True, exist_ok=True)
 
         with zipfile.ZipFile(str(resolved), "r") as zf:
+            # Security: zip-bomb protection (reuses module-level limits)
+            infolist = zf.infolist()
+            if len(infolist) > _MAX_FILES:
+                return {
+                    "error": (
+                        f"Zip bomb protection: too many files "
+                        f"({len(infolist)} > {_MAX_FILES})"
+                    )
+                }
+
+            total_size = sum(info.file_size for info in infolist)
+            if total_size > _MAX_UNCOMPRESSED_SIZE:
+                return {
+                    "error": (
+                        f"Zip bomb protection: total uncompressed size "
+                        f"{total_size:,} bytes exceeds {_MAX_UNCOMPRESSED_SIZE:,} bytes"
+                    )
+                }
+
             # Security: prevent zip slip (path traversal via ../ in entry names)
             extracted_count = 0
-            for info in zf.infolist():
+            bytes_written = 0
+            for info in infolist:
                 # Resolve and check destination is within target dir
                 target_path = (dest_resolved / info.filename).resolve()
                 try:
@@ -194,7 +237,27 @@ async def _zip_extract(file_path: str, dest: str) -> dict[str, Any]:
                         dest_resolved,
                     )
                     continue
-                zf.extract(info, str(dest_resolved))
+                # Directory entries: just create the directory
+                if info.filename.endswith("/"):
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                # Ensure parent directory exists for this file entry
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                # Stream-extract with actual byte tracking (defense against
+                # file_size=0 zip bombs where metadata lies about size)
+                with zf.open(info) as src, open(target_path, "wb") as dst:
+                    while chunk := src.read(8192):
+                        bytes_written += len(chunk)
+                        if bytes_written > _MAX_UNCOMPRESSED_SIZE:
+                            dst.close()
+                            target_path.unlink(missing_ok=True)
+                            return {
+                                "error": (
+                                    f"Zip bomb protection: actual extracted size "
+                                    f"exceeds {_MAX_UNCOMPRESSED_SIZE:,} bytes"
+                                )
+                            }
+                        dst.write(chunk)
                 extracted_count += 1
 
             return {

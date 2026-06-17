@@ -6,21 +6,24 @@ import asyncio
 import hashlib
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from aiogram import F, Router
-from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
 )
+from telethon.errors import FloodWaitError
+
+if TYPE_CHECKING:
+    from aiogram.fsm.context import FSMContext
 
 from src.agents.draft_agent import draft_variants
 from src.bot.filters import OwnerOnly
 from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
 from src.bot.states import DraftStates
-from src.core.contacts.send_guard import store_undo
 from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import get_or_create_user as _get_or_create_user
@@ -37,147 +40,21 @@ router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
 
 
-# in-memory store: draft_hash -> (timestamp, full draft text)
-_draft_texts: dict[str, tuple[float, str]] = {}
-_draft_lock = asyncio.Lock()
-
 # variant_groups: hash -> (timestamp, peer_id, contact_name, incoming_text, variant_dicts)
-# Безопасен под asyncio: доступ только внутри async-хендлеров без interleaving-записи.
 _variant_groups: dict[str, tuple[float, int, str, str, list[dict]]] = {}
+_variant_lock = asyncio.Lock()
 DRAFT_TTL_SECONDS = 30 * 60  # 30 минут
 
 
 async def _draft_cleanup() -> None:
-    """Удаляет черновики старше DRAFT_TTL_SECONDS."""
-    async with _draft_lock:
+    """Удаляет варианты старше DRAFT_TTL_SECONDS."""
+    async with _variant_lock:
         now = time.time()
-        stale = [
-            k for k, (ts, _) in _draft_texts.items() if now - ts > DRAFT_TTL_SECONDS
-        ]
-        for k in stale:
-            del _draft_texts[k]
-        # Clean variant groups too
         stale_v = [
             k for k, v in _variant_groups.items() if now - v[0] > DRAFT_TTL_SECONDS
         ]
         for k in stale_v:
             del _variant_groups[k]
-
-
-async def store_draft(draft_text: str) -> str:
-    """Сохраняет черновик и возвращает hash-ключ для callback'ов."""
-    loop = asyncio.get_running_loop()
-    draft_hash = (
-        await loop.run_in_executor(
-            None,
-            lambda: hashlib.sha256(
-                draft_text.encode(), usedforsecurity=False
-            ).hexdigest(),
-        )
-    )[:8]
-    async with _draft_lock:
-        _draft_texts[draft_hash] = (time.time(), draft_text)
-    await _draft_cleanup()
-    return draft_hash
-
-
-def draft_keyboard(peer_id: int, draft_hash: str) -> InlineKeyboardMarkup:
-    """Строит inline-клавиатуру для черновика."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="▶️ Отправить",
-                    callback_data=f"draft:send:{peer_id}:{draft_hash}",
-                ),
-                InlineKeyboardButton(
-                    text="✏️ Редактировать",
-                    callback_data=f"draft:edit:{peer_id}:{draft_hash}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🗑 Игнорировать",
-                    callback_data=f"draft:ignore:{peer_id}:{draft_hash}",
-                ),
-            ],
-        ]
-    )
-
-
-# ── Отправка ──
-
-
-@router.callback_query(F.data.startswith("draft:send:"))
-async def cb_draft_send(callback: CallbackQuery) -> None:
-    parts = callback.data.split(":")
-    if len(parts) < 4:
-        await callback.answer("Ошибка данных.", show_alert=True)
-        return
-    peer_id = int(parts[2])
-    draft_hash = parts[3]
-
-    async with _draft_lock:
-        draft_data = _draft_texts.pop(draft_hash, None)
-    if draft_data is None:
-        await callback.answer("Черновик устарел или не найден", show_alert=True)
-        return
-    ts, draft_text = draft_data
-    if time.time() - ts > DRAFT_TTL_SECONDS:
-        await callback.answer("Черновик устарел", show_alert=True)
-        return
-
-    client = get_active_telethon_client(callback.from_user.id)
-    if client is None:
-        await callback.answer("Нет активной сессии. Сначала /login.", show_alert=True)
-        return
-
-    try:
-        entity = await client.get_entity(peer_id)
-        sent_msg = await client.send_message(entity=entity, message=draft_text)
-        if callback.message:
-            await store_undo(callback.from_user.id, peer_id, sent_msg.id, draft_text)
-            after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
-            await callback.message.edit_text("✅ Отправлено! 🚀", reply_markup=after_kb)
-    except ValueError as e:
-        logger.warning("draft_send value_error: %s", e)
-        if callback.message:
-            await callback.message.edit_text("❌ Ошибка отправки. Проверь получателя")
-        else:
-            await callback.answer(
-                "❌ Ошибка отправки. Проверь получателя", show_alert=True
-            )
-    except Exception as e:
-        from telethon.errors import FloodWaitError
-
-        if isinstance(e, FloodWaitError):
-            if callback.message:
-                await callback.message.edit_text(f"❌ Flood wait ⏳: {e.seconds}с")
-            else:
-                await callback.answer(f"❌ Flood wait: {e.seconds}с", show_alert=True)
-        else:
-            logger.warning("draft_send failed: %s", e)
-            await callback.answer(
-                "❌ Ошибка отправки. Попробуй ещё раз", show_alert=True
-            )
-    await callback.answer()
-
-
-# ── Игнорировать ──
-
-
-@router.callback_query(F.data.startswith("draft:ignore:"))
-async def cb_draft_ignore(callback: CallbackQuery) -> None:
-    parts = callback.data.split(":")
-    if len(parts) < 4:
-        await callback.answer("Ошибка данных.", show_alert=True)
-        return
-    draft_hash = parts[3]
-    async with _draft_lock:
-        _draft_texts.pop(draft_hash, None)
-    if callback.message:
-        await callback.message.edit_text("🗑 Пропущено")
-    await callback.answer()
 
 
 # ── Редактировать ──
@@ -188,21 +65,27 @@ async def cb_draft_edit(callback: CallbackQuery, state: FSMContext) -> None:
     parts = callback.data.split(":")
     if len(parts) == 4:
         # Old format: draft:edit:{peer_id}:{hash} — single draft edit
-        peer_id = int(parts[2])
+        try:
+            peer_id = int(parts[2])
+        except ValueError:
+            await callback.answer("Неверный формат", show_alert=True)
+            return
         draft_hash = parts[3]
         await state.set_state(DraftStates.waiting_edit)
         await state.set_data({"peer_id": peer_id, "draft_hash": draft_hash})
-        await callback.message.answer(
-            "Пришли новый текст черновика для отправки. /cancel — отмена."
-        )
+        if callback.message:
+            await callback.message.answer(
+                "Пришли новый текст черновика для отправки. /cancel — отмена."
+            )
     elif len(parts) == 3:
         # New format: draft:edit:{group_hash} — variant group edit
         group_hash = parts[2]
-        group_data = _variant_groups.get(group_hash)
+        async with _variant_lock:
+            group_data = _variant_groups.get(group_hash)
         if group_data is None:
             await callback.answer("Черновик устарел или не найден", show_alert=True)
             return
-        ts, peer_id, contact_name, incoming_text, variants = group_data
+        _ts, peer_id, contact_name, _incoming_text, _variants = group_data
         await state.set_state(DraftStates.waiting_edit)
         await state.set_data(
             {
@@ -211,9 +94,10 @@ async def cb_draft_edit(callback: CallbackQuery, state: FSMContext) -> None:
                 "draft_variants": True,
             }
         )
-        await callback.message.answer(
-            f"Пришли новый текст для отправки контакту {contact_name}. /cancel — отмена."
-        )
+        if callback.message:
+            await callback.message.answer(
+                f"Пришли новый текст для отправки контакту {contact_name}. /cancel — отмена."
+            )
     else:
         await callback.answer("Неверный формат", show_alert=True)
         return
@@ -224,6 +108,10 @@ async def cb_draft_edit(callback: CallbackQuery, state: FSMContext) -> None:
 async def step_draft_edit(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     peer_id = data.get("peer_id")
+    if peer_id is None:
+        await message.answer("Ошибка состояния. Начни заново.")
+        await state.clear()
+        return
     new_text = (message.text or "").strip()
     if not new_text:
         await message.answer("Пустой текст. Повтори или /cancel.")
@@ -236,15 +124,22 @@ async def step_draft_edit(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        entity = await client.get_entity(peer_id)
-        sent_msg = await client.send_message(entity=entity, message=new_text)
-        await store_undo(message.from_user.id, peer_id, sent_msg.id, new_text)
-        after_kb = smart_post_action_keyboard("edit", {"peer_id": str(peer_id)})
-        await message.answer("✅ Отправлено! 🚀", reply_markup=after_kb)
-    except Exception as e:
+        try:
+            entity = await client.get_entity(peer_id)
+            await client.send_message(entity=entity, message=new_text)
+            after_kb = smart_post_action_keyboard("edit", {"peer_id": str(peer_id)})
+            await message.answer("✅ Отправлено! 🚀", reply_markup=after_kb)
+        except Exception as e:
+            try:
+                await message.answer(
+                    f"❌ Ошибка отправки 😞: {sanitize_html(safe_str(e))}"
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to send error message in step_draft_edit", exc_info=True
+                )
+    finally:
         await state.clear()
-        await message.answer(f"❌ Ошибка отправки 😞: {sanitize_html(safe_str(e))}")
-    await state.clear()
 
 
 # ── Variant group storage ────────────────────────────────────────────────
@@ -255,20 +150,15 @@ async def store_variant_group(
 ) -> str:
     """Сохраняет группу вариантов и возвращает hash для callback'ов."""
     raw = f"{peer_id}:{contact_name}:{incoming_text}:{variants!s}"
-    loop = asyncio.get_running_loop()
-    group_hash = (
-        await loop.run_in_executor(
-            None,
-            lambda: hashlib.sha256(raw.encode(), usedforsecurity=False).hexdigest(),
+    group_hash = hashlib.sha256(raw.encode(), usedforsecurity=False).hexdigest()[:8]
+    async with _variant_lock:
+        _variant_groups[group_hash] = (
+            time.time(),
+            peer_id,
+            contact_name,
+            incoming_text,
+            variants,
         )
-    )[:8]
-    _variant_groups[group_hash] = (
-        time.time(),
-        peer_id,
-        contact_name,
-        incoming_text,
-        variants,
-    )
     await _draft_cleanup()
     return group_hash
 
@@ -299,40 +189,6 @@ def build_variants_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-async def show_draft_variants(
-    callback: CallbackQuery, peer_id: int, contact_name: str, incoming_text: str
-) -> None:
-    """Генерирует 3 варианта черновика и показывает их с клавиатурой выбора."""
-    async with get_session() as session:
-        owner = await _get_or_create_user(session, callback.from_user.id)
-        provider = await build_provider(session, owner, task_type=TaskType.DRAFT)
-    if provider is None:
-        await callback.answer("Не задан LLM-ключ.", show_alert=True)
-        return
-    variants = await draft_variants(provider, contact_name, incoming_text)
-
-    if not variants or len(variants) < 2:
-        # Fallback to single draft
-        from src.agents.draft_agent import draft
-
-        single = await draft(provider, contact_name, incoming_text)
-        variants = [{"tone": "черновик", "text": single["draft"]}]
-
-    group_hash = await store_variant_group(
-        peer_id, contact_name, incoming_text, variants
-    )
-
-    lines = [f"🤖 <b>Черновики для {contact_name}:</b>\n"]
-    for i, v in enumerate(variants, 1):
-        lines.append(f"{i}️⃣ <b>{v['tone'].capitalize()}:</b> {v['text']}")
-
-    html = "\n".join(lines)
-    kb = build_variants_keyboard(group_hash, variants)
-
-    await callback.message.edit_text(html, reply_markup=kb)
-    await callback.answer()
-
-
 # ── Choose variant ───────────────────────────────────────────────────────
 
 
@@ -350,11 +206,12 @@ async def cb_draft_choose(callback: CallbackQuery) -> None:
         await callback.answer("Неверный индекс", show_alert=True)
         return
 
-    group_data = _variant_groups.get(group_hash)
+    async with _variant_lock:
+        group_data = _variant_groups.get(group_hash)
     if group_data is None:
         await callback.answer("Черновик устарел или не найден", show_alert=True)
         return
-    ts, peer_id, contact_name, incoming_text, variants = group_data
+    ts, peer_id, _contact_name, _incoming_text, variants = group_data
     if time.time() - ts > DRAFT_TTL_SECONDS:
         await callback.answer("Черновик устарел", show_alert=True)
         return
@@ -370,9 +227,10 @@ async def cb_draft_choose(callback: CallbackQuery) -> None:
 
     try:
         entity = await client.get_entity(peer_id)
-        sent_msg = await client.send_message(entity=entity, message=draft_text)
+        await client.send_message(entity=entity, message=draft_text)
+        async with _variant_lock:
+            _variant_groups.pop(group_hash, None)
         if callback.message:
-            await store_undo(callback.from_user.id, peer_id, sent_msg.id, draft_text)
             after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
             await callback.message.edit_text("✅ Отправлено! 🚀", reply_markup=after_kb)
     except ValueError as e:
@@ -380,18 +238,20 @@ async def cb_draft_choose(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 f"❌ Ошибка 😞: {sanitize_html(safe_str(e))}"
             )
+            await callback.answer()
         else:
             await callback.answer(f"❌ Ошибка: {safe_str(e)}", show_alert=True)
-    except Exception as e:
-        from telethon.errors import FloodWaitError
-
-        if isinstance(e, FloodWaitError):
-            if callback.message:
-                await callback.message.edit_text(f"❌ Flood wait ⏳: {e.seconds}с")
-            else:
-                await callback.answer(f"❌ Flood wait: {e.seconds}с", show_alert=True)
+        return
+    except FloodWaitError as e:
+        if callback.message:
+            await callback.message.edit_text(f"❌ Flood wait ⏳: {e.seconds}с")
+            await callback.answer()
         else:
-            await callback.answer(f"❌ Ошибка отправки: {safe_str(e)}", show_alert=True)
+            await callback.answer(f"❌ Flood wait: {e.seconds}с", show_alert=True)
+        return
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка отправки: {safe_str(e)}", show_alert=True)
+        return
     await callback.answer()
 
 
@@ -406,14 +266,17 @@ async def cb_draft_improve(callback: CallbackQuery) -> None:
         return
     group_hash = parts[2]
 
-    group_data = _variant_groups.get(group_hash)
+    async with _variant_lock:
+        group_data = _variant_groups.get(group_hash)
     if group_data is None:
         await callback.answer("Черновик устарел", show_alert=True)
         return
-    ts, peer_id, contact_name, incoming_text, old_variants = group_data
+    _ts, peer_id, contact_name, incoming_text, _old_variants = group_data
 
-    if callback.message:
-        await callback.message.edit_text("🔄 Улучшаю черновики…")
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.")
+        return
+    await callback.message.edit_text("🔄 Улучшаю черновики…")
     await callback.answer()
 
     async with get_session() as session:
@@ -422,29 +285,35 @@ async def cb_draft_improve(callback: CallbackQuery) -> None:
     if provider is None:
         await callback.answer("Не задан LLM-ключ.", show_alert=True)
         return
-    enriched_text = (
-        f"{incoming_text}\n\n(сделай ответ живее, естественнее, как в разговорной речи)"
-    )
-    variants = await draft_variants(provider, contact_name, enriched_text)
+    try:
+        enriched_text = f"{incoming_text}\n\n(сделай ответ живее, естественнее, как в разговорной речи)"
+        variants = await draft_variants(provider, contact_name, enriched_text)
 
-    if not variants or len(variants) < 2:
-        from src.agents.draft_agent import draft
+        if not variants or len(variants) < 2:
+            from src.agents.draft_agent import draft
 
-        single = await draft(provider, contact_name, enriched_text)
-        variants = [{"tone": "черновик", "text": single["draft"]}]
+            single = await draft(provider, contact_name, enriched_text)
+            variants = [{"tone": "черновик", "text": single["draft"]}]
 
-    _variant_groups.pop(group_hash, None)
-    new_hash = await store_variant_group(peer_id, contact_name, incoming_text, variants)
+        async with _variant_lock:
+            _variant_groups.pop(group_hash, None)
+        new_hash = await store_variant_group(
+            peer_id, contact_name, incoming_text, variants
+        )
 
-    lines = [f"🤖 <b>Улучшенные черновики для {contact_name}:</b>\n"]
-    for i, v in enumerate(variants, 1):
-        lines.append(f"{i}️⃣ <b>{v['tone'].capitalize()}:</b> {v['text']}")
+        lines = [f"🤖 <b>Улучшенные черновики для {contact_name}:</b>\n"]
+        for i, v in enumerate(variants, 1):
+            lines.append(f"{i}️⃣ <b>{v['tone'].capitalize()}:</b> {v['text']}")
 
-    html = "\n".join(lines)
-    kb = build_variants_keyboard(new_hash, variants)
+        html = "\n".join(lines)
+        kb = build_variants_keyboard(new_hash, variants)
 
-    if callback.message:
         await callback.message.edit_text(html, reply_markup=kb)
+    finally:
+        try:
+            await provider.close()
+        except Exception:
+            logger.debug("Failed to close provider in cb_draft_improve", exc_info=True)
 
 
 # ── Cancel variants ──────────────────────────────────────────────────────

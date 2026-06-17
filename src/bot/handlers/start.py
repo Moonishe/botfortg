@@ -156,7 +156,7 @@ async def cmd_start(message: Message) -> None:
     )
 
 
-@router.message(Command("start"), StateFilter(*list(OnboardingStates)))
+@router.message(Command("start"), StateFilter(OnboardingStates))
 async def cmd_start_during_onboarding(message: Message) -> None:
     """Если пользователь нажал /start во время онбординга — показываем текущий шаг."""
     await message.answer(
@@ -223,16 +223,19 @@ async def _show_regular_greeting(message: Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
+    from src.bot.command_registry import get_registry
+
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         auth_status = "✅" if owner.session else "❌"
         llm = _pretty_provider(owner.settings.llm_provider)
     header = (
         f"📖 <b>Помощь по командам</b>\n"
-        f"{'Ты авторизован' if owner.session else 'Не авторизован'} {auth_status} · "
-        f"LLM: {llm}\n\n"
+        f"{'Ты авторизован' if auth_status == '✅' else 'Не авторизован'} {auth_status} · "
+        f"LLM: {llm}\n"
     )
-    await message.answer(header + WELCOME)
+    help_text = get_registry().format_help()
+    await message.answer(header + "\n" + help_text)
 
 
 # ─── navigation callbacks (existing) ───────────────────────────────────
@@ -282,21 +285,21 @@ async def cb_skip_onboarding(callback: CallbackQuery) -> None:
 async def cb_onboarding_start(callback: CallbackQuery, state: FSMContext) -> None:
     """Пользователь нажал «Начать» — переходим к шагу авторизации."""
     await state.set_state(OnboardingStates.waiting_login)
-    await callback.answer()
-
-    if callback.message:
-        # Убираем кнопку "Начать"
-        try:
-            await callback.message.edit_text(
-                "👋 <b>Привет! Я твой AI-ассистент для Telegram</b>\n\n"
-                "Давай настроим всё за 5 шагов 🚀"
-            )
-        except Exception:
-            logger.debug("Non-critical error", exc_info=True)
 
     if callback.message is None:
         await callback.answer("Сообщение недоступно.")
         return
+    await callback.answer()
+
+    # Убираем кнопку "Начать"
+    try:
+        await callback.message.edit_text(
+            "👋 <b>Привет! Я твой AI-ассистент для Telegram</b>\n\n"
+            "Давай настроим всё за 5 шагов 🚀"
+        )
+    except Exception:
+        logger.debug("Non-critical error", exc_info=True)
+
     await _send_login_step(callback.message.chat.id, callback.bot)
 
 
@@ -1055,21 +1058,20 @@ async def cb_onboarding_tz(callback: CallbackQuery, state: FSMContext) -> None:
 
     await invalidate_settings_cache(callback.from_user.id)
 
-    await callback.answer(f"✅ Часовой пояс: {tz_short(tz_value)}")
     await state.set_state(OnboardingStates.waiting_sync_choice)
     if callback.message is None:
         await callback.answer("Сообщение недоступно.")
         return
+    await callback.answer(f"✅ Часовой пояс: {tz_short(tz_value)}")
     await _send_sync_step(callback.message.chat.id, callback.bot)
 
     # Убираем клавиатуру
-    if callback.message:
-        try:
-            await callback.message.edit_text(
-                f"✅ Часовой пояс: <b>{tz_short(tz_value)}</b>"
-            )
-        except Exception:
-            logger.debug("Non-critical error", exc_info=True)
+    try:
+        await callback.message.edit_text(
+            f"✅ Часовой пояс: <b>{tz_short(tz_value)}</b>"
+        )
+    except Exception:
+        logger.debug("Non-critical error", exc_info=True)
 
 
 @router.message(OnboardingStates.waiting_timezone)
@@ -1145,8 +1147,6 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
 
     await invalidate_settings_cache(callback.from_user.id)
 
-    await callback.answer("📱 Начинаю синхронизацию...")
-
     # Запускаем синхронизацию
     from src.userbot import get_active_telethon_client
     from src.userbot.dialogs import sync_dialogs
@@ -1157,6 +1157,8 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
             "❌ Telegram-сессия не активна. Сначала /login.", show_alert=True
         )
         return
+
+    await callback.answer("📱 Начинаю синхронизацию...")
 
     try:
         await sync_dialogs(client, owner)
@@ -1253,17 +1255,16 @@ async def step_onboarding_sync_folders_text(
 @router.callback_query(F.data == OnboardingCB.sync("skip"))
 async def cb_onboarding_sync_skip(callback: CallbackQuery, state: FSMContext) -> None:
     """Пользователь пропустил синхронизацию."""
-    await callback.answer("Ок, можно настроить позже в /settings → Синхронизация")
     await state.clear()
-
-    if callback.message:
-        try:
-            await callback.message.edit_text("⏭ Синхронизация пропущена")
-        except Exception:
-            logger.debug("Non-critical error", exc_info=True)
-
     if callback.message is None:
         await callback.answer("Сообщение недоступно.")
+        return
+    await callback.answer("Ок, можно настроить позже в /settings → Синхронизация")
+
+    try:
+        await callback.message.edit_text("⏭ Синхронизация пропущена")
+    except Exception:
+        logger.debug("Non-critical error", exc_info=True)
         return
     await _finish_onboarding(
         callback.message.chat.id, callback.bot, tg_id=callback.from_user.id

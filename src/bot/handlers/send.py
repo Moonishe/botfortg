@@ -340,7 +340,12 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
         action_id = 0
 
     if action_id:
-        async with get_session() as session:
+        # Prevent race with cb_confirm: if confirm is in-flight and has
+        # already validated the action, cancel may still delete it before
+        # the message is sent — resulting in a message being sent AFTER
+        # the user clicked cancel. Serialize via the per-user confirm lock.
+        lock = await _get_confirm_lock(callback.from_user.id)
+        async with lock, get_session() as session:
             user = await get_or_create_user(session, callback.from_user.id)
             await delete_pending_action(session, action_id, user)
     await state.clear()
@@ -533,6 +538,7 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
                     await callback.answer(
                         f"⚠️ {guard.warnings[0][:100]}", show_alert=True
                     )
+                    return
 
                 try:
                     entity = await client.get_entity(peer_id)

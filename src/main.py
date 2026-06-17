@@ -7,7 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from src.bot.app import run_bot, run_bot_webhook
-from src.bot.handlers.free_text import start_voice_worker, stop_voice_worker
+from src.bot.handlers.free_text_legacy import start_voice_worker, stop_voice_worker
 from src.core.infra.app_context import get_app_context
 from src.core.memory.memory_queue import start_worker, stop_worker
 from src.core.infra.task_manager import task_manager, stop_ff_tasks
@@ -65,16 +65,13 @@ def _setup_json_logging() -> None:
 def _register_background_tasks() -> None:
     """Импортирует модули с background-задачами — декораторы авторегистрируют их."""
     # PERF-018: background timer for stale pending confirmation cleanup
-    from src.bot.handlers.free_text_pipeline import register_cleanup_timer
+    from src.bot.handlers.free_text import register_cleanup_timer
 
     register_cleanup_timer()
 
 
 async def main() -> None:
-    import sys
-
-    sys.stderr.write("=== main() START ===\n")
-    sys.stderr.flush()
+    logger.info("=== main() START ===")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
@@ -84,12 +81,20 @@ async def main() -> None:
     # level, logger, message, module, lineno).
     if os.getenv("LOG_FORMAT", "").lower() == "json":
         _setup_json_logging()
+
+    # KeyMaskFilter: маскирует API-ключи даже в plain-text логах
+    from src.core.infra.key_guard import KeyMaskFilter
+
+    for _handler in logging.root.handlers:
+        _handler.addFilter(KeyMaskFilter())
+
     logger.info("Starting TelegramAssistant")
 
     # --- Обработчики сигналов для graceful shutdown ---
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
-    assert main_task is not None, "main() must be called via asyncio.run()"
+    if main_task is None:
+        raise RuntimeError("main() must be called via asyncio.run()")
 
     def _shutdown() -> None:
         logger.info("Received shutdown signal, cancelling main task...")
@@ -207,7 +212,7 @@ async def main() -> None:
 
         await hooks.emit("on_startup")
     except Exception:
-        pass  # hooks are optional, never break core flow
+        logger.debug("hooks.emit('on_startup') failed (non-critical)", exc_info=True)
 
     await start_worker()
     start_voice_worker()
@@ -423,7 +428,7 @@ async def main() -> None:
                                 mode="light",
                             )
                     except Exception:
-                        pass  # warmup best-effort
+                        logger.debug("Recall warmup failed", exc_info=True)
 
                 track_ff(asyncio.create_task(_do_warmup()))
 
@@ -492,6 +497,11 @@ async def main() -> None:
             except Exception:
                 logger.exception("%s task cancellation failed", _name)
 
+        async def _shutdown_avito_rotator() -> None:
+            from src.core.avito.service import shutdown_avito_rotator
+
+            await shutdown_avito_rotator()
+
         for step, coro in [
             ("userbot", userbot_manager.shutdown()),
             ("background tasks", task_manager.stop_all()),
@@ -499,6 +509,7 @@ async def main() -> None:
             ("voice worker", stop_voice_worker()),
             ("notification queue", notification_queue.stop()),
             ("cache manager", cache_manager.stop_background_cleanup()),
+            ("avito rotator", _shutdown_avito_rotator()),
         ]:
             try:
                 logger.debug("Stopping %s…", step)
@@ -553,7 +564,9 @@ async def main() -> None:
 
             await hooks.emit("on_shutdown")
         except Exception:
-            pass  # hooks are optional, never break core flow
+            logger.debug(
+                "hooks.emit('on_shutdown') failed (non-critical)", exc_info=True
+            )
 
         logger.info("Shutdown complete")
 
@@ -577,16 +590,17 @@ async def _close_shared_resources() -> None:
     except Exception:
         logger.debug("embedding_cache close failed (non-critical)", exc_info=True)
 
-    # mcp_timer sqlite3 connection (sync — run in thread)
+    # mcp_timer: cancel all active timer tasks on shutdown.
+    # Timer DB connections are managed by the global SQLAlchemy engine dispose.
     try:
-        from src.core.actions.mcp_timer import close_timer_db
+        from src.core.actions.mcp_timer import cancel_all_timers
 
-        await asyncio.wait_for(asyncio.to_thread(close_timer_db), timeout=3.0)
-        logger.debug("mcp_timer DB connection closed")
+        await asyncio.wait_for(cancel_all_timers(), timeout=3.0)
+        logger.debug("mcp_timer tasks cancelled")
     except TimeoutError:
-        logger.warning("mcp_timer DB close timed out")
+        logger.warning("mcp_timer cancel timed out")
     except Exception:
-        logger.debug("mcp_timer DB close failed (non-critical)", exc_info=True)
+        logger.debug("mcp_timer cancel failed (non-critical)", exc_info=True)
 
     # pubmed httpx client
     try:
@@ -610,12 +624,20 @@ async def _close_shared_resources() -> None:
     except Exception:
         logger.debug("mcp_oauth close failed (non-critical)", exc_info=True)
 
+    # avito stealth session (httpx AsyncClient) — close to avoid fd leak
+    try:
+        from src.core.avito.service import _close_stealth_session
+
+        await asyncio.wait_for(_close_stealth_session(), timeout=10.0)
+        logger.debug("avito stealth session closed")
+    except TimeoutError:
+        logger.warning("avito stealth session close timed out")
+    except Exception:
+        logger.debug("avito stealth session close failed (non-critical)", exc_info=True)
+
 
 def run() -> None:
-    import sys
-
-    sys.stderr.write("=== run() START ===\n")
-    sys.stderr.flush()
+    logger.info("=== run() START ===")
 
     # --- Schema migrations (Alembic — with 120s timeout and retry) ---
     import time as _time
@@ -640,18 +662,19 @@ def run() -> None:
     # и новым потоком на уровне БД.
 
     for _attempt in range(1, _MIGRATION_MAX_RETRIES + 1):
-        sys.stderr.write(
-            f"=== alembic upgrade head (attempt {_attempt}/{_MIGRATION_MAX_RETRIES}, "
-            f"timeout={_MIGRATION_TIMEOUT}s, head={head_rev}) ===\n"
+        logger.info(
+            "=== alembic upgrade head (attempt %d/%d, timeout=%ds, head=%s) ===",
+            _attempt,
+            _MIGRATION_MAX_RETRIES,
+            _MIGRATION_TIMEOUT,
+            head_rev,
         )
-        sys.stderr.flush()
 
         executor = ThreadPoolExecutor(max_workers=1)
         try:
             future = executor.submit(alembic.command.upgrade, _cfg, "head")
             future.result(timeout=_MIGRATION_TIMEOUT)
-            sys.stderr.write("=== alembic DONE, entering asyncio ===\n")
-            sys.stderr.flush()
+            logger.info("=== alembic DONE, entering asyncio ===")
             break  # success — exit retry loop
         except FutureTimeoutError:
             if _attempt < _MIGRATION_MAX_RETRIES:
@@ -711,7 +734,18 @@ def run() -> None:
             "Scheduling main() as a background task."
         )
         try:
-            _loop.create_task(main())
+            _bg_task = _loop.create_task(main())
+            _bg_task.add_done_callback(
+                lambda t: (
+                    logger.exception(
+                        "main() background task failed unexpectedly",
+                        exc_info=t.exception(),
+                    )
+                    if t.exception()
+                    and not isinstance(t.exception(), asyncio.CancelledError)
+                    else None
+                )
+            )
         except Exception:
             logger.critical(
                 "Failed to schedule main() in existing event loop",

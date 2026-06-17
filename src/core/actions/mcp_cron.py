@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 _VALID_CHANNELS = {"notification_queue", "telegram", "userbot"}
 _VALID_PAYLOAD_TYPES = {"message", "llm_prompt", "webhook"}
 
+
+def _resolve_user_id(user_id: int, kwargs: dict[str, Any]) -> int | None:
+    """Вернуть user_id, если он совпадает с caller identity из kwargs."""
+    caller_id = kwargs.get("user")
+    if caller_id is None:
+        return user_id
+    if int(caller_id) != user_id:
+        return None
+    return user_id
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # cron_create
 # ══════════════════════════════════════════════════════════════════════════
@@ -121,6 +132,7 @@ async def cron_create(
     channel: str = "notification_queue",
     tags: list[str] | None = None,
     max_runs: int = 0,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Создать новую cron-задачу.
 
@@ -142,6 +154,11 @@ async def cron_create(
         Результат операции.
     """
     # Валидация обязательных полей
+
+    _uid = _resolve_user_id(user_id, kwargs)
+    if _uid is None:
+        return {"success": False, "error": "user_id does not match caller identity"}
+    user_id = _uid  # type: ignore[assignment]
     if not name or not name.strip():
         return {
             "success": False,
@@ -225,7 +242,6 @@ async def cron_create(
             # Валидация URL: разрешены только http/https, блокируем
             # внутренние/приватные IP для предотвращения SSRF.
             from urllib.parse import urlparse
-            import ipaddress
 
             parsed = urlparse(payload_text)
             if parsed.scheme not in ("http", "https"):
@@ -241,32 +257,12 @@ async def cron_create(
                     "success": False,
                     "error": "Webhook URL должен содержать hostname",
                 }
-            # Block localhost and mDNS hostnames (not caught by ip_address)
-            hostname_lower = parsed.hostname.lower()
-            if (
-                hostname_lower in {"localhost", "0.0.0.0", "::1", "[::1]", "127.0.0.1"}  # noqa: S104
-                or hostname_lower.endswith(".local")
-                or hostname_lower.endswith(".internal")
-            ):
-                return {
-                    "success": False,
-                    "error": (
-                        "Webhook URL не может указывать "
-                        "на локальный/зарезервированный адрес"
-                    ),
-                }
-            try:
-                addr = ipaddress.ip_address(parsed.hostname)
-                if addr.is_private or addr.is_loopback or addr.is_link_local:
-                    return {
-                        "success": False,
-                        "error": (
-                            "Webhook URL не может указывать "
-                            "на приватный/локальный адрес"
-                        ),
-                    }
-            except ValueError:
-                pass  # hostname не IP-адрес — ок, резолвится через DNS
+            # SSRF protection: DNS resolution + IP validation
+            from src.core.security.ssrf_guard import _check_ssrf_async
+
+            ssrf_error = await _check_ssrf_async(payload_text)
+            if ssrf_error:
+                return {"success": False, **ssrf_error}
             payload["url"] = payload_text
 
     result = await cron_scheduler.create_and_schedule(
@@ -306,6 +302,7 @@ async def cron_list(
     enabled_only: bool = False,
     tag: str | None = None,
     limit: int = 20,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Получить список cron-задач пользователя.
 
@@ -318,6 +315,11 @@ async def cron_list(
     Returns:
         Список задач.
     """
+
+    _uid = _resolve_user_id(user_id, kwargs)
+    if _uid is None:
+        return {"success": False, "error": "user_id does not match caller identity"}
+    user_id = _uid  # type: ignore[assignment]
     from src.db.repos.cron_repo import list_user_jobs
     from src.db.session import get_session
 
@@ -383,7 +385,7 @@ async def cron_list(
         "user_id": "int",
     },
 )
-async def cron_delete(job_id: int, user_id: int) -> dict[str, Any]:
+async def cron_delete(job_id: int, user_id: int, **kwargs: Any) -> dict[str, Any]:
     """Удалить cron-задачу.
 
     Args:
@@ -393,6 +395,11 @@ async def cron_delete(job_id: int, user_id: int) -> dict[str, Any]:
     Returns:
         Результат операции.
     """
+
+    _uid = _resolve_user_id(user_id, kwargs)
+    if _uid is None:
+        return {"success": False, "error": "user_id does not match caller identity"}
+    user_id = _uid  # type: ignore[assignment]
     from src.db.repos.cron_repo import delete_cron_job
     from src.db.session import get_session
 
@@ -431,7 +438,7 @@ async def cron_delete(job_id: int, user_id: int) -> dict[str, Any]:
     },
 )
 async def cron_toggle(
-    job_id: int, user_id: int, *, enabled: bool | None = None
+    job_id: int, user_id: int, *, enabled: bool | None = None, **kwargs: Any
 ) -> dict[str, Any]:
     """Переключить статус cron-задачи.
 
@@ -443,6 +450,11 @@ async def cron_toggle(
     Returns:
         Результат операции.
     """
+
+    _uid = _resolve_user_id(user_id, kwargs)
+    if _uid is None:
+        return {"success": False, "error": "user_id does not match caller identity"}
+    user_id = _uid  # type: ignore[assignment]
     from src.db.repos.cron_repo import update_cron_job
     from src.db.session import get_session
 
@@ -477,7 +489,7 @@ async def cron_toggle(
     risk="low",
     requires_confirmation=False,
 )
-async def cron_info(job_id: int, user_id: int) -> dict[str, Any]:
+async def cron_info(job_id: int, user_id: int, **kwargs: Any) -> dict[str, Any]:
     """Получить детальную информацию о cron-задаче.
 
     Args:
@@ -487,6 +499,11 @@ async def cron_info(job_id: int, user_id: int) -> dict[str, Any]:
     Returns:
         Детали задачи и следующие 5 выполнений.
     """
+
+    _uid = _resolve_user_id(user_id, kwargs)
+    if _uid is None:
+        return {"success": False, "error": "user_id does not match caller identity"}
+    user_id = _uid  # type: ignore[assignment]
     from src.db.session import get_session
 
     async with get_session() as session:
@@ -584,6 +601,7 @@ async def cron_blueprint(
     *,
     channel: str | None = None,
     timezone: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Создать cron-задачу из шаблона.
 
@@ -596,6 +614,11 @@ async def cron_blueprint(
     Returns:
         Результат создания задачи.
     """
+
+    _uid = _resolve_user_id(user_id, kwargs)
+    if _uid is None:
+        return {"success": False, "error": "user_id does not match caller identity"}
+    user_id = _uid  # type: ignore[assignment]
     bp = get_blueprint(blueprint_name)
     if bp is None:
         return {
@@ -605,7 +628,7 @@ async def cron_blueprint(
             ),
         }
 
-    kwargs: dict[str, Any] = {
+    create_kwargs: dict[str, Any] = {
         "user_id": user_id,
         "name": bp.name,
         "cron_expression_or_nl": bp.cron_expression,
@@ -617,11 +640,11 @@ async def cron_blueprint(
         "tags": bp.tags,
     }
     if channel:
-        kwargs["channel"] = channel
+        create_kwargs["channel"] = channel
     if timezone:
-        kwargs["timezone"] = timezone
+        create_kwargs["timezone"] = timezone
 
-    return await cron_create(**kwargs)
+    return await cron_create(**create_kwargs)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -705,6 +728,7 @@ async def cron_update(
     timezone: str | None = None,
     tags: list[str] | None = None,
     max_runs: int | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Обновить параметры cron-задачи.
 
@@ -724,6 +748,11 @@ async def cron_update(
     Returns:
         Результат операции.
     """
+
+    _uid = _resolve_user_id(user_id, kwargs)
+    if _uid is None:
+        return {"success": False, "error": "user_id does not match caller identity"}
+    user_id = _uid  # type: ignore[assignment]
     from src.db.repos.cron_repo import update_cron_job
     from src.db.session import get_session
 

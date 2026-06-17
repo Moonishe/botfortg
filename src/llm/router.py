@@ -86,8 +86,6 @@ _DEFAULT_LLM_TIMEOUT = 90.0  # секунд — таймаут одного LLM-
 class ExhaustedError(Exception):
     """Все API-ключи провайдера исчерпаны (колдаун/отключены)."""
 
-    pass
-
 
 RETRYABLE_MARKERS = (
     "429",
@@ -703,7 +701,6 @@ class MultiKeyProvider:
 
     async def close(self) -> None:
         """MultiKeyProvider is a factory — instances are closed in _try_with_retry."""
-        pass
 
     async def list_models(self) -> list[str]:
         """Возвращает включённые (enabled) модели для всех ключей провайдера.
@@ -743,7 +740,7 @@ class MultiKeyProvider:
             except Exception:
                 logger.warning(
                     "list_models() failed for key %s, returning empty",
-                    key[:16] + "…" if len(key) > 16 else key,
+                    _mask_key(key),
                     exc_info=True,
                 )
                 return []
@@ -963,6 +960,7 @@ class ProviderFallback:
                 models = await provider.list_models()
                 all_models.update(models)
             except Exception:
+                logger.debug("list_models failed for %s", provider.name, exc_info=True)
                 continue
         return sorted(all_models)
 
