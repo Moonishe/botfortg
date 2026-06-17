@@ -233,49 +233,44 @@ async def _set_frozen(
     owner_id: int | None,
     user_text: str,
     ctx: Any,
+    contact_id: int | None = None,
 ) -> bool:
-    """S3i frozen memory snapshot: top-3 facts pre-loaded."""
-    if owner_id is not None:
-        try:
-            from src.core.memory.memory_recall import recall
+    """S3i bounded session memory snapshot: 3-7 facts + digest + pending + style."""
+    if owner_id is None or owner_id <= 0:
+        return False
+    try:
+        from src.core.memory.session_snapshot import (
+            build_session_snapshot,
+            format_snapshot,
+        )
 
-            _recall_result = await recall(
-                telegram_id=owner_id,
-                query=user_text,
-                limit=3,
-                include_deep=False,
-                mode="normal",
-            )
-            if _recall_result.facts:
-                _lines = [
-                    "[ПАМЯТЬ] Ниже факты о пользователе и его контактах. "
-                    "Используй их ЕСТЕСТВЕННО в ответе — не перечисляй списком, "
-                    "не говори «я помню» или «по моим данным». "
-                    "Вплетай в речь как само собой разумеющееся."
-                ]
-                for _f in _recall_result.facts:
-                    _lines.append(f"[{_f.reason}] {_f.fact}")
-                ctx.frozen_snapshot = "\n".join(_lines)
+        _snapshot = await build_session_snapshot(
+            telegram_id=owner_id,
+            contact_id=contact_id,
+            user_text=user_text,
+            max_facts=7,
+        )
+        _formatted = format_snapshot(_snapshot)
+        if _formatted:
+            ctx.frozen_snapshot = _formatted
+            ctx.session_summary = _snapshot.get("session_summary") or ""
 
-                # Also update the frozen_provider so ContextEngine can serve it
-                try:
-                    from src.core.context.providers.frozen_provider import (
-                        frozen_provider,
-                    )
+            # Also update the frozen_provider so ContextEngine can serve it
+            try:
+                from src.core.context.providers.frozen_provider import (
+                    frozen_provider,
+                )
 
-                    await frozen_provider.set_frozen(
-                        owner_id,
-                        [
-                            {"fact": f"[{_f.reason}] {_f.fact}"}
-                            for _f in _recall_result.facts
-                        ],
-                    )
-                except Exception:
-                    logger.debug("Failed to set frozen provider", exc_info=True)
+                frozen_provider.set_frozen(
+                    owner_id,
+                    [{"fact": f} for f in _snapshot.get("facts", [])],
+                )
+            except Exception:
+                logger.debug("Failed to set frozen provider", exc_info=True)
 
-                return True
-        except Exception:
-            logger.debug("Frozen snapshot recall failed, skipping", exc_info=True)
+            return True
+    except Exception:
+        logger.debug("Bounded session snapshot failed, skipping", exc_info=True)
     return False
 
 

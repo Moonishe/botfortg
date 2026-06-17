@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src.core.actions.tool_registry import tool_registry
 from src.core.intelligence.soul_blocks import ANTI_AI_BLOCK, _load_blocks
 from src.core.security.prompt_injection_scanner import scan_content
 from src.db.repo import get_or_create_user, get_self_profile
@@ -179,15 +180,21 @@ class PromptAssembler:
                 "Для сложных запросов — обрабатывай данные через tools, не загружай в контекст."
             )
             # Tool usage hints — compact catalog reference (full list in SOUL.md)
-            if target == "maestro":
-                tool_hints = (
-                    "\n\n[ИНСТРУМЕНТЫ — 41 доступен]\n"
-                    "Категории: память(5), продуктивность(4), интернет(5), файлы(4), система(7), утилиты(4), медиа(3), почта(3), настройки(4), код(2).\n"
-                    "Правила: 1) память first 2) один вызов=один инструмент 3) комбинируй результаты.\n"
-                    "Полный список — в SOUL.md. "
-                    "Для деталей о каждом инструменте используй list_for_prompt() в туллупе.\n"
-                )
-                parts.append(tool_hints)
+            by_cat = tool_registry.list_by_category()
+            total = sum(len(tools) for tools in by_cat.values())
+            cat_parts = []
+            for cat_name in sorted(by_cat.keys()):
+                cat_parts.append(f"{cat_name}({len(by_cat[cat_name])})")
+            cat_str = ", ".join(cat_parts)
+
+            tool_hints = (
+                f"\n\n[ИНСТРУМЕНТЫ — {total} доступно]\n"
+                f"Категории: {cat_str}.\n"
+                "Правила: 1) память first 2) один вызов=один инструмент 3) комбинируй результаты.\n"
+                "Полный список — в SOUL.md. "
+                "Для деталей о каждом инструменте используй list_for_prompt() в туллупе.\n"
+            )
+            parts.append(tool_hints)
 
             # Correction learning — feed recent user corrections into prompt
             if ctx.correction_context:
@@ -357,30 +364,61 @@ class PromptAssembler:
         parts = [p for p in [tier1, tier2, tier3] if p]
         prompt = "\n\n".join(parts)
 
-        # Проверка ёмкости
-        prompt = self._capacity_check(prompt)
+        # Проверка ёмкости + prompt audit
+        prompt, _audit = self._capacity_check(prompt)
+        logger.debug(
+            "Prompt assembly audit: chars_before=%d chars_after=%d tokens=%d stage=%s",
+            _audit["chars_before"],
+            _audit["chars_after"],
+            _audit["tokens"],
+            _audit["stage"],
+        )
 
         return prompt
 
-    def _capacity_check(self, prompt: str) -> str:
-        """Проверяет длину промпта и усекает при необходимости."""
-        if len(prompt) <= MAX_PROMPT_CHARS:
-            return prompt
+    def _capacity_check(self, prompt: str) -> tuple[str, dict[str, int | str]]:
+        """Проверяет длину промпта и усекает при необходимости.
+
+        Returns:
+            (final_prompt, audit_dict) where audit_dict has:
+            chars_before, chars_after, tokens, stage.
+        """
+        from src.core.context.token_tracker import (
+            DEFAULT_MAX_TOKENS,
+            estimate_tokens,
+            get_budget_stage,
+        )
+
+        chars_before = len(prompt)
+        tokens = estimate_tokens(prompt)
+        stage, _ = get_budget_stage(tokens, DEFAULT_MAX_TOKENS)
+
+        if chars_before <= MAX_PROMPT_CHARS:
+            return prompt, {
+                "chars_before": chars_before,
+                "chars_after": chars_before,
+                "tokens": tokens,
+                "stage": stage,
+            }
 
         logger.warning(
             "Prompt too long (%d chars), truncating to %d",
-            len(prompt),
+            chars_before,
             MAX_PROMPT_CHARS,
         )
 
-        # Smart truncation: режем по границе предложения, не посередине слова
-        truncated = _truncate_smart(prompt, MAX_PROMPT_CHARS)
-        # Добавляем предупреждение
+        # Smart truncation: режем по границе предложения, не посередине слова;
+        # оставляем запас на предупреждение об усечении.
         truncated = (
-            _truncate_smart(truncated, MAX_PROMPT_CHARS - 100)
+            _truncate_smart(prompt, MAX_PROMPT_CHARS - 100)
             + "\n\n[Промпт усечён из-за ограничения длины. Часть контекста опущена.]"
         )
-        return truncated
+        return truncated, {
+            "chars_before": chars_before,
+            "chars_after": len(truncated),
+            "tokens": estimate_tokens(truncated),
+            "stage": stage,
+        }
 
     def inject_rule(self, rule_tier: str, rule_text: str) -> bool:
         """Проверяет, можно ли инжектить правило в tier.

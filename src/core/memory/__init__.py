@@ -17,15 +17,23 @@ from src.core.memory.chat_summarizer import (
     generate_chat_summary,
     save_summary_checkpoint,
 )
+from src.core.memory.memory_provider import (
+    VectorMemoryBackend,
+    QdrantMemoryBackend,
+    VectorHit as MemoryVectorHit,
+)
 
 __all__ = [
     "AllEvolutionChains",
     "EvolutionChainResult",
     "MemoryMetricsSnapshot",
     "MemoryMode",
+    "MemoryVectorHit",
+    "QdrantMemoryBackend",
     "System2Analysis",
     "TTLCache",
     "UserWorldview",
+    "VectorMemoryBackend",
     "analyze",
     "build_worldview",
     "check_chat_needs_summary",

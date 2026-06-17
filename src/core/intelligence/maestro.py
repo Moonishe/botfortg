@@ -368,7 +368,7 @@ async def process(
         # ── Execute all 4 Phase-3 tasks in parallel ──
         p3_results = await asyncio.gather(
             _set_skill_index(owner_id, user_text, ctx),
-            _set_frozen(owner_id, user_text, ctx),
+            _set_frozen(owner_id, user_text, ctx, contact_id=contact_id),
             _gather_context(user_text, owner_id, contact_id),
             _set_contact_rules(owner_id, contact_id, ctx),
             return_exceptions=True,

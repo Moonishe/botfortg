@@ -33,24 +33,32 @@ def _cleanup_stale_pending() -> None:
             del _pending[uid]
 
 
-async def save_pending(telegram_id: int, question: str, context: str = "") -> None:
-    """Сохраняет вопрос, на который не нашлось ответа."""
-    global _save_counter
-    async with _pending_lock:
-        _pending.setdefault(telegram_id, []).append(
-            {
-                "question": question[:500],
-                "context": context[:200],
-                "ts": time.time(),
-            }
-        )
-        # Ограничиваем 20 вопросами на пользователя
-        if len(_pending[telegram_id]) > 20:
-            _pending[telegram_id] = _pending[telegram_id][-20:]
+def _append_in_memory(telegram_id: int, question: str, context: str = "") -> None:
+    """Append a question to the in-memory queue under the lock.
 
-        _save_counter += 1
-        if _save_counter % _CLEANUP_EVERY_N == 0:
-            _cleanup_stale_pending()
+    Caps per-user list at 20 items and bumps the cleanup counter.
+    Must be called while holding _pending_lock.
+    """
+    global _save_counter
+    _pending.setdefault(telegram_id, []).append(
+        {
+            "question": (question or "")[:500],
+            "context": context[:200],
+            "ts": time.time(),
+        }
+    )
+    # Cap at 20 items per user
+    if len(_pending[telegram_id]) > 20:
+        _pending[telegram_id] = _pending[telegram_id][-20:]
+    _save_counter += 1
+    if _save_counter % _CLEANUP_EVERY_N == 0:
+        _cleanup_stale_pending()
+
+
+async def save_pending(telegram_id: int, question: str, context: str = "") -> None:
+    """Сохраняет вопрос, на который не нашлось ответа (in-memory only)."""
+    async with _pending_lock:
+        _append_in_memory(telegram_id, question, context)
 
 
 async def get_pending(telegram_id: int) -> list[dict[str, Any]]:
@@ -61,6 +69,15 @@ async def get_pending(telegram_id: int) -> list[dict[str, Any]]:
     """
     async with _pending_lock:
         return _pending.pop(telegram_id, [])
+
+
+async def peek_pending(telegram_id: int) -> list[dict[str, Any]]:
+    """Возвращает список неотвеченных вопросов, не удаляя их из очереди.
+
+    Используется для чтения в промпт/снапшот без пометки обработанными.
+    """
+    async with _pending_lock:
+        return list(_pending.get(telegram_id, []))
 
 
 async def delete_pending_questions(telegram_id: int) -> None:
@@ -97,8 +114,8 @@ async def delete_pending_questions(telegram_id: int) -> None:
 # ---------------------------------------------------------------------------
 # The bot-side implementation previously living in
 # ``src.bot.pending_questions`` has been moved here so that ``src/core/*``
-# can enqueue follow-up questions without reaching upward into the bot
-# layer. Behaviour is preserved: in-memory fast path + DB persistence.
+# can call it without reaching upward into the bot layer. Behaviour is preserved:
+# in-memory fast path + DB persistence.
 # ---------------------------------------------------------------------------
 
 
@@ -110,13 +127,7 @@ async def add_question(telegram_id: int, question: str) -> None:
     """
     # In-memory (fast)
     async with _pending_lock:
-        _pending.setdefault(telegram_id, []).append(
-            {
-                "question": (question or "")[:500],
-                "context": "",
-                "ts": time.time(),
-            }
-        )
+        _append_in_memory(telegram_id, question)
     # DB (persistent)
     try:
         async with get_session() as session:
