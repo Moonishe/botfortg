@@ -4,10 +4,14 @@ Finds underperforming skills, collects failure trajectories, and uses LLM
 to rewrite them. Runs as a background task every 6 hours.
 
 Key flow:
-    1. ``find_underperforming_skills`` — query enabled skills with low score or many failures
-    2. ``collect_failure_trajectories`` — recent trajectories where the skill was used and failed
-    3. ``rewrite_skill_with_llm`` — LLM generates improved body based on failure examples
-    4. ``evolve_skill`` — single skill evolution (orchestrates 1-3 + apply via curator)
+    1. ``find_underperforming_skills`` — query enabled skills with low score
+       or many failures
+    2. ``collect_failure_trajectories`` — recent trajectories where the skill
+       was used and failed
+    3. ``rewrite_skill_with_llm`` — LLM generates improved body based on failure
+       examples
+    4. ``evolve_skill`` — single skill evolution (orchestrates 1-3 + apply via
+       curator)
     5. ``auto_evolve_loop`` — infinite background loop on configurable interval
 """
 
@@ -85,7 +89,16 @@ def _sanitize_for_prompt(text: str) -> str:
 # underscore-prefixed private name.  Keeping both names means internal
 # callers (and any existing user code) keep working unchanged.
 sanitize_for_prompt = _sanitize_for_prompt
-__all__ = ["_sanitize_for_prompt", "sanitize_for_prompt"]
+__all__ = [
+    "_EVOLVE_SEMAPHORE",
+    "_sanitize_for_prompt",
+    "auto_evolve_loop",
+    "collect_failure_trajectories",
+    "evolve_skill",
+    "find_underperforming_skills",
+    "rewrite_skill_with_llm",
+    "sanitize_for_prompt",
+]
 
 
 # ── Public API ─────────────────────────────────────────────────────────
@@ -116,7 +129,7 @@ async def find_underperforming_skills(owner_id: int) -> list[Skill]:
             select(Skill)
             .where(
                 Skill.user_id == owner.id,
-                Skill.enabled == True,
+                Skill.enabled.is_(True),
             )
             .where(
                 (Skill.validation_score < 0.6)
@@ -176,7 +189,7 @@ async def collect_failure_trajectories(
             select(Trajectory)
             .where(
                 Trajectory.user_id == owner.id,
-                Trajectory.success == False,
+                Trajectory.success.is_(False),
                 Trajectory.created_at >= since,
                 Trajectory.used_skills_json.isnot(None),
             )

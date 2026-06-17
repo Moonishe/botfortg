@@ -34,7 +34,8 @@ from src.bot.handlers.skills_callbacks import (
     cb_skill_reject,
     cb_skill_rollback,
     cb_skill_toggle,
-    cb_skills_evolve,
+    cb_skills_evolve_apply,
+    cb_skills_evolve_dryrun,
     cb_skills_page,
     cb_skills_stats,
 )
@@ -244,7 +245,7 @@ class TestSkillListKeyboard:
         skill = _make_skill()
         kb = _skill_list_keyboard([skill], "all", 0, 1)
         texts = [b.text for row in kb.inline_keyboard for b in row]
-        assert any("Auto-evolve" in t for t in texts)
+        assert any("Evolve dry-run" in t for t in texts)
         assert any("Stats" in t for t in texts)
 
 
@@ -608,62 +609,59 @@ class TestCbSkillRollback:
 
 class TestCbSkillsEvolve:
     @pytest.mark.asyncio
-    async def test_reports_results(self):
-        cb = _make_callback(data="skills:evolve:0")
-        with (
-            patch(
-                "src.bot.handlers.skills_callbacks.auto_approve_high_confidence",
-                AsyncMock(return_value=2),
-            ),
-            patch(
-                "src.bot.handlers.skills_callbacks.list_proposed",
-                AsyncMock(return_value=[]),
-            ),
+    async def test_dryrun_reports_candidates(self):
+        cb = _make_callback(data="skills:evolve_dryrun:0")
+        skill = _make_skill()
+        with patch(
+            "src.bot.handlers.skills_callbacks.find_underperforming_skills",
+            AsyncMock(return_value=[skill]),
         ):
-            await cb_skills_evolve(cb)
+            await cb_skills_evolve_dryrun(cb)
         cb.message.edit_text.assert_called_once()
         text = cb.message.edit_text.call_args[0][0]
-        assert "Авто-одобрено: 2" in text
+        assert "Кандидатов: 1" in text
 
     @pytest.mark.asyncio
-    async def test_evolve_failure(self):
-        cb = _make_callback(data="skills:evolve:0")
-        with (
-            patch(
-                "src.bot.handlers.skills_callbacks.auto_approve_high_confidence",
-                AsyncMock(side_effect=RuntimeError("db fail")),
-            ),
-            patch(
-                "src.bot.handlers.skills_callbacks.list_proposed",
-                AsyncMock(side_effect=RuntimeError("db fail")),
-            ),
+    async def test_dryrun_failure(self):
+        cb = _make_callback(data="skills:evolve_dryrun:0")
+        with patch(
+            "src.bot.handlers.skills_callbacks.find_underperforming_skills",
+            AsyncMock(side_effect=RuntimeError("db fail")),
         ):
-            await cb_skills_evolve(cb)
-        cb.message.edit_text.assert_called_once()
-        text = cb.message.edit_text.call_args[0][0]
-        # Failure now shown inline as warning, not a hard error page
-        assert "Auto-approve failed" in text
-        assert "Авто-одобрено: 0" in text
+            await cb_skills_evolve_dryrun(cb)
+        cb.answer.assert_called_once_with(
+            "⚠️ Не удалось найти кандидатов",  # noqa: RUF001
+            show_alert=True,
+        )
 
     @pytest.mark.asyncio
-    async def test_evolve_partial_failure_preserves_approved(self):
-        """list_proposed fails after auto_approve succeeds — approved count kept."""
-        cb = _make_callback(data="skills:evolve:0")
+    async def test_apply_reports_results(self):
+        """Apply callback runs evolution and reports counts."""
+        cb = _make_callback(data="skills:evolve_apply:0")
+        skill = _make_skill()
         with (
             patch(
-                "src.bot.handlers.skills_callbacks.auto_approve_high_confidence",
-                AsyncMock(return_value=3),
+                "src.bot.handlers.skills_callbacks.find_underperforming_skills",
+                AsyncMock(return_value=[skill]),
             ),
             patch(
-                "src.bot.handlers.skills_callbacks.list_proposed",
-                AsyncMock(side_effect=RuntimeError("db fail")),
+                "src.bot.handlers.skills_callbacks.evolve_skill",
+                AsyncMock(
+                    return_value={
+                        "success": True,
+                        "applied": True,
+                        "reason": "Evolved v1.1.0",
+                        "skill_name": "test-skill",
+                    }
+                ),
             ),
         ):
-            await cb_skills_evolve(cb)
+            await cb_skills_evolve_apply(cb)
+        cb.answer.assert_called_once()
         cb.message.edit_text.assert_called_once()
         text = cb.message.edit_text.call_args[0][0]
-        assert "Авто-одобрено: 3" in text
-        assert "Осталось proposed: 0" in text
+        assert "Применено: 1" in text
+        assert "test-skill" in text
 
 
 class TestCbSkillsStats:

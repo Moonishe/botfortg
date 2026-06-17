@@ -61,17 +61,19 @@ def _ui_status(skill) -> str:
 
 def _format_metrics(skill) -> str:
     """Single-line metrics for a skill."""
-    usage = (skill.success_count or 0) + (skill.failure_count or 0)
-    success_rate = (skill.success_count or 0) / max(usage, 1)
+    sc = max(0, skill.success_count or 0)
+    fc = max(0, skill.failure_count or 0)
+    usage = sc + fc
+    success_rate = sc / max(usage, 1)
     score = (
-        f"{skill.validation_score * 100:.0f}%"
+        f"{min(max(skill.validation_score or 0, 0), 1) * 100:.0f}%"
         if skill.validation_score is not None
         else "—"
     )
     last_used = skill.last_used_at.strftime("%d.%m") if skill.last_used_at else "—"
     return (
-        f"исп:{usage} | усп:{skill.success_count or 0} | "
-        f"неусп:{skill.failure_count or 0} | sr:{success_rate:.0%} | "
+        f"исп:{usage} | усп:{sc} | "
+        f"неусп:{fc} | sr:{success_rate:.0%} | "
         f"score:{score} | last:{last_used}"
     )
 
@@ -146,8 +148,8 @@ def _skill_list_keyboard(
     # Evolve action
     kb.row(
         InlineKeyboardButton(
-            text="🧬 Auto-evolve",
-            callback_data=f"{CALLBACK_PREFIX}:evolve:0",
+            text="🧬 Evolve dry-run",
+            callback_data=f"{CALLBACK_PREFIX}:evolve_dryrun:0",
         ),
         InlineKeyboardButton(
             text="📊 Stats",
@@ -192,6 +194,12 @@ def _skill_detail_keyboard(skill) -> InlineKeyboardMarkup:
                     callback_data=f"{CALLBACK_PREFIX}:rollback:{skill.id}",
                 )
             )
+        actions.append(
+            InlineKeyboardButton(
+                text="🧬 Evolve",
+                callback_data=f"{CALLBACK_PREFIX}:evolve_one:{skill.id}",
+            )
+        )
         if status == "active":
             actions.append(
                 InlineKeyboardButton(
@@ -273,3 +281,64 @@ def _skills_summary(skills: list) -> str:
             f"• <b>{html.escape(skill.name or 'Unnamed')}</b> — {_format_metrics(skill)}"
         )
     return "\n" + "\n".join(lines)
+
+
+def _format_evolve_dryrun(candidates: list) -> tuple[str, InlineKeyboardMarkup]:
+    """Format dry-run report and confirmation keyboard for auto-evolve.
+
+    Args:
+        candidates: List of Skill ORM objects that are underperforming.
+
+    Returns:
+        (text, keyboard) for the Telegram message.
+    """
+    if not candidates:
+        text = (
+            "🧬 <b>Auto-evolve dry-run</b>\n\nНет underperforming skills для эволюции."
+        )
+    else:
+        lines = [
+            f"• <b>{html.escape(s.name or 'Unnamed')}</b> — {_format_metrics(s)}"
+            for s in candidates
+        ]
+        text = (
+            f"🧬 <b>Auto-evolve dry-run</b>\n\n"
+            f"Кандидатов: {len(candidates)}\n\n"
+            + "\n".join(lines)
+            + "\n\nПодтверди, чтобы запустить эволюцию."
+        )
+
+    kb = InlineKeyboardBuilder()
+    if candidates:
+        kb.row(
+            InlineKeyboardButton(
+                text="✅ Применить эволюцию",
+                callback_data=f"{CALLBACK_PREFIX}:evolve_apply:0",
+            )
+        )
+    kb.row(
+        InlineKeyboardButton(
+            text="🔙 К списку",
+            callback_data=f"{CALLBACK_PREFIX}:page:all:0",
+        )
+    )
+    return text, kb.as_markup()
+
+
+def _format_evolve_apply(
+    results: list[dict],
+    applied: int,
+    skipped: int,
+    failed: int,
+) -> str:
+    """Format the auto-evolve apply result report for Telegram HTML."""
+    lines = [
+        f"• <b>{html.escape(r.get('skill_name') or 'Unnamed')}</b>: "
+        f"{html.escape(r.get('reason', ''))}"
+        for r in results
+    ]
+    return (
+        f"🧬 <b>Auto-evolve результат</b>\n\n"
+        f"Применено: {applied} | Пропущено: {skipped} | Ошибок: {failed}\n\n"
+        + "\n".join(lines)
+    )

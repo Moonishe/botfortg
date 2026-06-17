@@ -6,7 +6,7 @@ Depends on ``skills_ui`` for presentation and ``skills_data`` for data access.
 
 from __future__ import annotations
 
-import html
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -16,11 +16,14 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
+from src.core.intelligence.auto_evolve import (
+    _EVOLVE_SEMAPHORE,
+    evolve_skill,
+    find_underperforming_skills,
+)
 from src.core.intelligence.skills_curator import (
     approve_skill,
-    auto_approve_high_confidence,
     curator_stats,
-    list_proposed,
     promote_to_global,
     reject_skill,
 )
@@ -36,6 +39,8 @@ from .skills_ui import (
     CALLBACK_PREFIX,
     _STATUS_LABELS,
     _edit_callback_message,
+    _format_evolve_apply,
+    _format_evolve_dryrun,
     _format_skill_detail,
     _skill_detail_keyboard,
     _skill_list_keyboard,
@@ -49,7 +54,6 @@ logger = logging.getLogger(__name__)
 
 
 # ── Callback query handlers ──────────────────────────────────────────
-
 
 
 # ── Callback helpers ─────────────────────────────────────────────────
@@ -133,6 +137,7 @@ async def _skill_mutation(
     await callback.answer(msg)
     await cb_skill_detail(callback, skip_answer=True, skill=skill)
 
+
 @router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:page:"))
 async def cb_skills_page(callback: CallbackQuery) -> None:
     """Render a paginated skill list for a status tab."""
@@ -153,15 +158,12 @@ async def cb_skills_page(callback: CallbackQuery) -> None:
         owner = await get_or_create_user(session, callback.from_user.id)
         page_skills, total = await _fetch_skills_by_status(session, owner, status, page)
 
-    text = f"<b>Skills</b> — {_STATUS_LABELS[status]} (всего {total}):\n"
-    text += _skills_summary(page_skills)
+        text = f"<b>Skills</b> — {_STATUS_LABELS[status]} (всего {total}):\n"
+        text += _skills_summary(page_skills)
+        reply_markup = _skill_list_keyboard(page_skills, status, page, total)
 
     await callback.answer()
-    await _edit_callback_message(
-        callback,
-        text,
-        reply_markup=_skill_list_keyboard(page_skills, status, page, total),
-    )
+    await _edit_callback_message(callback, text, reply_markup=reply_markup)
 
 
 @router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:detail:"))
@@ -300,41 +302,105 @@ async def cb_skill_promote(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:evolve:"))
-async def cb_skills_evolve(callback: CallbackQuery) -> None:
-    """Run curator auto-evolve and report results.
+@router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:evolve_one:"))
+async def cb_skill_evolve(callback: CallbackQuery) -> None:
+    """Evolve a single skill via the auto-evolve pipeline."""
 
-    This is a dry-run + approve flow: auto_approve_high_confidence only
-    approves skills that pass validation, so it is safe to run manually.
-    """
-    await callback.answer("🧬 Запускаю auto-evolve...")
+    async def _action(session, owner, skill: Skill) -> bool:
+        result = await evolve_skill(callback.from_user.id, skill)
+        # Store the result on the skill object for display in detail view.
+        skill._evolve_result = result  # type: ignore[attr-defined]
+        return result.get("success", False)
 
-    approved = 0
-    evolve_error: str | None = None
-    try:
-        approved = await auto_approve_high_confidence()
-    except Exception as e:
-        logger.warning("auto_approve_high_confidence failed: %s", e)
-        evolve_error = "Auto-approve failed"
+    def _success(skill: Skill) -> str:
+        result = getattr(skill, "_evolve_result", {})
+        return f"🧬 {result.get('reason', 'эволюция завершена')}"
 
-    try:
-        proposed = await list_proposed()
-    except Exception as e:
-        logger.warning("list_proposed failed: %s", e)
-        proposed = []
-
-    error_note = f"\n⚠️ {evolve_error}" if evolve_error else ""
-    text = (
-        f"🧬 <b>Auto-evolve результат</b>{error_note}\n\n"
-        f"Авто-одобрено: {approved}\n"
-        f"Осталось proposed: {len(proposed)}\n"
+    await _skill_mutation(
+        callback,
+        _action,
+        _success,
+        "Не удалось эволюционировать skill",
     )
-    if proposed:
-        lines = [
-            f"• {html.escape(s['name'])} (confidence: {s['confidence']:.0%})"
-            for s in proposed[:10]
-        ]
-        text += "\nТоп предложенных:\n" + "\n".join(lines)
+
+
+@router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:evolve_dryrun:"))
+async def cb_skills_evolve_dryrun(callback: CallbackQuery) -> None:
+    """Show underperforming skills without applying evolution."""
+    candidates: list = []
+    try:
+        candidates = await find_underperforming_skills(callback.from_user.id)
+    except Exception as e:
+        logger.warning("find_underperforming_skills failed: %s", e)
+        await callback.answer("⚠️ Не удалось найти кандидатов", show_alert=True)
+        return
+
+    text, kb = _format_evolve_dryrun(candidates)
+    await callback.answer()
+    await _edit_callback_message(callback, text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith(f"{CALLBACK_PREFIX}:evolve_apply:"))
+async def cb_skills_evolve_apply(callback: CallbackQuery) -> None:
+    """Apply auto-evolve to all underperforming skills (dry-run → approve → apply)."""
+    candidates: list[Skill] = []
+    try:
+        candidates = await find_underperforming_skills(callback.from_user.id)
+    except Exception as e:
+        logger.warning("find_underperforming_skills failed: %s", e)
+        await callback.answer("⚠️ Не удалось найти кандидатов", show_alert=True)
+        return
+
+    if not candidates:
+        text = "🧬 <b>Auto-evolve</b>\n\nНет кандидатов для эволюции."
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            InlineKeyboardButton(
+                text="🔙 К списку",
+                callback_data=f"{CALLBACK_PREFIX}:page:all:0",
+            )
+        )
+        await callback.answer()
+        await _edit_callback_message(callback, text, reply_markup=kb.as_markup())
+        return
+
+    async def _evolve_one(skill: Skill) -> dict:
+        try:
+            async with _EVOLVE_SEMAPHORE:
+                return await evolve_skill(callback.from_user.id, skill)
+        except Exception as e:
+            logger.warning("evolve_skill failed for %s: %s", skill.name, e)
+            return {
+                "skill_name": skill.name,
+                "success": False,
+                "applied": False,
+                "reason": f"Error: {e}",
+            }
+
+    results = await asyncio.gather(
+        *(_evolve_one(skill) for skill in candidates),
+        return_exceptions=True,
+    )
+    normalized: list[dict] = []
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.warning("evolve batch: unhandled exception %s", r)
+            normalized.append(
+                {
+                    "skill_name": "Unnamed",
+                    "success": False,
+                    "applied": False,
+                    "reason": f"Unhandled: {r}",
+                }
+            )
+        else:
+            normalized.append(r)
+
+    applied = sum(1 for r in normalized if r.get("applied"))
+    skipped = sum(1 for r in normalized if r.get("success") and not r.get("applied"))
+    failed = sum(1 for r in normalized if not r.get("success"))
+
+    text = _format_evolve_apply(normalized, applied, skipped, failed)
 
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -343,9 +409,7 @@ async def cb_skills_evolve(callback: CallbackQuery) -> None:
             callback_data=f"{CALLBACK_PREFIX}:page:all:0",
         )
     )
-
-    # ponytail: callback already answered at top for instant feedback;
-    # no second answer() needed — Telegram allows only one.
+    await callback.answer()
     await _edit_callback_message(callback, text, reply_markup=kb.as_markup())
 
 
