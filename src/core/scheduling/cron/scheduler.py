@@ -185,7 +185,7 @@ class CronScheduler:
                     timeout=60.0,
                 )
                 return json.dumps({"text": text or ""})
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "CronScheduler: LLM-запрос для llm_prompt превысил таймаут 60с"
             )

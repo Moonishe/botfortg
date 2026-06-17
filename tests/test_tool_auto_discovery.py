@@ -709,7 +709,7 @@ class TestRouteProfiles:
             )
         )
 
-        # cron_headless has exclude_names with "send_message", "code_exec", "mcp_telegram"
+        # cron_headless excludes send_message, code_exec, mcp_telegram
         result = registry.format_tools_with_schemas(route="cron_headless")
         assert "real_tool" in result
         # No crash, no error
