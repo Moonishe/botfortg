@@ -43,7 +43,7 @@ NEWS_SYSTEM = (
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     if na == 0 or nb == 0:
@@ -101,6 +101,7 @@ async def build_news_digest(
     provider_override: LLMProvider | None = None,
 ) -> str:
     """Готовит дайджест. Если only_marked_sources=False — берёт все подписанные каналы."""
+    own_provider = False
     async with get_session() as session:
         owner: User = await get_or_create_user(session, owner_telegram_id)
         channels = await list_contacts(
@@ -119,6 +120,7 @@ async def build_news_digest(
             provider = await build_provider(
                 session, owner, task_type=TaskType.SUMMARIZE
             )
+            own_provider = True
 
     if provider is None:
         return "Не задан LLM-ключ. Настрой в /settings → LLM."
@@ -127,68 +129,79 @@ async def build_news_digest(
             "Не нашёл каналов. Сначала /sync, потом помечь нужные через /news_channels."
         )
 
-    posts = await _gather_posts(
-        client, channels, hours=hours, per_channel_limit=per_channel_limit
-    )
-    if not posts:
-        return f"За последние {hours}ч в твоих каналах постов не нашёл."
-
-    # embedding темы
     try:
-        topic_vec = await provider.embed(topic)
-    except Exception:
-        logger.exception("embed topic failed")
-        topic_vec = None
-
-    if topic_vec is not None:
-        texts_to_embed = [p["text"][:1500] for p in posts]
-        try:
-            vecs = await provider.embed_batch(texts_to_embed)
-        except Exception:
-            logger.exception("embed_batch failed")
-            vecs = None
-        scored: list[tuple[float, dict]] = []
-        if vecs is not None:
-            for p, v in zip(posts, vecs):
-                scored.append((_cosine(topic_vec, v), p))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        # отсекаем шум: оставляем хотя бы топ-N с положительным сходством
-        relevant = [p for s, p in scored if s > 0.15][:top_k]
-        if not relevant:
-            relevant = [p for _, p in scored[:top_k]]
-    else:
-        # без embeddings — простая фильтрация по вхождению ключевых слов
-        kw = topic.lower().split()
-        relevant = [p for p in posts if any(k in p["text"].lower() for k in kw)][
-            :top_k
-        ] or posts[:top_k]
-
-    # формируем выжимку для LLM
-    lines = []
-    for p in relevant:
-        when = p["date"].strftime("%Y-%m-%d %H:%M") if p["date"] else "?"
-        link_tail = (
-            f" (https://t.me/{p['channel_username']}/{p['message_id']})"
-            if p["channel_username"]
-            else ""
+        posts = await _gather_posts(
+            client, channels, hours=hours, per_channel_limit=per_channel_limit
         )
-        lines.append(f"[{when}] <{p['channel_name']}>{link_tail}\n{p['text'][:1200]}")
-    body = "\n\n---\n\n".join(lines)
+        if not posts:
+            return f"За последние {hours}ч в твоих каналах постов не нашёл."
 
-    user_prompt = (
-        f"Тема запроса: {topic}\n"
-        f"Окно: последние {hours} часов\n"
-        f"Каналов: {len(channels)}, релевантных постов: {len(relevant)}\n\n"
-        f"Посты:\n\n{body}"
-    )
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=NEWS_SYSTEM),
-            ChatMessage(role="user", content=user_prompt),
-        ],
-        task_type=TaskType.SUMMARIZE,
-    )
-    return sanitize_html(raw)
+        # embedding темы
+        try:
+            topic_vec = await provider.embed(topic)
+        except Exception:
+            logger.exception("embed topic failed")
+            topic_vec = None
+
+        if topic_vec is not None:
+            texts_to_embed = [p["text"][:1500] for p in posts]
+            try:
+                vecs = await provider.embed_batch(texts_to_embed)
+            except Exception:
+                logger.exception("embed_batch failed")
+                vecs = None
+            scored: list[tuple[float, dict]] = []
+            if vecs is not None:
+                for p, v in zip(posts, vecs, strict=True):
+                    scored.append((_cosine(topic_vec, v), p))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            # отсекаем шум: оставляем хотя бы топ-N с положительным сходством
+            relevant = [p for s, p in scored if s > 0.15][:top_k]
+            if not relevant:
+                relevant = [p for _, p in scored[:top_k]]
+        else:
+            # без embeddings — простая фильтрация по вхождению ключевых слов
+            kw = topic.lower().split()
+            relevant = [p for p in posts if any(k in p["text"].lower() for k in kw)][
+                :top_k
+            ] or posts[:top_k]
+
+        # формируем выжимку для LLM
+        lines = []
+        for p in relevant:
+            when = p["date"].strftime("%Y-%m-%d %H:%M") if p["date"] else "?"
+            link_tail = (
+                f" (https://t.me/{p['channel_username']}/{p['message_id']})"
+                if p["channel_username"]
+                else ""
+            )
+            lines.append(
+                f"[{when}] <{p['channel_name']}>{link_tail}\n{p['text'][:1200]}"
+            )
+        body = "\n\n---\n\n".join(lines)
+
+        user_prompt = (
+            f"Тема запроса: {topic}\n"
+            f"Окно: последние {hours} часов\n"
+            f"Каналов: {len(channels)}, релевантных постов: {len(relevant)}\n\n"
+            f"Посты:\n\n{body}"
+        )
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=NEWS_SYSTEM),
+                ChatMessage(role="user", content=user_prompt),
+            ],
+            task_type=TaskType.SUMMARIZE,
+        )
+        return sanitize_html(raw)
+    finally:
+        if own_provider and provider is not None:
+            try:
+                await provider.close()
+            except Exception:
+                logger.debug(
+                    "Failed to close provider in build_news_digest", exc_info=True
+                )
 
 
 from src.core.infra.task_manager import task_manager
@@ -198,71 +211,78 @@ from src.core.infra.task_manager import task_manager
 async def news_scheduler_loop() -> None:
     last_sent: dict[int, str] = {}
     while True:
-        # Защита от наложения: если предыдущий тик ещё не завершён — пропускаем
-        if _overlap_guard.locked():
-            await asyncio.sleep(settings.news_check_sec)
-            continue
-        await _overlap_guard.acquire()
-        try:
-            owner_id = settings.owner_telegram_id
-            topics_to_run: list[tuple[str, int]] = []
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = owner.settings.timezone
-                target_hm = owner.settings.news_digest_time
-                enabled = owner.settings.news_enabled
-                if enabled:
-                    local_now = now_in_tz(tz_name)
-                    current_hm = local_now.strftime("%H:%M")
-                    current_day = local_now.strftime("%Y-%m-%d")
-                    # Normalize target_hm to HH:MM (handle "9:00" vs "09:00")
-                    try:
-                        th, tm = target_hm.split(":")
-                        target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
-                    except (ValueError, AttributeError):
-                        continue
-                    if (
-                        target_hm_normalized == current_hm
-                        and last_sent.get(owner_id) != current_day
-                    ):
-                        topics = await list_news_topics(
-                            session, owner, only_enabled=True
-                        )
-                        topics_to_run = [(t.topic, t.hours) for t in topics]
-                        last_sent[owner_id] = current_day  # помечаем даже если тем нет
-
-            if topics_to_run:
-                from src.core.infra.userbot_gateway import get_userbot_gateway
-
-                client = get_userbot_gateway().get_client(owner_id)
-                if client is None:
-                    logger.warning(
-                        "news scheduler: no userbot client for owner %s", owner_id
-                    )
-                else:
-                    await notification_queue.enqueue(
-                        topic="news",
-                        text=f"📰 <b>Авто-новости</b> · {len(topics_to_run)} тем(ы)…",
-                        priority=Notification.PRIORITY_LOW,
-                    )
-                    for topic, hours in topics_to_run:
+        async with _overlap_guard:
+            try:
+                owner_id = settings.owner_telegram_id
+                topics_to_run: list[tuple[str, int]] = []
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    tz_name = owner.settings.timezone
+                    target_hm = owner.settings.news_digest_time
+                    enabled = owner.settings.news_enabled
+                    if enabled:
+                        local_now = now_in_tz(tz_name)
+                        current_hm = local_now.strftime("%H:%M")
+                        current_day = local_now.strftime("%Y-%m-%d")
+                        # Normalize target_hm to HH:MM (handle "9:00" vs "09:00")
                         try:
-                            text = await build_news_digest(
-                                client,
+                            th, tm = target_hm.split(":")
+                            target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
+                        except (ValueError, AttributeError):
+                            logger.warning(
+                                "Malformed news_digest_time %r for owner %d — "
+                                "skipping tick",
+                                target_hm,
                                 owner_id,
-                                topic,
-                                hours=hours,
                             )
-                            await notification_queue.enqueue(
-                                topic="news",
-                                text=f"<b>«{topic}»</b>\n\n{text}",
-                                priority=Notification.PRIORITY_LOW,
-                                category=topic,
+                            await asyncio.sleep(settings.news_check_sec)
+                            continue
+                        if (
+                            target_hm_normalized == current_hm
+                            and last_sent.get(owner_id) != current_day
+                        ):
+                            topics = await list_news_topics(
+                                session, owner, only_enabled=True
                             )
-                        except Exception:
-                            logger.exception("news topic failed: %s", topic)
-        except Exception:
-            logger.exception("news scheduler tick failed")
-        finally:
-            _overlap_guard.release()
+                            topics_to_run = [(t.topic, t.hours) for t in topics]
+                            last_sent[owner_id] = (
+                                current_day  # помечаем даже если тем нет
+                            )
+
+                if topics_to_run:
+                    from src.core.infra.userbot_gateway import get_userbot_gateway
+
+                    client = get_userbot_gateway().get_client(owner_id)
+                    if client is None:
+                        logger.warning(
+                            "news scheduler: no userbot client for owner %s", owner_id
+                        )
+                    else:
+                        await notification_queue.enqueue(
+                            topic="news",
+                            text=f"📰 <b>Авто-новости</b> · {len(topics_to_run)} тем(ы)…",
+                            priority=Notification.PRIORITY_LOW,
+                        )
+                        for topic, hours in topics_to_run:
+                            try:
+                                text = await build_news_digest(
+                                    client,
+                                    owner_id,
+                                    topic,
+                                    hours=hours,
+                                )
+                                await notification_queue.enqueue(
+                                    topic="news",
+                                    text=f"<b>«{topic}»</b>\n\n{text}",
+                                    priority=Notification.PRIORITY_LOW,
+                                    category=topic,
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                logger.exception("news topic failed: %s", topic)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("news scheduler tick failed")
         await asyncio.sleep(settings.news_check_sec)

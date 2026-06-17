@@ -247,6 +247,10 @@ class RecallResult:
 
 # Debounce-кеш для _bump_use_counts: memory_id → timestamp (time.monotonic)
 _bump_queue: dict[int, float] = {}
+# Module-level dict mutated from multiple recall tasks — must be guarded.
+# Without a lock two concurrent recall() calls can both pass the debounce
+# check for the same fact and both mark it bumped, double-counting usage.
+_bump_queue_lock = asyncio.Lock()
 _BUMP_DEBOUNCE: float = 5.0  # секунд между bump одного и того же факта
 _BUMP_FLUSH_SIZE: int = 20
 _BUMP_MAX_NEW_IDS: int = 100  # cap IN clause to prevent huge SQL on first call
@@ -266,36 +270,36 @@ async def _bump_use_counts(fact_ids: list[int]) -> None:
 
     now_ts = time.monotonic()
     new_ids: list[int] = []
-    for fid in fact_ids:
-        last = _bump_queue.get(fid)
-        if last is not None and now_ts - last < _BUMP_DEBOUNCE:
-            continue  # skip, recently bumped
-        _bump_queue[fid] = now_ts
-        new_ids.append(fid)
+    # Whole read-check-and-write on _bump_queue happens under one lock so
+    # concurrent recall() tasks cannot interleave and double-bump the same id.
+    async with _bump_queue_lock:
+        for fid in fact_ids:
+            last = _bump_queue.get(fid)
+            if last is not None and now_ts - last < _BUMP_DEBOUNCE:
+                continue  # skip, recently bumped
+            _bump_queue[fid] = now_ts
+            new_ids.append(fid)
 
-    # Периодическая очистка: удаляем старейшие записи при превышении лимита
-    if len(_bump_queue) >= _BUMP_FLUSH_SIZE:
-        oldest = sorted(_bump_queue.items(), key=lambda item: item[1])
-        keep = max(_BUMP_FLUSH_SIZE // 2, 1)
-        for k, _v in oldest[: len(oldest) - keep]:
-            _bump_queue.pop(k, None)
+        # Периодическая очистка: удаляем старейшие записи при превышении лимита
+        if len(_bump_queue) >= _BUMP_FLUSH_SIZE:
+            oldest = sorted(_bump_queue.items(), key=lambda item: item[1])
+            keep = max(_BUMP_FLUSH_SIZE // 2, 1)
+            for k, _v in oldest[: len(oldest) - keep]:
+                _bump_queue.pop(k, None)
 
-    if not new_ids:
-        return  # всё в пределах debounce-окна
-
-    # Cap new_ids to prevent huge SQL IN clauses (e.g. first call with
-    # 1000+ fact_ids).  Excess IDs will be picked up on the next call
-    # after the debounce window expires.
-    if len(new_ids) > _BUMP_MAX_NEW_IDS:
-        logger.debug(
-            "_bump_use_counts: capping new_ids from %d to %d",
-            len(new_ids),
-            _BUMP_MAX_NEW_IDS,
-        )
-        # Remove excess entries from _bump_queue too so they can retry later
-        for fid in new_ids[_BUMP_MAX_NEW_IDS:]:
-            _bump_queue.pop(fid, None)
-        new_ids = new_ids[:_BUMP_MAX_NEW_IDS]
+        # Cap new_ids to prevent huge SQL IN clauses (e.g. first call with
+        # 1000+ fact_ids).  Excess IDs will be picked up on the next call
+        # after the debounce window expires.
+        if len(new_ids) > _BUMP_MAX_NEW_IDS:
+            logger.debug(
+                "_bump_use_counts: capping new_ids from %d to %d",
+                len(new_ids),
+                _BUMP_MAX_NEW_IDS,
+            )
+            # Remove excess entries from _bump_queue too so they can retry later
+            for fid in new_ids[_BUMP_MAX_NEW_IDS:]:
+                _bump_queue.pop(fid, None)
+            new_ids = new_ids[:_BUMP_MAX_NEW_IDS]
 
     try:
         from src.db.models._memory import Memory
@@ -663,6 +667,7 @@ async def recall(
                         threshold=semantic_threshold,
                         limit=qdrant_limit,
                         contact_id=contact_id,
+                        with_vectors=True,
                     )
                     keyword_task = search_memories_fts_with_scores(
                         session,
@@ -672,10 +677,40 @@ async def recall(
                         limit=qdrant_limit,
                     )
 
-                    vector_hits_raw, keyword_hits_raw = await asyncio.gather(
+                    # return_exceptions=True: if Qdrant or FTS5 raises, we
+                    # degrade to keyword-only / vector-only instead of
+                    # crashing the whole recall. The surrounding try/except
+                    # only catches (ImportError, ValueError, ConnectionError,
+                    # OSError) — a RuntimeError from qdrant-client or a
+                    # generic Exception would otherwise propagate and lose
+                    # the query entirely.
+                    _vector_res, _keyword_res = await asyncio.gather(
                         vector_task,
                         keyword_task,
+                        return_exceptions=True,
                     )
+
+                    # Degrade gracefully when one branch fails: log the error
+                    # and treat that branch as empty hits.
+                    if isinstance(_vector_res, BaseException):
+                        logger.warning(
+                            "vector recall branch failed: %r; "
+                            "falling back to keyword-only",
+                            _vector_res,
+                        )
+                        vector_hits_raw = []
+                    else:
+                        vector_hits_raw = _vector_res
+
+                    if isinstance(_keyword_res, BaseException):
+                        logger.warning(
+                            "keyword recall branch failed: %r; "
+                            "falling back to vector-only",
+                            _keyword_res,
+                        )
+                        keyword_hits_raw = []
+                    else:
+                        keyword_hits_raw = _keyword_res
 
                     # Преобразуем в (memory_id, score) для RRF
                     vector_hits: list[tuple[int, float]] = [

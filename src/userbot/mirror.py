@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, UTC
 
 from telethon import TelegramClient, events
@@ -35,15 +36,21 @@ from telethon.errors import FloodWaitError
 logger = logging.getLogger(__name__)
 
 
-async def _safe_telethon_call(coro, description: str = "Telethon RPC"):
+async def _safe_telethon_call(coro_factory, description: str = "Telethon RPC"):
     """Execute a Telethon RPC call with FloodWait retry.
 
     Unlike restore_all() which handles FloodWait explicitly, message handlers
     previously had no protection — a FloodWaitError would silently lose the
     operation. This wrapper retries once with the server-specified delay.
+
+    ``coro_factory`` MUST be a zero-arg callable returning a fresh awaitable
+    (e.g. a bound method or a ``lambda``). Passing an already-created coroutine
+    is forbidden: a coroutine can be awaited exactly once, so re-awaiting it
+    after FloodWait would raise ``RuntimeError: cannot reuse already awaited
+    coroutine`` and the operation would be lost.
     """
     try:
-        return await coro
+        return await coro_factory()
     except FloodWaitError as e:
         logger.warning(
             "FloodWait %ds during %s — retrying once after delay",
@@ -51,7 +58,7 @@ async def _safe_telethon_call(coro, description: str = "Telethon RPC"):
             description,
         )
         await asyncio.sleep(e.seconds)
-        return await coro
+        return await coro_factory()
 
 
 # ===== PERF-002: TTL-кэш для проверки watched_peers =====
@@ -68,9 +75,12 @@ _watched_peers_lock = asyncio.Lock()
 
 # ===== DEDUP: message deduplication for Telethon replayed events =====
 # When Telethon reconnects, it replays recent updates — the same message
-# can be delivered multiple times. This LRU set tracks recently seen
+# can be delivered multiple times. This ordered set tracks recently seen
 # (message_id, peer_id) pairs to prevent duplicate DB inserts.
-_SEEN_MESSAGES: set[tuple[int, int]] = set()  # (message_id, peer_id)
+# OrderedDict preserves insertion order so eviction removes the OLDEST entries
+# (FIFO). A plain set.pop() removes an arbitrary element and can evict a
+# freshly-added entry while keeping stale ones — breaking dedup.
+_SEEN_MESSAGES: OrderedDict[tuple[int, int], None] = OrderedDict()
 _SEEN_MESSAGES_MAX = 1000
 _SEEN_MESSAGES_LOCK = asyncio.Lock()
 
@@ -84,12 +94,16 @@ async def _is_message_duplicate(msg_id: int, peer_id: int) -> bool:
 async def _mark_message_processed(msg_id: int, peer_id: int) -> None:
     """Mark (msg_id, peer_id) as processed in dedup set."""
     async with _SEEN_MESSAGES_LOCK:
-        _SEEN_MESSAGES.add((msg_id, peer_id))
+        key = (msg_id, peer_id)
+        # Move-to-end refreshes insertion order so frequently-replayed keys
+        # stay "fresh" and are not the first to be evicted.
+        _SEEN_MESSAGES.pop(key, None)
+        _SEEN_MESSAGES[key] = None
         if len(_SEEN_MESSAGES) > _SEEN_MESSAGES_MAX:
-            # Remove oldest ~50% to keep recent entries for dedup.
+            # Remove oldest ~50% (FIFO) — preserves recent entries for dedup.
             remove_count = len(_SEEN_MESSAGES) // 2
             for _ in range(remove_count):
-                _SEEN_MESSAGES.pop()
+                _SEEN_MESSAGES.popitem(last=False)
 
 
 async def _is_watched_peer_cached(peer_id: int) -> bool | None:
@@ -166,7 +180,7 @@ async def _sender_label(msg: TgMessage) -> str | None:
     if msg.out:
         return None  # это мы сами
     try:
-        sender = await _safe_telethon_call(msg.get_sender(), "get_sender")
+        sender = await _safe_telethon_call(msg.get_sender, "get_sender")
     except Exception:
         sender = None
     if sender is None:
@@ -381,7 +395,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     owner.absence_message = None
 
                 try:
-                    chat = await _safe_telethon_call(event.get_chat(), "get_chat")
+                    chat = await _safe_telethon_call(event.get_chat, "get_chat")
                 except Exception:
                     chat = None
                 if chat is not None:
@@ -483,7 +497,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             elif msg.sender_id:
                 try:
                     _sender_entity = await _safe_telethon_call(
-                        client.get_entity(msg.sender_id), "get_entity"
+                        lambda: client.get_entity(msg.sender_id), "get_entity"
                     )
                     _is_bot_sender = bool(getattr(_sender_entity, "bot", False))
                 except Exception:

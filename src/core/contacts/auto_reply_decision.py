@@ -37,20 +37,24 @@ def _global_reply_hour_key() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d-%H")
 
 
-async def _global_reply_allow() -> bool:
-    """Check if the global hourly budget has been exhausted."""
+async def _global_reply_reserve() -> bool:
+    """Atomically reserve one slot from the global hourly budget.
+
+    Check-and-increment happen under a single ``_global_reply_lock`` so that
+    N concurrent ``decide()`` calls cannot all observe a budget with free
+    slots and then all proceed to send an LLM-generated reply. Call this at
+    decision time (before any expensive LLM call); if generation later fails
+    the reserved slot is simply unused — that is the safe direction to err in.
+
+    Returns ``True`` when the slot was reserved, ``False`` when the budget is
+    exhausted.
+    """
     async with _global_reply_lock:
         key = _global_reply_hour_key()
         count = _global_reply_count.get(key, 0)
-        return count < _GLOBAL_REPLY_MAX_PER_HOUR
-
-
-async def _global_reply_increment() -> None:
-    """Increment the global reply counter for the current hour.
-    Cleans up stale keys on every call."""
-    async with _global_reply_lock:
-        key = _global_reply_hour_key()
-        _global_reply_count[key] = _global_reply_count.get(key, 0) + 1
+        if count >= _GLOBAL_REPLY_MAX_PER_HOUR:
+            return False
+        _global_reply_count[key] = count + 1
         # Purge stale buckets older than 2 hours
         now_ts = time.time()
         stale_cutoff = datetime.fromtimestamp(now_ts - 7200, tz=UTC).strftime(
@@ -59,6 +63,7 @@ async def _global_reply_increment() -> None:
         for stale_key in list(_global_reply_count):
             if stale_key < stale_cutoff:
                 del _global_reply_count[stale_key]
+        return True
 
 
 class AutoReplyVerdict(Enum):
@@ -231,7 +236,10 @@ async def decide(
         )
 
     # ── 8. Global hourly rate-limit ────────────────────────────────────────
-    if not await _global_reply_allow():
+    # Atomically reserve a slot: check-and-increment under one lock. Calling
+    # allow() here and increment() later (after the LLM reply is generated)
+    # would let a burst of concurrent messages all pass the budget check.
+    if not await _global_reply_reserve():
         return AutoReplyChoice(
             verdict=AutoReplyVerdict.SKIP_GLOBAL_LIMIT,
             reason=f"Global hourly limit ({_GLOBAL_REPLY_MAX_PER_HOUR}/h) reached",

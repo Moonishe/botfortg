@@ -1,4 +1,4 @@
-"""Smoke tests for free_text_pipeline.py — pure function coverage.
+"""Smoke tests for free_text.py — pure function coverage.
 
 Verifies:
 - Module can be imported without errors (env-vars set first).
@@ -33,8 +33,8 @@ class TestModuleImport:
     """The pipeline module must be importable without side-effects."""
 
     def test_import_pipeline_succeeds(self):
-        """free_text_pipeline.py imports cleanly when env vars are set."""
-        from src.bot.handlers.free_text_pipeline import (
+        """free_text.py imports cleanly when env vars are set."""
+        from src.bot.handlers.free_text import (
             CLASSIC_INTENT_HANDLERS,
             INTENT_HANDLERS,
         )
@@ -44,7 +44,7 @@ class TestModuleImport:
 
     def test_intent_registries_not_empty(self):
         """INTENT_HANDLERS and CLASSIC_INTENT_HANDLERS have entries."""
-        from src.bot.handlers.free_text_pipeline import (
+        from src.bot.handlers.free_text import (
             CLASSIC_INTENT_HANDLERS,
             INTENT_HANDLERS,
         )
@@ -69,73 +69,73 @@ class TestTimeOfDayGreeting:
         return datetime(2025, 1, 15, hour, 0, 0)
 
     def test_morning(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(7),
         ):
             assert _time_of_day_greeting() == "Доброе утро"
 
     def test_afternoon(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(14),
         ):
             assert _time_of_day_greeting() == "Добрый день"
 
     def test_evening(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(19),
         ):
             assert _time_of_day_greeting() == "Добрый вечер"
 
     def test_night(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(2),
         ):
             assert _time_of_day_greeting() == "Доброй ночи"
 
     def test_boundary_morning_start(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(6),
         ):
             assert _time_of_day_greeting() == "Доброе утро"
 
     def test_boundary_afternoon_start(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(12),
         ):
             assert _time_of_day_greeting() == "Добрый день"
 
     def test_boundary_evening_start(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(18),
         ):
             assert _time_of_day_greeting() == "Добрый вечер"
 
     def test_boundary_night_start(self):
-        from src.bot.handlers.free_text_pipeline import _time_of_day_greeting
+        from src.bot.handlers.free_text import _time_of_day_greeting
 
         with patch(
-            "src.bot.handlers.free_text_pipeline.now_in_tz",
+            "src.bot.handlers.free_text._core.now_in_tz",
             return_value=self._make_dt(23),
         ):
             assert _time_of_day_greeting() == "Доброй ночи"
@@ -168,20 +168,20 @@ class TestDetectContextHint:
         ],
     )
     def test_keyword_hints(self, text, expected):
-        from src.bot.handlers.free_text_pipeline import _detect_context_hint
+        from src.bot.handlers.free_text import _detect_context_hint
 
         assert _detect_context_hint(text) == expected
 
     def test_purpose_overrides_keywords(self):
         """plan_purpose has priority over keyword detection."""
-        from src.bot.handlers.free_text_pipeline import _detect_context_hint
+        from src.bot.handlers.free_text import _detect_context_hint
 
         # Text suggests "search", but purpose says "analysis"
         result = _detect_context_hint("найди и проанализируй", plan_purpose="analysis")
         assert result == "analysis"
 
     def test_unknown_purpose_falls_back_to_keyword(self):
-        from src.bot.handlers.free_text_pipeline import _detect_context_hint
+        from src.bot.handlers.free_text import _detect_context_hint
 
         result = _detect_context_hint(
             "найди мне что-нибудь", plan_purpose="unknown_task"
@@ -211,7 +211,7 @@ class TestLooksLikeSendRequest:
         ],
     )
     def test_send_detection(self, text, expected):
-        from src.bot.handlers.free_text_pipeline import _looks_like_send_request
+        from src.bot.handlers.free_text import _looks_like_send_request
 
         assert _looks_like_send_request(text) == expected
 
@@ -240,6 +240,6 @@ class TestSafeForDeepHumanize:
         ],
     )
     def test_humanize_guard(self, text, hint, expected):
-        from src.bot.handlers.free_text_pipeline import _safe_for_deep_humanize
+        from src.bot.handlers.free_text import _safe_for_deep_humanize
 
         assert _safe_for_deep_humanize(text, context_hint=hint) == expected

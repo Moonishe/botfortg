@@ -241,7 +241,7 @@ class UserbotManager:
         return self._pending.pop(telegram_id, None)
 
     async def shutdown(self) -> None:
-        """Shutdown the manager — cancel retry tasks, disconnect all clients and pending logins."""
+        """Shutdown: cancel retry tasks, disconnect clients and pending logins."""
         logger.info("Shutting down UserbotManager")
 
         # 1. Cancel all pending FloodWait retry tasks
@@ -316,13 +316,17 @@ class UserbotManager:
                     me = await client.get_me()
                     if me is None:
                         logger.error(
-                            "Userbot for tg_id=%d not authorized — removing (session revoked?)",
+                            "Userbot for tg_id=%d not authorized — removing",
                             tg_id,
                         )
                         try:
                             await client.disconnect()
                         except RPCError:
-                            pass
+                            logger.debug(
+                                "client.disconnect() failed for tg_id=%d",
+                                tg_id,
+                                exc_info=True,
+                            )
                         self._clients.pop(tg_id, None)
                 except Exception:
                     logger.debug(

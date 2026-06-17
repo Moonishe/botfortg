@@ -73,13 +73,13 @@ class BaseLLMProvider(ABC):
 
     # ── Общие методы ──────────────────────────────────────────────────
 
-    def _resolve_model(self, heavy: bool = False) -> str:
+    def _resolve_model(self, heavy: bool | None = None) -> str:
         """Выбор модели: явная модель > тяжёлая > лёгкая.
 
         Приоритет:
         1. self._model (явно задана пользователем/роутером)
         2. self._HEAVY_MODEL (если heavy=True)
-        3. self._LIGHT_MODEL (по умолчанию)
+        3. self._LIGHT_MODEL (по умолчанию; heavy=None → light)
         """
         return self._model or (self._HEAVY_MODEL if heavy else self._LIGHT_MODEL)
 
@@ -98,7 +98,7 @@ class BaseLLMProvider(ABC):
         self,
         messages: list[ChatMessage],
         *,
-        heavy: bool = False,
+        heavy: bool | None = None,
         task_type: str = "default",
     ) -> str:
         """Основной вызов: chat completion (не стриминг).
@@ -113,7 +113,7 @@ class BaseLLMProvider(ABC):
         self,
         messages: list[ChatMessage],
         *,
-        heavy: bool = False,
+        heavy: bool | None = None,
         task_type: str = "default",
     ) -> AsyncGenerator[str]:
         """Стриминг chat completion (если поддерживается).
@@ -122,6 +122,7 @@ class BaseLLMProvider(ABC):
             NotImplementedError: если провайдер не поддерживает стриминг.
         """
         raise NotImplementedError("chat_stream not supported by this provider")
+        yield  # type: ignore[unreachable]
 
     @abstractmethod
     async def validate_key(self) -> bool:

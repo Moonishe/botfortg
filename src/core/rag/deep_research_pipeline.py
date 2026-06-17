@@ -112,7 +112,7 @@ class DeepResearchPipeline:
         Задача стартует асинхронно через `asyncio.create_task`.
         Статус сразу становится PENDING, затем PHASE1_RUNNING.
         """
-        # Edge guard: validate max_minutes (1–60 range for safety)
+        # Edge guard: validate max_minutes (1-60 range for safety)
         request.max_minutes = max(1, min(60, request.max_minutes))
 
         # Memory guard: evict oldest jobs if above max
@@ -227,7 +227,7 @@ class DeepResearchPipeline:
         Шаги:
         0. Memory-seeded research (Qdrant prior facts, если включено).
         1. Поиск по основному запросу (через duckduckgo_search).
-        2. Генерация 3–5 подзапросов + auto-tool selection.
+        2. Генерация 3-5 подзапросов + auto-tool selection.
         3. Параллельная загрузка источников (semaphore=3, опционально Swarm).
         4. Knowledge Graph: contradiction detection (если включено).
         5. Timeline extraction (если включено).
@@ -520,12 +520,24 @@ class DeepResearchPipeline:
             self._sem.release()
 
     async def _fetch_page_content(self, url: str) -> str:
-        """Fetch page content via httpx with timeout and size limits."""
+        """Fetch page content via httpx with timeout and size limits.
+
+        SSRF protection: validates the URL before the request and re-validates
+        the final URL after redirects to prevent redirect-based bypass.
+        """
         try:
             import httpx
         except ImportError:
             return ""
         try:
+            from src.core.security.ssrf_guard import _check_ssrf_async
+
+            # Pre-request SSRF check on the original URL
+            ssrf_error = await _check_ssrf_async(url)
+            if ssrf_error:
+                logger.warning("SSRF blocked: %s — %s", url, ssrf_error.get("error", "unknown"))
+                return ""
+
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
                     url,
@@ -533,15 +545,29 @@ class DeepResearchPipeline:
                     follow_redirects=True,
                 )
                 resp.raise_for_status()
+
+                # Post-redirect SSRF check: validate the final URL after redirects
+                final_url = str(resp.url)
+                if final_url != url:
+                    ssrf_error = await _check_ssrf_async(final_url)
+                    if ssrf_error:
+                        logger.warning(
+                            "SSRF blocked after redirect: %s -> %s — %s",
+                            url, final_url, ssrf_error.get("error", "unknown"),
+                        )
+                        return ""
+
                 # Limit to 50KB to prevent memory issues
                 return resp.text[:50000]
         except Exception:
             logger.debug("Failed to fetch page content for %s", url, exc_info=True)
             return ""
 
+
+
     async def _do_fetch(self, query: str) -> list[ResearchSource]:
         """Непосредственно выполнить поиск через DuckDuckGo.
-        Контент страниц загружается через httpx (см. _fetch_page_content).
+        Контент страниц загружается через httpx (см. _fetch_page_content)."""
         sources: list[ResearchSource] = []
 
         try:
@@ -593,19 +619,19 @@ class DeepResearchPipeline:
     # ── Генерация подзапросов ─────────────────────────────────────────
 
     def _generate_sub_queries(self, query: str) -> list[str]:
-        """Разбить исходный запрос на 3–5 уточняющих подзапросов.
+        """Разбить исходный запрос на 3-5 уточняющих подзапросов.
 
         Реализация: шаблонная генерация без LLM (чтобы не зависеть
         от доступности модели). Добавляет модификаторы к исходному
         запросу: «примеры», «статистика», «мнения», «история», «прогноз».
 
-        TODO(2026-06-13): в будущем — LLM-генерация через lightweight модель.
+        # ponytail: шаблонные модификаторы вместо LLM, upgrade: lightweight LLM-генерация.
 
         Args:
             query: Исходный поисковый запрос.
 
         Returns:
-            Список из 3–5 подзапросов.
+            Список из 3-5 подзапросов.
         """
         # Edge guard: strip to avoid leading spaces in sub-queries
         query = query.strip()

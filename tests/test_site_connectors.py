@@ -249,7 +249,7 @@ def test_redirect_headers_strip_sensitive_values_cross_host():
 async def test_fetch_response_blocks_private_network_redirect(monkeypatch):
     from src.core.connectors.site_connectors import _fetch_response
 
-    async def fake_is_public(host):
+    def fake_is_public(host):
         return host == "example.com"
 
     class FakeClient:
@@ -269,7 +269,12 @@ async def test_fetch_response_blocks_private_network_redirect(monkeypatch):
                 url=url,
             )
 
-    monkeypatch.setattr("src.core.connectors.http._is_public_ip", fake_is_public)
+    # _resolve_is_public_ip is the blocking DNS resolver that
+    # validate_public_url runs via asyncio.to_thread. Patching it (rather than
+    # the async wrapper) lets us control resolution synchronously.
+    monkeypatch.setattr(
+        "src.core.connectors.http._resolve_is_public_ip", fake_is_public
+    )
     monkeypatch.setattr(
         "src.core.connectors.site_connectors.httpx.AsyncClient", FakeClient
     )

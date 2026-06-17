@@ -209,7 +209,7 @@ def find_relevant_contexts(user_message: str) -> dict[str, str]:
 
 
 def save_context(key: str, content: str) -> None:
-    """Save/overwrite context file for any key (contact name, owner, arbitrary topic)."""
+    """Save/overwrite context file for any key (contact name, owner, topic)."""
     CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
     path = _safe_context_path(key)
     path.write_text(content, encoding="utf-8")
@@ -323,13 +323,13 @@ async def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
                 async with aiosqlite.connect(str(db_path)) as db:
                     # Ensure FTS5 table exists (connect is read-only by default)
                     await db.execute("PRAGMA journal_mode=WAL")
-                    async with db.execute(
-                        "SELECT key, snippet(contexts_fts, 1, '<b>', '</b>', '…', 64) AS snippet, "
-                        "       rank "
+                    sql = (
+                        "SELECT key, snippet(contexts_fts, 1, '<b>', '</b>', '…', 64) "
+                        "AS snippet, rank "
                         "FROM contexts_fts WHERE contexts_fts MATCH ? "
-                        "ORDER BY rank LIMIT ?",
-                        (fts_q, limit),
-                    ) as cursor:
+                        "ORDER BY rank LIMIT ?"
+                    )
+                    async with db.execute(sql, (fts_q, limit)) as cursor:
                         rows = await cursor.fetchall()
                     if rows:
                         return [
@@ -383,12 +383,7 @@ def init_owner_context() -> None:
     if get_context(OWNER_KEY) is not None:
         return
     template = (
-        "# Владелец\n\n"
-        "Авто-генерируемый профиль. Бот дополняет файл при обнаружении новых фактов.\n\n"
-        "## Личное\n\n"
-        "## Работа\n\n"
-        "## Предпочтения\n\n"
-        "## Принципы\n\n"
+        "# Владелец\n\n## Личное\n\n## Работа\n\n## Предпочтения\n\n## Принципы\n\n"
     )
     save_context(OWNER_KEY, template)
     logger.info("Initialized _owner.md context file")
@@ -700,7 +695,10 @@ async def search_contexts_semantic(query: str, provider, limit: int = 5) -> list
 async def search_contexts_hybrid(
     query: str, provider=None, limit: int = 5
 ) -> list[dict]:
-    """Hybrid search: FTS5 + semantic via RRF. Falls back to FTS5-only if no provider."""
+    """Hybrid search: FTS5 + semantic via RRF.
+
+    Falls back to FTS5-only if no provider.
+    """
     fts_results = await search_in_contexts(query, limit=limit * 2)
     sem_results: list[dict] = []
     if provider:

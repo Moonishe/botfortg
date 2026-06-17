@@ -65,15 +65,21 @@ async def cmd_llm_status(message: Message) -> None:
     lines.append(f"Всего вызовов: {total_used} | фейлов: {total_fail}")
     lines.append("")
 
-    for purpose, sem in _PURPOSE_SEMAPHORES.items():
-        active = sem._value
-        limit = sem._bound_value if hasattr(sem, "_bound_value") else "?"
+    # _PURPOSE_SEMAPHORES is None until ensure_locks_initialized() runs at
+    # startup — guard against that or .items() raises AttributeError on None.
+    semaphores = _PURPOSE_SEMAPHORES or {}
+    for purpose, sem in semaphores.items():
+        # sem._value / sem._bound_value are the only way to introspect an
+        # asyncio.Semaphore without acquiring it. Both have been stable
+        # since 3.10; fall back gracefully if a future CPython rename drops
+        # them. ``_value`` is the count of *available* slots, ``_bound_value``
+        # is the original limit.
+        active = getattr(sem, "_value", "?")
+        limit = getattr(sem, "_bound_value", "?")
         lines.append(f"🔹 {purpose}: {active}/{limit} слотов свободно")
     lines.append("")
     for s in slots[:10]:
-        cooldown_active = (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(
-            UTC
-        )
+        cooldown_active = (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(UTC)
         status = "❌" if not s.enabled else "⏳" if cooldown_active else "✅"
         lines.append(
             f"{status} <b>{s.provider}</b> / {s.purpose} — {s.usage_count}× ({s.failure_count}× фейлов)"
@@ -227,7 +233,7 @@ async def cmd_insights(message: Message) -> None:
         await message.answer(text)
         return
     # Если есть — каждый инсайт отдельным сообщением с клавиатурой
-    for ins, kb in zip(insights[:5], keyboards):
+    for ins, kb in zip(insights[:5], keyboards, strict=False):
         detail = (
             f"<b>{sanitize_html(ins['title'])}</b>\n"
             f"{sanitize_html(ins['detail'])}\n"
@@ -399,11 +405,20 @@ async def cmd_tag(message: Message) -> None:
 @router.callback_query(F.data.startswith("mem:neighbors:"))
 async def cb_mem_neighbors(callback: CallbackQuery) -> None:
     """Показать семантических соседей для факта памяти."""
-    mid = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    try:
+        mid = int(parts[2])
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     neighbors = await get_neighbors(callback.from_user.id, mid)
     text = format_neighbors(neighbors)
     if text:
-        await callback.message.answer(text)  # type: ignore[union-attr]
+        if callback.message:
+            await callback.message.answer(text)
         await callback.answer()
     else:
         await callback.answer("Соседей не найдено")
@@ -436,8 +451,15 @@ async def cmd_warnings(message: Message) -> None:
 async def cb_conflict_resolve(callback: CallbackQuery) -> None:
     """Обработать разрешение конфликта памяти."""
     parts = callback.data.split(":")
-    positive_id = int(parts[2])
-    negative_id = int(parts[3])
+    if len(parts) < 5:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    try:
+        positive_id = int(parts[2])
+        negative_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
     resolution = parts[4]
     from src.core.actions.conflict_resolver import resolve_conflict
 
@@ -445,9 +467,10 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
         callback.from_user.id, positive_id, negative_id, resolution
     )
     if success:
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            callback.message.text + "\n\n✅ Конфликт разрешён."
-        )
+        if callback.message:
+            await callback.message.edit_text(
+                callback.message.text + "\n\n✅ Конфликт разрешён."
+            )
         await callback.answer()
     else:
         await callback.answer("Ошибка при разрешении конфликта")
@@ -557,7 +580,15 @@ async def cmd_memory_summary(
 @router.callback_query(F.data.startswith("summary_save:"))
 async def cb_summary_save(callback: CallbackQuery) -> None:
     """Сохранить текст пересказа как факт памяти."""
-    chat_id = int(callback.data.split(":")[1])
+    parts = callback.data.split(":")
+    if len(parts) < 2:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
     # Извлекаем текст пересказа из сообщения (после заголовка)
     if callback.message is None or callback.message.text is None:
         await callback.answer("Не удалось извлечь текст.")
@@ -589,7 +620,9 @@ async def cb_summary_save(callback: CallbackQuery) -> None:
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
-            logger.debug("Non-critical error", exc_info=True)  # кнопка уже убрана или сообщение недоступно
+            logger.debug(
+                "Non-critical error", exc_info=True
+            )  # кнопка уже убрана или сообщение недоступно
 
 
 @router.message(Command("persona"))
@@ -656,12 +689,12 @@ async def cmd_persona(message: Message) -> None:
     }
 
     lines = ["<b>🧑‍🎤 Твой стиль общения:</b>", ""]
-    lines.append(brevity_labels.get(p.brevity, p.brevity))
-    lines.append(formality_labels.get(p.formality, p.formality))
-    lines.append(emoji_labels.get(p.emoji_usage, p.emoji_usage))
-    lines.append(initiative_labels.get(p.initiative, p.initiative))
-    lines.append(format_labels.get(p.preferred_format, p.preferred_format))
-    lines.append(work_labels.get(p.work_mode, p.work_mode))
+    lines.append(brevity_labels.get(p.brevity or "", p.brevity or "?"))
+    lines.append(formality_labels.get(p.formality or "", p.formality or "?"))
+    lines.append(emoji_labels.get(p.emoji_usage or "", p.emoji_usage or "?"))
+    lines.append(initiative_labels.get(p.initiative or "", p.initiative or "?"))
+    lines.append(format_labels.get(p.preferred_format or "", p.preferred_format or "?"))
+    lines.append(work_labels.get(p.work_mode or "", p.work_mode or "?"))
     lines.append(f"📏 Макс. длина: {p.max_response_len} символов")
     lines.append(f"🔄 Коррекций: {p.total_corrections}")
     lines.append("")

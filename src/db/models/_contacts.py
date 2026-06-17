@@ -48,7 +48,7 @@ class Contact(Base):
     style_profile: Mapped[str | None] = mapped_column(
         Text, nullable=True
     )  # JSON-строка
-    style_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    style_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     folder_names: Mapped[str | None] = mapped_column(
         Text, nullable=True
@@ -148,9 +148,9 @@ class ConversationState(Base):
         String(16), default="active"
     )  # active | waiting_reply | archived
     unread_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_incoming_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_outgoing_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_auto_reply_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_incoming_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_outgoing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_auto_reply_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     radar_snoozed_until: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )

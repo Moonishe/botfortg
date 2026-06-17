@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 _worker_task: asyncio.Task | None = None
+# DLQ retry loop must be tracked too — otherwise it (a) becomes a zombie that
+# keeps writing to a closing DB after shutdown, and (b) loses its only strong
+# reference and may be garbage-collected mid-execution.
+_dlq_task: asyncio.Task | None = None
 _worker_lock: asyncio.Lock = asyncio.Lock()
 
 
@@ -113,7 +118,8 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
             target_memory = saved_by_index.get(target_idx)
             if target_memory is not None:
                 try:
-                    # savepoint: изолирует link — ошибка в одной связи не откатывает другие
+                    # savepoint: изолирует link — ошибка в одной связи
+                    # не откатывает другие
                     async with session.begin_nested():
                         await link_memories(
                             session,
@@ -253,26 +259,52 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
     )
 
 
+def _spawn_dlq_task() -> None:
+    """Create the DLQ retry task and attach a crash-restart callback."""
+    global _dlq_task
+    if _dlq_task is None or _dlq_task.done():
+        _dlq_task = asyncio.create_task(_retry_dlq(), name="memory-dlq-retry")
+        _dlq_task.add_done_callback(_on_dlq_done)
+
+
+def _on_dlq_done(task: asyncio.Task) -> None:
+    """Log unexpected DLQ task death and schedule a restart."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.exception("DLQ retry loop died unexpectedly", exc_info=exc)
+        # Restart after a short delay to avoid tight crash loops.
+        loop = asyncio.get_event_loop()
+        loop.call_later(5, _spawn_dlq_task)
+
+
 async def start_worker() -> asyncio.Task:
     """Запустить фонового worker'а и DLQ retry loop (если ещё не запущены)."""
     global _worker_task
     async with _worker_lock:
         if _worker_task is None or _worker_task.done():
             _worker_task = asyncio.create_task(_worker(), name="memory-queue-worker")
-            # DLQ retry loop — re-injects overflowed jobs every 30s
-            asyncio.create_task(_retry_dlq(), name="memory-dlq-retry")
+            # DLQ retry loop — re-injects overflowed jobs every 30s.
+            # Only (re)spawn if not already running — avoids duplicate DLQ
+            # loops when start_worker is called after a previous stop_worker.
+            _spawn_dlq_task()
         return _worker_task
 
 
 async def stop_worker() -> None:
-    """Остановить фонового worker'а (graceful shutdown)."""
-    global _worker_task
+    """Остановить фонового worker'а и DLQ loop (graceful shutdown)."""
+    global _worker_task, _dlq_task
     async with _worker_lock:
         if _worker_task and not _worker_task.done():
             _worker_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await _worker_task
-            except asyncio.CancelledError:
-                pass
             _worker_task = None
             logger.info("Memory queue worker stopped")
+        if _dlq_task and not _dlq_task.done():
+            _dlq_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _dlq_task
+            _dlq_task = None
+            logger.info("Memory DLQ retry loop stopped")

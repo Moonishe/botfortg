@@ -34,14 +34,36 @@ class VectorHit:
 
 class VectorStore:
     def __init__(self) -> None:
-        path = settings.data_dir / "qdrant"
-        path.mkdir(parents=True, exist_ok=True)
-        self._client = QdrantClient(path=str(path))
+        import os
+
+        qdrant_url = os.environ.get("QDRANT_URL", "").strip()
+        if qdrant_url:
+            # Server mode — подключение к отдельному Qdrant инстансу
+            self._client = QdrantClient(url=qdrant_url)
+            logger.info("Qdrant server mode: %s", qdrant_url)
+        else:
+            # Embedded mode — локальное хранилище в data/qdrant
+            path = settings.data_dir / "qdrant"
+            path.mkdir(parents=True, exist_ok=True)
+            try:
+                self._client = QdrantClient(path=str(path))
+            except Exception as e:
+                if "lock" in str(e).lower() or "already" in str(e).lower():
+                    logger.critical(
+                        "Qdrant embedded lock conflict — другой процесс уже "
+                        "держит блокировку. Для multi-process установите "
+                        "QDRANT_URL (например QDRANT_URL=http://localhost:6333) "
+                        "и запустите Qdrant сервер отдельно. "
+                        "Оригинальная ошибка: %s",
+                        e,
+                    )
+                    raise RuntimeError(
+                        "Qdrant embedded lock conflict. "
+                        "Set QDRANT_URL env var for server mode."
+                    ) from e
+                raise
+            logger.debug("Qdrant embedded mode: %s", path)
         self._lock = asyncio.Lock()
-        # NOTE: Embedded Qdrant использует файловую блокировку (file lock).
-        # Для горизонтального масштабирования необходимо мигрировать на
-        # Qdrant server mode (отдельный контейнер).
-        # Single-instance deployment достаточен для персонального использования.
         self._dim: int | None = None
         self._memory_dim: int | None = None
         self._reindex_required: bool = False
@@ -51,36 +73,46 @@ class VectorStore:
         self.embedding_provider: str | None = None
         self.embedding_model: str | None = None
 
-    async def _ensure_collection(self, dim: int) -> None:
-        if self._dim == dim:
-            self._reindex_required = False
+    async def _ensure_collection_for(
+        self, dim: int, attr: str, reindex_attr: str, collection_name: str
+    ) -> None:
+        """Ensure a Qdrant collection exists with the correct dimension.
+
+        Args:
+            dim: Expected embedding dimension.
+            attr: Instance attribute name for cached dim (e.g. ``_dim``).
+            reindex_attr: Instance attribute name for reindex flag.
+            collection_name: Qdrant collection name.
+        """
+        current_dim: int | None = getattr(self, attr)
+        if current_dim == dim:
+            setattr(self, reindex_attr, False)
             return
         async with self._lock:
-            if self._dim == dim:
-                self._reindex_required = False
+            if getattr(self, attr) == dim:
+                setattr(self, reindex_attr, False)
                 return
 
             def _check_or_create() -> bool:
-                """Returns True if ready, False if reindex is required."""
                 existing = {c.name for c in self._client.get_collections().collections}
-                if COLLECTION in existing:
-                    info = self._client.get_collection(COLLECTION)
+                if collection_name in existing:
+                    info = self._client.get_collection(collection_name)
                     actual = info.config.params.vectors.size
                     if actual != dim:
                         logger.warning(
                             "Dimension mismatch for %s: has dim %d, "
                             "requested dim %d — reindex required. "
                             "Data NOT deleted. "
-                            "Call reindex_collection(%d) explicitly.",
-                            COLLECTION,
+                            "Call reindex for %s explicitly.",
+                            collection_name,
                             actual,
                             dim,
-                            dim,
+                            collection_name,
                         )
                         return False
                 else:
                     self._client.create_collection(
-                        COLLECTION,
+                        collection_name,
                         vectors_config=qmodels.VectorParams(
                             size=dim, distance=qmodels.Distance.COSINE
                         ),
@@ -89,57 +121,32 @@ class VectorStore:
 
             ready = await asyncio.to_thread(_check_or_create)
             if ready:
-                self._dim = dim
-                self._reindex_required = False
+                setattr(self, attr, dim)
+                setattr(self, reindex_attr, False)
                 self._index_status = "ready"
             else:
-                self._reindex_required = True
+                setattr(self, reindex_attr, True)
                 self._index_status = "reindex_required"
+
+    async def _ensure_collection(self, dim: int) -> None:
+        await self._ensure_collection_for(dim, "_dim", "_reindex_required", COLLECTION)
 
     async def _ensure_memory_collection(self, dim: int) -> None:
-        if self._memory_dim == dim:
-            self._memory_reindex_required = False
-            return
-        async with self._lock:
-            if self._memory_dim == dim:
-                self._memory_reindex_required = False
-                return
+        await self._ensure_collection_for(
+            dim, "_memory_dim", "_memory_reindex_required", MEMORY_COLLECTION
+        )
 
-            def _check_or_create() -> bool:
-                """Returns True if ready, False if reindex is required."""
-                existing = {c.name for c in self._client.get_collections().collections}
-                if MEMORY_COLLECTION in existing:
-                    info = self._client.get_collection(MEMORY_COLLECTION)
-                    actual = info.config.params.vectors.size
-                    if actual != dim:
-                        logger.warning(
-                            "Dimension mismatch for %s: has dim %d, "
-                            "requested dim %d — reindex required. "
-                            "Data NOT deleted. "
-                            "Call reindex_memory_collection(%d) explicitly.",
-                            MEMORY_COLLECTION,
-                            actual,
-                            dim,
-                            dim,
-                        )
-                        return False
-                else:
-                    self._client.create_collection(
-                        MEMORY_COLLECTION,
-                        vectors_config=qmodels.VectorParams(
-                            size=dim, distance=qmodels.Distance.COSINE
-                        ),
-                    )
-                return True
+    async def _detect_collection_dim(self, collection_name: str) -> int | None:
+        """Detect vector dimension of an existing Qdrant collection."""
 
-            ready = await asyncio.to_thread(_check_or_create)
-            if ready:
-                self._memory_dim = dim
-                self._memory_reindex_required = False
-                self._index_status = "ready"
-            else:
-                self._memory_reindex_required = True
-                self._index_status = "reindex_required"
+        def _do() -> int | None:
+            existing = {c.name for c in self._client.get_collections().collections}
+            if collection_name in existing:
+                info = self._client.get_collection(collection_name)
+                return info.config.params.vectors.size
+            return None
+
+        return await asyncio.to_thread(_do)
 
     async def upsert_memory(
         self,
@@ -179,8 +186,6 @@ class VectorStore:
                             "importance": importance,
                             "confidence": confidence,
                             "created_at": created_at,
-                            # store vector for cosine similarity
-                            "embedding": embedding,
                         },
                     )
                 ],
@@ -188,6 +193,25 @@ class VectorStore:
 
         async with self._lock:
             await asyncio.to_thread(_do)
+
+    async def delete_memories(self, memory_ids: list[int]) -> int:
+        """Delete points from the ``memory_facts`` collection by memory id.
+
+        Non-existing ids are silently ignored by Qdrant. Returns the number
+        of ids submitted for deletion (actual deletion count is not exposed).
+        """
+        if not memory_ids:
+            return 0
+
+        def _do() -> None:
+            self._client.delete(
+                collection_name=MEMORY_COLLECTION,
+                points_selector=qmodels.PointIdsList(points=memory_ids),
+            )
+
+        async with self._lock:
+            await asyncio.to_thread(_do)
+        return len(memory_ids)
 
     async def search_similar_memories(
         self,
@@ -197,20 +221,33 @@ class VectorStore:
         threshold: float = 0.85,
         limit: int = 5,
         contact_id: int | None = None,
+        with_vectors: bool = False,
     ) -> list[dict]:
         """Поиск похожих фактов в коллекции memory_facts по cosine similarity.
 
         Если contact_id передан — возвращаются только факты о контакте или общие
         (contact_id == null).
+
+        Args:
+            with_vectors: If True, include the Qdrant vector in the result
+                (needed by callers that do MMR re-ranking). Defaults to False
+                to avoid transferring unused vector payloads.
         """
         await self._ensure_memory_collection(len(embedding))
+        if self._memory_reindex_required:
+            logger.warning(
+                "Skipping memory search in %s — reindex required",
+                MEMORY_COLLECTION,
+            )
+            return []
         if self._memory_dim is None:
-            existing = {c.name for c in self._client.get_collections().collections}
-            if MEMORY_COLLECTION in existing:
-                info = self._client.get_collection(MEMORY_COLLECTION)
-                self._memory_dim = info.config.params.vectors.size
-            else:
-                return []
+            # Edge case: collection exists but we couldn't determine dim
+            async with self._lock:
+                if self._memory_dim is None:
+                    dim_detected = await self._detect_collection_dim(MEMORY_COLLECTION)
+                    if dim_detected is None:
+                        return []
+                    self._memory_dim = dim_detected
         if len(embedding) != self._memory_dim:
             logger.warning(
                 "Memory embedding dim %d != collection dim %d — re-index needed?",
@@ -241,12 +278,14 @@ class VectorStore:
                 limit=limit,
                 query_filter=flt,
                 score_threshold=threshold,
+                with_vectors=with_vectors,
             )
             return response.points
 
         raw = await asyncio.to_thread(_do)
-        return [
-            {
+        results = []
+        for p in raw:
+            item = {
                 "memory_id": p.payload.get("memory_id"),
                 "fact": p.payload.get("fact", ""),
                 "score": float(p.score),
@@ -254,10 +293,11 @@ class VectorStore:
                 "importance": p.payload.get("importance", 0.5),
                 "confidence": p.payload.get("confidence", 0.5),
                 "created_at": p.payload.get("created_at"),
-                "embedding": p.payload.get("embedding"),  # for cosine similarity
             }
-            for p in raw
-        ]
+            if with_vectors:
+                item["embedding"] = p.vector if isinstance(p.vector, list) else None
+            results.append(item)
+        return results
 
     @staticmethod
     def _point_id(user_id: int, peer_id: int, message_id: int) -> int:
@@ -362,13 +402,21 @@ class VectorStore:
         limit: int = 10,
         peer_id: int | None = None,
     ) -> list[VectorHit]:
+        await self._ensure_collection(len(embedding))
+        if self._reindex_required:
+            logger.warning(
+                "Skipping search in %s — reindex required",
+                COLLECTION,
+            )
+            return []
         if self._dim is None:
-            existing = {c.name for c in self._client.get_collections().collections}
-            if COLLECTION in existing:
-                info = self._client.get_collection(COLLECTION)
-                self._dim = info.config.params.vectors.size
-            else:
-                return []
+            # Edge case: collection exists but we couldn't determine dim
+            async with self._lock:
+                if self._dim is None:
+                    dim_detected = await self._detect_collection_dim(COLLECTION)
+                    if dim_detected is None:
+                        return []
+                    self._dim = dim_detected
         if len(embedding) != self._dim:
             logger.warning(
                 "Embedding dim %d != collection dim %d — re-index needed?",
@@ -489,8 +537,12 @@ class VectorStore:
         Исходные данные (сообщения) хранятся в SQLite и не теряются.
         Повреждение векторов не затрагивает БД сообщений.
         """
+        # All Qdrant client + filesystem calls below are SYNCHRONOUS and can
+        # block the event loop for the whole duration of disk I/O (rmtree on
+        # a large index can take minutes). Everything is offloaded to a
+        # worker thread via asyncio.to_thread.
         try:
-            self._client.get_collections()
+            await asyncio.to_thread(self._client.get_collections)
             return True
         except Exception:
             logger.exception("Qdrant health check failed")
@@ -499,9 +551,8 @@ class VectorStore:
             try:
                 qdrant_dir = settings.data_dir / "qdrant"
                 async with self._lock:
-                    self._client.close()
-                    self._client = QdrantClient(path=str(qdrant_dir))
-                self._client.get_collections()
+                    await asyncio.to_thread(self._reconnect_client, qdrant_dir)
+                await asyncio.to_thread(self._client.get_collections)
                 logger.info("Qdrant reconnected successfully")
                 return True
             except Exception:
@@ -533,7 +584,9 @@ class VectorStore:
                 # corruption detection. Backup kept for 7 days, auto-cleaned.
                 _backup_dir = settings.data_dir / f"qdrant.backup.{int(_time.time())}"
                 try:
-                    shutil.copytree(str(qdrant_dir), str(_backup_dir))
+                    await asyncio.to_thread(
+                        shutil.copytree, str(qdrant_dir), str(_backup_dir)
+                    )
                     logger.warning(
                         "Qdrant backup saved to %s before recovery", _backup_dir
                     )
@@ -544,20 +597,8 @@ class VectorStore:
 
                 known_dim = self._dim or settings.embedding_dim
                 async with self._lock:
-                    self._client.close()
-                    shutil.rmtree(str(qdrant_dir), ignore_errors=True)
-                    qdrant_dir.mkdir(parents=True, exist_ok=True)
-                    self._client = QdrantClient(path=str(qdrant_dir))
-
-                    def _create_collection() -> None:
-                        self._client.create_collection(
-                            COLLECTION,
-                            vectors_config=qmodels.VectorParams(
-                                size=known_dim, distance=qmodels.Distance.COSINE
-                            ),
-                        )
-
-                    await asyncio.to_thread(_create_collection)
+                    await asyncio.to_thread(self._wipe_and_rebuild, qdrant_dir)
+                    await asyncio.to_thread(self._create_collection_with_dim, known_dim)
                     self._dim = known_dim
                     self._reindex_required = False
                     self._index_status = "ready"
@@ -580,6 +621,71 @@ class VectorStore:
             except Exception:
                 logger.exception("Qdrant recovery failed")
                 return False
+
+    # ── Sync helpers for check_health_and_recover (offloaded via to_thread) ──
+    # These run on the default executor — never call them directly from an
+    # async function, always wrap with ``await asyncio.to_thread(...)``.
+
+    def _reconnect_client(self, qdrant_dir) -> None:
+        """Sync: close current client and open a fresh one (no reindex)."""
+        self._client.close()
+        self._client = QdrantClient(path=str(qdrant_dir))
+
+    def _wipe_and_rebuild(self, qdrant_dir) -> None:
+        """Sync: close, wipe storage dir, recreate empty dir + fresh client."""
+        import shutil
+
+        self._client.close()
+        shutil.rmtree(str(qdrant_dir), ignore_errors=True)
+        qdrant_dir.mkdir(parents=True, exist_ok=True)
+        self._client = QdrantClient(path=str(qdrant_dir))
+
+    def _create_collection_with_dim(self, known_dim: int) -> None:
+        """Sync: create the main collection with the given vector dimension."""
+        self._client.create_collection(
+            COLLECTION,
+            vectors_config=qmodels.VectorParams(
+                size=known_dim, distance=qmodels.Distance.COSINE
+            ),
+        )
+
+    @staticmethod
+    async def cleanup_old_backups() -> int:
+        """Remove Qdrant backup directories older than 7 days.
+
+        Called at startup and periodically (every 24h) to prevent disk
+        exhaustion from repeated corruption-recovery backups.
+
+        Returns:
+            Number of removed backup directories.
+        """
+        import shutil
+        import time as _time
+
+        data_dir = settings.data_dir
+        cutoff = _time.time() - 7 * 86400  # 7 days ago
+        removed = 0
+
+        try:
+            for entry in data_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                if not entry.name.startswith("qdrant.backup."):
+                    continue
+                # Extract timestamp from directory name: qdrant.backup.<timestamp>
+                try:
+                    ts_str = entry.name.split("qdrant.backup.", 1)[1]
+                    ts = int(ts_str)
+                except (IndexError, ValueError):
+                    continue
+                if ts < cutoff:
+                    shutil.rmtree(str(entry), ignore_errors=True)
+                    removed += 1
+                    logger.info("Removed stale Qdrant backup: %s", entry.name)
+        except OSError:
+            logger.debug("Non-critical error during backup cleanup", exc_info=True)
+
+        return removed
 
     async def shutdown(self) -> None:
         """Graceful shutdown — закрывает Qdrant клиент."""

@@ -43,7 +43,7 @@ async def _check_once(owner_telegram_id: int) -> None:
                 Commitment.deadline_at.is_not(None),
                 or_(
                     Commitment.last_reminded_at.is_(None),
-                    Commitment.last_reminded_at < cutoff.replace(tzinfo=None),
+                    Commitment.last_reminded_at < cutoff,
                 ),
             )
         )
@@ -114,12 +114,11 @@ async def reminders_loop() -> None:
     поэтому перезапрашиваем User объект в новой сессии.
     """
     while True:
-        if _overlap_guard.locked():
-            await asyncio.sleep(REMINDER_TICK_SECONDS)
-            continue
         async with _overlap_guard:
             try:
                 await _check_once(settings.owner_telegram_id)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("reminders tick failed")
         await asyncio.sleep(REMINDER_TICK_SECONDS)

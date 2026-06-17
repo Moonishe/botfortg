@@ -43,6 +43,7 @@ from src.db.models._memory import (
     MemoryVersion,
     WorkingMemory,
 )
+from src.db.models._cron import CronJob
 from src.db.models._cache import SmartCacheEntry
 from src.db.models._avito import AvitoListing, AvitoPriceHistory, AvitoWatch
 from src.db.models._monitor import (
@@ -69,6 +70,7 @@ from src.db.models._session import (
     SessionContext,
 )
 from src.db.models._encryption import EncryptionKey
+from src.db.models._timer import Timer
 
 __all__ = [
     "AdaptivePersona",
@@ -87,6 +89,7 @@ __all__ = [
     "ContactProfile",
     "ConversationState",
     "ConversationSummary",
+    "CronJob",
     "EncryptionKey",
     "Entity",
     "EntityRelation",
@@ -124,6 +127,7 @@ __all__ = [
     "SmartCacheEntry",
     "SoulSnapshot",
     "TelegramSession",
+    "Timer",
     "Trajectory",
     "TranscriptionCache",
     "User",

@@ -30,6 +30,7 @@ from src.core.services.chat_actions import (
 )
 from src.core.memory import conversation_context as ctx_store
 from src.core.scheduling.news import build_news_digest
+from src.core.security import is_confirmed_truthy
 from src.crypto import decrypt
 from src.db.models import LlmKeySlot
 from src.db.repo import (
@@ -123,6 +124,9 @@ async def classic_resolve_contact(
         )
         return None
     kind = intent.get("intent")
+    if kind is None:
+        await message.answer("❓ Неизвестное действие.")
+        return None
     action_map = {
         "summarize_chat": "summary",
         "tasks_for_chat": "tasks",
@@ -560,7 +564,9 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
         await message.delete()
         _deleted = True
     except Exception:
-        pass  # expected in private chats — notify user below
+        logger.debug(
+            "message.delete() failed (expected in private chats)", exc_info=True
+        )
 
     success = 0
     failed = 0
@@ -596,6 +602,12 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
                 results.append(f"  #{slot.id} — ❌ ключ повреждён")
                 continue
             prov_class = _provider_class_for(provider)
+            if prov_class is None:
+                results.append(
+                    f"  #{slot.id} {provider}/{purpose} ❌ (неизвестный провайдер)"
+                )
+                failed += 1
+                continue
             prov = prov_class(raw_key)
             valid = await prov.validate_key()
             if not valid:
@@ -611,6 +623,13 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
                 results.append(f"  #{slot.id} {provider}/{purpose} ✅")
                 success += 1
         except Exception:
+            logger.warning(
+                "Key validation failed for slot %d (%s/%s)",
+                slot.id,
+                provider,
+                purpose,
+                exc_info=True,
+            )
             results.append(f"  #{slot.id} {provider}/{purpose} ❌ (ошибка проверки)")
             failed += 1
 
@@ -991,6 +1010,38 @@ async def exec_classic_send_message(
             sanitize_html(f"Не нашёл контакт «{recipient}». Попробуй /sync.")
         )
         return
+    # _confirmed=True: bypass picker, send to top candidate directly.
+    if is_confirmed_truthy(intent.get("_confirmed")):
+        target = candidates[0]
+        await ctx_store.set_last_peer(
+            message.from_user.id, target.peer_id, target.display_name
+        )
+        guard_hint = ""
+        if target.peer_id:
+            try:
+                from src.core.contacts.send_guard import build_send_guard
+
+                guard = await build_send_guard(owner.telegram_id, target.peer_id, text)
+                if guard.formatted_html:
+                    guard_hint = "\n\n" + guard.formatted_html
+            except Exception:
+                logger.warning("send guard failed", exc_info=True)
+        try:
+            entity = await client.get_entity(target.peer_id)
+            await client.send_message(entity, text)
+        except Exception as e:
+            logger.warning("send_message failed: %s", e)
+            await message.answer("❌ Ошибка отправки. Попробуй ещё раз.")
+            return
+        await message.answer(
+            sanitize_html(
+                f"✅ <b>Отправлено</b>\n\n"
+                f"→ <b>Кому:</b> {target.label()}\n"
+                f"→ <b>Текст:</b>\n{text}{guard_hint}"
+            )
+        )
+        return
+
     if len(candidates) == 1 or candidates[0].score >= 90:
         target = candidates[0]
         await ctx_store.set_last_peer(
@@ -999,12 +1050,20 @@ async def exec_classic_send_message(
         payload = json.dumps(
             {"peer_id": target.peer_id, "text": text}, ensure_ascii=False
         )
+
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
             from src.db.repo import create_pending_action
 
             action = await create_pending_action(
-                session, user_id=owner.id, kind="send_message", payload=payload
+                session,
+                user_id=owner.id,
+                kind="send_message",
+                payload=payload,
+                route="db",
+                verb="send",
+                risk="high",
+                human_summary=f"Отправить {target.label()}: {text[:80]}",
             )
             guard_hint = ""
             if target.peer_id:

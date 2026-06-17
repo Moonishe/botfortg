@@ -106,7 +106,7 @@ def _fuzzy_match(
 
 def _searchable(c: Contact) -> str:
     """Build searchable string for fuzzy matching. Mirrors contact_resolver._searchable."""
-    parts = [c.display_name]
+    parts = [c.display_name or ""]
     if c.username:
         parts.append("@" + c.username)
     if c.phone:

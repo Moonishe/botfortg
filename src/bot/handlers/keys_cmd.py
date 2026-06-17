@@ -10,8 +10,6 @@ from datetime import datetime, UTC
 
 from aiogram import F, Router
 
-# ── Module constants ─────────────────────────────────────────────────────
-_FETCH_MODELS_TIMEOUT = 15.0  # секунд — таймаут запроса списка моделей
 from aiogram.filters import BaseFilter, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -32,6 +30,7 @@ from src.llm.provider_catalog import (
 
 from src.bot.callbacks import KeysCB
 from src.bot.filters import OwnerOnly
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
 from src.db.models import LlmKeySlot
 from src.db.repo import (
@@ -40,6 +39,9 @@ from src.db.repo import (
     list_key_slots,
 )
 from src.db.session import get_session
+
+# ── Module constants ─────────────────────────────────────────────────────
+_FETCH_MODELS_TIMEOUT = 15.0  # секунд — таймаут запроса списка моделей
 
 
 logger = logging.getLogger(__name__)
@@ -199,12 +201,16 @@ async def _detect_provider(key: str) -> str | None:
         from src.llm.router import _provider_class_for
 
         prov_class = _provider_class_for(by_prefix)
-        try:
-            prov = prov_class(key)
-            if await prov.validate_key():
-                return by_prefix
-        except Exception:
-            logger.debug("Non-critical error", exc_info=True)
+        if prov_class is not None:
+            try:
+                prov = prov_class(key)
+                try:
+                    if await prov.validate_key():
+                        return by_prefix
+                finally:
+                    await prov.close()
+            except Exception:
+                logger.debug("Non-critical error", exc_info=True)
 
     # 2. Перебор всех провайдеров
     from src.llm.router import _provider_class_for
@@ -212,12 +218,18 @@ async def _detect_provider(key: str) -> str | None:
     for provider_name in _PROVIDER_ORDER:
         if provider_name == by_prefix:
             continue  # уже пробовали
+        prov_class = _provider_class_for(provider_name)
+        if prov_class is None:
+            continue
         try:
-            prov_class = _provider_class_for(provider_name)
             prov = prov_class(key)
-            if await prov.validate_key():
-                return provider_name
+            try:
+                if await prov.validate_key():
+                    return provider_name
+            finally:
+                await prov.close()
         except Exception:
+            logger.debug("Key validation failed for %s", provider_name, exc_info=True)
             continue
 
     return None
@@ -284,6 +296,8 @@ async def _do_import_keys(
     results: list[str] = []
     by_provider: dict[str, int] = {}
     total_found = 0
+    slot = None
+    is_new = False
 
     for i, (explicit_provider, api_key, endpoint, explicit_model) in enumerate(
         raw_entries
@@ -329,29 +343,40 @@ async def _do_import_keys(
                 key = decrypt(slot.key_enc)
             except ValueError:
                 logger.warning("Key decryption failed for slot %d", slot.id)
+                async with get_session() as session:
+                    bad_slot = await session.get(LlmKeySlot, slot.id)
+                    if bad_slot:
+                        await session.delete(bad_slot)
+                        await session.flush()
                 results.append(f"  #{slot.id} — ❌ ключ повреждён")
                 continue
             prov_class = _provider_class_for(detected)
+            if prov_class is None:
+                results.append(f"  #{slot.id} — провайдер {detected} не поддерживается")
+                continue
             try:
                 prov = (
                     prov_class(key, base_url=endpoint) if endpoint else prov_class(key)
                 )
             except TypeError:
                 prov = prov_class(key)
-            valid = await prov.validate_key()
-            if not valid:
-                async with get_session() as session:
-                    owner = await get_or_create_user(session, message.from_user.id)
-                    bad_slot = await session.get(LlmKeySlot, slot.id)
-                    if bad_slot:
-                        await session.delete(bad_slot)
-                        await session.flush()
-                results.append(
-                    f"  #{slot.id} {detected}/{purpose} ❌ (не прошёл проверку)"
-                )
-            else:
-                results.append(f"  #{slot.id} {detected}/{purpose} ✅")
-                total_found += 1
+            try:
+                valid = await prov.validate_key()
+                if not valid:
+                    async with get_session() as session:
+                        owner = await get_or_create_user(session, message.from_user.id)
+                        bad_slot = await session.get(LlmKeySlot, slot.id)
+                        if bad_slot:
+                            await session.delete(bad_slot)
+                            await session.flush()
+                    results.append(
+                        f"  #{slot.id} {detected}/{purpose} ❌ (не прошёл проверку)"
+                    )
+                else:
+                    results.append(f"  #{slot.id} {detected}/{purpose} ✅")
+                    total_found += 1
+            finally:
+                await prov.close()
         except Exception:
             results.append(f"  #{slot.id} {detected}/{purpose} ✅ (ошибка проверки)")
             total_found += 1
@@ -608,6 +633,7 @@ async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
     endpoint = slot.endpoint
 
     # Создаём провайдера: с endpoint или без
+    provider = None  # ponytail: guard against UnboundLocalError in finally
     if endpoint:
         try:
             provider = provider_cls(api_key=api_key, base_url=endpoint)
@@ -631,10 +657,11 @@ async def _fetch_models_for_slot(slot) -> tuple[list[str], str | None]:
             return [], "Неверный API ключ"
         return [], f"Ошибка: {error_msg[:100]}"
     finally:
-        try:
-            await provider.close()
-        except Exception:
-            logger.debug("Non-critical error", exc_info=True)
+        if provider is not None:
+            try:
+                await provider.close()
+            except Exception:
+                logger.debug("Non-critical error", exc_info=True)
 
 
 async def _show_model_discovery(message: Message, slot: LlmKeySlot) -> None:
@@ -720,6 +747,8 @@ async def cmd_keys(message: Message) -> None:
         success = 0
         failed = 0
         results = []
+        slot = None
+        is_new = False
 
         for i, api_key in enumerate(keys):
             priority = i if auto_inc else 0
@@ -746,23 +775,40 @@ async def cmd_keys(message: Message) -> None:
                     key = decrypt(slot.key_enc)
                 except ValueError:
                     logger.warning("Key decryption failed for slot %d", slot.id)
-                    results.append(f"  #{slot.id} — ❌ ключ повреждён")
-                    continue
-                prov_class = _provider_class_for(provider)
-                prov = prov_class(key)
-                valid = await prov.validate_key()
-                if not valid:
                     async with get_session() as session:
-                        owner = await get_or_create_user(session, message.from_user.id)
                         bad_slot = await session.get(LlmKeySlot, slot.id)
                         if bad_slot:
                             await session.delete(bad_slot)
                             await session.flush()
-                    results.append(f"  #{slot.id} {provider}/{purpose} ❌")
+                    results.append(f"  #{slot.id} — ❌ ключ повреждён")
                     failed += 1
-                else:
-                    results.append(f"  #{slot.id} {provider}/{purpose} ✅")
-                    success += 1
+                    continue
+                prov_class = _provider_class_for(provider)
+                if prov_class is None:
+                    results.append(
+                        f"  #{slot.id} — провайдер {provider} не поддерживается"
+                    )
+                    failed += 1
+                    continue
+                prov = prov_class(key)
+                try:
+                    valid = await prov.validate_key()
+                    if not valid:
+                        async with get_session() as session:
+                            owner = await get_or_create_user(
+                                session, message.from_user.id
+                            )
+                            bad_slot = await session.get(LlmKeySlot, slot.id)
+                            if bad_slot:
+                                await session.delete(bad_slot)
+                                await session.flush()
+                        results.append(f"  #{slot.id} {provider}/{purpose} ❌")
+                        failed += 1
+                    else:
+                        results.append(f"  #{slot.id} {provider}/{purpose} ✅")
+                        success += 1
+                finally:
+                    await prov.close()
             except Exception:
                 results.append(
                     f"  #{slot.id} {provider}/{purpose} ✅ (ошибка проверки)"
@@ -782,17 +828,17 @@ async def cmd_keys(message: Message) -> None:
             )
             if not is_new:
                 await message.answer(
-                    f"ℹ️ Ключ {provider}/{purpose} уже был добавлен ранее (слот #{slot.id}).",
+                    f"ℹ️ Ключ {sanitize_html(provider)}/{sanitize_html(purpose)} уже был добавлен ранее (слот #{slot.id}).",
                     reply_markup=kb,
                 )
             else:
                 await message.answer(
-                    f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{slot.id})",
+                    f"✅ Ключ {sanitize_html(provider)}/{sanitize_html(purpose)} добавлен и проверен! (слот #{slot.id})",
                     reply_markup=kb,
                 )
         elif len(keys) == 1 and failed == 1:
             await message.answer(
-                f"❌ Ключ {provider}/{purpose} не прошёл валидацию. Проверь ключ."
+                f"❌ Ключ {sanitize_html(provider)}/{sanitize_html(purpose)} не прошёл валидацию. Проверь ключ."
             )
         else:
             lines = [f"<b>Добавлено {len(keys)} ключей {provider}/{purpose}:</b>", ""]
@@ -822,7 +868,7 @@ async def cmd_keys(message: Message) -> None:
 
                 await invalidate_settings_cache(message.from_user.id)
                 await message.answer(
-                    f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
+                    f"✅ Слот #{slot_id} ({sanitize_html(provider)}/{sanitize_html(purpose)}) удалён."
                 )
             else:
                 await message.answer("❌ Слот не найден или не твои.")
@@ -898,7 +944,7 @@ async def cmd_keys(message: Message) -> None:
             )[:5]:
                 fail_pct = (s.failure_count / max(s.usage_count, 1)) * 100
                 lines.append(
-                    f"<b>{s.provider}/{s.purpose}</b>: {s.usage_count}× вызовов, {s.failure_count}× фейлов ({fail_pct:.1f}%)"
+                    f"<b>{sanitize_html(s.provider)}/{sanitize_html(s.purpose)}</b>: {s.usage_count}× вызовов, {s.failure_count}× фейлов ({fail_pct:.1f}%)"
                 )
             await message.answer("\n".join(lines))
             return
@@ -964,20 +1010,19 @@ async def cmd_keys(message: Message) -> None:
             status = "✅" if s.enabled else "🚫"
             cool = (
                 " 🔒"
-                if (c := _ensure_utc(s.cooldown_until))
-                and c > datetime.now(UTC)
+                if (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(UTC)
                 else ""
             )
             lines.append(
-                f"{status} <b>{s.provider}</b> / {s.purpose} "
+                f"{status} <b>{sanitize_html(s.provider)}</b> / {sanitize_html(s.purpose)} "
                 f"(приоритет {s.priority}, исп. {s.usage_count}×{cool})"
             )
             if s.endpoint:
-                lines.append(f"   🔗 {s.endpoint}")
+                lines.append(f"   🔗 {sanitize_html(s.endpoint)}")
             if s.last_error:
-                lines.append(f"   ⚠️ {s.last_error[:80]}")
+                lines.append(f"   ⚠️ {sanitize_html(s.last_error[:80])}")
             if s.label:
-                lines.append(f"   🏷 {s.label}")
+                lines.append(f"   🏷 {sanitize_html(s.label)}")
         lines.append("")
         lines.append(
             "<i>/keys add &lt;provider&gt; &lt;purpose&gt; &lt;key&gt; — добавить ключ</i>"
@@ -993,14 +1038,18 @@ async def cmd_keys(message: Message) -> None:
         await message.answer("\n".join(lines))
 
 
-@router.callback_query(F.data.startswith(KeysCB.remove("")))
+@router.callback_query(F.data.startswith("keys:remove:"))
 async def cb_keys_remove(callback: CallbackQuery) -> None:
     """Удалить слот ключа по inline-кнопке."""
     parts = callback.data.split(":")
-    if len(parts) < 3:
+    if len(parts) < 3 or not parts[2]:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    slot_id = int(parts[2])
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверный номер слота.", show_alert=True)
+        return
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         slot = await session.get(LlmKeySlot, slot_id)
@@ -1013,7 +1062,7 @@ async def cb_keys_remove(callback: CallbackQuery) -> None:
             from src.bot.handlers.free_text_common import invalidate_settings_cache
 
             await invalidate_settings_cache(callback.from_user.id)
-            text = f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
+            text = f"✅ Слот #{slot_id} ({sanitize_html(provider)}/{sanitize_html(purpose)}) удалён."
         else:
             text = "❌ Слот не найден или не твой."
     if callback.message:
@@ -1029,6 +1078,7 @@ async def cb_keys_cata(callback: CallbackQuery) -> None:
     """User picked a category → show providers."""
     parts = callback.data.split(":")
     if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
         return
     category = parts[2]
     category_names = {
@@ -1036,11 +1086,12 @@ async def cb_keys_cata(callback: CallbackQuery) -> None:
         "stt": "STT (голос→текст)",
         "tts": "TTS (текст→голос)",
     }
-    await callback.message.edit_text(
-        f"📂 <b>Категория: {category_names.get(category, category)}</b>\n"
-        f"Выбери провайдера:",
-        reply_markup=_build_provider_keyboard(category),
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"📂 <b>Категория: {category_names.get(category, category)}</b>\n"
+            f"Выбери провайдера:",
+            reply_markup=_build_provider_keyboard(category),
+        )
     await callback.answer()
 
 
@@ -1049,6 +1100,7 @@ async def cb_keys_cat(callback: CallbackQuery) -> None:
     """User picked a provider → запрос API ключа (модели — потом авто-обнаружены)."""
     parts = callback.data.split(":")
     if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
         return
     category = parts[2]
     provider_name = parts[3]
@@ -1069,13 +1121,14 @@ async def cb_keys_cat(callback: CallbackQuery) -> None:
         "category": category,
         "deadline": time.monotonic() + 300,
     }
-    await callback.message.edit_text(
-        f"📦 <b>{p.display}</b>\n"
-        f"Вставь {key_prefix}\n"
-        f"Или: <code>{provider_name}:ключ</code>{endpoint_hint}\n"
-        f"С endpoint: <code>{provider_name}:ключ:https://твой-url.com/v1</code>",
-        reply_markup=None,
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"📦 <b>{sanitize_html(p.display)}</b>\n"
+            f"Вставь {key_prefix}\n"
+            f"Или: <code>{provider_name}:ключ</code>{endpoint_hint}\n"
+            f"С endpoint: <code>{provider_name}:ключ:https://твой-url.com/v1</code>",
+            reply_markup=None,
+        )
     await callback.answer()
 
 
@@ -1084,6 +1137,7 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
     """User picked a model → ask for API key."""
     parts = callback.data.split(":")
     if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
         return
     provider_name = parts[2]
     model = parts[3]
@@ -1095,11 +1149,12 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
             "model_pending": True,
             "deadline": time.monotonic() + 300,
         }
-        await callback.message.edit_text(
-            f"🔧 Введи название модели для <b>{provider_name}</b>.\n"
-            f"Например: <code>gpt-4o</code> или <code>claude-3-opus</code>",
-            reply_markup=None,
-        )
+        if callback.message:
+            await callback.message.edit_text(
+                f"🔧 Введи название модели для <b>{sanitize_html(provider_name)}</b>.\n"
+                f"Например: <code>gpt-4o</code> или <code>claude-3-opus</code>",
+                reply_markup=None,
+            )
     elif model == "none":
         # STT/TTS провайдер без модели → сразу запрашиваем ключ
         p = get_provider(provider_name)
@@ -1111,12 +1166,13 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
             "deadline": time.monotonic() + 300,
         }
         display = p.display if p else provider_name
-        await callback.message.edit_text(
-            f"📦 <b>{display}</b>\n"
-            f"Вставь {key_prefix}\n"
-            f"Или: <code>{provider_name}:ключ</code>",
-            reply_markup=None,
-        )
+        if callback.message:
+            await callback.message.edit_text(
+                f"📦 <b>{sanitize_html(display)}</b>\n"
+                f"Вставь {key_prefix}\n"
+                f"Или: <code>{provider_name}:ключ</code>",
+                reply_markup=None,
+            )
     else:
         # Known model → ask for API key
         p = get_provider(provider_name)
@@ -1131,13 +1187,14 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
         }
         display = p.display if p else provider_name
         key_prefix = p.key_prefix if p and p.key_prefix else "API-ключ"
-        await callback.message.edit_text(
-            f"📦 <b>{display} — {model}</b>\n"
-            f"Вставь {key_prefix}\n"
-            f"Или: <code>{provider_name}:ключ</code>{endpoint_hint}\n"
-            f"С endpoint: <code>{provider_name}:ключ:https://твой-url.com/v1</code>",
-            reply_markup=None,
-        )
+        if callback.message:
+            await callback.message.edit_text(
+                f"📦 <b>{sanitize_html(display)} — {sanitize_html(model)}</b>\n"
+                f"Вставь {key_prefix}\n"
+                f"Или: <code>{provider_name}:ключ</code>{endpoint_hint}\n"
+                f"С endpoint: <code>{provider_name}:ключ:https://твой-url.com/v1</code>",
+                reply_markup=None,
+            )
     await callback.answer()
 
 
@@ -1147,16 +1204,18 @@ async def cb_keys_model(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == KeysCB.BACK_CLOSE)
 async def cb_keys_back_close(callback: CallbackQuery) -> None:
     """Close the key addition dialog."""
-    await callback.message.edit_text("🔑 Добавление ключа отменено.")
+    if callback.message:
+        await callback.message.edit_text("🔑 Добавление ключа отменено.")
     await callback.answer()
 
 
 @router.callback_query(F.data == KeysCB.BACK_CAT)
 async def cb_keys_back_cat(callback: CallbackQuery) -> None:
     """Back to category selection."""
-    await callback.message.edit_text(
-        "Выбери категорию ключа:", reply_markup=_build_category_keyboard()
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            "Выбери категорию ключа:", reply_markup=_build_category_keyboard()
+        )
     await callback.answer()
 
 
@@ -1165,6 +1224,7 @@ async def cb_keys_back_provider(callback: CallbackQuery) -> None:
     """Back to provider list for category."""
     parts = callback.data.split(":")
     if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
         return
     category = parts[3]
     category_names = {
@@ -1172,11 +1232,12 @@ async def cb_keys_back_provider(callback: CallbackQuery) -> None:
         "stt": "STT (голос→текст)",
         "tts": "TTS (текст→голос)",
     }
-    await callback.message.edit_text(
-        f"📂 <b>Категория: {category_names.get(category, category)}</b>\n"
-        f"Выбери провайдера:",
-        reply_markup=_build_provider_keyboard(category),
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"📂 <b>Категория: {category_names.get(category, category)}</b>\n"
+            f"Выбери провайдера:",
+            reply_markup=_build_provider_keyboard(category),
+        )
     await callback.answer()
 
 
@@ -1218,10 +1279,11 @@ async def cb_disc_pick(callback: CallbackQuery) -> None:
             slot.model = model
             await session.commit()
 
-    await callback.message.edit_text(
-        f"✅ Модель <b>{model}</b> сохранена в слот #{slot_id}.\n"
-        f"Сменить: /models {slot_id}",
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"✅ Модель <b>{sanitize_html(model)}</b> сохранена в слот #{slot_id}.\n"
+            f"Сменить: /models {slot_id}",
+        )
     await callback.answer()
 
 
@@ -1241,9 +1303,10 @@ async def cb_disc_page(callback: CallbackQuery) -> None:
         return
 
     models = _get_cached_discovery(slot_id) or []
-    await callback.message.edit_reply_markup(
-        reply_markup=_build_discovered_keyboard(slot_id, models, page)
-    )
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=_build_discovered_keyboard(slot_id, models, page)
+        )
     await callback.answer()
 
 
@@ -1266,9 +1329,10 @@ async def cb_disc_manual(callback: CallbackQuery) -> None:
         "slot_id": slot_id,
         "deadline": time.monotonic() + 300,
     }
-    await callback.message.edit_text(
-        "✏️ Введи название модели (например gpt-4o, claude-3-opus…)"
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            "✏️ Введи название модели (например gpt-4o, claude-3-opus…)"
+        )
     await callback.answer()
 
 
@@ -1297,11 +1361,12 @@ async def cb_disc_skip(callback: CallbackQuery) -> None:
         if slot:
             provider_name = slot.provider
 
-    await callback.message.edit_text(
-        f"✅ Слот #{slot_id} создан без указания модели.\n"
-        f"Будет использоваться модель по умолчанию для {provider_name}.\n"
-        f"Указать позже: /models {slot_id}",
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"✅ Слот #{slot_id} создан без указания модели.\n"
+            f"Будет использоваться модель по умолчанию для {sanitize_html(provider_name)}.\n"
+            f"Указать позже: /models {slot_id}",
+        )
     await callback.answer()
 
 
@@ -1318,8 +1383,12 @@ async def cb_multiselect_toggle(callback: CallbackQuery):
     if len(parts) < 4:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    slot_id = int(parts[2])
-    idx = int(parts[3])
+    try:
+        slot_id = int(parts[2])
+        idx = int(parts[3])
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
 
     models = _get_visible_models_for_slot(slot_id)
     selected = _multiselect_state.get(slot_id, set())
@@ -1348,8 +1417,12 @@ async def cb_multiselect_page(callback: CallbackQuery):
     if len(parts) < 4:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    slot_id = int(parts[2])
-    page = int(parts[3])
+    try:
+        slot_id = int(parts[2])
+        page = int(parts[3])
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     _multiselect_page[slot_id] = page
 
     models = _get_visible_models_for_slot(slot_id)
@@ -1367,7 +1440,15 @@ async def cb_multiselect_page(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("keys:msel_all:"))
 async def cb_multiselect_all(callback: CallbackQuery):
     """Выбрать все модели."""
-    slot_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
     models = _get_visible_models_for_slot(slot_id)
     _multiselect_state[slot_id] = set(models)
 
@@ -1383,7 +1464,15 @@ async def cb_multiselect_all(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("keys:msel_none:"))
 async def cb_multiselect_none(callback: CallbackQuery):
     """Снять выбор со всех моделей."""
-    slot_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
     models = _get_visible_models_for_slot(slot_id)
     _multiselect_state[slot_id] = set()
 
@@ -1406,7 +1495,11 @@ async def cb_multiselect_filter(callback: CallbackQuery):
     if len(parts) < 4:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    slot_id = int(parts[2])
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     ftype = parts[3]
     _multiselect_filter[slot_id] = ftype
     # Сбрасываем результаты поиска (фильтр переопределяет поиск)
@@ -1442,22 +1535,35 @@ async def cb_multiselect_search(callback: CallbackQuery):
     if len(parts) < 3:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    slot_id = int(parts[2])
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     _PENDING_KEY_ENTRIES[callback.from_user.id] = {
         "type": "model_search",
         "slot_id": slot_id,
         "deadline": time.monotonic() + 300,
     }
-    await callback.message.edit_text(
-        "🔍 Введи часть названия модели для поиска (минимум 2 символа):"
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            "🔍 Введи часть названия модели для поиска (минимум 2 символа):"
+        )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("keys:msel_done:"))
 async def cb_multiselect_done(callback: CallbackQuery):
     """Сохранить выбранные модели в БД."""
-    slot_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    try:
+        slot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
     selected = _multiselect_state.get(slot_id, set())
 
     if not selected:
@@ -1480,7 +1586,7 @@ async def cb_multiselect_done(callback: CallbackQuery):
 
         await set_slot_models(session, slot_id, list(selected))
         # Обратная совместимость: slot.model = первая выбранная модель
-        slot.model = list(selected)[0] if selected else None
+        slot.model = next(iter(selected), None) if selected else None
         await session.commit()
 
     # Очистка состояния
@@ -1520,9 +1626,7 @@ class _PendingKeyEntryFilter(BaseFilter):
         if time.monotonic() > deadline:
             _PENDING_KEY_ENTRIES.pop(uid, None)
             return False
-        if state is not None and await state.get_state() is not None:
-            return False
-        return True
+        return state is None or await state.get_state() is None
 
 
 @router.message(_PendingKeyEntryFilter())
@@ -1559,7 +1663,7 @@ async def _pending_key_entry_handler(message: Message) -> None:
         filtered = [m for m in models if query in m.lower()]
 
         if not filtered:
-            await message.answer(f"🔍 Ничего не найдено по «{text}».")
+            await message.answer(f"🔍 Ничего не найдено по «{sanitize_html(text)}».")
             # Возвращаемся к полному списку через multi-select
             selected = _multiselect_state.get(slot_id, set())
             await message.answer(
@@ -1581,7 +1685,7 @@ async def _pending_key_entry_handler(message: Message) -> None:
         _multiselect_page[slot_id] = 0
 
         await message.answer(
-            f"🔍 Найдено {len(filtered)} моделей по «{text}»:",
+            f"🔍 Найдено {len(filtered)} моделей по «{sanitize_html(text)}»:",
             reply_markup=_build_model_multiselect_keyboard(
                 slot_id, filtered, selected, 0
             ),
@@ -1603,7 +1707,9 @@ async def _pending_key_entry_handler(message: Message) -> None:
                 slot.model = model
                 await session.commit()
 
-        await message.answer(f"✅ Модель <b>{model}</b> сохранена в слот #{slot_id}.")
+        await message.answer(
+            f"✅ Модель <b>{sanitize_html(model)}</b> сохранена в слот #{slot_id}."
+        )
         return
 
     if entry.get("model_pending"):
@@ -1619,7 +1725,7 @@ async def _pending_key_entry_handler(message: Message) -> None:
         p = get_provider(provider_name)
         display = p.display if p else provider_name
         await message.answer(
-            f"📦 <b>{display} — {model}</b>\n"
+            f"📦 <b>{sanitize_html(display)} — {sanitize_html(model)}</b>\n"
             f"Теперь вставь API-ключ:\n"
             f"<code>{provider_name}:ключ</code> или просто сам ключ"
         )
@@ -1691,9 +1797,17 @@ async def _pending_key_entry_handler(message: Message) -> None:
             key_dec = decrypt(slot.key_enc)
         except ValueError:
             logger.warning("Key decryption failed for slot %d", slot.id)
+            async with get_session() as session:
+                bad_slot = await session.get(LlmKeySlot, slot.id)
+                if bad_slot:
+                    await session.delete(bad_slot)
+                    await session.flush()
             await message.answer(f"  #{slot.id} — ❌ ключ повреждён")
             return
         prov_class = _provider_class_for(provider_name)
+        if prov_class is None:
+            await message.answer(f"❌ Провайдер {provider_name} не поддерживается.")
+            return
         try:
             prov = (
                 prov_class(key_dec, base_url=endpoint)
@@ -1702,20 +1816,23 @@ async def _pending_key_entry_handler(message: Message) -> None:
             )
         except TypeError:
             prov = prov_class(key_dec)
-        valid = await prov.validate_key()
-        if not valid:
-            async with get_session() as session:
-                bad_slot = await session.get(LlmKeySlot, slot.id)
-                if bad_slot:
-                    await session.delete(bad_slot)
-                    await session.flush()
-            await message.answer(
-                f"❌ Ключ {provider_name}/{model or ''} "
-                f"не прошёл валидацию. Проверь ключ."
-            )
-        else:
-            # Авто-обнаружение моделей после успешной валидации
-            await _show_model_discovery(message, slot)
+        try:
+            valid = await prov.validate_key()
+            if not valid:
+                async with get_session() as session:
+                    bad_slot = await session.get(LlmKeySlot, slot.id)
+                    if bad_slot:
+                        await session.delete(bad_slot)
+                        await session.flush()
+                await message.answer(
+                    f"❌ Ключ {provider_name}/{model or ''} "
+                    f"не прошёл валидацию. Проверь ключ."
+                )
+            else:
+                # Авто-обнаружение моделей после успешной валидации
+                await _show_model_discovery(message, slot)
+        finally:
+            await prov.close()
     except Exception:
         # Авто-обнаружение моделей (проверка ключа недоступна, но ключ сохранён)
         await _show_model_discovery(message, slot)
@@ -1741,9 +1858,7 @@ class _PendingImportFilter(BaseFilter):
         if time.monotonic() > deadline:
             _PENDING_IMPORTS.pop(uid, None)
             return False
-        if state is not None and await state.get_state() is not None:
-            return False
-        return True
+        return state is None or await state.get_state() is None
 
 
 @router.message(_PendingImportFilter())

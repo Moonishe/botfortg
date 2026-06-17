@@ -241,8 +241,11 @@ class MCPServer:
                 )
 
             elif method == "tools/list":
+                from src.core.actions.mcp_expose import get_mcp_exposed
+
                 tools = [
-                    {"name": name, **schema} for name, schema in EXPOSED_TOOLS.items()
+                    {"name": name, **schema}
+                    for name, schema in get_mcp_exposed().items()
                 ]
                 return self._response(req_id, {"tools": tools})
 
@@ -262,8 +265,15 @@ class MCPServer:
     # ── Tool execution ──────────────────────────────────────────────────
 
     async def _call_tool(self, name: str, args: dict) -> dict:
-        """Execute a tool via the internal registry."""
-        if name not in EXPOSED_TOOLS:
+        """Execute a tool via the internal registry.
+
+        Security: tools with risk ``high`` or ``critical`` are NOT auto-confirmed.
+        The MCP client must pass ``_confirmed: true`` in arguments to execute them.
+        Low/medium risk tools are auto-confirmed (config file = consent).
+        """
+        from src.core.actions.mcp_expose import get_mcp_exposed
+
+        if name not in get_mcp_exposed():
             return {
                 "content": [
                     {
@@ -274,20 +284,88 @@ class MCPServer:
                 "isError": True,
             }
 
-        tool = tool_registry.get(name)
-        if tool is None:
+        spec = tool_registry.get(name)
+        if spec is None:
             return {
                 "content": [{"type": "text", "text": f"Tool '{name}' not registered"}],
                 "isError": True,
             }
 
-        try:
-            # All exposed tools expect the calling user via ``user`` kwarg.
-            # Pass ``_confirmed=True`` because the user already authorised
-            # the MCP connection (the config file acts as consent).
-            result = await tool_registry.execute(
-                name, user=self.telegram_id, _confirmed=True, **args
+        # Work on a local copy to avoid mutating the caller's dict.
+        args = dict(args)
+
+        # ── HARDLINE BLOCKLIST — блок ВСЕГДА, до confirmation gate ──
+        # Defense-in-depth: дублирует проверку из tool_registry.execute(),
+        # чтобы MCP-клиенты получили понятное сообщение без запуска tool'а.
+        from src.core.security import check_params
+
+        hardline_block = check_params(name, args)
+        if hardline_block is not None:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"⛔ {hardline_block['error']} "
+                            f"(category={hardline_block.get('category')}, "
+                            f"rule={hardline_block.get('rule_id')})"
+                        ),
+                    }
+                ],
+                "isError": True,
+            }
+
+        # ── Risk-based confirmation gating ──
+        from src.core.actions.tool_registry import CONFIRMATION_RISKS
+        from src.config import settings
+
+        action_name = args.get("action")
+        risk = spec.effective_risk(action_name)
+        requires_conf = spec.effective_requires_confirmation(action_name)
+
+        # Multi-mode approval — определяем нужно ли подтверждение для UI.
+        # Сама блокировка/пропуск делает tool_registry.execute() (единая точка),
+        # здесь мы лишь формируем пользовательское сообщение для MCP-клиента.
+        mode = getattr(settings, "approval_mode", "smart")
+        if mode == "off":
+            is_dangerous = False
+        elif mode == "manual":
+            is_dangerous = (
+                risk in CONFIRMATION_RISKS or requires_conf or risk == "medium"
             )
+        else:  # "smart"
+            is_dangerous = risk in CONFIRMATION_RISKS or requires_conf
+
+        # Always pop `_confirmed` from args BEFORE passing to tool_registry
+        # to avoid duplicate keyword argument (TypeError) when the user
+        # explicitly passes ``_confirmed`` in non-dangerous path.
+        mcp_confirmed_raw = args.pop("_confirmed", False)
+        # Require JSON boolean ``true``.  Strings (e.g. ``"true"`` from
+        # lenient JSON parsers) are NOT accepted — only explicit ``true``.
+        mcp_confirmed = mcp_confirmed_raw is True
+
+        if is_dangerous and not mcp_confirmed:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"⚠️  Tool '{name}' requires explicit confirmation "
+                            f"(risk={risk}, mode={mode}). "
+                            f'Pass `"_confirmed": true` in arguments to proceed.'
+                        ),
+                    }
+                ],
+                "isError": True,
+            }
+
+        # Pass through — dangerous tools were gated above,
+        # low/medium tools are auto-confirmed (config file = consent).
+        result = await tool_registry.execute(
+            name, user=self.telegram_id, _confirmed=True, **args
+        )
+
+        try:
             # Normalise the internal dict format to MCP content list.
             return {
                 "content": [

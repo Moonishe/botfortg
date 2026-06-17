@@ -218,7 +218,9 @@ async def habit_tracker_loop(owner_id: int) -> None:
                             await invalidate_settings_cache(owner_id)
 
                             memories = await list_memories(session, owner)
-                            active = [m for m in memories if m.is_active and m.created_at]
+                            active = [
+                                m for m in memories if m.is_active and m.created_at
+                            ]
                             habits = find_habit_candidates(active)
                     if habits:
                         text = format_habits(habits)
@@ -229,6 +231,8 @@ async def habit_tracker_loop(owner_id: int) -> None:
                         text=text,
                         priority=Notification.PRIORITY_LOW,
                     )
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.exception("Habit tracker error: %s", e)
         await asyncio.sleep(settings.habit_tracker_interval_sec)  # проверять каждый час

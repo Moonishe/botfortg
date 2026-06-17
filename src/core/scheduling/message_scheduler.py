@@ -86,6 +86,8 @@ async def _check_once(client=None) -> None:
                     target = await client.get_input_entity(entity)  # type: ignore[arg-type]
                     await client.send_message(target, msg.text)
                     await mark_sent(session, msg.id)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as retry_exc:
                     await mark_failed(session, msg.id, str(retry_exc)[:500])
                     logger.warning(
@@ -93,6 +95,8 @@ async def _check_once(client=None) -> None:
                         msg.id,
                         retry_exc,
                     )
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 await mark_failed(session, msg.id, str(e)[:500])
                 logger.warning("Failed to send scheduled message %s: %s", msg.id, e)
@@ -104,21 +108,17 @@ async def _check_once(client=None) -> None:
 async def scheduled_messages_loop() -> None:
     """Точка входа: получает клиент userbot и передаёт в чистую бизнес-логику."""
     while True:
-        # Защита от наложения: если предыдущий тик ещё не завершён — пропускаем
-        if _overlap_guard.locked():
-            await asyncio.sleep(SCHEDULED_TICK_SECONDS)
-            continue
-        await _overlap_guard.acquire()
-        try:
-            from src.config import settings
-            from src.core.infra.userbot_gateway import get_userbot_gateway
+        async with _overlap_guard:
+            try:
+                from src.config import settings
+                from src.core.infra.userbot_gateway import get_userbot_gateway
 
-            client = get_userbot_gateway().get_client(settings.owner_telegram_id)
-            if client is None:
-                logger.debug("Userbot not available, skipping scheduled tick")
-            await _check_once(client)
-        except Exception:
-            logger.exception("scheduled-messages tick failed")
-        finally:
-            _overlap_guard.release()
+                client = get_userbot_gateway().get_client(settings.owner_telegram_id)
+                if client is None:
+                    logger.debug("Userbot not available, skipping scheduled tick")
+                await _check_once(client)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("scheduled-messages tick failed")
         await asyncio.sleep(SCHEDULED_TICK_SECONDS)

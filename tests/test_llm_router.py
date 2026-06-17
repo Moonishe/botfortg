@@ -374,7 +374,7 @@ async def test_circuit_breaker_max_timeout_cap():
 @pytest.mark.asyncio
 async def test_provider_metrics_initial_state():
     """Новый _ProviderMetrics: success_rate=1.0, score=1.0 (exploration bias)."""
-    from src.llm.router import _ProviderMetrics
+    from src.llm.provider_manager import _ProviderMetrics
 
     m = _ProviderMetrics()
     assert m.success_rate == 1.0
@@ -386,7 +386,7 @@ async def test_provider_metrics_initial_state():
 @pytest.mark.asyncio
 async def test_provider_metrics_score_formula():
     """Score = 0.6*success_rate + 0.4*latency_score, c recency penalty."""
-    from src.llm.router import _ProviderMetrics
+    from src.llm.provider_manager import _ProviderMetrics
 
     m = _ProviderMetrics()
     # 100% success, avg 1s latency, no recent failure → score ≈ 0.96
@@ -413,7 +413,7 @@ async def test_provider_metrics_score_formula():
 @pytest.mark.asyncio
 async def test_provider_metrics_latency_normalization():
     """Латентность нормализуется: 0s → 1.0, >=10s → 0.0."""
-    from src.llm.router import _ProviderMetrics
+    from src.llm.provider_manager import _ProviderMetrics
 
     # Very fast provider
     fast = _ProviderMetrics()
@@ -435,7 +435,7 @@ async def test_provider_metrics_latency_normalization():
 @pytest.mark.asyncio
 async def test_record_provider_success_failure():
     """_record_provider_success и _record_provider_failure обновляют метрики."""
-    from src.llm.router import (
+    from src.llm.provider_manager import (
         _record_provider_success,
         _record_provider_failure,
         _PROVIDER_METRICS,
@@ -465,7 +465,7 @@ async def test_record_provider_success_failure():
 @pytest.mark.asyncio
 async def test_score_provider_unknown_returns_one():
     """Неизвестный провайдер получает score=1.0 (exploration)."""
-    from src.llm.router import _score_provider, _PROVIDER_METRICS
+    from src.llm.provider_manager import _score_provider, _PROVIDER_METRICS
 
     _PROVIDER_METRICS.clear()
     assert _score_provider("nonexistent", 1000.0) == 1.0
@@ -477,6 +477,8 @@ async def test_adaptive_sorting_failing_provider_last():
     from src.llm.router import (
         MultiKeyProvider,
         ProviderFallback,
+    )
+    from src.llm.provider_manager import (
         _PROVIDER_METRICS,
         _record_provider_failure,
         _record_provider_success,
@@ -513,6 +515,8 @@ async def test_adaptive_sorting_all_providers_succeed_first():
     from src.llm.router import (
         MultiKeyProvider,
         ProviderFallback,
+    )
+    from src.llm.provider_manager import (
         _PROVIDER_METRICS,
     )
     from src.llm.base import ChatMessage
@@ -539,6 +543,8 @@ async def test_adaptive_sorting_embed_unchanged():
     from src.llm.router import (
         MultiKeyProvider,
         ProviderFallback,
+    )
+    from src.llm.provider_manager import (
         _PROVIDER_METRICS,
         _record_provider_failure,
     )

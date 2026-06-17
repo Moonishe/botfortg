@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -144,6 +145,9 @@ async def get(text: str, model: str = "") -> list[float] | None:
             except Exception:
                 logger.debug("Non-critical error", exc_info=True)
             return embedding
+    except sqlite3.OperationalError:
+        logger.warning("SQLite operational error in embedding cache", exc_info=True)
+        raise
     except Exception:
         logger.warning("SQLite read failed for embedding cache", exc_info=True)
 

@@ -52,8 +52,8 @@ class SpecializedRouter:
         )
         return selected
 
-    @classmethod
-    def classify_task(cls, text: str) -> str:
+    @staticmethod
+    def classify_task(text: str) -> str:
         """Быстрая эвристическая классификация без вызова LLM.
 
         Правила (в порядке приоритета):

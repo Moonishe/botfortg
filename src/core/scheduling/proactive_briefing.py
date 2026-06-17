@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, UTC
 from functools import partial
 
-from sqlalchemy import case, select, func, and_, or_, desc
+from sqlalchemy import case, select, func, and_, or_, desc, update
 
 from src.config import settings
 from src.core.memory.memory_fuel import get_fuel_stats
@@ -24,6 +24,7 @@ from src.db.models import (
     Memory,
     Message,
     Notification,
+    UserSettings,
 )
 from src.db.repo import (
     get_memory_stats,
@@ -54,14 +55,15 @@ class BriefingData:
     overdue_commitments: list[dict] = field(default_factory=list)
     today_commitments: list[dict] = field(default_factory=list)
     recent_memories: int = 0
-    memory_stats: dict = None  # статистика по памяти
-    fuel_stats: dict = None  # статистика топлива памяти
-    bridges: list = None  # смысловые мосты между контактами
-    cross_insights: list = None  # инсайты по связям между контактами
-    tag_stats: dict = None  # статистика по тегам
-    health: dict = None  # здоровье памяти
+    memory_stats: dict | None = None  # статистика по памяти
+    fuel_stats: dict | None = None  # статистика топлива памяти
+    bridges: list | None = None  # смысловые мосты между контактами
+    cross_insights: list | None = None  # инсайты по связям между контактами
+    tag_stats: dict | None = None  # статистика по тегам
+    health: dict | None = None  # здоровье памяти
     emotional_trend: str | None = None  # эмоциональный тренд
-    radar_items: list = None  # Reply Radar (list[RadarItem])
+    radar_items: list | None = None  # Reply Radar (list[RadarItem])
+    layer_stats: dict | None = None  # статистика по временным слоям памяти
 
     def __post_init__(self) -> None:
         if self.waiting_reply is None:
@@ -70,12 +72,22 @@ class BriefingData:
             self.overdue_commitments = []
         if self.today_commitments is None:
             self.today_commitments = []
+        if self.memory_stats is None:
+            self.memory_stats = {}
+        if self.fuel_stats is None:
+            self.fuel_stats = {}
         if self.bridges is None:
             self.bridges = []
         if self.cross_insights is None:
             self.cross_insights = []
+        if self.tag_stats is None:
+            self.tag_stats = {}
+        if self.health is None:
+            self.health = {}
         if self.radar_items is None:
             self.radar_items = []
+        if self.layer_stats is None:
+            self.layer_stats = {}
 
 
 async def collect_briefing_data(owner_id: int) -> BriefingData:
@@ -544,6 +556,7 @@ async def proactive_briefing_loop(owner_id: int) -> None:
             await asyncio.sleep(settings.proactive_briefing_check_sec)
             continue
         async with _overlap_guard:
+            brief_sent = False
             try:
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_id)
@@ -559,16 +572,31 @@ async def proactive_briefing_loop(owner_id: int) -> None:
                     slot_start_tz = now_tz.replace(
                         hour=9, minute=0, second=0, microsecond=0
                     )
-                    slot_start_utc = slot_start_tz.astimezone(UTC).replace(
-                        tzinfo=None
-                    )
+                    slot_start_utc = slot_start_tz.astimezone(UTC).replace(tzinfo=None)
 
                     async with get_session() as session:
-                        owner = await get_or_create_user(session, owner_id)
-                        if owner.settings.proactive_last_sent == slot_start_utc:
+                        # Atomic check-and-set via conditional UPDATE.
+                        # Two instances (manual trigger + auto loop, or two
+                        # workers) would otherwise both read the stale value
+                        # of proactive_last_sent and both proceed to send a
+                        # duplicate morning briefing. The UPDATE filters on
+                        # the *current* value being != slot_start_utc, so
+                        # only the first caller wins the row; everyone else
+                        # sees rowcount == 0 and skips.
+                        result = await session.execute(
+                            update(UserSettings)
+                            .where(
+                                UserSettings.user_id == owner_id,
+                                or_(
+                                    UserSettings.proactive_last_sent != slot_start_utc,
+                                    UserSettings.proactive_last_sent.is_(None),
+                                ),
+                            )
+                            .values(proactive_last_sent=slot_start_utc)
+                        )
+                        if result.rowcount == 0:
                             await asyncio.sleep(settings.proactive_briefing_check_sec)
                             continue
-                        owner.settings.proactive_last_sent = slot_start_utc
                         await session.commit()
 
                     from src.core.infra.settings_cache import invalidate_settings_cache
@@ -582,10 +610,15 @@ async def proactive_briefing_loop(owner_id: int) -> None:
                         priority=Notification.PRIORITY_MEDIUM,
                         category="morning",
                     )
-                    await asyncio.sleep(3600)  # не повторять в этот час
+                    brief_sent = True
 
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Briefing loop error")
+        if brief_sent:
+            await asyncio.sleep(3600)  # не повторять в этот час
+            continue
         await asyncio.sleep(settings.proactive_briefing_check_sec)
 
 

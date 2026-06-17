@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -31,6 +32,7 @@ from src.core.contacts.contact_resolver import ContactCandidate, resolve
 from src.db.repo import (
     add_watched_peer,
     get_contact,
+    get_contacts_by_peer_ids,
     get_or_create_user,
     get_watched_peers,
     is_peer_watched,
@@ -44,6 +46,9 @@ from src.userbot.manager import UserbotManager
 
 
 logger = logging.getLogger(__name__)
+
+# Concurrency limit for memory extraction across multiple contacts.
+_EXTRACT_SEM = asyncio.Semaphore(3)
 router = Router(name="chat_cmd")
 router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
@@ -114,6 +119,21 @@ async def _ensure_client(message: Message, userbot_manager: UserbotManager):
     return client
 
 
+def _parse_peer_id(callback_data: str) -> int | None:
+    """Безопасно извлекает peer_id из callback_data и валидирует формат.
+
+    Поддерживает как 3-сегментные (chat:pick:123), так и 4-сегментные
+    (chat:summary:123:50) callback_data.
+    """
+    parts = callback_data.split(":")
+    if len(parts) < 3:
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
+
+
 @router.message(Command("chat"))
 async def cmd_chat(
     message: Message, command: CommandObject, userbot_manager: UserbotManager
@@ -132,20 +152,23 @@ async def cmd_chat(
         # Показываем недавние контакты
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            from src.db.repo import fetch_chat_messages, list_contacts
+            from src.db.repo import fetch_latest_messages_per_contact, list_contacts
 
             contacts = await list_contacts(
                 session, owner, kinds=("user",), include_bots=False
             )
-            # Берём последние сообщения для каждого контакта, сортируем по дате
-            recent = []  # (display_name, peer_id, date)
+            # Берём последние сообщения для каждого контакта одним batch-запросом
+            peer_ids = [ct.peer_id for ct in contacts[:30] if not ct.is_bot]
+            latest_by_peer = await fetch_latest_messages_per_contact(
+                session, owner, peer_ids, limit=1
+            )
+            recent = []
             for ct in contacts[:30]:
                 if ct.is_bot:
                     continue
-                msgs = await fetch_chat_messages(session, owner, ct.peer_id, limit=1)
+                msgs = latest_by_peer.get(ct.peer_id, [])
                 if msgs:
                     recent.append((ct.display_name, ct.peer_id, msgs[0].date))
-
             recent.sort(key=lambda x: x[2], reverse=True)
             top5 = recent[:5]
 
@@ -218,11 +241,10 @@ async def cb_cancel(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("chat:pick:"))
 async def cb_pick(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
-    parts = callback.data.split(":")
-    if len(parts) < 3:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
@@ -237,11 +259,10 @@ async def cb_pick(callback: CallbackQuery, userbot_manager: UserbotManager) -> N
 
 @router.callback_query(F.data.startswith("chat:watch:"))
 async def cb_watch(callback: CallbackQuery) -> None:
-    parts = callback.data.split(":")
-    if len(parts) < 3:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
@@ -259,11 +280,10 @@ async def cb_watch(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("chat:unwatch:"))
 async def cb_unwatch(callback: CallbackQuery) -> None:
-    parts = callback.data.split(":")
-    if len(parts) < 3:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
@@ -281,9 +301,15 @@ async def cb_unwatch(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("chat:summary:"))
 async def cb_summary(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     parts = callback.data.split(":")
-    peer_id = int(parts[2])
-    limit = int(parts[3]) if len(parts) >= 4 else 50
+    try:
+        limit = int(parts[3]) if len(parts) >= 4 else 50
+    except (IndexError, ValueError):
+        limit = 50
     await callback.answer("Подгружаю чат…")
     if callback.message:
         await callback.message.edit_text("⏳ Подгружаю последние сообщения…")
@@ -298,9 +324,15 @@ async def cb_summary(callback: CallbackQuery, userbot_manager: UserbotManager) -
 
 @router.callback_query(F.data.startswith("chat:tasks:"))
 async def cb_tasks(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     parts = callback.data.split(":")
-    peer_id = int(parts[2])
-    limit = int(parts[3]) if len(parts) >= 4 else 50
+    try:
+        limit = int(parts[3]) if len(parts) >= 4 else 50
+    except (IndexError, ValueError):
+        limit = 50
     await callback.answer("Извлекаю задачи…")
     if callback.message:
         await callback.message.edit_text("⏳ Анализирую переписку…")
@@ -315,9 +347,15 @@ async def cb_tasks(callback: CallbackQuery, userbot_manager: UserbotManager) -> 
 
 @router.callback_query(F.data.startswith("chat:draft:"))
 async def cb_draft(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     parts = callback.data.split(":")
-    peer_id = int(parts[2])
-    limit = int(parts[3]) if len(parts) >= 4 else 50
+    try:
+        limit = int(parts[3]) if len(parts) >= 4 else 50
+    except (IndexError, ValueError):
+        limit = 50
     await callback.answer("Готовлю черновик…")
     if callback.message:
         await callback.message.edit_text("⏳ Пишу черновик ответа…")
@@ -332,9 +370,15 @@ async def cb_draft(callback: CallbackQuery, userbot_manager: UserbotManager) -> 
 
 @router.callback_query(F.data.startswith("chat:catchup:"))
 async def cb_catchup(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     parts = callback.data.split(":")
-    peer_id = int(parts[2])
-    limit = int(parts[3]) if len(parts) >= 4 else 50
+    try:
+        limit = int(parts[3]) if len(parts) >= 4 else 50
+    except (IndexError, ValueError):
+        limit = 50
     await callback.answer("Подгружаю историю…")
     if callback.message:
         await callback.message.edit_text("⏳ Ищу где вы остановились…")
@@ -350,11 +394,10 @@ async def cb_catchup(callback: CallbackQuery, userbot_manager: UserbotManager) -
 @router.callback_query(F.data.startswith("chat:limit:"))
 async def cb_limit(callback: CallbackQuery) -> None:
     """Показывает меню выбора лимита сообщений."""
-    parts = callback.data.split(":")
-    if len(parts) < 3:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
 
     # Проверяем количество сообщений
     try:
@@ -391,7 +434,7 @@ async def cb_limit(callback: CallbackQuery) -> None:
     kb.row(
         InlineKeyboardButton(
             text="📋 Все сообщения",
-            callback_data=f"chat:summary:{peer_id}:{max(count, 500)}",
+            callback_data=f"chat:summary:{peer_id}:{count or 500}",
         )
     )
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"chat:pick:{peer_id}"))
@@ -508,18 +551,26 @@ async def cb_sync_opt(callback: CallbackQuery, userbot_manager: UserbotManager) 
         await callback.answer("Ошибка данных", show_alert=True)
         return
 
-    index = int(parts[2])
+    try:
+        index = int(parts[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+
     state_str = parts[3]
     state_parts = state_str.split(",")
 
     # Переключить бит
-    if index < len(state_parts):
+    if 0 <= index < len(state_parts):
         state_parts[index] = "1" if state_parts[index] == "0" else "0"
     new_state = ",".join(state_parts)
 
     # Получить список папок для перестроения клавиатуры
     client = userbot_manager.get_client(callback.from_user.id)
-    folder_titles = await _fetch_folder_titles(client) if client else []
+    if client is None:
+        await callback.answer("Сначала /login", show_alert=True)
+        return
+    folder_titles = await _fetch_folder_titles(client)
 
     if callback.message:
         await callback.message.edit_text(
@@ -698,47 +749,6 @@ async def cb_sync_cancel(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-async def _offer_memory_extraction(message: Message) -> None:
-    """Предлагает извлечь память из топ-чатов после prefetch."""
-    from src.db.repo import list_contacts
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        contacts = await list_contacts(
-            session,
-            owner,
-            kinds=("user",),
-            include_archived=False,
-        )
-
-    people = [c for c in contacts[:15] if not c.is_bot]
-    if not people:
-        return
-
-    kb = InlineKeyboardBuilder()
-    for c in people[:8]:
-        kb.row(
-            InlineKeyboardButton(
-                text=f"🧠 {c.display_name}",
-                callback_data=f"sync:mem:{c.peer_id}:{message.from_user.id}",
-            )
-        )
-    kb.row(
-        InlineKeyboardButton(
-            text="🧠 Все контакты", callback_data=f"sync:mem:all:{message.from_user.id}"
-        ),
-        InlineKeyboardButton(
-            text="❌ Пропустить", callback_data=f"sync:mem:skip:{message.from_user.id}"
-        ),
-    )
-    await message.answer(
-        "🧠 <b>Извлечь факты в память?</b>\n\n"
-        "Выбери контакты, из чатов с которыми извлечь важные факты (отношения, договорённости, эмоции). "
-        "Или «Все контакты» — обработаю всех людей.",
-        reply_markup=kb.as_markup(),
-    )
-
-
 @router.callback_query(F.data.startswith("sync:mem:"))
 async def cb_extract_memories(
     callback: CallbackQuery, userbot_manager: UserbotManager
@@ -748,7 +758,12 @@ async def cb_extract_memories(
         await callback.answer("Ошибка данных.", show_alert=True)
         return
     _, _, target, caller_id = parts[:4]
-    if int(caller_id) != callback.from_user.id:
+    try:
+        caller_id_int = int(caller_id)
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    if caller_id_int != callback.from_user.id:
         await callback.answer("Не твоя кнопка", show_alert=True)
         return
 
@@ -791,19 +806,25 @@ async def cb_extract_memories(
         await callback.answer()
         return
 
-    total = 0
-    for ct in targets:
-        try:
+    async def _extract_one(ct: Any) -> int:
+        async with _EXTRACT_SEM:
             messages = await load_chat(
                 client, callback.from_user.id, ct.peer_id, limit=80
             )
-            count = await extract_and_save_memories(
+            return await extract_and_save_memories(
                 provider, callback.from_user.id, ct, messages
             )
-            if count:
-                total += count
-        except Exception:
+
+    results = await asyncio.gather(
+        *[_extract_one(ct) for ct in targets],
+        return_exceptions=True,
+    )
+    total = 0
+    for ct, result in zip(targets, results, strict=True):
+        if isinstance(result, Exception):
             logger.exception("memory extraction failed for %s", ct.display_name)
+        elif result:
+            total += result
 
     if callback.message:
         await callback.message.edit_text(
@@ -812,65 +833,13 @@ async def cb_extract_memories(
     await callback.answer()
 
 
-async def _auto_extract_memories(message: Message, client, owner) -> None:
-    """Авто-извлечение памяти без вопроса (fire-and-forget).
-
-    При холодном старте (warmup) извлекает из ВСЕХ контактов.
-    В штатном режиме — только из top-N (memory_warmup_max_contacts).
-    """
-    from src.db.repo import list_contacts
-    from src.core.memory.memory_warmup import should_full_extract
-    from src.config import settings
-
-    async with get_session() as session:
-        contacts = await list_contacts(
-            session, owner, kinds=("user",), include_archived=False
-        )
-        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
-    if provider is None:
-        return
-
-    # --- Warmup: все контакты при холодном старте ---
-    telegram_id = message.from_user.id
-    in_warmup = should_full_extract(
-        telegram_id,
-        idle_timeout_sec=settings.memory_warmup_idle_timeout_sec,
-    )
-
-    max_contacts = len(contacts) if in_warmup else settings.memory_warmup_max_contacts
-    targets = [c for c in contacts[:max_contacts] if not c.is_bot]
-    if not targets:
-        return
-
-    logger.info(
-        "auto_extract: %s mode, %d contacts",
-        "warmup" if in_warmup else "normal",
-        len(targets),
-    )
-
-    total = 0
-    for ct in targets:
-        try:
-            msgs = await load_chat(client, message.from_user.id, ct.peer_id, limit=60)
-            count = await extract_and_save_memories(provider, telegram_id, ct, msgs)
-            total += count
-        except Exception:
-            logger.exception("auto extract memories failed")
-
-    if total:
-        mode_label = "🔥 Warmup" if in_warmup else "🧠"
-        await message.answer(
-            f"{mode_label} Авто-память: +{total} фактов из {len(targets)} контактов."
-        )
-
-
 # ──────────────────────────────────────────────
 # Smart memory после синхронизации
 # ──────────────────────────────────────────────
 
 
 async def _offer_smart_memory_extraction(
-    message: Message, owner, has_private: bool
+    message: Message, owner: object, has_private: bool
 ) -> None:
     """Предлагает запустить smart-анализ диалогов после синхронизации."""
     if not has_private:
@@ -934,7 +903,12 @@ async def cb_smart_memories(
         await callback.answer()
         return
 
-    if int(caller_id) != callback.from_user.id:
+    try:
+        caller_id_int = int(caller_id)
+    except ValueError:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    if caller_id_int != callback.from_user.id:
         await callback.answer("Не твоя кнопка", show_alert=True)
         return
 
@@ -1078,7 +1052,7 @@ async def cmd_recent(message: Message) -> None:
     """Показать сводку по последней активности в чатах."""
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        from src.db.repo import list_contacts, fetch_chat_messages
+        from src.db.repo import list_contacts, fetch_latest_messages_per_contact
 
         contacts = await list_contacts(
             session, owner, kinds=("user",), include_archived=False
@@ -1089,13 +1063,17 @@ async def cmd_recent(message: Message) -> None:
         await message.answer("Нет активных чатов.")
         return
 
+    async with get_session() as session:
+        latest_by_peer = await fetch_latest_messages_per_contact(
+            session, owner, [ct.peer_id for ct in active[:10]], limit=3
+        )
+
     lines = []
     for ct in active[:10]:
-        async with get_session() as session:
-            msgs = await fetch_chat_messages(session, owner, ct.peer_id, limit=3)
+        msgs = latest_by_peer.get(ct.peer_id, [])
         last_date = msgs[0].date.strftime("%d.%m %H:%M") if msgs else "?"
         last_msg = (
-            msgs[0].text or msgs[0].transcript or f"[{msgs[0].kind}]" if msgs else "?"
+            (msgs[0].text or msgs[0].transcript or f"[{msgs[0].kind}]") if msgs else "?"
         )
         if len(last_msg) > 50:
             last_msg = last_msg[:47] + "…"
@@ -1123,24 +1101,26 @@ async def cmd_watchlist(message: Message) -> None:
         )
         return
 
-    # Получаем имена контактов
+    # Получаем имена контактов одним запросом
     lines = [f"👁 <b>Отслеживаемые чаты ({len(watched)})</b>\n"]
     kb = InlineKeyboardBuilder()
 
     async with get_session() as session:
-        for pid in sorted(watched):
-            contact = await get_contact(session, owner, pid)
-            name = contact.display_name if contact else f"ID:{pid}"
-            icon = {"user": "👤", "chat": "👥", "channel": "📢", "bot": "🤖"}.get(
-                contact.peer_kind if contact else "user", "💬"
+        contacts = await get_contacts_by_peer_ids(session, owner, watched)
+
+    for pid in sorted(watched):
+        contact = contacts.get(pid)
+        name = contact.display_name if contact else f"ID:{pid}"
+        icon = {"user": "👤", "chat": "👥", "channel": "📢", "bot": "🤖"}.get(
+            contact.peer_kind if contact else "user", "💬"
+        )
+        lines.append(f"{icon} <b>{name}</b>")
+        kb.row(
+            InlineKeyboardButton(
+                text=f"❌ Перестать следить за «{name}»",
+                callback_data=f"chat:unwatch:{pid}",
             )
-            lines.append(f"{icon} <b>{name}</b>")
-            kb.row(
-                InlineKeyboardButton(
-                    text=f"❌ Перестать следить за «{name}»",
-                    callback_data=f"chat:unwatch:{pid}",
-                )
-            )
+        )
 
     kb.row(InlineKeyboardButton(text="➕ Добавить чат", callback_data="watchlist:add"))
 
@@ -1165,11 +1145,10 @@ async def cb_watchlist_add(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("chat:story:"))
 async def cb_story(callback: CallbackQuery) -> None:
     """Показать историю отношений с контактом."""
-    parts = callback.data.split(":")
-    if len(parts) < 3:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
     from src.core.memory.memory_chain import build_chain_narrative
 
     narrative = await build_chain_narrative(peer_id, callback.from_user.id)
@@ -1190,11 +1169,10 @@ async def cb_story(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("chat:profile:"))
 async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
     """Показать профиль контакта."""
-    parts = callback.data.split(":")
-    if len(parts) < 3:
+    peer_id = _parse_peer_id(callback.data)
+    if peer_id is None:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
     client = userbot_manager.get_client(callback.from_user.id)
     if client is None:
         await callback.answer("Сначала /login", show_alert=True)
@@ -1203,16 +1181,6 @@ async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
-
-    from src.core.contacts.contact_resolver import ContactCandidate
-
-    _ = ContactCandidate(
-        peer_id=peer_id,
-        display_name=contact.display_name if contact else str(peer_id),
-        username=None,
-        peer_kind="user",
-        score=100,
-    )
 
     contact_name = contact.display_name if contact else str(peer_id)
 

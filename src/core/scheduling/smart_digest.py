@@ -24,6 +24,7 @@ _overlap_guard = asyncio.Lock()
 
 # module-level cache: owner_id -> sha256 of last sent digest text
 _last_digest_hash: dict[int, str] = {}
+_last_digest_hash_lock = asyncio.Lock()
 
 
 async def collect_recent_messages(
@@ -37,9 +38,7 @@ async def collect_recent_messages(
     Возвращает {peer_id: {"sender_name": str, "last_text": str,
                            "count": int, "urgency": str}}
     """
-    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(
-        minutes=since_minutes
-    )
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=since_minutes)
 
     result = await session.execute(
         select(Message)
@@ -173,15 +172,15 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
             try:
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_telegram_id)
-                    settings = owner.settings
+                    user_settings = owner.settings
 
-                    if not settings.smart_digest_enabled:
+                    if not user_settings.smart_digest_enabled:
                         await asyncio.sleep(60)
                         continue
 
                     now = datetime.now(UTC).replace(tzinfo=None)
-                    last_sent = settings.smart_digest_last_sent
-                    interval = settings.smart_digest_interval_min
+                    last_sent = user_settings.smart_digest_last_sent
+                    interval = user_settings.smart_digest_interval_min
 
                     if last_sent is not None:
                         elapsed = (now - last_sent).total_seconds() / 60
@@ -196,11 +195,12 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
 
                     # — duplicate suppression —
                     current_hash = hashlib.sha256(text.encode()).hexdigest()
-                    prev_hash = _last_digest_hash.get(owner.id)
+                    async with _last_digest_hash_lock:
+                        prev_hash = _last_digest_hash.get(owner.id)
                     if prev_hash == current_hash:
                         logger.info("duplicate digest skipped for owner %s", owner.id)
                         # still update last_sent so the interval clock resets
-                        settings.smart_digest_last_sent = now
+                        user_settings.smart_digest_last_sent = now
                         await session.commit()
                         await asyncio.sleep(60)
                         continue
@@ -211,8 +211,9 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                         priority=Notification.PRIORITY_MEDIUM,
                     )
 
-                    _last_digest_hash[owner.id] = current_hash
-                    settings.smart_digest_last_sent = now
+                    async with _last_digest_hash_lock:
+                        _last_digest_hash[owner.id] = current_hash
+                    user_settings.smart_digest_last_sent = now
                     await session.commit()
             except Exception:
                 logger.exception("smart_digest_loop tick failed")

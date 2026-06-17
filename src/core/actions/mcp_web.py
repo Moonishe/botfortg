@@ -15,6 +15,7 @@ import asyncio
 import logging
 import re
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 _DDG_HTML_URL = "https://html.duckduckgo.com/html"
 _FETCH_TIMEOUT = 10  # seconds
 _MAX_FETCH_CHARS = 2000
+_MAX_BODY_BYTES = 1_000_000  # защита от oversized-ответов (1 MB)
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -152,7 +154,8 @@ async def _web_search(query: str, max_results: int = 5) -> dict[str, Any]:
             )
             resp.raise_for_status()
             # Validate final URL after redirects — must stay on DuckDuckGo
-            if not resp.url.startswith("https://html.duckduckgo.com/"):
+            parsed = urlparse(resp.url)
+            if parsed.scheme != "https" or parsed.netloc != "html.duckduckgo.com":
                 logger.warning(
                     "DDG search redirected to unexpected domain: %s", resp.url
                 )
@@ -241,16 +244,48 @@ async def _web_fetch(url: str) -> dict[str, Any]:
                 headers=_REQUEST_HEADERS,
                 timeout=_FETCH_TIMEOUT,
                 allow_redirects=False,
+                stream=True,
             )
             resp.raise_for_status()
         except requests.RequestException as exc:
             logger.warning("Fetch request failed for %r: %s", url, exc)
             raise
 
-        # Determine encoding from headers or content, fallback to utf-8
-        resp.encoding = resp.apparent_encoding or "utf-8"
+        # Content-Length pre-check
+        content_length = resp.headers.get("Content-Length")
+        if content_length and content_length.isdigit():
+            if int(content_length) > _MAX_BODY_BYTES:
+                resp.close()
+                raise requests.RequestException(
+                    f"Response body too large: {content_length} bytes "
+                    f"(max {_MAX_BODY_BYTES})"
+                )
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        # Determine encoding BEFORE closing the response
+        encoding = resp.apparent_encoding or resp.encoding or "utf-8"
+
+        # Stream reading with early abort
+        chunks: list[bytes] = []
+        total_read = 0
+        try:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk is None:
+                    continue
+                remaining = _MAX_BODY_BYTES - total_read
+                if remaining <= 0:
+                    break
+                if len(chunk) > remaining:
+                    chunks.append(chunk[:remaining])
+                    total_read += remaining
+                    break
+                chunks.append(chunk)
+                total_read += len(chunk)
+        finally:
+            resp.close()
+
+        raw_text = b"".join(chunks).decode(encoding, errors="replace")
+
+        soup = BeautifulSoup(raw_text, "html.parser")
 
         # Remove script / style elements
         for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
@@ -296,8 +331,6 @@ def _extract_ddg_url(href: str) -> str:
     if "uddg=" in href:
         match = re.search(r"uddg=([^&]+)", href)
         if match:
-            from urllib.parse import unquote
-
             return unquote(match.group(1))
     # Some results have direct URLs
     if href.startswith("http://") or href.startswith("https://"):

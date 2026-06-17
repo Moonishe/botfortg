@@ -111,14 +111,35 @@ async def get_contact(session: AsyncSession, user, peer_id: int) -> Contact | No
     return result.scalar_one_or_none()
 
 
+async def get_contacts_by_peer_ids(
+    session: AsyncSession, user, peer_ids: set[int]
+) -> dict[int, Contact]:
+    """Batch-load contacts for many peer_ids in one query.
+
+    Returns a mapping peer_id -> Contact for contacts that exist.
+    """
+    if not peer_ids:
+        return {}
+    result = await session.execute(
+        select(Contact).where(
+            Contact.user_id == user.id,
+            Contact.peer_id.in_(list(peer_ids)),
+        )
+    )
+    return {contact.peer_id: contact for contact in result.scalars().all()}
+
+
 async def get_watched_peers(session: AsyncSession, user) -> set[int]:
     """Возвращает множество peer_id отслеживаемых чатов."""
+    # Ensure settings relationship is loaded (avoids MissingGreenletError
+    # when settings is a lazy-loaded relationship).
+    await session.refresh(user, ["settings"])
     raw = user.settings.watched_peers
     if not raw:
         return set()
     try:
         parsed = json.loads(raw)
-        return set(int(p) for p in parsed)
+        return {int(p) for p in parsed}
     except (json.JSONDecodeError, TypeError, ValueError):
         return set()
 
@@ -215,7 +236,14 @@ async def upsert_contact_profile(
     """Создаёт или обновляет профиль контакта.
 
     Переданные ``**kwargs`` применяются только если значение не None.
+
+    Race-safety: if two concurrent calls hit the ``profile is None`` branch
+    for the same ``(user_id, contact_id)`` pair, both INSERT and the loser
+    raises ``IntegrityError`` on flush. We use a SAVEPOINT so only the
+    failed INSERT is rolled back, not the entire transaction.
     """
+    from sqlalchemy.exc import IntegrityError
+
     result = await session.execute(
         select(ContactProfile).where(
             ContactProfile.user_id == user.id,
@@ -224,8 +252,59 @@ async def upsert_contact_profile(
     )
     profile = result.scalar_one_or_none()
     if profile is None:
-        profile = ContactProfile(user_id=user.id, contact_id=contact_id, **kwargs)
-        session.add(profile)
+        filtered = {k: v for k, v in kwargs.items() if v is not None}
+        try:
+            async with session.begin_nested():
+                profile = ContactProfile(
+                    user_id=user.id, contact_id=contact_id, **filtered
+                )
+                session.add(profile)
+                await session.flush()
+        except IntegrityError:
+            # Concurrent insert won — savepoint was rolled back automatically.
+            # Re-fetch the row that the other call created.
+            result = await session.execute(
+                select(ContactProfile).where(
+                    ContactProfile.user_id == user.id,
+                    ContactProfile.contact_id == contact_id,
+                )
+            )
+            profile = result.scalar_one_or_none()
+            if profile is None:
+                # Race loser + concurrent insert also failed — retry fresh
+                # Wrap in savepoint so a second IntegrityError doesn't blow up the caller's txn.
+                try:
+                    async with session.begin_nested():
+                        profile = ContactProfile(
+                            user_id=user.id, contact_id=contact_id, **filtered
+                        )
+                        session.add(profile)
+                        await session.flush()
+                except IntegrityError:
+                    # Double-race: another caller's retry also just inserted.
+                    # Re-fetch one last time.
+                    result = await session.execute(
+                        select(ContactProfile).where(
+                            ContactProfile.user_id == user.id,
+                            ContactProfile.contact_id == contact_id,
+                        )
+                    )
+                    profile = result.scalar_one_or_none()
+                    if profile is not None:
+                        for k, v in kwargs.items():
+                            if v is not None:
+                                setattr(profile, k, v)
+                    else:
+                        # Triple-race edge case — both retries failed.
+                        # Last resort: direct insert without contention context.
+                        profile = ContactProfile(
+                            user_id=user.id, contact_id=contact_id, **filtered
+                        )
+                        session.add(profile)
+            else:
+                for k, v in kwargs.items():
+                    if v is not None:
+                        setattr(profile, k, v)
     else:
         for k, v in kwargs.items():
             if v is not None:

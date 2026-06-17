@@ -198,7 +198,11 @@ async def cb_radar_why(callback: CallbackQuery):
     if len(parts) < 3:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
+    try:
+        peer_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверный формат", show_alert=True)
+        return
     telegram_id = callback.from_user.id
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
@@ -227,6 +231,9 @@ async def cb_radar_why(callback: CallbackQuery):
             lines.append(f"• {sanitize_html(h)}")
     if item.reply_window:
         lines.append(f"Лучшее время ответа: {item.reply_window}")
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно", show_alert=True)
+        return
     await callback.message.answer("\n".join(lines))
     await callback.answer()
 
@@ -238,7 +245,11 @@ async def cb_radar_snooze(callback: CallbackQuery):
     if len(parts) < 3:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
-    peer_id = int(parts[2])
+    try:
+        peer_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Неверный формат", show_alert=True)
+        return
     async with get_session() as session:
         from sqlalchemy import select
         from src.db.models import ConversationState

@@ -3,6 +3,7 @@
 Использует Qdrant (memory_facts) для поиска семантически близких фактов.
 """
 
+import asyncio
 import logging
 
 from src.db.models import Memory
@@ -115,21 +116,44 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
         if not provider:
             return []
 
-        bridges: list[dict] = []
-        seen_pairs: set[tuple[int, int]] = set()
+        candidates = active[:50]
+        texts = [m.fact for m in candidates if m.fact]
+        try:
+            embeddings = await provider.embed_batch(texts)
+        except Exception:
+            logger.debug(
+                "Failed to embed batch for cross-contact bridges", exc_info=True
+            )
+            return []
 
-        for m1 in active[:50]:  # макс 50 для производительности
-            try:
-                emb = await provider.embed(m1.fact)
-            except Exception:
-                continue
+        if not embeddings or len(embeddings) != len(texts):
+            return []
 
-            neighbors = await (await get_vector_store()).search_similar_memories(
+        vector_store = await get_vector_store()
+        indexed = list(zip(candidates, embeddings, strict=True))
+        valid = [(m, emb) for m, emb in indexed if emb]
+        search_tasks = [
+            vector_store.search_similar_memories(
                 user_id=owner.id,
                 embedding=emb,
                 threshold=0.75,
                 limit=5,
             )
+            for _, emb in valid
+        ]
+        search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+        bridges: list[dict] = []
+        seen_pairs: set[tuple[int, int]] = set()
+
+        for (m1, _emb), neighbors in zip(valid, search_results, strict=True):
+            if not isinstance(neighbors, list):
+                logger.debug(
+                    "Search failed for memory_id=%d in cross-contact bridges",
+                    m1.id,
+                )
+                continue
+
             for n in neighbors:
                 nid = n.get("memory_id", 0)
                 n_cid = n.get("contact_id", 0)
@@ -153,9 +177,7 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
                             }
                         )
                         if len(bridges) >= 5:
-                            break
-            if len(bridges) >= 5:
-                break
+                            return bridges
 
     return bridges
 
@@ -229,9 +251,11 @@ async def cross_contact_insights(owner_id: int) -> list[str]:
                     name1 = c1.display_name if c1 else str(cid1)
                     name2 = c2.display_name if c2 else str(cid2)
                     common_words = ", ".join(sorted(common)[:4])
-                    insights.append(
-                        f"🔗 И <b>{name1}</b>, и <b>{name2}</b> упоминали: {common_words}"
+                    line = (
+                        f"🔗 И <b>{name1}</b>, и <b>{name2}</b>"
+                        f" упоминали: {common_words}"
                     )
+                    insights.append(line)
                     if len(insights) >= 5:
                         break
             if len(insights) >= 5:
@@ -261,7 +285,8 @@ async def get_contact_graph(user_id: int, limit: int = 20) -> dict:
         limit: Максимальное число рёбер (по умолчанию 20).
 
     Возвращает:
-        {"nodes": ["Маша", "Петя", ...], "edges": [{"from": "...", "to": "...", "relation": "..."}, ...]}
+        {"nodes": ["Маша", "Петя", ...],
+         "edges": [{"from": "...", "to": "...", "relation": "..."}, ...]}
     """
     from sqlalchemy import select
 

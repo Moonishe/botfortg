@@ -10,7 +10,9 @@ from src.db.models._base import Base
 class AgentSession(Base):
     __tablename__ = "agent_sessions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
     session_type: Mapped[str] = mapped_column(String(32), default="chat")
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
@@ -26,7 +28,7 @@ class AgentSessionMessage(Base):
     __tablename__ = "agent_session_messages"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("agent_sessions.id"), index=True
+        Integer, ForeignKey("agent_sessions.id", ondelete="CASCADE"), index=True
     )
     role: Mapped[str] = mapped_column(String(16))  # user, assistant
     content: Mapped[str] = mapped_column(Text)

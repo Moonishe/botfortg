@@ -34,21 +34,21 @@ def _table_exists(table_name: str) -> bool:
 
 
 def _column_exists(table_name: str, column_name: str) -> bool:
-    """Проверить существование колонки через PRAGMA table_info (SQLite)."""
+    """Проверить существование колонки через SQLAlchemy inspector."""
     if not _table_exists(table_name):
         return False
     conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA table_info({table_name})"))
-    return any(row[1] == column_name for row in result)
+    inspector = sa.inspect(conn)
+    return column_name in {c["name"] for c in inspector.get_columns(table_name)}
 
 
 def _index_exists(index_name: str, table_name: str) -> bool:
-    """Проверить наличие индекса через PRAGMA index_list (SQLite)."""
+    """Проверить наличие индекса через SQLAlchemy inspector."""
     if not _table_exists(table_name):
         return False  # таблицы нет → индекса нет и не нужно создавать
     conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA index_list({table_name})"))
-    return any(row[1] == index_name for row in result)
+    inspector = sa.inspect(conn)
+    return index_name in {idx["name"] for idx in inspector.get_indexes(table_name)}
 
 
 def upgrade() -> None:

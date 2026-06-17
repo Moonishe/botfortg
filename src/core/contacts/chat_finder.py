@@ -77,13 +77,22 @@ def _safe_json(text: str) -> Any:
 
 
 async def _expand_keywords(provider: LLMProvider, query: str) -> list[str]:
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=_EXPAND_SYS),
-            ChatMessage(role="user", content=query),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=_EXPAND_SYS),
+                ChatMessage(role="user", content=query),
+            ],
+            heavy=False,
+        )
+    except Exception:
+        # LLM provider failures (timeout, API error, network) must not crash
+        # the whole contact search — degrade to using the raw query as the
+        # sole keyword. The local FTS branch still runs with it.
+        logger.warning(
+            "_expand_keywords: provider.chat failed — using raw query", exc_info=True
+        )
+        return [query]
     parsed = _safe_json(raw) or {}
     kws = parsed.get("keywords") if isinstance(parsed, dict) else None
     if not isinstance(kws, list):
@@ -115,13 +124,22 @@ async def _classify_contacts(
         items.append({"peer_id": c.peer_id, "name": c.display_name, "kind": kind})
     payload = json.dumps({"topic": query, "contacts": items}, ensure_ascii=False)
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=_CLASSIFY_SYS),
-            ChatMessage(role="user", content=payload),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=_CLASSIFY_SYS),
+                ChatMessage(role="user", content=payload),
+            ],
+            heavy=False,
+        )
+    except Exception:
+        # LLM provider failures must not crash the whole contact search —
+        # degrade to pure-text FTS hits without name scoring.
+        logger.warning(
+            "_classify_contacts: provider.chat failed — skipping name scoring",
+            exc_info=True,
+        )
+        return {}
     parsed = _safe_json(raw) or {}
     matches = parsed.get("matches") if isinstance(parsed, dict) else None
     out: dict[int, int] = {}
@@ -244,7 +262,22 @@ async def smart_find(
         owner, keywords, contact_by_pid, per_kw_limit=per_kw_limit
     )
     name_task = _classify_contacts(provider, query, contacts)
-    local_hits, name_scores = await asyncio.gather(local_task, name_task)
+    # return_exceptions=True: if either branch raises (e.g. LLM provider
+    # failure or DB error), degrade to the other branch instead of crashing
+    # the whole contact search.
+    _local_res, _name_res = await asyncio.gather(
+        local_task, name_task, return_exceptions=True
+    )
+    if isinstance(_local_res, BaseException):
+        logger.warning("local keyword search failed: %r", _local_res)
+        local_hits: dict[int, dict] = {}
+    else:
+        local_hits = _local_res
+    if isinstance(_name_res, BaseException):
+        logger.warning("name classification failed: %r", _name_res)
+        name_scores: dict[int, int] = {}
+    else:
+        name_scores = _name_res
 
     if not local_hits:
         tg_results = await asyncio.gather(

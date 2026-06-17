@@ -16,6 +16,7 @@ supersedes_count, pre_filter_reject_rate, extraction_latency.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -61,6 +62,14 @@ class MemoryMetricsSnapshot:
     recall_hit_rate: float = 0.0
     recall_cache_hit_rate: float = 0.0
 
+    # Compaction v2
+    compaction_facts_pruned: int = 0
+    compaction_facts_merged: int = 0
+    compaction_groups_compressed: int = 0
+    compaction_vectors_removed: int = 0
+    compaction_skills_extracted: int = 0
+    compaction_ratio: float = 0.0
+
     generated_at: str = ""
 
 
@@ -88,6 +97,13 @@ class MemoryMetricsCollector:
         self._recall_misses: int = 0
         self._recall_cache_hits: int = 0
         self._recall_cache_misses: int = 0
+        # Compaction v2
+        self._compaction_facts_pruned: int = 0
+        self._compaction_facts_merged: int = 0
+        self._compaction_groups_compressed: int = 0
+        self._compaction_vectors_removed: int = 0
+        self._compaction_skills_extracted: int = 0
+        self._compaction_ratio: float = 0.0
         # Facts count (external, set via set_fact_counts)
         self._total_facts: int = 0
         self._active_facts: int = 0
@@ -108,7 +124,7 @@ class MemoryMetricsCollector:
                 MetricPoint(
                     timestamp=time.time(),
                     value=score,
-                    tags={"components": str(components or {})},
+                    tags={"components": json.dumps(components or {})},
                 )
             )
             if len(self._health) > self.MAX_POINTS:
@@ -173,6 +189,16 @@ class MemoryMetricsCollector:
             else:
                 self._recall_cache_misses += 1
 
+    async def record_compaction(self, report) -> None:
+        """Записать метрики compaction pipeline v2."""
+        async with self._lock:
+            self._compaction_facts_pruned = getattr(report, "facts_pruned", 0)
+            self._compaction_facts_merged = getattr(report, "facts_merged", 0)
+            self._compaction_groups_compressed = getattr(report, "groups_compressed", 0)
+            self._compaction_vectors_removed = getattr(report, "vectors_removed", 0)
+            self._compaction_skills_extracted = getattr(report, "skills_extracted", 0)
+            self._compaction_ratio = getattr(report, "compression_ratio", 0.0)
+
     async def set_fact_counts(self, total: int, active: int, inactive: int) -> None:
         """Обновить счётчики фактов."""
         async with self._lock:
@@ -209,10 +235,8 @@ class MemoryMetricsCollector:
             if self._health:
                 # Try to parse components from last point tags
                 try:
-                    import json
-
                     snap.health_components = json.loads(
-                        self._health[-1].tags.get("components", "{}").replace("'", '"')
+                        self._health[-1].tags.get("components", "{}")
                     )
                 except Exception:
                     snap.health_components = {}
@@ -255,6 +279,14 @@ class MemoryMetricsCollector:
                 self._recall_cache_hits / rc_total if rc_total > 0 else 0.0
             )
 
+            # Compaction v2
+            snap.compaction_facts_pruned = self._compaction_facts_pruned
+            snap.compaction_facts_merged = self._compaction_facts_merged
+            snap.compaction_groups_compressed = self._compaction_groups_compressed
+            snap.compaction_vectors_removed = self._compaction_vectors_removed
+            snap.compaction_skills_extracted = self._compaction_skills_extracted
+            snap.compaction_ratio = self._compaction_ratio
+
             snap.generated_at = datetime.now(UTC).isoformat()
 
             return snap
@@ -274,10 +306,17 @@ class MemoryMetricsCollector:
             self._recall_misses = 0
             self._recall_cache_hits = 0
             self._recall_cache_misses = 0
+            self._compaction_facts_pruned = 0
+            self._compaction_facts_merged = 0
+            self._compaction_groups_compressed = 0
+            self._compaction_vectors_removed = 0
+            self._compaction_skills_extracted = 0
+            self._compaction_ratio = 0.0
             self._total_facts = 0
             self._active_facts = 0
             self._inactive_facts = 0
-            await self._snapshot_cache.clear()
+        # Clear cache outside lock — TTLCache.clear() is async & fast
+        await self._snapshot_cache.clear()
 
     # ---- Internal ----
 

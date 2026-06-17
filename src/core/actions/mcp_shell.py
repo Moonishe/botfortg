@@ -180,6 +180,12 @@ def _is_command_allowed(
     """
     effective_allowlist = allowlist if allowlist is not None else _ALLOWED_COMMANDS
 
+    # 0. Reject raw newlines before tokenization — they are consumed by
+    #    shlex.split() as separators but re-interpreted as command separators
+    #    by shells used in Docker/SSH backends.
+    if "\n" in command or "\r" in command:
+        return False, "Command contains newline or carriage return"
+
     # 1. Parse the command into tokens FIRST.
     #    shlex.split() handles quoting — dangerous chars inside quotes
     #    become literal parts of tokens and are harmless with shell=False.
@@ -267,7 +273,7 @@ def _is_command_allowed(
         "action": "str — 'run', 'check', or 'list_backends'",
         "command": "str — shell command to execute or check",
         "backend": "str — 'local' (default), 'docker', or 'ssh'",
-        "admin_mode": "bool — True для расширенного доступа (pip, git push, systemctl). Только для local backend.",
+        "admin_mode": "bool — True для расширенного доступа (pip, git push, systemctl). Только для local backend.",  # noqa: E501
     },
 )
 async def mcp_shell(
@@ -341,12 +347,22 @@ async def mcp_shell(
                 "message": f"Would execute on {backend!r}: {command.strip()}",
             }
 
-        # Normalise _confirmed: string "False" / "false" must NOT bypass the guard.
-        _confirmed = kwargs.get("_confirmed", False)
-        if isinstance(_confirmed, str):
-            _confirmed = _confirmed.strip().lower() in ("true", "1", "yes", "ok", "on")
+        # Normalise _confirmed: СТРОГО только настоящий boolean True.
+        # Раньше принималась разрешительная строковая логика ("true","1","yes"),
+        # что было несовместимо с канонической проверкой is_confirmed_truthy
+        # и mcp_server.py. Теперь — единый источник истины: только True.
+        from src.core.security import is_confirmed_truthy
+
+        _confirmed = is_confirmed_truthy(kwargs.get("_confirmed", False))
         if not _confirmed:
             return {"error": "requires confirmation"}
+
+        if admin_mode:
+            _admin_confirmed = is_confirmed_truthy(
+                kwargs.get("_admin_confirmed", False)
+            )
+            if not _admin_confirmed:
+                return {"error": ("admin_mode requires separate _admin_confirmed=True")}
 
         # ── Dispatch to backend ───────────────────────────────────────
         if backend == "local":
@@ -381,7 +397,7 @@ async def _list_backends() -> dict[str, Any]:
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                ["docker", "info"],
+                ["docker", "info"],  # noqa: S607 — system binary on PATH, allowlist-protected
                 capture_output=True,
                 timeout=10,
                 shell=False,
@@ -410,7 +426,7 @@ async def _list_backends() -> dict[str, Any]:
     ssh_available = False
     ssh_reason = ""
     try:
-        import asyncssh  # noqa: F401
+        import asyncssh  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
         if _SSH_HOST:
             ssh_available = True
@@ -572,7 +588,7 @@ async def _run_ssh(command: str) -> dict[str, Any]:
 
     # Guarded import.
     try:
-        import asyncssh  # noqa: F811
+        import asyncssh
     except ImportError:
         return {"error": "asyncssh not installed. Run: pip install asyncssh"}
 

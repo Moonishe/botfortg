@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,7 +100,7 @@ async def count_messages(
     user,
     peer_id: int,
 ) -> int:
-    """Возвращает общее количество сообщений в чате с peer_id для данного пользователя."""
+    """Return message count for a chat with peer_id for the user."""
     result = await session.execute(
         select(func.count())
         .select_from(Message)
@@ -218,38 +219,62 @@ async def upsert_conversation_state(
     last_outgoing_at=None,
     last_auto_reply_at=None,
 ) -> ConversationState:
-    """Создаёт или обновляет состояние диалога с контактом."""
-    result = await session.execute(
+    """Создаёт или обновляет состояние диалога с контактом (atomic upsert)."""
+    insert_data = {
+        "user_id": user.id,
+        "peer_id": peer_id,
+        "status": status or "active",
+        "unread_count": 1 if increment_unread else 0,
+        "last_incoming_at": last_incoming_at,
+        "last_outgoing_at": last_outgoing_at,
+        "last_auto_reply_at": last_auto_reply_at,
+    }
+    update_data: dict = {}
+    if status is not None:
+        update_data["status"] = status
+    if increment_unread:
+        update_data["unread_count"] = ConversationState.unread_count + 1
+    if last_incoming_at is not None:
+        update_data["last_incoming_at"] = last_incoming_at
+    if last_outgoing_at is not None:
+        update_data["last_outgoing_at"] = last_outgoing_at
+    if last_auto_reply_at is not None:
+        update_data["last_auto_reply_at"] = last_auto_reply_at
+
+    stmt = sqlite_insert(ConversationState).values(insert_data)
+    if update_data:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["user_id", "peer_id"],
+            set_=update_data,
+        )
+    else:
+        stmt = stmt.on_conflict_do_nothing(index_elements=["user_id", "peer_id"])
+    result = await session.execute(stmt)
+    await session.flush()
+
+    if not update_data or result.rowcount == 0:
+        # Fallback: either the row existed and we did nothing, or no update needed
+        row = await session.execute(
+            select(ConversationState).where(
+                ConversationState.user_id == user.id,
+                ConversationState.peer_id == peer_id,
+            )
+        )
+        return row.scalar_one()
+    # SQLite UPSERT: inserted_primary_key может быть None при ON CONFLICT UPDATE
+    pk = result.inserted_primary_key
+    if pk is not None:
+        cs = await session.get(ConversationState, pk)
+        if cs is not None:
+            return cs
+    # Fallback: fetch by compound key
+    row = await session.execute(
         select(ConversationState).where(
             ConversationState.user_id == user.id,
             ConversationState.peer_id == peer_id,
         )
     )
-    state = result.scalar_one_or_none()
-    if state is None:
-        state = ConversationState(
-            user_id=user.id,
-            peer_id=peer_id,
-            status=status or "active",
-            unread_count=1 if increment_unread else 0,
-            last_incoming_at=last_incoming_at,
-            last_outgoing_at=last_outgoing_at,
-            last_auto_reply_at=last_auto_reply_at,
-        )
-        session.add(state)
-    else:
-        if status is not None:
-            state.status = status
-        if increment_unread:
-            state.unread_count = (state.unread_count or 0) + 1
-        if last_incoming_at is not None:
-            state.last_incoming_at = last_incoming_at
-        if last_outgoing_at is not None:
-            state.last_outgoing_at = last_outgoing_at
-        if last_auto_reply_at is not None:
-            state.last_auto_reply_at = last_auto_reply_at
-    await session.flush()
-    return state
+    return row.scalar_one()
 
 
 async def get_conversation_state(
@@ -265,6 +290,84 @@ async def get_conversation_state(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def fetch_latest_message_per_contact(
+    session: AsyncSession,
+    user,
+    peer_ids: list[int],
+) -> dict[int, Message]:
+    """Return the latest Message for each peer_id in ONE query.
+
+    Uses ROW_NUMBER() window function partitioned by peer_id,
+    ordered by date descending, keeping only row_num=1.
+    """
+    if not peer_ids:
+        return {}
+
+    subq = (
+        select(
+            Message,
+            func.row_number()
+            .over(
+                partition_by=Message.peer_id,
+                order_by=Message.date.desc(),
+            )
+            .label("rn"),
+        )
+        .where(
+            Message.user_id == user.id,
+            Message.peer_id.in_(peer_ids),
+        )
+        .subquery()
+    )
+    aliased_msg = aliased(Message, subq)
+    result = await session.execute(select(aliased_msg, subq.c.rn).where(subq.c.rn == 1))
+    # result rows are tuples (Message_instance, rn_value)
+    return {row[0].peer_id: row[0] for row in result.all()}
+
+
+async def fetch_latest_messages_per_contact(
+    session: AsyncSession,
+    user,
+    peer_ids: list[int],
+    limit: int = 3,
+) -> dict[int, list[Message]]:
+    """Return up to *limit* latest Messages per peer_id in ONE query.
+
+    Uses ROW_NUMBER() window function partitioned by peer_id,
+    ordered by date descending, keeping rows with row_num <= limit.
+    """
+    if not peer_ids:
+        return {}
+
+    subq = (
+        select(
+            Message,
+            func.row_number()
+            .over(
+                partition_by=Message.peer_id,
+                order_by=Message.date.desc(),
+            )
+            .label("rn"),
+        )
+        .where(
+            Message.user_id == user.id,
+            Message.peer_id.in_(peer_ids),
+        )
+        .subquery()
+    )
+    aliased_msg = aliased(Message, subq)
+    result = await session.execute(
+        select(aliased_msg, subq.c.rn)
+        .where(subq.c.rn <= limit)
+        .order_by(aliased_msg.peer_id, subq.c.rn)
+    )
+    mapping: dict[int, list[Message]] = {}
+    for row in result.all():
+        msg = row[0]
+        mapping.setdefault(msg.peer_id, []).append(msg)
+    return mapping
 
 
 async def save_reaction(

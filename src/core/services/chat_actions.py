@@ -7,7 +7,8 @@
 Каждая action-функция:
 1. Загружает контекст (клиент, контакт, сообщения, LLM-провайдер)
 2. Вызывает LLM
-3. Возвращает структурированный результат — отображение остаётся за вызывающим хендлером.
+3. Возвращает структурированный результат.
+   Отображение остаётся за вызывающим хендлером.
 """
 
 from __future__ import annotations
@@ -130,7 +131,7 @@ async def get_chat_message_count(telegram_id: int, peer_id: int) -> int:
 async def summarize_chat_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
+    userbot_manager: object = None,  # legacy unused arg
     limit: int = 50,
 ) -> ChatActionResult | None:
     """Саммари последних сообщений с контактом."""
@@ -156,7 +157,7 @@ async def summarize_chat_action(
 async def extract_tasks_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
+    userbot_manager: object = None,  # legacy unused arg
     limit: int = 50,
 ) -> ChatActionResult | None:
     """Извлечение задач/обязательств из чата."""
@@ -195,7 +196,7 @@ async def extract_tasks_action(
 async def draft_reply_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
+    userbot_manager: object = None,  # legacy unused arg
     instruction: str = "",
     limit: int = 50,
 ) -> ChatActionResult | None:
@@ -218,17 +219,29 @@ async def draft_reply_action(
     async with get_session() as session:
         owner = await _get_or_create_user(session, telegram_id)
         action = await create_pending_action(
-            session, user_id=owner.id, kind="send_message", payload=payload
+            session,
+            user_id=owner.id,
+            kind="send_message",
+            payload=payload,
+            route="db",
+            verb="send",
+            risk="high",
+            human_summary="Отправить черновик ответа",
         )
+
+    from src.core.security import approval
 
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
             text="✅ Отправить",
-            callback_data=f"send:confirm:{action.id}:{action.hmac_signature or ''}",
+            callback_data=approval.format_callback(
+                "send", str(action.id), action.hmac_signature or ""
+            ),
         ),
         InlineKeyboardButton(
-            text="❌ Отмена", callback_data=f"send:cancel:{action.id}"
+            text="❌ Отмена",
+            callback_data=approval.format_cancel_callback("send", str(action.id)),
         ),
     )
 
@@ -246,7 +259,7 @@ async def draft_reply_action(
 async def catchup_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
+    userbot_manager: object = None,  # legacy unused arg
     limit: int = 50,
 ) -> ChatActionResult | None:
     """«Где мы остановились» с контактом."""
@@ -327,7 +340,7 @@ async def _load_memory_context(
 async def ask_chat_action(
     telegram_id: int,
     peer_id: int,
-    userbot_manager: object = None,  # kept for backward compat, unused — see UserbotGateway
+    userbot_manager: object = None,  # legacy unused arg
     user_query: str = "",
     limit: int = 50,
 ) -> ChatActionResult | None:
@@ -392,7 +405,11 @@ async def ask_chat_action(
 
     if user_query:
         truncated_query = user_query[:60] + "…" if len(user_query) > 60 else user_query
-        html = f"🤖 <b>Анализ чата «{contact_name}»</b>\n<i>Запрос: {_sanitize_html(truncated_query)}</i>\n\n{humanized}"
+        html = (
+            f"🤖 <b>Анализ чата «{contact_name}»</b>\n"
+            f"<i>Запрос: {_sanitize_html(truncated_query)}</i>\n\n"
+            f"{humanized}"
+        )
     else:
         html = f"🤖 <b>Анализ чата «{contact_name}»</b>\n\n{humanized}"
 
@@ -439,13 +456,15 @@ async def load_working_memory_context(telegram_id: int) -> str:
                 return ""
             lines = ["<working_memory>"]
             for e in active:
-                expires = (
-                    f" (истекает через {round((e.expires_at - now).total_seconds() / 60, 1)} мин)"
+                minutes = (
+                    round((e.expires_at - now).total_seconds() / 60, 1)
                     if e.expires_at
-                    else ""
+                    else 0.0
                 )
+                expires = f" (истекает через {minutes} мин)" if e.expires_at else ""
                 lines.append(
-                    f"• {_sanitize_html(e.key)} = {_sanitize_html(e.value[:200])}{expires}"
+                    f"• {_sanitize_html(e.key)} = "
+                    f"{_sanitize_html(e.value[:200])}{expires}"
                 )
             lines.append("</working_memory>")
             return "\n".join(lines)

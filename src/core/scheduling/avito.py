@@ -336,6 +336,8 @@ async def avito_checker_loop() -> None:
         async with _overlap_guard:
             try:
                 await _check_watches(settings.owner_telegram_id)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("avito checker tick failed")
         await asyncio.sleep(settings.avito_check_sec)

@@ -24,8 +24,6 @@ from src.db.models import (
 )
 from typing import TYPE_CHECKING
 
-from src.core.contacts.contact_memory_digest import invalidate_contact_digest
-
 if TYPE_CHECKING:
     from src.core.actions.vector_store import VectorStore
 
@@ -550,8 +548,18 @@ async def add_memory(
         session.add(mem)
         await session.flush()
 
-    # Auto-link: connect to related facts via cosine similarity (Qdrant) or keyword overlap fallback
-    await _auto_link_memory(session, user, mem, embedding=embedding)
+    # Auto-link: connect to related facts via cosine similarity (Qdrant) or keyword overlap fallback.
+    # Best-effort — failure here must NOT roll back the already-flushed memory.
+    # Lazy imports inside _auto_link_memory (e.g. RelationType) can fail
+    # during circular-import resolution; treat auto-linking as optional.
+    try:
+        await _auto_link_memory(session, user, mem, embedding=embedding)
+    except Exception:
+        logger.warning(
+            "Auto-link failed for memory %d — memory saved anyway",
+            mem.id,
+            exc_info=True,
+        )
 
     try:
         from src.core.infra.hooks import hooks
@@ -612,6 +620,7 @@ async def add_memory(
 
     await invalidate("mem_")
     from src.core.memory.memory_recall import bump_recall_version
+    from src.core.contacts.contact_memory_digest import invalidate_contact_digest
 
     await bump_recall_version(user.telegram_id)
     if contact_id is not None:
@@ -726,7 +735,7 @@ async def _batch_link_memories(
                     (MemoryLink.source_id == src) & (MemoryLink.target_id == tgt),
                     w,
                 )
-                for src, tgt, w, rt in updates_to_apply
+                for src, tgt, w, _rt in updates_to_apply
             ],
             else_=MemoryLink.weight,
         )
@@ -737,7 +746,7 @@ async def _batch_link_memories(
                     (MemoryLink.source_id == src) & (MemoryLink.target_id == tgt),
                     rt if rt else MemoryLink.relation_type,
                 )
-                for src, tgt, w, rt in updates_to_apply
+                for src, tgt, _w, rt in updates_to_apply
             ],
             else_=MemoryLink.relation_type,
         )
@@ -749,7 +758,7 @@ async def _batch_link_memories(
                 or_(
                     *[
                         (MemoryLink.source_id == src) & (MemoryLink.target_id == tgt)
-                        for src, tgt, w, rt in updates_to_apply
+                        for src, tgt, _w, _rt in updates_to_apply
                     ]
                 ),
             )
@@ -986,6 +995,7 @@ async def delete_memory(session: AsyncSession, user, memory_id: int) -> bool:
     await invalidate("mem_")
     await session.flush()
     from src.core.memory.memory_recall import bump_recall_version
+    from src.core.contacts.contact_memory_digest import invalidate_contact_digest
 
     await bump_recall_version(user.telegram_id)
     if m.contact_id is not None:
@@ -1558,7 +1568,7 @@ async def get_memory_graph(
             graph.append({"memory_id": mid, "depth": depth})
         if depth < max_depth:
             # adj.get(mid, []) уже отсортирован по weight DESC из Phase 1
-            for target_id, weight, rel_type in adj.get(mid, [])[:10]:
+            for target_id, weight, _ in adj.get(mid, [])[:10]:
                 if target_id not in visited:
                     queue.append((target_id, depth + 1))
 

@@ -10,21 +10,22 @@ matching the TencentDB-Agent-Memory warmup pattern.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 import time
 
 logger = logging.getLogger(__name__)
 
 # { telegram_id: (last_extraction_at_monotonic, extraction_count) }
 _warmup_state: dict[int, tuple[float, int]] = {}
-# threading.Lock: sync-функции модуля вызываются из async-контекста,
-# но без await между чтением и записью — гонок нет. Lock добавлен
-# для защиты от гипотетической многопоточной нагрузки в будущем.
-_warmup_lock = threading.Lock()
+# asyncio.Lock: all callers run in the same event loop; using a threading
+# lock would block the event loop for purely in-memory state updates.
+_warmup_lock = asyncio.Lock()
 
 
-def should_full_extract(telegram_id: int, *, idle_timeout_sec: int = 86400) -> bool:
+async def should_full_extract(
+    telegram_id: int, *, idle_timeout_sec: int = 86400
+) -> bool:
     """Return True if warmup is active — extract ALL contacts, not just top-N.
 
     Cold start = no extraction in the last `idle_timeout_sec` seconds.
@@ -32,7 +33,7 @@ def should_full_extract(telegram_id: int, *, idle_timeout_sec: int = 86400) -> b
     After that, returns to normal (False).
     """
     now = time.monotonic()
-    with _warmup_lock:
+    async with _warmup_lock:
         state = _warmup_state.get(telegram_id)
 
         if state is None:
@@ -59,16 +60,16 @@ def should_full_extract(telegram_id: int, *, idle_timeout_sec: int = 86400) -> b
         return False
 
 
-def reset_warmup(telegram_id: int) -> None:
+async def reset_warmup(telegram_id: int) -> None:
     """Force reset warmup state for a user (e.g., after manual full extract)."""
-    with _warmup_lock:
+    async with _warmup_lock:
         _warmup_state.pop(telegram_id, None)
     logger.debug("Warmup forcibly reset for user %d", telegram_id)
 
 
-def get_warmup_count(telegram_id: int) -> int:
+async def get_warmup_count(telegram_id: int) -> int:
     """Return current warmup extraction count (0 if never extracted)."""
-    with _warmup_lock:
+    async with _warmup_lock:
         state = _warmup_state.get(telegram_id)
         return state[1] if state else 0
 

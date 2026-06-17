@@ -15,7 +15,8 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 
-from .free_text_common import _coerce_setting_value, invalidate_settings_cache
+from .free_text_common import _coerce_setting_value
+from src.core.infra.settings_cache import invalidate_settings_cache
 
 logger = logging.getLogger(__name__)
 router = Router(name="free_text_settings")

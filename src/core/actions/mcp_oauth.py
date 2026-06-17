@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 import httpx
 
 from src.config import settings
+from src.crypto import decrypt, encrypt
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,13 @@ _LOCAL_CALLBACK_PORT = 18080
 _LOCAL_CALLBACK_PATH = "/callback"
 _CALLBACK_TIMEOUT = 120.0  # seconds to wait for user authorisation
 _REFRESH_BUFFER = 60  # refresh when < 60 s remaining
+_SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _validate_server_name(name: str) -> None:
+    """Reject path traversal or unusual characters in OAuth server names."""
+    if not _SERVER_NAME_RE.match(name):
+        raise ValueError(f"Invalid OAuth server name: {name!r}")
 
 
 @dataclass
@@ -401,11 +410,7 @@ class MCPOAuthClient:
         token: OAuthToken,
     ) -> OAuthToken | None:
         """Refresh an expired token using the stored refresh token."""
-        token_data = self._load_token(server_name)
-        if not token_data:
-            return None
-
-        metadata = await self._fetch_metadata(token_data.get("server_url", ""))
+        metadata = await self._fetch_metadata(token.server_url)
         token_endpoint = metadata.get("token_endpoint", "")
         if not token_endpoint:
             return None
@@ -441,20 +446,27 @@ class MCPOAuthClient:
     def _save_token(
         self, server_name: str, token_data: dict[str, Any], server_url: str
     ) -> None:
-        """Persist *token_data* as a JSON file keyed by *server_name*."""
+        """Persist *token_data* as an encrypted JSON file keyed by *server_name*."""
+        _validate_server_name(server_name)
         data = dict(token_data)
         data["server_url"] = server_url
         path = TOKENS_DIR / f"{server_name}.json"
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(encrypt(json.dumps(data, indent=2)))
 
     def _load_token(self, server_name: str) -> dict[str, Any] | None:
         """Load persisted token data for *server_name*, or ``None``."""
+        _validate_server_name(server_name)
         path = TOKENS_DIR / f"{server_name}.json"
         if path.exists():
+            raw = path.read_text()
             try:
-                return json.loads(path.read_text())
-            except json.JSONDecodeError:
-                pass
+                return json.loads(decrypt(raw))
+            except (json.JSONDecodeError, ValueError):
+                # Legacy plaintext token — try to parse, will be re-encrypted on save.
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    pass
         return None
 
 

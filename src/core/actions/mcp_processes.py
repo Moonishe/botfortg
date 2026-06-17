@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from src.core.actions.tool_registry import ToolActionSpec, tool
+from src.core.security import is_confirmed_truthy
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ async def mcp_processes(
         else:  # kill
             if pid <= 0:
                 return {"error": "pid parameter must be a positive integer"}
-            if not bool(kwargs.get("_confirmed", False)):
+            if not is_confirmed_truthy(kwargs.get("_confirmed", False)):
                 return {
                     "error": "Action 'kill' requires confirmation",
                     "requires_confirmation": True,

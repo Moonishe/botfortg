@@ -7,6 +7,7 @@ import hashlib
 import logging
 import sqlite3
 import time
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -17,8 +18,9 @@ from sqlalchemy.orm import selectinload
 
 from src.bot.filters import OwnerOnly
 from src.config import settings
-from src.core.memory.context_files import _get_db_path
 from src.core.avito.service import ScanResult, SearchParams, scan_avito_cached
+from src.core.infra.text_sanitizer import sanitize_html
+from src.core.memory.context_files import _get_db_path
 from src.db.models._avito import AvitoListing, AvitoWatch
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -39,6 +41,52 @@ import threading as _threading
 
 _cache_lock = _threading.Lock()
 _QUERY_CACHE_TTL_SEC = 3600
+_AVITO_CACHE_MIGRATED = False
+
+
+def _cache_db_path() -> str:
+    return str(settings.data_dir / "avito_query_cache.db")
+
+
+def _maybe_migrate_avito_cache(conn: sqlite3.Connection) -> None:
+    """Copy legacy avito_query_cache rows from app.db if new DB is empty."""
+    global _AVITO_CACHE_MIGRATED
+    with _cache_lock:
+        if _AVITO_CACHE_MIGRATED:
+            return
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM avito_query_cache").fetchone()
+            if row and row[0] > 0:
+                _AVITO_CACHE_MIGRATED = True
+                return
+        except sqlite3.OperationalError:
+            _AVITO_CACHE_MIGRATED = True
+            return
+        old_db_path = _get_db_path()
+        if not old_db_path.exists():
+            _AVITO_CACHE_MIGRATED = True
+            return
+        try:
+            with sqlite3.connect(str(old_db_path)) as old_conn:
+                old_conn.execute("PRAGMA busy_timeout=30000")
+                old_rows = old_conn.execute(
+                    "SELECT hash, query, created_at FROM avito_query_cache"
+                ).fetchall()
+            if old_rows:
+                conn.executemany(
+                    "INSERT INTO avito_query_cache(hash, query, created_at) VALUES (?, ?, ?)",
+                    old_rows,
+                )
+                conn.commit()
+                logger.info(
+                    "Migrated %d avito query cache entries from %s",
+                    len(old_rows),
+                    old_db_path,
+                )
+        except Exception:
+            logger.debug("Avito query cache migration not possible", exc_info=True)
+        finally:
+            _AVITO_CACHE_MIGRATED = True
 
 
 def _evict_expired_cache_entries() -> None:
@@ -57,16 +105,25 @@ def _cache_put_query(hash_str: str, query: str) -> None:
         _QUERY_CACHE[hash_str] = (query, now)
     _evict_expired_cache_entries()
     try:
-        with sqlite3.connect(str(_get_db_path())) as conn:
+        with sqlite3.connect(_cache_db_path()) as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS avito_query_cache("
                 "hash TEXT PRIMARY KEY, query TEXT NOT NULL, created_at REAL)"
             )
+            _maybe_migrate_avito_cache(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO avito_query_cache(hash, query, created_at) "
                 "VALUES (?, ?, ?)",
                 (hash_str, query, now),
             )
+            # Prune rows older than 24h (TTL is 1h, 24h gives generous headroom)
+            cutoff = now - 86400
+            deleted = conn.execute(
+                "DELETE FROM avito_query_cache WHERE created_at < ?", (cutoff,)
+            ).rowcount
+            if deleted:
+                logger.debug("Pruned %d stale avito query cache rows", deleted)
             conn.commit()
     except Exception:
         logger.exception("_cache_put_query failed for hash=%s", hash_str)
@@ -81,7 +138,13 @@ def _cache_get_query(hash_str: str) -> str | None:
             query, _ = cached
             return query
     try:
-        with sqlite3.connect(str(_get_db_path())) as conn:
+        with sqlite3.connect(_cache_db_path()) as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS avito_query_cache("
+                "hash TEXT PRIMARY KEY, query TEXT NOT NULL, created_at REAL)"
+            )
+            _maybe_migrate_avito_cache(conn)
             row = conn.execute(
                 "SELECT query FROM avito_query_cache WHERE hash = ?", (hash_str,)
             ).fetchone()
@@ -96,7 +159,7 @@ def _cache_get_query(hash_str: str) -> str | None:
 
 async def _cb_hash(query: str) -> str:
     """Короткий хэш запроса для callback_data (макс 16 символов)."""
-    h = hashlib.md5(query.encode()).hexdigest()[:16]
+    h = hashlib.sha256(query.encode()).hexdigest()[:16]
     await asyncio.to_thread(_cache_put_query, h, query)
     return h
 
@@ -129,11 +192,18 @@ _RISK_DISPLAY: dict[str, str] = {
 }
 
 
-def _fmt_price(price: int | None) -> str:
+def _fmt_price(price: object) -> str:
     """Форматирует цену с разделителем тысяч."""
     if price is None:
         return "не указана"
-    return f"{price:,.0f}".replace(",", " ") + " ₽"
+    if isinstance(price, str):
+        try:
+            price = int(float(price.replace(" ", "").replace("\xa0", "")))
+        except (ValueError, TypeError):
+            return str(price) if price else "не указана"
+    if not isinstance(price, (int, float)):
+        return str(price) if price else "не указана"
+    return f"{int(price):,}".replace(",", " ") + " ₽"
 
 
 def _grade_label(grade: str | None, score: int | None) -> str:
@@ -144,20 +214,27 @@ def _grade_label(grade: str | None, score: int | None) -> str:
     return "Нет оценки"
 
 
-def _scam_line(scam: dict | None) -> str:
+def _scam_line(scam: dict[str, object] | None) -> str:
     """Форматирует строку мошенничества."""
     if not scam or not scam.get("is_suspicious"):
         return ""
-    risk = _RISK_DISPLAY.get(scam.get("risk", ""), scam.get("risk", ""))
-    reasons = "; ".join(scam.get("reasons", [])[:2])
-    return f"\n⚠️ Подозрительно ({risk}): {reasons}"
+    raw_risk = scam.get("risk") or ""
+    risk = _RISK_DISPLAY.get(str(raw_risk), str(raw_risk))
+    reasons_list = scam.get("reasons", []) or []
+    reasons = "; ".join(str(r) for r in reasons_list[:2])
+    return f"\n⚠️ Подозрительно ({sanitize_html(risk)}): {sanitize_html(reasons)}"
+
+
+def _deal_score_key(item: dict[str, Any]) -> int:
+    """Sort key for listings by deal_score."""
+    return (item.get("deal_score") or {}).get("score", 0)
 
 
 def _condition_line(condition: str | None) -> str:
     """Форматирует состояние."""
     if not condition:
         return ""
-    return f" | 📦 {condition}"
+    return f" | 📦 {sanitize_html(condition)}"
 
 
 def _delivery_line(has_delivery: bool) -> str:
@@ -167,15 +244,15 @@ def _delivery_line(has_delivery: bool) -> str:
 
 def _listing_summary(listing: dict, idx: int) -> str:
     """Короткое описание одного объявления для списка."""
-    title = listing.get("title", "Без названия")
+    title = sanitize_html(listing.get("title", "Без названия"))
     price = _fmt_price(listing.get("price"))
-    deal = listing.get("deal_score", {})
+    deal = listing.get("deal_score") or {}
     grade = deal.get("grade")
     score = deal.get("score")
     scam = listing.get("scam_check")
     condition = listing.get("condition")
     delivery = listing.get("delivery", False)
-    url = listing.get("url", "")
+    url = sanitize_html(listing.get("url", ""))
 
     lines = [
         f"<b>{idx}. {title}</b>",
@@ -242,7 +319,7 @@ async def cmd_avito(message: Message, command: CommandObject) -> None:
 
     if not result.listings:
         await status_msg.edit_text(
-            f"😕 По запросу «<i>{query}</i>» ничего не найдено.\n"
+            f"😕 По запросу «<i>{sanitize_html(query)}</i>» ничего не найдено.\n"
             f"Попробуй изменить запрос или проверь URL: {result.url}"
         )
         return
@@ -250,7 +327,7 @@ async def cmd_avito(message: Message, command: CommandObject) -> None:
     # Сортируем по deal_score (от лучшего к худшему)
     sorted_listings = sorted(
         result.listings,
-        key=lambda item: (item.get("deal_score") or {}).get("score", 0),
+        key=_deal_score_key,
         reverse=True,
     )
 
@@ -263,7 +340,7 @@ async def cmd_avito(message: Message, command: CommandObject) -> None:
     top5 = sorted_listings[:5]
 
     summary_parts = [
-        f"🔍 <b>Результаты поиска: «{query}»</b>\n",
+        f"🔍 <b>Результаты поиска: «{sanitize_html(query)}»</b>\n",
         f"📊 Всего: <b>{total}</b> объявлений",
     ]
     if new_count:
@@ -347,14 +424,17 @@ async def cmd_avito_list(message: Message) -> None:
     for w in watches:
         status = "✅ Активно" if w.is_active else "⏸ Пауза"
         threshold = (
-            f" (порог: {_fmt_price(w.price_threshold)})" if w.price_threshold else ""
+            f" (порог: {_fmt_price(w.price_threshold)})"
+            if w.price_threshold is not None
+            else ""
         )
         created = w.created_at.strftime("%d.%m.%Y %H:%M") if w.created_at else "?"
         # Получаем search_query из связанного listing
         listing = w.listing if hasattr(w, "listing") and w.listing else None
         query_text = listing.search_query if listing else f"listing_id={w.listing_id}"
+        safe_query = sanitize_html(query_text)
         lines.append(
-            f"• <b>{query_text}</b>{threshold}\n"
+            f"• <b>{safe_query}</b>{threshold}\n"
             f"  {status} | 📅 {created} | ID: <code>{w.id}</code>"
         )
 
@@ -365,7 +445,8 @@ async def cmd_avito_list(message: Message) -> None:
     for w in watches:
         listing = w.listing if hasattr(w, "listing") and w.listing else None
         query_text = listing.search_query if listing else f"#{w.id}"
-        btn_text = f"{'▶️' if w.is_active else '⏸'} {query_text[:30]}"
+        safe_btn = sanitize_html(query_text[:30])
+        btn_text = f"{'▶️' if w.is_active else '⏸'} {safe_btn}"
         kb.row(
             InlineKeyboardButton(
                 text=btn_text,
@@ -445,18 +526,18 @@ async def cb_avito_table(callback: CallbackQuery) -> None:
 
     sorted_listings = sorted(
         result.listings,
-        key=lambda item: (item.get("deal_score") or {}).get("score", 0),
+        key=_deal_score_key,
         reverse=True,
     )
 
     # Формируем таблицу в monospace
     header = f"{'#':<3} {'Цена':>10} {'Оценка':>5} {'Заголовок':<40}"
     sep = "─" * 62
-    rows = [f"<b>📊 Таблица: «{query}»</b>\n", f"<pre>{header}\n{sep}"]
+    rows = [f"<b>📊 Таблица: «{sanitize_html(query)}»</b>\n", f"<pre>{header}\n{sep}"]
 
     for i, listing in enumerate(sorted_listings[:30], 1):
         price = listing.get("price")
-        price_str = f"{price:>10,}" if price else "       N/A"
+        price_str = f"{price:>10,}" if price is not None else "       N/A"
         deal = listing.get("deal_score") or {}
         score = deal.get("score", 0)
         grade = deal.get("grade", "?")
@@ -467,9 +548,13 @@ async def cb_avito_table(callback: CallbackQuery) -> None:
     rows.append(f"\nВсего: {len(sorted_listings)} объявлений")
 
     text = "\n".join(rows)
-    for part in _split_message(text):
-        if callback.message:
-            await callback.message.answer(part, disable_web_page_preview=True)
+    parts = list(_split_message(text))
+    if not parts:
+        return
+    if callback.message:
+        await callback.message.edit_text(parts[0], disable_web_page_preview=True)
+    for part in parts[1:]:
+        await callback.message.answer(part, disable_web_page_preview=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -537,7 +622,7 @@ async def cb_avito_stats(callback: CallbackQuery) -> None:
     ]
 
     lines = [
-        f"📈 <b>Статистика цен: «{query}»</b>\n",
+        f"📈 <b>Статистика цен: «{sanitize_html(query)}»</b>\n",
         f"📊 Всего объявлений: <b>{len(listings)}</b>",
         f"💰 Средняя цена: <b>{_fmt_price(int(avg_price))}</b>",
         f"📉 Минимальная: <b>{_fmt_price(min_price)}</b>",
@@ -597,14 +682,17 @@ async def cb_avito_watch(callback: CallbackQuery) -> None:
     # Сохраняем лучшее объявление как привязку к watch
     best = max(
         result.listings,
-        key=lambda item: (item.get("deal_score") or {}).get("score", 0),
+        key=_deal_score_key,
     )
 
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
 
         # Upsert listing
-        avito_id = best.get("avito_id", "")
+        avito_id = best.get("avito_id", "") or ""
+        if not avito_id:
+            url = best.get("url", "") or ""
+            avito_id = "fallback_" + hashlib.sha1(url.encode()).hexdigest()[:16]
         stmt = select(AvitoListing).where(
             AvitoListing.user_id == owner.id,
             AvitoListing.avito_id == avito_id,
@@ -648,7 +736,7 @@ async def cb_avito_watch(callback: CallbackQuery) -> None:
         if existing_watch:
             if callback.message:
                 await callback.message.edit_text(
-                    f"ℹ️ «<i>{query}</i>» уже отслеживается (ID: <code>{existing_watch.id}</code>)."
+                    f"ℹ️ «<i>{sanitize_html(query)}</i>» уже отслеживается (ID: <code>{existing_watch.id}</code>)."
                 )
             return
 
@@ -662,7 +750,7 @@ async def cb_avito_watch(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.edit_text(
             f"🔔 Отслеживание добавлено!\n\n"
-            f"📌 <b>{query}</b>\n"
+            f"📌 <b>{sanitize_html(query)}</b>\n"
             f"💰 Лучшая цена: {_fmt_price(best.get('price'))}\n\n"
             f"Используй /avito_list для управления."
         )
@@ -752,87 +840,6 @@ async def cb_avito_watch_del(callback: CallbackQuery) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@router.callback_query(F.data.startswith("avito:detail:"))
-async def cb_avito_detail(callback: CallbackQuery) -> None:
-    """Показывает полные детали объявления."""
-    parts = callback.data.split(":")
-    if len(parts) < 3:
-        await callback.answer("Ошибка данных.", show_alert=True)
-        return
-
-    avito_id = parts[2]
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
-        stmt = select(AvitoListing).where(
-            AvitoListing.user_id == owner.id,
-            AvitoListing.avito_id == avito_id,
-        )
-        listing = (await session.execute(stmt)).scalar_one_or_none()
-
-    if listing is None:
-        await callback.answer("Объявление не найдено в БД.", show_alert=True)
-        return
-
-    # Формируем подробное описание
-    price = _fmt_price(listing.price)
-    condition = listing.condition or "не указано"
-    delivery = "✅ Да" if listing.delivery else "❌ Нет"
-    seller = listing.seller_name or "неизвестен"
-    rating = f"{listing.seller_rating:.1f}" if listing.seller_rating else "нет"
-    reviews = listing.seller_reviews if listing.seller_reviews is not None else "нет"
-
-    grade = "—"
-    if listing.deal_score is not None:
-        if listing.deal_score >= 85:
-            grade = "A"
-        elif listing.deal_score >= 70:
-            grade = "B"
-        elif listing.deal_score >= 55:
-            grade = "C"
-        elif listing.deal_score >= 40:
-            grade = "D"
-        else:
-            grade = "F"
-
-    lines = [
-        f"📋 <b>{listing.title}</b>\n",
-        f"💰 Цена: <b>{price}</b>",
-        f"⭐ Оценка: {_grade_label(grade, listing.deal_score)}",
-        f"📦 Состояние: {condition}",
-        f"🚚 Доставка: {delivery}",
-        f"👤 Продавец: {seller}",
-        f"📊 Рейтинг: {rating} | Отзывов: {reviews}",
-    ]
-
-    if listing.description:
-        desc = listing.description[:500]
-        if len(listing.description) > 500:
-            desc += "…"
-        lines.append(f"\n📝 <b>Описание:</b>\n{desc}")
-
-    if listing.is_suspicious:
-        risk = _RISK_DISPLAY.get("high", "🔴 Высокий")
-        reasons = listing.scam_reasons or "не указаны"
-        lines.append(f"\n⚠️ <b>Подозрительно</b> ({risk})")
-        lines.append(f"Причины: {reasons}")
-
-    if listing.url:
-        lines.append(f"\n🔗 {listing.url}")
-
-    first_seen = (
-        listing.first_seen_at.strftime("%d.%m.%Y %H:%M")
-        if listing.first_seen_at
-        else "?"
-    )
-    lines.append(f"\n📅 Впервые: {first_seen}")
-
-    text = "\n".join(lines)
-    if callback.message:
-        await callback.message.edit_text(text, disable_web_page_preview=True)
-    await callback.answer()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  Callback: avito:all:{query} — все результаты
 # ═══════════════════════════════════════════════════════════════════════════
@@ -868,11 +875,11 @@ async def cb_avito_all(callback: CallbackQuery) -> None:
 
     sorted_listings = sorted(
         result.listings,
-        key=lambda item: (item.get("deal_score") or {}).get("score", 0),
+        key=_deal_score_key,
         reverse=True,
     )
 
-    lines = [f"📋 <b>Все объявления: «{query}»</b>\n"]
+    lines = [f"📋 <b>Все объявления: «{sanitize_html(query)}»</b>\n"]
     for i, listing in enumerate(sorted_listings, 1):
         lines.append(_listing_summary(listing, i))
         lines.append("")
@@ -903,6 +910,9 @@ async def cb_avito_page(callback: CallbackQuery) -> None:
     except ValueError:
         await callback.answer("Ошибка данных.", show_alert=True)
         return
+    if offset < 0:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     query = await _cb_query(qh)
     if not query:
         await callback.answer("Ошибка данных.", show_alert=True)
@@ -929,16 +939,18 @@ async def cb_avito_page(callback: CallbackQuery) -> None:
 
     sorted_listings = sorted(
         result.listings,
-        key=lambda item: (item.get("deal_score") or {}).get("score", 0),
+        key=_deal_score_key,
         reverse=True,
     )
 
     total = len(sorted_listings)
+    if offset >= total:
+        offset = max(0, total - ITEMS_PER_PAGE)
     page_num = offset // ITEMS_PER_PAGE + 1
     page_items = sorted_listings[offset : offset + ITEMS_PER_PAGE]
 
     lines = [
-        f"📋 <b>Результаты: «{query}»</b>  (стр. {page_num})\n",
+        f"📋 <b>Результаты: «{sanitize_html(query)}»</b>  (стр. {page_num})\n",
     ]
     for i, listing in enumerate(page_items, offset + 1):
         lines.append(_listing_summary(listing, i))
@@ -961,15 +973,11 @@ async def cb_avito_page(callback: CallbackQuery) -> None:
     if offset + ITEMS_PER_PAGE < total:
         kb.add(
             InlineKeyboardButton(
-                text="Вперёд ▶",
+                text="Вперед ▶",
                 callback_data=f"avito:page:{qh}:{offset + ITEMS_PER_PAGE}",
             ),
         )
-
+    kb.adjust(2)
     if callback.message:
-        await callback.message.edit_text(
-            text,
-            reply_markup=kb.as_markup(),
-            disable_web_page_preview=True,
-        )
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
     await callback.answer()

@@ -55,6 +55,9 @@ yt-dlp>=2024.0.0
 psutil==7.2.2
 playwright==1.59.0
 
+# Парсинг cron-выражений (Generic Cron Scheduler)
+croniter>=6.0.0,<7.0
+
 # Миграции схемы БД
 alembic>=1.13
 

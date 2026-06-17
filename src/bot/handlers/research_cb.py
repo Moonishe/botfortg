@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from pathlib import Path
 
 from aiogram import F, Router
@@ -57,30 +58,28 @@ def _strip_markdown(text: str) -> str:
     ссылки — как ``title (url)``, таблицы — как строки с | разделителями.
     Удаляет только синтаксическую разметку (**Жирный** → Жирный).
     """
-    import re as _re
-
     # <details> / <summary> блоки — убрать теги, оставить содержимое
-    text = _re.sub(r"</?details>", "", text)
-    text = _re.sub(r"</?summary>", "", text)
+    text = re.sub(r"</?details>", "", text)
+    text = re.sub(r"</?summary>", "", text)
 
     # Markdown ссылки: [text](url) → text (url)
-    text = _re.sub(r"\[([^\]]*)\]\(([^)]*)\)", r"\1 (\2)", text)
+    text = re.sub(r"\[([^\]]*)\]\(([^)]*)\)", r"\1 (\2)", text)
 
     # Жирный/курсив: **text** → text, _text_ → text
-    text = _re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-    text = _re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", text)
 
     # ``code`` → code
-    text = _re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
 
     # Заголовки: # Heading → Heading
-    text = _re.sub(r"^#{1,6}\s+", "", text, flags=_re.MULTILINE)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
 
     # Разделители таблиц (|---|---|) — убрать
-    text = _re.sub(r"^\|[\s\-:|]+\|$", "", text, flags=_re.MULTILINE)
+    text = re.sub(r"^\|[\s\-:|]+\|$", "", text, flags=re.MULTILINE)
 
     # Пустые строки после удаления разделителей таблиц — схлопнуть
-    text = _re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
 

@@ -12,8 +12,41 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse, urlunparse
+
+from src.core.security.ssrf_guard import _check_ssrf_async
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_url(url: str | None, max_len: int = 60) -> str:
+    """Return URL without credentials, truncated for logging/status.
+
+    Strips user:pass from URLs like socks5://user:pass@host:port.
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        safe = urlunparse(
+            (
+                parsed.scheme,
+                parsed.hostname or "",
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+        if parsed.port:
+            safe = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+        out = safe[:max_len]
+        if len(safe) > max_len:
+            out += "…"
+        return out
+    except Exception:
+        return url[:max_len]
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Типы
@@ -87,6 +120,7 @@ class ProxyRotator:
         self._max_fails = max_fails
         self._lock = asyncio.Lock()
         self._idx = 0  # round-robin индекс
+        self._pending_tasks: set[asyncio.Task] = set()  # tracked rotate tasks
 
         for p in proxies:
             entry = ProxyEntry(
@@ -135,7 +169,7 @@ class ProxyRotator:
                             e.fail_count = 0
                             logger.info(
                                 "ProxyRotator: кулдаун истёк для %s...",
-                                e.url[:50],
+                                _safe_url(e.url, 50),
                             )
                     active = [
                         e
@@ -169,18 +203,21 @@ class ProxyRotator:
                 "ProxyRotator: ошибка %d/%d для %s...",
                 proxy.fail_count,
                 self._max_fails,
-                proxy.url[:50],
+                _safe_url(proxy.url, 50),
             )
 
-            if proxy.fail_count >= self._max_fails:
+            if proxy.fail_count >= self._max_fails and proxy.status != "changing":
                 if proxy.type == "mobile" and proxy.change_ip_url:
                     # Мобильный прокси — пробуем сменить IP
                     proxy.status = "changing"
                     logger.info(
-                        "ProxyRotator: запуск смены IP для %s...", proxy.url[:50]
+                        "ProxyRotator: запуск смены IP для %s...",
+                        _safe_url(proxy.url, 50),
                     )
                     # Запускаем смену IP в фоне, не блокируем
-                    asyncio.create_task(self._do_rotate_ip(proxy))
+                    task = asyncio.create_task(self._do_rotate_ip(proxy))
+                    self._pending_tasks.add(task)
+                    task.add_done_callback(self._pending_tasks.discard)
                 else:
                     # Статический прокси — кулдаун
                     proxy.status = "cooldown"
@@ -188,7 +225,7 @@ class ProxyRotator:
                     logger.warning(
                         "ProxyRotator: кулдаун %d сек для %s...",
                         self._cooldown_sec,
-                        proxy.url[:50],
+                        _safe_url(proxy.url, 50),
                     )
 
     async def rotate_ip(self, proxy: ProxyEntry) -> bool:
@@ -208,7 +245,7 @@ class ProxyRotator:
             counts[e.status] = counts.get(e.status, 0) + 1
             entries_data.append(
                 {
-                    "url_preview": e.url[:60] + "..." if len(e.url) > 60 else e.url,
+                    "url_preview": _safe_url(e.url, 60),
                     "type": e.type,
                     "status": e.status,
                     "fail_count": e.fail_count,
@@ -225,6 +262,26 @@ class ProxyRotator:
             entries=entries_data,
         )
 
+    async def shutdown(self, timeout: float = 10.0) -> None:
+        """Graceful shutdown: cancel pending rotate tasks and drain them."""
+        async with self._lock:
+            tasks = list(self._pending_tasks)
+            self._pending_tasks.clear()
+        if not tasks:
+            return
+        for t in tasks:
+            t.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            logger.warning(
+                "ProxyRotator: shutdown timed out with %d pending tasks", len(tasks)
+            )
+        logger.info("ProxyRotator: %d pending rotate tasks drained", len(tasks))
+
     # ── Приватные методы ───────────────────────────────────────────────────
 
     async def _do_rotate_ip(self, proxy: ProxyEntry) -> bool:
@@ -234,13 +291,27 @@ class ProxyRotator:
         для защиты от гонки данных с get_proxy().
         """
         if not proxy.change_ip_url:
-            logger.warning("ProxyRotator: нет change_ip_url для %s", proxy.url[:50])
+            logger.warning(
+                "ProxyRotator: нет change_ip_url для %s", _safe_url(proxy.url, 50)
+            )
             async with self._lock:
                 proxy.status = "cooldown"
                 proxy.cooldown_until = time.time() + self._cooldown_sec
             return False
 
         try:
+            ssrf_error = await _check_ssrf_async(proxy.change_ip_url)
+            if ssrf_error:
+                logger.warning(
+                    "ProxyRotator: change_ip_url SSRF blocked for %s: %s",
+                    _safe_url(proxy.url, 50),
+                    ssrf_error.get("error", "unknown"),
+                )
+                async with self._lock:
+                    proxy.status = "cooldown"
+                    proxy.cooldown_until = time.time() + self._cooldown_sec
+                return False
+
             import httpx
 
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -252,7 +323,8 @@ class ProxyRotator:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     logger.info(
-                        "ProxyRotator: IP успешно сменён для %s...", proxy.url[:50]
+                        "ProxyRotator: IP успешно сменён для %s...",
+                        _safe_url(proxy.url, 50),
                     )
                     async with self._lock:
                         proxy.status = "active"
@@ -263,15 +335,25 @@ class ProxyRotator:
                     logger.warning(
                         "ProxyRotator: ошибка смены IP (HTTP %d) для %s...",
                         resp.status_code,
-                        proxy.url[:50],
+                        _safe_url(proxy.url, 50),
                     )
                     async with self._lock:
                         proxy.status = "cooldown"
                         proxy.cooldown_until = time.time() + self._cooldown_sec
                     return False
+        except asyncio.CancelledError:
+            logger.info(
+                "ProxyRotator: rotate task cancelled for %s...",
+                _safe_url(proxy.url, 50),
+            )
+            async with self._lock:
+                proxy.status = "cooldown"
+                proxy.cooldown_until = time.time() + self._cooldown_sec
+            raise
         except Exception:
             logger.exception(
-                "ProxyRotator: исключение при смене IP для %s...", proxy.url[:50]
+                "ProxyRotator: исключение при смене IP для %s...",
+                _safe_url(proxy.url, 50),
             )
             async with self._lock:
                 proxy.status = "cooldown"

@@ -15,11 +15,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
 import time as _time_module
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote_plus
 
 from src.core.avito.anti_scam import check_scam
@@ -102,34 +103,37 @@ class ScanResult:
 #  HTTP-загрузка (stealth-сессия) + прокси
 # ═══════════════════════════════════════════════════════════════════════════
 
-_stealth_session: object | None = None
+if TYPE_CHECKING:
+    from src.core.avito.stealth.session import AvitoSession
+
+_stealth_session: AvitoSession | None = None
 _stealth_lock = asyncio.Lock()
 _proxy_rotator: object | None = None
+_proxy_rotator_checked: bool = False  # True = already checked, configured or not
 _proxy_rotator_lock = asyncio.Lock()
 
 
 async def _get_proxy_rotator():
     """Lazy-init ротатора прокси (если настроен)."""
-    global _proxy_rotator
+    global _proxy_rotator, _proxy_rotator_checked
 
-    if _proxy_rotator is not None:
+    if _proxy_rotator is not None or _proxy_rotator_checked:
         return _proxy_rotator
 
     async with _proxy_rotator_lock:
-        if _proxy_rotator is not None:
+        if _proxy_rotator is not None or _proxy_rotator_checked:
             return _proxy_rotator
 
+        _proxy_rotator_checked = True
         try:
             from src.config import settings
 
             proxy_list_raw = settings.avito_proxy_list
             if not proxy_list_raw or not proxy_list_raw.strip():
-                _proxy_rotator = False  # маркер «не настроен»
                 return None
 
             proxies = json.loads(proxy_list_raw)
             if not proxies or not isinstance(proxies, list):
-                _proxy_rotator = False
                 return None
 
             from src.core.avito.proxy_rotator import ProxyRotator
@@ -140,30 +144,57 @@ async def _get_proxy_rotator():
             logger.debug(
                 "_get_proxy_rotator: не удалось инициализировать", exc_info=True
             )
-            _proxy_rotator = False
             return None
 
 
+async def shutdown_avito_rotator(timeout: float = 10.0) -> None:
+    """Gracefully drain pending proxy rotation tasks if rotator is initialized."""
+    global _proxy_rotator
+    if _proxy_rotator is None:
+        return
+    if TYPE_CHECKING:
+        from src.core.avito.proxy_rotator import ProxyRotator
+    _proxy_rotator = cast(ProxyRotator, _proxy_rotator)
+    try:
+        await _proxy_rotator.shutdown(timeout=timeout)
+    except Exception:
+        logger.debug("Avito rotator shutdown failed (non-critical)", exc_info=True)
+    _proxy_rotator = None
+
+
 async def _get_stealth_session(proxy_url: str | None = None):
-    """Lazy-init the stealth session (warmup once, reuse)."""
+    """Lazy-init the stealth session (warmup once, reuse).
+
+    If proxy_url changes — atomically close old session and create new one
+    under a single lock acquisition to prevent TOCTOU races.
+
+    NOTE: Callers holding a reference to the session while another caller
+    triggers a proxy change may see their in-flight request fail. This is
+    a fundamental limitation of the global singleton pattern — it assumes
+    proxy changes are rare (ProxyRotator throttles failures) and that
+    failed requests will be retried by the caller.
+    """
     global _stealth_session
 
-    if proxy_url and _stealth_session is not None:
-        # Если прокси изменился — пересоздаём сессию
-        current_proxy = getattr(_stealth_session, "proxy", None)
-        if current_proxy != proxy_url:
-            # M2: закрытие сессии внутри блокировки — предотвращает TOCTOU-гонку
-            # с параллельными вызовами _get_stealth_session() с другим proxy_url
-            # ВАЖНО: не вызываем _close_stealth_session() здесь — она сама берёт
-            # _stealth_lock, а asyncio.Lock НЕ реентерабелен → deadlock.
-            # Вместо этого закрываем сессию напрямую под уже захваченной блокировкой.
-            async with _stealth_lock:
-                if _stealth_session is not None:
-                    try:
-                        await _stealth_session.close()  # type: ignore[attr-defined]
-                    except Exception:
-                        logger.debug("Non-critical error", exc_info=True)
+    if proxy_url is not None and _stealth_session is not None:
+        async with _stealth_lock:
+            # Re-check inside lock: another caller may have already
+            # recreated the session with the same proxy_url.
+            if _stealth_session is not None:
+                current_proxy = getattr(_stealth_session, "proxy", None)
+                if current_proxy == proxy_url:
+                    return _stealth_session  # already correct proxy
+                try:
+                    await _stealth_session.close()  # type: ignore[attr-defined]
+                except Exception:
+                    logger.debug("Non-critical error", exc_info=True)
                 _stealth_session = None
+            # Create new session with the requested proxy
+            from src.core.avito.stealth.session import AvitoSession
+
+            _stealth_session = AvitoSession(proxy=proxy_url)
+            await _stealth_session.warmup()  # type: ignore[attr-defined]
+        return _stealth_session
 
     if _stealth_session is None:
         async with _stealth_lock:
@@ -204,7 +235,7 @@ async def _fetch_page(url: str) -> str:
     proxy_entry: object | None = None
 
     rotator = await _get_proxy_rotator()
-    if rotator is not False and rotator is not None:
+    if rotator is not None:
         proxy_entry = await rotator.get_proxy()  # type: ignore[attr-defined]
         if proxy_entry is not None:
             proxy_url = proxy_entry.url  # type: ignore[attr-defined]
@@ -253,9 +284,17 @@ def build_avito_url(params: SearchParams) -> str:
     """
     city = params.city.strip().lower().replace(" ", "_")
     category = params.category.strip().lower().replace(" ", "_")
-    query_encoded = quote_plus(params.query)
+    query = params.query.strip()
+    if not city:
+        raise ValueError("Avito city is required")
+    if not query:
+        raise ValueError("Avito query is required")
+    query_encoded = quote_plus(query)
 
-    url = f"https://www.avito.ru/{city}/{category}?q={query_encoded}"
+    if category:
+        url = f"https://www.avito.ru/{city}/{category}?q={query_encoded}"
+    else:
+        url = f"https://www.avito.ru/{city}?q={query_encoded}"
 
     if params.price_min is not None:
         url += f"&pmin={params.price_min}"
@@ -335,17 +374,29 @@ def _compare_with_db(
 
 _SCAN_CACHE: dict[str, tuple[float, ScanResult]] = {}
 _SCAN_CACHE_TTL = 300  # 5 минут
+_SCAN_CACHE_MAX_SIZE = 500
 _SCAN_CACHE_LOCK = asyncio.Lock()
+_SCAN_IN_FLIGHT: dict[str, asyncio.Event] = {}
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Глобальные ограничители concurrency
+# ═══════════════════════════════════════════════════════════════════════════
+
+_LLM_ANALYSIS_SEM = asyncio.Semaphore(3)
 
 
 def _cache_hash(params: SearchParams) -> str:
-    return hashlib.md5(
+    return hashlib.sha256(
         f"{params.city}:{params.query}:{params.price_min}:{params.price_max}".encode()
     ).hexdigest()
 
 
 async def scan_avito_cached(params: SearchParams) -> ScanResult:
-    """scan_avito с кэшированием результата на 5 минут."""
+    """scan_avito с кэшированием результата на 5 минут.
+
+    Дедупликация in-flight запросов: параллельные вызовы с одинаковыми
+    params ждут завершения первого запроса вместо повторного HTTP+парсинга.
+    """
     key = _cache_hash(params)
     now = _time_module.time()
 
@@ -354,19 +405,43 @@ async def scan_avito_cached(params: SearchParams) -> ScanResult:
         if key in _SCAN_CACHE:
             ts, result = _SCAN_CACHE[key]
             if now - ts < _SCAN_CACHE_TTL:
-                return result
+                return copy.deepcopy(result)
+        # Регистрируем in-flight запрос
+        if key not in _SCAN_IN_FLIGHT:
+            _SCAN_IN_FLIGHT[key] = asyncio.Event()
+            owner = True
+        else:
+            owner = False
+            event = _SCAN_IN_FLIGHT[key]
+
+    if not owner:
+        # Ждём завершения in-flight запроса
+        await event.wait()
+        async with _SCAN_CACHE_LOCK:
+            if key in _SCAN_CACHE:
+                ts, result = _SCAN_CACHE[key]
+                if now - ts < _SCAN_CACHE_TTL:
+                    return copy.deepcopy(result)
+        # Если кэш не появился (редкий race), выполняем самостоятельно
 
     # Тяжёлая операция — выполняем БЕЗ блокировки
-    result = await scan_avito(params)
+    try:
+        result = await scan_avito(params)
+    finally:
+        async with _SCAN_CACHE_LOCK:
+            event = _SCAN_IN_FLIGHT.pop(key, None)
+            if event is not None:
+                event.set()
 
     # Запись результата и очистка под блокировкой
     async with _SCAN_CACHE_LOCK:
         _SCAN_CACHE[key] = (now, result)
         # Очистка старых записей
-        if len(_SCAN_CACHE) > 100:
-            for k in list(_SCAN_CACHE):
-                if now - _SCAN_CACHE[k][0] > _SCAN_CACHE_TTL * 2:
-                    del _SCAN_CACHE[k]
+        if len(_SCAN_CACHE) > _SCAN_CACHE_MAX_SIZE:
+            # Evict oldest half by timestamp
+            sorted_items = sorted(_SCAN_CACHE.items(), key=lambda item: item[1][0])
+            for k, _ in sorted_items[: len(sorted_items) // 2]:
+                del _SCAN_CACHE[k]
     return result
 
 
@@ -566,14 +641,23 @@ async def _enrich_listings(
         len(parsed),
     )
 
-    # Используем существующую сессию
-    session = await _get_stealth_session()
+    # Используем существующую сессию (или передаём None — batch создаст свою)
+    try:
+        stealth = await _get_stealth_session()
+    except Exception:
+        logger.exception("_enrich_listings: не удалось получить stealth-сессию")
+        return
 
     try:
         from src.core.avito.listing_fetcher import fetch_listing_details_batch
 
+        # _get_stealth_session returns AvitoSession at runtime; the global is
+        # typed as object to avoid circular imports. fetch_listing_details_batch
+        # handles None by creating its own session.
         details = await fetch_listing_details_batch(
-            urls, session=session, concurrency=3
+            urls,
+            session=stealth if stealth is not None else None,  # type: ignore[arg-type]
+            concurrency=3,
         )
     except Exception:
         logger.exception("_enrich_listings: ошибка загрузки деталей")
@@ -599,8 +683,8 @@ async def _enrich_listings(
 
     enriched = sum(
         1
-        for l, _ in to_fetch
-        if l.get("full_description") and not l.get("_detail_error")
+        for listing, _ in to_fetch
+        if listing.get("full_description") and not listing.get("_detail_error")
     )
     logger.info("_enrich_listings: обогащено %d/%d", enriched, len(to_fetch))
 
@@ -615,7 +699,9 @@ async def _llm_analyze_listings(
 
     # Берём top-N по deal_score с полным описанием
     candidates = [
-        l for l in parsed if l.get("full_description") or l.get("description")
+        listing
+        for listing in parsed
+        if listing.get("full_description") or listing.get("description")
     ]
     candidates.sort(
         key=lambda x: x.get("deal_score", {}).get("score", 0),
@@ -632,12 +718,10 @@ async def _llm_analyze_listings(
 
     from src.core.avito.llm_analyzer import analyze_listing_llm
 
-    # ── Параллельный LLM-анализ с семафором (макс. 3 одновременных вызова) ──
-    _llm_analysis_sem = asyncio.Semaphore(3)
-
+    # ── Параллельный LLM-анализ с глобальным семафором (макс. 3 вызова) ──
     async def _analyze_one(listing: dict[str, Any]) -> None:
         """Анализирует одно объявление через LLM (с обработкой ошибок)."""
-        async with _llm_analysis_sem:
+        async with _LLM_ANALYSIS_SEM:
             try:
                 analysis = await analyze_listing_llm(listing)
                 listing["llm_analysis"] = analysis
@@ -660,47 +744,4 @@ async def _llm_analyze_listings(
     )
 
 
-async def quick_scan(url: str) -> ScanResult:
-    """Быстрое сканирование по прямой ссылке (без построения URL).
 
-    Полезно для ручной проверки конкретной страницы.
-    """
-    result = ScanResult()
-
-    # SSRF-защита: проверяем что URL ведёт на Авито
-    try:
-        url = _validate_avito_url(url)
-    except ValueError as exc:
-        result.error = str(exc)
-        logger.warning("quick_scan: %s", exc)
-        return result
-
-    result.url = url
-
-    try:
-        html = await _fetch_page(url)
-    except Exception:
-        result.error = "Ошибка загрузки страницы"
-        logger.exception("quick_scan: ошибка загрузки %s", url)
-        return result
-
-    try:
-        parsed = parse_listings(html)
-    except Exception:
-        result.error = "Ошибка парсинга HTML"
-        logger.exception("quick_scan: ошибка парсинга")
-        return result
-
-    stats = _calc_market_stats(parsed)
-
-    for listing in parsed:
-        listing["deal_score"] = calculate_deal_score(
-            listing, avg_price=stats["avg_price"], min_price=stats["min_price"]
-        )
-        listing["scam_check"] = check_scam(listing, avg_price=stats["avg_price"])
-
-    result.listings = parsed
-    result.total_parsed = len(parsed)
-    result.new_listings = parsed  # без existing — всё новое
-
-    return result

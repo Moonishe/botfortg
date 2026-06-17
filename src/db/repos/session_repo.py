@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, UTC
+from itertools import count
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,28 +28,30 @@ logger = logging.getLogger(__name__)
 # пользователи не блокировали друг друга.
 _user_locks: dict[int, asyncio.Lock] = {}
 # Счётчик вызовов для периодической синхронной чистки (каждые 1000 вызовов)
-_lock_cleanup_counter: int = 0
+_lock_cleanup_counter = count(1)  # thread-safe replacement for mutable int
 
 
-def _get_user_lock(user_id: int) -> asyncio.Lock:
+def _get_user_lock(user_key: int) -> asyncio.Lock:
     """Возвращает per-user Lock, создаёт при первом обращении.
+
+    ``user_key`` — либо ``user.id`` (положительный), либо ``-telegram_id``
+    (отрицательный), чтобы ключи не пересекались.
 
     Периодически (каждые 1000 вызовов) чистит неиспользуемые локи.
     Безопасно без доп. синхронизации: функция синхронная, без await —
     переключение контекста asyncio невозможно внутри неё, поэтому
     итерация + del атомарны относительно других вызовов.
     """
-    global _lock_cleanup_counter
-    if user_id not in _user_locks:
-        _user_locks[user_id] = asyncio.Lock()
-    _lock_cleanup_counter += 1
-    if _lock_cleanup_counter % 1000 == 0:
+    n = next(_lock_cleanup_counter)
+    if user_key not in _user_locks:
+        _user_locks[user_key] = asyncio.Lock()
+    if n % 1000 == 0:
         for k in list(_user_locks):
             # Пропускаем ключ, созданный в текущем вызове —
             # иначе только что созданный lock будет удалён до возврата.
-            if k != user_id and not _user_locks[k].locked():
+            if k != user_key and not _user_locks[k].locked():
                 del _user_locks[k]
-    return _user_locks[user_id]
+    return _user_locks[user_key]
 
 
 async def get_or_create_user(

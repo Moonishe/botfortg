@@ -18,6 +18,7 @@ import os
 from typing import Any
 
 from src.core.actions.tool_registry import ToolActionSpec, tool
+from src.core.security import is_confirmed_truthy
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,20 @@ _SENSITIVE_KEY_PATTERNS = frozenset(
         "TOKEN",
         "ENCRYPTION_KEY",
         "CREDENTIALS",
+    }
+)
+
+# Ключи, которые нельзя перезаписывать через action='set'.
+_PROTECTED_ENV_KEYS = frozenset(
+    {
+        "BOT_TOKEN",
+        "ENCRYPTION_KEY",
+        "APPROVAL_HMAC_KEY",
+        "DATABASE_URL",
+        "WEBHOOK_SECRET_TOKEN",
+        "API_ID",
+        "API_HASH",
+        "OWNER_TELEGRAM_ID",
     }
 )
 
@@ -122,7 +137,7 @@ async def mcp_env(
                 return {"error": "key parameter is required for action='set'"}
             if not value:
                 return {"error": "value parameter is required for action='set'"}
-            if not bool(kwargs.get("_confirmed", False)):
+            if not is_confirmed_truthy(kwargs.get("_confirmed", False)):
                 return {"error": "requires confirmation"}
             return _set_env(key.strip(), value)
     except Exception as exc:
@@ -203,6 +218,14 @@ def _set_env(key: str, value: str) -> dict[str, Any]:
 
     This is NOT persisted — it only affects the current process.
     """
+    if key.upper() in _PROTECTED_ENV_KEYS:
+        logger.warning("Refused to set protected env var %s", key)
+        return {
+            "ok": False,
+            "error": (
+                f"Environment variable {key!r} is protected and cannot be overwritten"
+            ),
+        }
     # NOTE: os.environ modifications affect the current process.
     # Acceptable for single-user admin bot.
     os.environ[key] = value

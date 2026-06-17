@@ -37,7 +37,7 @@ async def mcp_delegate(
     steps = min(max(1, max_steps), 10)
 
     try:
-        from src.llm.router import build_provider
+        from src.llm.provider_manager import build_provider
         from src.db.session import get_session
         from src.db.repo import get_or_create_user
         from src.config import settings
@@ -63,8 +63,6 @@ async def mcp_delegate(
             ChatMessage(role="user", content=task),
         ]
 
-        from src.core.actions.tool_registry import tool_registry
-
         results: list[str] = []
         for step in range(steps):
             try:
@@ -88,3 +86,12 @@ async def mcp_delegate(
     except Exception as e:
         logger.exception("mcp_delegate failed")
         return {"error": str(e)}
+
+
+# ── Auto-register for MCP exposure ──
+from src.core.actions.mcp_expose import expose_to_mcp
+
+expose_to_mcp(
+    "mcp_delegate",
+    description="Spawn isolated sub-agent with separate LLM context",
+)

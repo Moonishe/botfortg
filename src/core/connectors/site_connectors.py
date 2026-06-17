@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import aiofiles
 import asyncio
 import logging
 import mimetypes
@@ -208,10 +209,13 @@ def _x_rss_spec() -> ConnectorSpec:
 
 
 def _limit(params: dict[str, Any], default: int = 10, maximum: int = 50) -> int:
+    raw = params.get("limit")
+    if raw is None or raw == "":
+        return default
     try:
-        value = int(params.get("limit") or default)
+        value = int(raw)
     except (TypeError, ValueError):
-        value = default
+        return default
     return max(1, min(maximum, value))
 
 
@@ -233,8 +237,10 @@ def _headers(
     return headers
 
 
-def _validate_connector_url(url: str, *, allowed_hosts: set[str] | None = None) -> str:
-    validated = validate_public_url(url)
+async def _validate_connector_url(
+    url: str, *, allowed_hosts: set[str] | None = None
+) -> str:
+    validated = await validate_public_url(url)
     host = (urlparse(validated).hostname or "").lower()
     if allowed_hosts and host not in allowed_hosts:
         raise ConnectorHttpError(f"Host is not allowed for this connector: {host}")
@@ -263,7 +269,7 @@ async def _fetch_response(
     allowed_hosts: set[str] | None = None,
     timeout: float = 25.0,
 ) -> httpx.Response:
-    current_url = _validate_connector_url(url, allowed_hosts=allowed_hosts)
+    current_url = await _validate_connector_url(url, allowed_hosts=allowed_hosts)
     current_params = params
     current_headers = headers or _headers()
 
@@ -276,7 +282,7 @@ async def _fetch_response(
                 location = response.headers.get("location")
                 if not location:
                     raise ConnectorHttpError("Redirect response has no Location header")
-                next_url = _validate_connector_url(
+                next_url = await _validate_connector_url(
                     urljoin(str(response.url), location), allowed_hosts=allowed_hosts
                 )
                 current_headers = _redirect_headers(
@@ -1033,7 +1039,11 @@ def _genius_spec() -> ConnectorSpec:
 async def _scrape_genius_lyrics(song_url: str) -> str | None:
     """Извлечь текст песни из HTML-страницы Genius."""
     try:
-        html = await _fetch_text(song_url, headers=_headers())
+        html = await _fetch_text(
+            song_url,
+            headers=_headers(),
+            allowed_hosts={"genius.com", "www.genius.com"},
+        )
         soup = BeautifulSoup(html, "html.parser")
         containers = soup.select('[data-lyrics-container="true"]')
         if not containers:
@@ -1135,7 +1145,7 @@ async def _download_url(
     *,
     allowed_hosts: set[str] | None = None,
 ) -> dict[str, Any]:
-    current_url = _validate_connector_url(url, allowed_hosts=allowed_hosts)
+    current_url = await _validate_connector_url(url, allowed_hosts=allowed_hosts)
     parsed = urlparse(current_url)
     safe_name = _safe_filename(filename_hint or Path(parsed.path).name or "download")
     target_dir = (DOWNLOAD_ROOT / connector).resolve()
@@ -1159,7 +1169,7 @@ async def _download_url(
                         raise ConnectorHttpError(
                             "Redirect response has no Location header"
                         )
-                    next_url = _validate_connector_url(
+                    next_url = await _validate_connector_url(
                         urljoin(str(response.url), location),
                         allowed_hosts=allowed_hosts,
                     )
@@ -1177,15 +1187,18 @@ async def _download_url(
                         or ".bin"
                     )
                     target = target.with_suffix(ext)
+                # Write via aiofiles — the previous ``with target.open("wb")``
+                # used blocking I/O inside an async function, freezing the
+                # event loop for up to MAX_DOWNLOAD_BYTES (50 MB) of writes.
                 total = 0
-                with target.open("wb") as fh:
+                async with aiofiles.open(target, "wb") as fh:
                     async for chunk in response.aiter_bytes():
                         total += len(chunk)
                         if total > MAX_DOWNLOAD_BYTES:
-                            fh.close()
+                            await fh.close()
                             target.unlink(missing_ok=True)
                             raise ValueError("Download exceeds size limit")
-                        fh.write(chunk)
+                        await fh.write(chunk)
                 return {
                     "url": redact_url_secrets(url),
                     "path": str(target),

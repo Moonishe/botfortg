@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-os.environ.setdefault("BOT_TOKEN", "test:token")
+os.environ.setdefault("BOT_TOKEN", "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
 import pytest
@@ -23,7 +23,6 @@ CRITICAL_MODULES = [
     # Bot handlers
     ("src.bot.handlers.free_text", "Free text handler"),
     ("src.bot.handlers.free_text_exec", "Exec handlers"),
-    ("src.bot.handlers.free_text_pipeline", "Pipeline stages"),
     ("src.bot.handlers.free_text_common", "Common utilities"),
     ("src.bot.handlers.free_text_memory", "Memory handlers"),
     ("src.bot.handlers.free_text_settings", "Settings handlers"),

@@ -17,6 +17,7 @@ _KEY_PATTERNS = [
     r"dl-[A-Za-z0-9_-]{20,}",  # Deepgram
     r"Nb[A-Za-z0-9_-]{20,}",  # Mistral (some formats)
     r"\d{8,10}:[\w-]{35,}",  # Telegram bot token
+    r"[A-Za-z0-9_-]{43}=",  # Fernet KEK/DEK (44 urlsafe-base64 chars)
 ]
 
 _MASKED_REPLACEMENT = "***"

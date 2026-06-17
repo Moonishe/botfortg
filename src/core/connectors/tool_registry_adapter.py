@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.core.actions.tool_registry import CONFIRMATION_RISKS, ToolSpec, tool_registry
+from src.core.security import is_confirmed_truthy
 
 from .base import (
     ConnectorActionAnnotations,
@@ -120,7 +121,7 @@ def _json_type(type_hint: str) -> str:
 async def _handler(action: str, params: dict[str, Any], runtime: ConnectorRuntime) -> ConnectorResult:
     tool_params = dict(params)
     tool_params.update(_runtime_kwargs(runtime))
-    confirmed = bool(tool_params.pop("_confirmed", False))
+    confirmed = is_confirmed_truthy(tool_params.pop("_confirmed", False))
     spec = tool_registry.get(action)
     tool_action = tool_params.get("action")
 

@@ -5,14 +5,23 @@ import asyncio
 import logging
 import re
 import time
+from datetime import UTC
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.reply_dedup import dedup
 from src.config import settings
-from src.core.infra.formatting import auto_format
+from src.core.actions.trajectory import record_trajectory
 from src.core.contacts.smart_reply import get_reaction
+from src.core.infra.formatting import auto_format
+from src.core.infra.settings_cache import _settings_cache, invalidate_settings_cache  # noqa: F401  # pyright: ignore[reportUnusedImport] — re-export for late imports
+from src.core.infra.task_manager import track_ff
+from src.core.infra.timeutil import HM_RE, is_valid_tz, get_user_tz
+from src.db.repo import get_or_create_user
+from src.db.session import get_session
+
+logger = logging.getLogger(__name__)
 
 # ── Telegram message length safety ─────────────────────────────────────
 TELEGRAM_SAFE_MAX = settings.safe_message_length  # Telegram hard limit is 4096 chars
@@ -138,20 +147,8 @@ async def safe_answer(
         await message.answer(part, **final_kwargs)
 
 
-from src.core.infra.task_manager import track_ff
-from src.core.infra.timeutil import HM_RE, is_valid_tz, get_user_tz
-from src.core.actions.trajectory import record_trajectory
-from src.db.repo import get_or_create_user
-from src.db.session import get_session
-
-logger = logging.getLogger(__name__)
-
 # ── Model name validation ─────────────────────────────────────────────
 _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9@/_.:-]{1,128}$")
-
-
-from src.core.infra.settings_cache import _settings_cache, invalidate_settings_cache  # noqa: F401
-from datetime import UTC
 
 
 async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object]:
@@ -249,17 +246,23 @@ def _coerce_setting_value(spec: str, raw):
 
 
 def _confirm_keyboard(action_id: int, hmac_signature: str | None = None):
-    """Клавиатура подтверждения отправки с HMAC-подписью в callback_data."""
+    """Клавиатура подтверждения отправки с unified HMAC-подписью в callback_data."""
+    from src.core.security import approval
+
     sig = hmac_signature or ""
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
-            text="✅ Отправить", callback_data=f"send:confirm:{action_id}:{sig}"
+            text="✅ Отправить",
+            callback_data=approval.format_callback("send", str(action_id), sig),
         ),
         InlineKeyboardButton(text="✏ Изменить", callback_data=f"send:edit:{action_id}"),
     )
     kb.row(
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"send:cancel:{action_id}")
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=approval.format_cancel_callback("send", str(action_id)),
+        )
     )
     return kb.as_markup()
 
@@ -523,6 +526,30 @@ async def _post_turn_optimize(
                     user_obj=owner,
                     user_message=user_message,
                     assistant_response=assistant_response,
+                )
+
+            # ── Background Self-Review (v3.1) ──────────────────────────
+            # После instruction_optimizer — лёгкий LLM-вызов решает:
+            # сохранить ли факт в память, обновить ли навык.
+            # Fire-and-forget, не блокирует основной диалог.
+            try:
+                from src.core.intelligence.background_review import (
+                    background_reviewer,
+                )
+
+                asyncio.create_task(  # noqa: RUF006
+                    background_reviewer.review_response(
+                        user_id=telegram_id,
+                        user_text=user_message,
+                        assistant_response=assistant_response,
+                        provider=None,  # build own cheap background provider
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "background_reviewer.review_response skipped", exc_info=True
                 )
         except asyncio.CancelledError:
             raise  # must propagate for proper task cancellation

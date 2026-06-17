@@ -38,7 +38,7 @@ async def cmd_stats(message: Message) -> None:
 
     # Circuit breaker stats
     try:
-        from src.llm.router import _CIRCUIT_BREAKERS, _CircuitState
+        from src.llm.provider_manager import _CIRCUIT_BREAKERS
 
         if _CIRCUIT_BREAKERS:
             lines.append("\n🔌 <b>Circuit Breakers:</b>")

@@ -344,7 +344,7 @@ def test_supersedes_in_relation_constants():
 
 
 def test_free_text_enqueues_extract_with_pre_filter_guard():
-    """Fix #1 (HIGH): free_text.py must enqueue extract job, gated by pre_filter.
+    """Fix #1 (HIGH): free_text_legacy.py must enqueue extract job, gated by pre_filter.
 
     Без этого extract_and_save_memories() НЕ вызывается в main flow →
     supersedes evolution chains в Stage 0c не работают (5-минутное окно
@@ -357,9 +357,9 @@ def test_free_text_enqueues_extract_with_pre_filter_guard():
     """
     import ast
     import inspect
-    from src.bot.handlers import free_text
+    from src.bot.handlers import free_text_legacy
 
-    src = inspect.getsource(free_text._process_text)
+    src = inspect.getsource(free_text_legacy._process_text)
     tree = ast.parse(src)
 
     # 1. _process_text должен импортировать MemoryJob и enqueue
@@ -377,9 +377,11 @@ def test_free_text_enqueues_extract_with_pre_filter_guard():
                     found_enqueue = True
 
     assert found_memory_job, (
-        "free_text._process_text must import MemoryJob from _queue_core"
+        "free_text_legacy._process_text must import MemoryJob from _queue_core"
     )
-    assert found_enqueue, "free_text._process_text must import enqueue from _queue_core"
+    assert found_enqueue, (
+        "free_text_legacy._process_text must import enqueue from _queue_core"
+    )
 
     # 2. _process_text должен импортировать should_extract
     found_pre_filter = False
@@ -392,7 +394,7 @@ def test_free_text_enqueues_extract_with_pre_filter_guard():
                 if alias.name == "should_extract":
                     found_pre_filter = True
     assert found_pre_filter, (
-        "free_text._process_text must import should_extract from pre_filter"
+        "free_text_legacy._process_text must import should_extract from pre_filter"
     )
 
     # 3. Должен быть вызов should_extract(raw) с последующим enqueue(MemoryJob)
@@ -425,7 +427,7 @@ def test_free_text_enqueues_extract_with_pre_filter_guard():
                                                 found_guard = True
 
     assert found_guard, (
-        "free_text._process_text must contain "
+        "free_text_legacy._process_text must contain "
         "`if should_extract(raw): await enqueue(MemoryJob(...))` block. "
         "Without it, supersedes evolution chains do not work in main dialog flow."
     )

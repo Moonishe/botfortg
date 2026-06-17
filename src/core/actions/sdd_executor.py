@@ -16,7 +16,6 @@ import logging
 import marshal
 import subprocess
 import sys
-import logging
 from typing import Any
 
 from src.core.actions.tool_registry import tool
@@ -224,9 +223,6 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
     # on timeout — asyncio.wait_for cancelled the Future but the thread
     # kept running.  Subprocess isolation guarantees the process and
     # all its resources are killed after timeout.
-    import pickle
-    import subprocess
-    import sys
 
     # Serialize code via marshal+base64 — subprocess script reads and executes.
     # Keeps AST validation in main process, only code execution in subprocess.
@@ -237,7 +233,7 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
         + repr(base64.b64encode(code_bytes).decode())
         + "))\n"
         "safe_kwargs = " + repr(_safe_kwargs) + "\n"
-        "safe_builtins = {k: __builtins__[k] for k in ['print','len','range','int','str','float','bool','list','dict','set','tuple','zip','enumerate','sorted','min','max','sum','any','all','isinstance']}\n"
+        "safe_builtins = {k: getattr(__builtins__, k) for k in ['print','len','range','int','str','float','bool','list','dict','set','tuple','zip','enumerate','sorted','min','max','sum','any','all','isinstance']}\n"
         "safe_builtins.update({'True': True, 'False': False, 'None': None})\n"
         "namespace = {'__builtins__': safe_builtins, 'kwargs': safe_kwargs, **safe_kwargs}\n"
         "output_buffer = io.StringIO()\n"

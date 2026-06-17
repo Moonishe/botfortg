@@ -23,7 +23,6 @@ from src.core.classification.message_classifier import (
     MessageClassifier,
     _AHO_AVAILABLE,
     _ManualAhoCorasick,
-    _PyAhoCorasickAdapter,
     classify_message,
     get_classifier,
 )
@@ -296,15 +295,25 @@ class TestPerformance:
         c = _fresh_classifier()
         text = "привет как дела что нового " * 500  # ~10K chars
 
+        # Warm-up
+        for _ in range(10):
+            c.classify(text)
+
+        # Benchmark: average over multiple iterations to avoid single-run noise
+        N = 100
         start = time.perf_counter()
-        result = c.classify(text)
+        for _ in range(N):
+            result = c.classify(text)
         elapsed = (time.perf_counter() - start) * 1_000_000
+        avg_us = elapsed / N
 
         # Should find matches
         assert result["greeting"] is True
         assert result["question"] is True
-        # Should be fast even for long text (< 5000 μs)
-        assert elapsed < 5000, f"Long text classify too slow: {elapsed:.1f} μs"
+        # Should be fast even for long text (< 5000 μs average)
+        # Note: isolated runs are ~2500 μs; full-suite load pushes this to ~4400 μs,
+        # so the original 5000 μs threshold is kept to avoid flakiness.
+        assert avg_us < 5000, f"Long text classify too slow: {avg_us:.1f} μs"
 
     def test_many_patterns_no_match(self):
         """Text with no patterns should still be fast (no degradation)."""
@@ -534,21 +543,21 @@ class TestWordBoundary:
         """'пока' should NOT match 'ok' (agreement) because 'ok' is a substring."""
         result = self.c.classify("пока")
         assert result["agreement"] is not True, (
-            f"'пока' should not match 'agreement' via 'ok' substring"
+            "'пока' should not match 'agreement' via 'ok' substring"
         )
 
     def test_da_not_in_podarok(self):
         """'подарок' should NOT match 'да' (agreement)."""
         result = self.c.classify("подарок")
         assert result["agreement"] is not True, (
-            f"'подарок' should not match 'agreement' via 'да' substring"
+            "'подарок' should not match 'agreement' via 'да' substring"
         )
 
     def test_net_not_in_internet(self):
         """'интернет' should NOT match 'нет' (disagreement)."""
         result = self.c.classify("интернет")
         assert result["disagreement"] is not True, (
-            f"'интернет' should not match 'disagreement' via 'нет' substring"
+            "'интернет' should not match 'disagreement' via 'нет' substring"
         )
 
     def test_chto_in_context(self):

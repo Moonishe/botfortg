@@ -12,12 +12,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, UTC
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cryptography.fernet import Fernet, InvalidToken
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +54,19 @@ class KeyRotationManager:
         self._deks: dict[int, bytes] = {}
         # ID активного DEK
         self._active_key_id: int | None = None
+        # Защита от конкурентной ротации (только один rotate за раз)
+        self._lock = asyncio.Lock()
 
     @property
     def active_dek(self) -> bytes:
         """Текущий активный DEK для шифрования новых данных.
 
-        Если DEK ещё не загружен — генерирует новый Fernet-ключ
-        и использует его как DEK (fallback для первого запуска без БД).
+        Если DEK ещё не загружен (БД не инициализирована) — возвращает KEK
+        как fallback для обратной совместимости с данными, зашифрованными
+        напрямую KEK до внедрения ротации.
 
         Returns:
-            32-байтовый ключ (urlsafe-base64 encoded).
+            32-байтовый ключ (urlsafe-base64 encoded) — либо DEK, либо KEK.
         """
         if self._active_key_id is not None and self._active_key_id in self._deks:
             return self._deks[self._active_key_id]
@@ -120,30 +127,17 @@ class KeyRotationManager:
         """
         return self._kek_fernet.decrypt(encrypted_dek.encode())
 
-    async def rotate(
+    async def _rotate_unlocked(
         self,
-        re_encrypt_callback: Callable[[bytes, bytes], Any] | None = None,
+        re_encrypt_callback: Callable[[bytes, bytes], Awaitable[Any]] | None = None,
     ) -> int:
-        """Ротация активного DEK: создаёт новый, сохраняет старый.
-
-        Старый DEK остаётся в in-memory кэше для расшифровки.
-        Новый DEK становится активным для шифрования.
-
-        Args:
-            re_encrypt_callback: async callable(old_dek: bytes, new_dek: bytes) -> None.
-                Вызывается для перешифрования данных со старого DEK на новый.
-                Если не передан — ротация проходит без перешифрования.
-
-        Returns:
-            ID нового активного ключа.
-        """
+        """Внутренняя ротация без захвата лока (caller должен держать self._lock)."""
         old_dek = self.active_dek
         old_key_id = self._active_key_id
 
         new_dek = self._generate_dek()
-        new_key_id = (
-            old_key_id or 0
-        ) + 1  # NOTE: key_id вычисляется in-memory на основе предыдущего.
+        new_key_id = (old_key_id if old_key_id is not None else 0) + 1
+        # NOTE: key_id вычисляется in-memory на основе предыдущего.
         # При конкурентной ротации возможно дублирование key_id,
         # которое разрешается на уровне БД (ограничение уникальности).
 
@@ -162,7 +156,9 @@ class KeyRotationManager:
             try:
                 await re_encrypt_callback(old_dek, new_dek)
                 logger.info(
-                    "Перешифрование данных завершено: %s → %s", old_key_id, new_key_id
+                    "Перешифрование данных завершено: %s → %s",
+                    old_key_id,
+                    new_key_id,
                 )
             except Exception:
                 logger.exception(
@@ -172,12 +168,89 @@ class KeyRotationManager:
 
         return new_key_id
 
-    async def load_from_db(self, session) -> None:
+    async def rotate(
+        self,
+        re_encrypt_callback: Callable[[bytes, bytes], Awaitable[Any]] | None = None,
+    ) -> int:
+        """Ротация активного DEK: создаёт новый, сохраняет старый.
+
+        Старый DEK остаётся в in-memory кэше для расшифровки.
+        Новый DEK становится активным для шифрования.
+
+        Args:
+            re_encrypt_callback: async callable(old_dek: bytes, new_dek: bytes) -> None.
+                Вызывается для перешифрования данных со старого DEK на новый.
+                Если не передан — ротация проходит без перешифрования.
+
+        Returns:
+            ID нового активного ключа.
+
+        Note:
+            Для атомарной ротации с сохранением в БД используйте
+            :meth:`rotate_and_persist` — она откатывает in-memory состояние
+            при неудаче persist.
+        """
+        async with self._lock:
+            return await self._rotate_unlocked(re_encrypt_callback=re_encrypt_callback)
+
+    async def rotate_and_persist(  # pyright: ignore[reportRedeclaration]
+        self,
+        session: AsyncSession,
+        re_encrypt_callback: Callable[[bytes, bytes], Awaitable[Any]] | None = None,
+    ) -> int:
+        """Атомарная ротация: обновляет in-memory состояние и БД.
+
+        Если сохранение в БД не удалось, in-memory состояние откатывается
+        к предыдущему активному ключу.
+
+        Args:
+            session: SQLAlchemy AsyncSession.
+            re_encrypt_callback: async callable(old_dek, new_dek) -> None.
+
+        Returns:
+            ID нового активного ключа.
+
+        Raises:
+            Exception: пробрасывается из persist_rotation.
+        """
+        async with self._lock:
+            old_key_id = self._active_key_id
+            new_key_id = await self._rotate_unlocked(
+                re_encrypt_callback=re_encrypt_callback
+            )
+            new_dek = self._deks.get(new_key_id)
+            if new_dek is None:
+                # Внутренняя ошибка: rotate вернул id, которого нет в кэше
+                self._active_key_id = old_key_id
+                raise RuntimeError(f"New DEK key_id={new_key_id} missing after rotate")
+            try:
+                await self.persist_rotation(
+                    session,
+                    new_key_id,
+                    self._encrypt_dek(new_dek),
+                    old_key_id=old_key_id,
+                )
+            except Exception:
+                # Откатываем in-memory состояние, чтобы не рассинхронизоваться с БД
+                self._active_key_id = old_key_id
+                self._deks.pop(new_key_id, None)
+                logger.exception(
+                    "DEK rotation persist failed — in-memory state rolled back"
+                )
+                raise
+            return new_key_id
+
+    async def load_from_db(self, session: AsyncSession) -> None:
         """Загружает существующие DEK'и из БД в in-memory кэш.
 
         Args:
             session: SQLAlchemy AsyncSession.
         """
+        async with self._lock:
+            await self._load_from_db_unlocked(session)
+
+    async def _load_from_db_unlocked(self, session: AsyncSession) -> None:
+        """Внутренняя загрузка без захвата лока."""
         from sqlalchemy import select
 
         from src.db.models._encryption import EncryptionKey
@@ -228,9 +301,38 @@ class KeyRotationManager:
             self._active_key_id,
         )
 
+    async def create_initial_dek(self, session: AsyncSession) -> int | None:
+        """Создаёт первый DEK при старте, если в БД нет активного ключа.
+
+        Возвращает ID созданного ключа или None, если активный ключ уже есть.
+        Потокобезопасно: держит self._lock.
+        """
+        async with self._lock:
+            await self._load_from_db_unlocked(session)
+            if self._active_key_id is not None:
+                return None
+
+            from sqlalchemy import func, select
+
+            from src.db.models._encryption import EncryptionKey
+
+            max_result = await session.execute(select(func.max(EncryptionKey.key_id)))
+            max_id = max_result.scalar()
+            key_id = (max_id or 0) + 1
+
+            new_dek = self._generate_dek()
+            self._deks[key_id] = new_dek
+            self._active_key_id = key_id
+
+            await self.save_to_db(
+                session, key_id, self._encrypt_dek(new_dek), is_active=True
+            )
+            logger.info("Начальный DEK создан (key_id=%s)", key_id)
+            return key_id
+
     async def save_to_db(
         self,
-        session,
+        session: AsyncSession,
         key_id: int,
         encrypted_dek: str,
         is_active: bool = False,
@@ -253,7 +355,7 @@ class KeyRotationManager:
         )
         row = existing.scalar_one_or_none()
 
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC)
 
         if row is not None:
             row.encrypted_dek = encrypted_dek
@@ -273,7 +375,7 @@ class KeyRotationManager:
 
     async def persist_rotation(
         self,
-        session,
+        session: AsyncSession,
         new_key_id: int,
         new_encrypted_dek: str,
         old_key_id: int | None = None,
@@ -301,10 +403,6 @@ class KeyRotationManager:
         # Сохраняем новый активный ключ
         await self.save_to_db(session, new_key_id, new_encrypted_dek, is_active=True)
         await session.commit()
-
-    def get_all_key_ids(self) -> list[int]:
-        """Возвращает список всех известных key_id (для отладки)."""
-        return sorted(self._deks.keys())
 
 
 # ── Глобальный singleton ──────────────────────────────────────────────

@@ -15,8 +15,13 @@ class FrozenProvider:
     def set_frozen(self, telegram_id: int, chunks: list[dict]) -> None:
         self._frozen_telegram_id = telegram_id
         self._frozen = [
-            ContextChunk(text=c["fact"], source="frozen", reason="cached_snapshot")
+            ContextChunk(
+                text=c.get("fact") or "",
+                source="frozen",
+                reason="cached_snapshot",
+            )
             for c in chunks
+            if c.get("fact")
         ]
 
     async def get_context(self, query, *, telegram_id, contact_id=None, limit=8):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from typing import Any
@@ -19,7 +20,14 @@ class ConnectorHttpError(RuntimeError):
     pass
 
 
-def _is_public_ip(host: str) -> bool:
+def _resolve_is_public_ip(host: str) -> bool:
+    """Blocking DNS resolver used to validate that *host* is public.
+
+    Shared by the sync and async entry points. The actual ``getaddrinfo``
+    call must run off the event loop (``asyncio.to_thread``) from async
+    code — it blocks for the duration of the DNS lookup (1–10s) and would
+    freeze every other coroutine otherwise.
+    """
     try:
         addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
@@ -33,13 +41,29 @@ def _is_public_ip(host: str) -> bool:
     return True
 
 
-def validate_public_url(url: str) -> str:
+async def _is_public_ip_async(host: str) -> bool:
+    """Async-safe wrapper: resolve DNS on the default executor."""
+    return await asyncio.to_thread(_resolve_is_public_ip, host)
+
+
+def _validate_scheme_and_host(url: str) -> str:
+    """Sync part of URL validation — no I/O, safe to call directly."""
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_SCHEMES:
         raise ConnectorHttpError("Only http and https URLs are allowed")
     if not parsed.hostname:
         raise ConnectorHttpError("URL must include a hostname")
-    if not _is_public_ip(parsed.hostname):
+    return parsed.hostname
+
+
+async def validate_public_url(url: str) -> str:
+    """Validate URL scheme + resolve host off the event loop.
+
+    Returns the original URL on success. Raises ``ConnectorHttpError``
+    on scheme/hostname/DNS failures.
+    """
+    hostname = _validate_scheme_and_host(url)
+    if not await _is_public_ip_async(hostname):
         raise ConnectorHttpError("URL resolves to a non-public address")
     return url
 
@@ -53,7 +77,7 @@ async def request_json(
     json: Any = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> Any:
-    current_url = validate_public_url(url)
+    current_url = await validate_public_url(url)
     current_method = method.upper()
     current_json = json
 
@@ -70,7 +94,9 @@ async def request_json(
                 location = response.headers.get("location")
                 if not location:
                     raise ConnectorHttpError("Redirect response has no Location header")
-                current_url = validate_public_url(urljoin(str(response.url), location))
+                current_url = await validate_public_url(
+                    urljoin(str(response.url), location)
+                )
                 if response.status_code in {301, 302, 303}:
                     current_method = "GET"
                     current_json = None

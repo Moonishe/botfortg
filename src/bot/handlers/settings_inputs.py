@@ -6,7 +6,7 @@ SRP: all cb_input_* callbacks, step handlers, and make_key_handler registrations
 import logging
 
 from aiogram import F
-from aiogram.exceptions import TelegramError
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -38,9 +38,14 @@ from src.llm.groq_provider import GroqProvider
 from src.llm.mimo_provider import MIMO_REGIONS, MiMoProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
-from openai import APIConnectionError
 
 logger = logging.getLogger(__name__)
+
+# Примечание (issue #3): если openai не установлен, APIConnectionError недоступен.
+try:
+    import openai as _openai
+except ImportError:  # pragma: no cover
+    _openai = None
 
 
 # =====================================================================
@@ -284,7 +289,7 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
         return
     try:
         await message.delete()
-    except TelegramError:
+    except TelegramAPIError:
         logger.warning("failed to delete message with mimo key")
     if not await MiMoProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
@@ -292,7 +297,7 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
     await state.update_data(mimo_key=",".join(parts))
     await state.set_state(SettingsStates.waiting_mimo_region)
     kb = InlineKeyboardBuilder()
-    for region_key, region_url in MIMO_REGIONS.items():
+    for region_key in MIMO_REGIONS:
         label = {"eu": "🇪🇺 EU", "us": "🇺🇸 US", "asia": "🌏 Asia"}.get(
             region_key, region_key.upper()
         )
@@ -447,12 +452,17 @@ async def step_custom_key(message: Message, state: FSMContext) -> None:
     endpoint = data.get("custom_endpoint", "")
     try:
         await message.delete()
-    except TelegramError:
+    except TelegramAPIError:
         logger.warning("failed to delete message with custom key")
     try:
         valid = await CustomProvider(parts[0], endpoint=endpoint).validate_key()
-    except (ValueError, APIConnectionError):
+    except ValueError:
         valid = False
+    except Exception as _e:
+        if _openai is not None and isinstance(_e, _openai.APIConnectionError):
+            valid = False
+        else:
+            raise
     if not valid:
         await message.answer(
             "❌ Ключ не работает или endpoint недоступен. Повтори или /cancel."

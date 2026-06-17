@@ -74,6 +74,10 @@ async def mcp_self_info(action: str = "status") -> dict[str, Any]:
                 result = await session.execute(
                     select(LlmKeySlot).where(LlmKeySlot.enabled == True)  # noqa: E712
                 )
+                # .scalars() is required: iterating a raw `select(Entity)`
+                # result yields Row(Entity,) tuples, so `s.provider` would
+                # raise AttributeError. (list_providers in mcp_self_model uses
+                # a tuple-select and indexes r[0]; here we want entity access.)
                 providers = [
                     {
                         "provider": s.provider,
@@ -81,7 +85,7 @@ async def mcp_self_info(action: str = "status") -> dict[str, Any]:
                         "priority": s.priority,
                         "cooldown": str(s.cooldown_until) if s.cooldown_until else None,
                     }
-                    for s in result
+                    for s in result.scalars()
                 ]
             return {"providers": providers, "total": len(providers)}
         except Exception as e:
@@ -94,3 +98,12 @@ async def mcp_self_info(action: str = "status") -> dict[str, Any]:
         }
 
     return {"error": f"Unknown action: {action}"}
+
+
+# ── Auto-register for MCP exposure ──
+from src.core.actions.mcp_expose import expose_to_mcp
+
+expose_to_mcp(
+    "mcp_self_info",
+    description="Agent diagnostics: status, health, providers, version",
+)

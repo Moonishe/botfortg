@@ -25,9 +25,6 @@ async def sleep_tracker_loop(owner_id: int) -> None:
         None  # дата (YYYY-MM-DD) последнего sleep-уведомления
     )
     while True:
-        if _overlap_guard.locked():
-            await asyncio.sleep(settings.sleep_tracker_check_sec)
-            continue
         async with _overlap_guard:
             try:
                 async with get_session() as session:
@@ -85,6 +82,8 @@ async def sleep_tracker_loop(owner_id: int) -> None:
                                     priority=Notification.PRIORITY_LOW,
                                 )
                                 _notified_for_date = None
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Sleep tracker error")
         await asyncio.sleep(settings.sleep_tracker_check_sec)  # каждые 15 минут

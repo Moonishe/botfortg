@@ -148,7 +148,7 @@ async def deep_research(
                 f"Результаты будут сохранены в data/research/{job_id}/"
             ),
         }
-        # Флаг для free_text_pipeline — не перезаписывать сообщение,
+        # Флаг для free_text — не перезаписывать сообщение,
         # т.к. прогресс стримится асинхронно
         if _has_streaming:
             response["_streaming"] = True

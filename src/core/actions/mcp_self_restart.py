@@ -26,7 +26,7 @@ async def mcp_self_restart(action: str) -> dict[str, Any]:
             from src.core.actions import register_builtin_tools
             import asyncio
 
-            await asyncio.to_thread(register_builtin_tools)
+            await asyncio.to_thread(lambda: register_builtin_tools(force=True))
             from src.core.actions.tool_registry import tool_registry
 
             count = len(tool_registry._tools)
@@ -54,20 +54,43 @@ async def mcp_self_restart(action: str) -> dict[str, Any]:
         }
 
     elif action == "clear_cache":
+        cleared: list[str] = []
+        errors: list[str] = []
+        # Circuit-breaker reset — never fatal, but report if it fails.
         try:
-            from src.llm.router import _CIRCUIT_BREAKERS
+            from src.llm.provider_manager import (
+                _CIRCUIT_BREAKERS,
+                _CIRCUIT_BREAKERS_LOCK,
+            )
 
-            _CIRCUIT_BREAKERS.clear()
-        except Exception:
-            pass
+            if _CIRCUIT_BREAKERS_LOCK is not None:
+                async with _CIRCUIT_BREAKERS_LOCK:
+                    _CIRCUIT_BREAKERS.clear()
+            # else: locks not initialized — skip, nothing to clear
+            cleared.append("circuit_breakers")
+        except Exception as e:
+            errors.append(f"circuit_breakers: {e}")
+        # FTS5 connection close — never fatal, but report if it fails.
         try:
             from src.core.actions.tool_registry import tool_registry
 
             if hasattr(tool_registry, "_fts5_conn"):
+                try:
+                    tool_registry._fts5_conn.close()
+                except Exception as e:
+                    errors.append(f"fts5_close: {e}")
                 del tool_registry._fts5_conn
-        except Exception:
-            pass
-        return {"ok": True, "cleared": ["circuit_breakers", "tool_search_cache"]}
+            cleared.append("tool_search_cache")
+        except Exception as e:
+            errors.append(f"tool_search_cache: {e}")
+        if errors:
+            return {
+                "ok": False,
+                "cleared": cleared,
+                "errors": errors,
+                "note": "partial failure — see errors list",
+            }
+        return {"ok": True, "cleared": cleared}
 
     elif action == "list_components":
         return {
@@ -80,3 +103,12 @@ async def mcp_self_restart(action: str) -> dict[str, Any]:
         }
 
     return {"error": f"Unknown action: {action}"}
+
+
+# ── Auto-register for MCP exposure ──
+from src.core.actions.mcp_expose import expose_to_mcp
+
+expose_to_mcp(
+    "mcp_self_restart",
+    description="Restart components: reload_tools, restart_userbot, clear_cache",
+)

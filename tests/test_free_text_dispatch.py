@@ -1,4 +1,4 @@
-"""Smoke tests for intent dispatch registries in free_text_pipeline.py."""
+"""Smoke tests for intent dispatch registries in free_text/__init__.py."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
 import pytest
 
-from src.bot.handlers.free_text_pipeline import (
+from src.bot.handlers.free_text import (
     CLASSIC_INTENT_HANDLERS,
     INTENT_HANDLERS,
     _dispatch,
@@ -120,16 +120,16 @@ class TestDispatchLogic:
 
         with (
             patch.dict(
-                "src.bot.handlers.free_text_pipeline.INTENT_HANDLERS",
+                "src.bot.handlers.free_text._core.INTENT_HANDLERS",
                 {"set_setting": (mock_handler, "test")},
                 clear=True,
             ),
             patch(
-                "src.bot.handlers.free_text_pipeline.guard_intent",
+                "src.bot.handlers.free_text._core.guard_intent",
                 return_value=allowed_guard,
             ),
             patch(
-                "src.bot.handlers.free_text_pipeline.guardrail_evaluate",
+                "src.bot.handlers.free_text._core.guardrail_evaluate",
                 return_value=GuardrailResult(needs_confirm=False),
             ),
         ):
@@ -154,15 +154,15 @@ class TestDispatchLogic:
 
         with (
             patch(
-                "src.bot.handlers.free_text_pipeline.guard_intent",
+                "src.bot.handlers.free_text._core.guard_intent",
                 return_value=allowed_guard,
             ),
             patch(
-                "src.bot.handlers.free_text_pipeline.guardrail_evaluate",
+                "src.bot.handlers.free_text._core.guardrail_evaluate",
                 return_value=GuardrailResult(needs_confirm=False),
             ),
             patch(
-                "src.bot.handlers.free_text_pipeline._execute_intent",
+                "src.bot.handlers.free_text._core._execute_intent",
                 new_callable=AsyncMock,
             ) as mock_exec,
         ):
@@ -182,7 +182,7 @@ class TestDispatchLogic:
         intent = {"intent": "chat", "text": "hello"}
 
         with patch.dict(
-            "src.bot.handlers.free_text_pipeline.CLASSIC_INTENT_HANDLERS",
+            "src.bot.handlers.free_text.CLASSIC_INTENT_HANDLERS",
             {"chat": (mock_handler, "Чат")},
             clear=True,
         ):
@@ -217,13 +217,13 @@ class TestDispatchLogic:
 async def _run_dag(patch_dispatch, sub_intents, msg, state, ubm):
     """Helper: вызывает _dag_dispatch с замоканным _dispatch."""
     with (
-        patch("src.bot.handlers.free_text_pipeline._dispatch", patch_dispatch),
+        patch("src.bot.handlers.free_text._core._dispatch", patch_dispatch),
         patch(
-            "src.bot.handlers.free_text_pipeline.guard_intent",
+            "src.bot.handlers.free_text._core.guard_intent",
             return_value=MagicMock(allowed=True, intent=None),
         ),
     ):
-        from src.bot.handlers.free_text_pipeline import _dag_dispatch
+        from src.bot.handlers.free_text import _dag_dispatch
 
         await _dag_dispatch(sub_intents, msg, state, ubm, tz_name="UTC")
 
@@ -238,8 +238,8 @@ class TestDagDispatch:
         state = MagicMock()
         ubm = MagicMock()
 
-        with patch("src.bot.handlers.free_text_pipeline._dispatch") as mock_dispatch:
-            from src.bot.handlers.free_text_pipeline import _dag_dispatch
+        with patch("src.bot.handlers.free_text._core._dispatch") as mock_dispatch:
+            from src.bot.handlers.free_text import _dag_dispatch
 
             await _dag_dispatch([], msg, state, ubm, tz_name="UTC")
 
@@ -364,7 +364,7 @@ class TestDagDispatch:
             {"intent": "c", "depends_on": [1]},
         ]
 
-        with patch("src.bot.handlers.free_text_pipeline.logger") as mock_logger:
+        with patch("src.bot.handlers.free_text._core.logger") as mock_logger:
             await _run_dag(_cycle_dispatch, subs, msg, state, ubm)
 
         assert len(call_log) == 3, f"Expected 3 calls, got {len(call_log)}"

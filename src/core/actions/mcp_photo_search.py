@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 from aiogram.types import BufferedInputFile
@@ -125,18 +126,34 @@ async def _send_image(url: str, **kwargs: Any) -> dict[str, Any]:
     if not url.startswith(("http://", "https://")):
         return {"error": "URL должен начинаться с http:// или https://"}
 
-    # SSRF-защита
-    ssrf_error = await _check_ssrf_async(url)
-    if ssrf_error:
-        return ssrf_error
-
-    # Скачивание
+    # Скачивание с SSRF-проверкой на каждом редиректе
+    _MAX_REDIRECTS = 5
     try:
         async with httpx.AsyncClient(
-            timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True
+            timeout=_DOWNLOAD_TIMEOUT, follow_redirects=False
         ) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
+            current_url = url
+            for redirect_count in range(_MAX_REDIRECTS + 1):
+                # SSRF-защита для текущего URL
+                ssrf_error = await _check_ssrf_async(current_url)
+                if ssrf_error:
+                    return ssrf_error
+
+                resp = await client.get(current_url)
+
+                # Ручная обработка редиректов
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    if redirect_count >= _MAX_REDIRECTS:
+                        return {"error": "Слишком много редиректов"}
+                    location = resp.headers.get("location")
+                    if not location:
+                        return {"error": "Redirect без Location заголовка"}
+                    current_url = urljoin(current_url, location)
+                    continue
+
+                resp.raise_for_status()
+                break
+
             content_type = resp.headers.get("content-type", "")
             if not content_type.startswith("image/"):
                 return {

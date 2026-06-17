@@ -266,6 +266,24 @@ async def get_enabled_models(session: AsyncSession, slot_id: int) -> list[str]:
     return [m.model_name for m in models if m.enabled]
 
 
+async def get_enabled_models_for_slots(
+    session: AsyncSession, slot_ids: list[int]
+) -> list[str]:
+    """Получить имена enabled-моделей для нескольких слотов за один запрос.
+
+    Избегает N+1: вместо отдельных запросов на каждый slot_id
+    делает один batch-запрос с ``WHERE slot_id IN (...)``.
+    """
+    if not slot_ids:
+        return []
+    q = select(LlmKeySlotModel.model_name).where(
+        LlmKeySlotModel.slot_id.in_(slot_ids),
+        LlmKeySlotModel.enabled == True,
+    )
+    r = await session.execute(q)
+    return [row[0] for row in r.all()]
+
+
 async def get_key_slot(
     session: AsyncSession, slot_id: int, user: User
 ) -> LlmKeySlot | None:

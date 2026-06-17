@@ -240,6 +240,9 @@ async def step_code(
         await state.clear()
         await message.answer("❌ Не удалось войти. Запусти /login заново.")
         return
+    finally:
+        code = None
+        del code
 
     await _finalize_login(message, state, userbot_manager)
 
@@ -317,6 +320,9 @@ async def _finalize_login(
             phone=pending.phone or "",
             account_label=label,
         )
+
+    session_string = None
+    del session_string
 
     userbot_manager.register_client(tg_id, pending.client)
     await state.clear()

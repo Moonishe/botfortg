@@ -48,7 +48,7 @@ async def cmd_revoke(message: Message) -> None:
 
 @router.message(Command("pending"))
 async def cmd_pending(message: Message) -> None:
-    count = pairing.pending_count
+    count = await pairing.pending_count()
     if count == 0:
         await message.answer("Нет ожидающих подтверждения.")
     else:

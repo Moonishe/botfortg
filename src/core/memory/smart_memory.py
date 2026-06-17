@@ -46,9 +46,10 @@ _SEMAPHORE_ACQUIRE_TIMEOUT: float = 120.0  # 2 minutes
 _FACT_CACHE_TTL: float = 300.0  # 5 minutes
 _FACT_CACHE_MAX: int = 200
 _fact_cache: dict[str, tuple[float, list[dict[str, object]]]] = {}
+_fact_cache_lock = asyncio.Lock()
 
 
-def _evict_fact_cache_if_full() -> None:
+async def _evict_fact_cache_if_full() -> None:
     """Evict oldest entries when the fact cache exceeds its max size."""
     if len(_fact_cache) > _FACT_CACHE_MAX:
         # Sort by timestamp (ascending) and remove oldest 25%
@@ -381,14 +382,15 @@ async def _extract_llm_filtered(
     # are not incorrectly shared (contact=None → both get key "...:0").
     transcript_hash = hashlib.md5(transcript.encode()).hexdigest()[:12]
     cache_key = f"{telegram_id}:{contact.peer_id if contact else 0}:{transcript_hash}"
-    cached = _fact_cache.get(cache_key)
-    if cached is not None:
-        cached_time, cached_facts = cached
-        if time.monotonic() - cached_time < _FACT_CACHE_TTL:
-            logger.debug("Cache hit for %s", cache_key)
-            return cached_facts, 0
-        else:
-            _fact_cache.pop(cache_key, None)
+    async with _fact_cache_lock:
+        cached = _fact_cache.get(cache_key)
+        if cached is not None:
+            cached_time, cached_facts = cached
+            if time.monotonic() - cached_time < _FACT_CACHE_TTL:
+                logger.debug("Cache hit for %s", cache_key)
+                return cached_facts, 0
+            else:
+                _fact_cache.pop(cache_key, None)
 
     # Формируем промпт (как в memory_extractor.py)
     if contact is not None:
@@ -411,7 +413,7 @@ async def _extract_llm_filtered(
             await asyncio.wait_for(
                 _llm_semaphore.acquire(), timeout=_SEMAPHORE_ACQUIRE_TIMEOUT
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "LLM semaphore acquire timed out after %.0fs — "
                 "all %d slots may be occupied by hanging calls",
@@ -517,8 +519,9 @@ async def _extract_llm_filtered(
         )
 
     # ── Cache store (with eviction to prevent unbounded growth) ──
-    _evict_fact_cache_if_full()
-    _fact_cache[cache_key] = (time.monotonic(), valid)
+    async with _fact_cache_lock:
+        await _evict_fact_cache_if_full()
+        _fact_cache[cache_key] = (time.monotonic(), valid)
 
     return valid, skipped
 

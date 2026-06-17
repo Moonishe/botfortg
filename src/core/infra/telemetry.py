@@ -12,13 +12,17 @@ all functions are graceful no-ops — no runtime overhead beyond one env-var che
 
 Optional dependencies (install them before enabling)::
 
-    pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+    pip install opentelemetry-api opentelemetry-sdk
+    opentelemetry-exporter-otlp-proto-http
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 
 _TRACING_ENABLED: bool = bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
 
@@ -85,7 +89,7 @@ def set_attribute(key: str, value: object) -> None:
         if span.is_recording:
             span.set_attribute(key, value)
     except Exception:
-        pass  # never fail on telemetry
+        logger.debug("telemetry.set_attribute failed for key=%s", key, exc_info=True)
 
 
 def add_event(name: str, **attrs: object) -> None:
@@ -99,4 +103,4 @@ def add_event(name: str, **attrs: object) -> None:
         if span.is_recording:
             span.add_event(name, attributes=attrs)
     except Exception:
-        pass  # never fail on telemetry
+        logger.debug("telemetry.add_event failed for name=%s", name, exc_info=True)

@@ -41,6 +41,15 @@ async def setup_db():
     engine.sync_engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+def _fast_bump_debounce(monkeypatch):
+    """Отключаем debounce use_count-бампера и чистим очередь для изоляции тестов."""
+    from src.core.memory.memory_recall import _bump_queue
+
+    _bump_queue.clear()
+    monkeypatch.setattr("src.core.memory.memory_recall._BUMP_DEBOUNCE", 0.0)
+
+
 def utc_naive():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 

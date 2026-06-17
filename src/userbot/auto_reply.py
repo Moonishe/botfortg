@@ -25,7 +25,6 @@ from telethon.tl.types import (
 
 from src.core.contacts.auto_reply_decision import (
     AutoReplyVerdict,
-    _global_reply_increment,
     decide,
 )
 from src.core.contacts.chat_service import load_chat, message_to_text
@@ -493,8 +492,10 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
             await event.respond(reply)
 
-            # Трекаем глобальный лимит авто-ответов
-            await _global_reply_increment()
+            # NOTE: global rate-limit slot is now reserved atomically inside
+            # auto_reply_decision.decide() via _global_reply_reserve(). The
+            # previous separate _global_reply_increment() call would double-
+            # count and also re-open the TOCTOU window that reserve() closes.
 
             # Обновить ConversationState
             async with get_session() as _ar_session:

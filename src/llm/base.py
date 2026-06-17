@@ -20,6 +20,7 @@ class TaskType:
     SKILLS = "skills"  # Навыки и инструменты
     BACKGROUND = "background"  # Фоновые задачи
     VISION = "vision"  # Мультимодальный анализ изображений
+    GOAL_JUDGE = "goal_judge"  # Goal Judge — финальная оценка достижения цели
     DEFAULT = "default"  # Обычный чат
 
 
@@ -30,36 +31,48 @@ class ChatMessage:
 
 
 class LLMProvider(Protocol):
-    name: str
+    @property
+    def name(self) -> str:
+        raise NotImplementedError
 
     async def validate_key(self) -> bool:
-        """Лёгкий запрос: подходит ли ключ. Используется в /settings."""
+        raise NotImplementedError
 
     async def chat(
         self,
         messages: list[ChatMessage],
         *,
-        heavy: bool = False,  # DEPRECATED: use task_type instead. Kept for backward compat.
+        heavy: bool
+        | None = None,  # DEPRECATED: use task_type instead. Kept for backward compat.
         task_type: str = "default",
-    ) -> str: ...
+    ) -> str:
+        raise NotImplementedError
 
     async def chat_stream(
         self,
         messages: list[ChatMessage],
         *,
-        heavy: bool = False,  # DEPRECATED: use task_type instead. Kept for backward compat.
+        heavy: bool
+        | None = None,  # DEPRECATED: use task_type instead. Kept for backward compat.
         task_type: str = "default",
     ) -> AsyncGenerator[str]:
-        """Stream tokens from chat completion. Raises NotImplementedError if unsupported."""
+        """Stream tokens from chat completion.
+        Raises NotImplementedError if unsupported."""
         raise NotImplementedError("chat_stream not supported by this provider")
+        yield  # type: ignore[unreachable]
 
-    async def embed(self, text: str) -> list[float]: ...
+    async def embed(self, text: str) -> list[float]:
+        raise NotImplementedError
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        raise NotImplementedError
 
     async def list_models(self) -> list[str]:
-        """Return available model IDs from the provider. Raises NotImplementedError if unsupported."""
-        ...
+        """Return available model IDs from the provider.
+
+        Raises NotImplementedError if unsupported.
+        """
+        raise NotImplementedError
 
     async def close(self) -> None:
         """Close underlying HTTP client and release connections."""
@@ -75,7 +88,8 @@ class VisionProvider(Protocol):
         image_mime: str = "image/jpeg",
         *,
         task_type: str = "default",
-    ) -> str: ...
+    ) -> str:
+        raise NotImplementedError
 
 
 class TTSProvider(Protocol):
@@ -85,17 +99,17 @@ class TTSProvider(Protocol):
 
     async def validate_key(self) -> bool:
         """Validate API key with a lightweight request."""
-        ...
+        raise NotImplementedError
 
     async def synthesize(
         self, text: str, *, voice: str = "default", speed: float = 1.0
     ) -> bytes:
         """Synthesize speech from text. Returns raw audio bytes."""
-        ...
+        raise NotImplementedError
 
     async def list_voices(self) -> list[str]:
         """Return available voice IDs."""
-        ...
+        raise NotImplementedError
 
     async def close(self) -> None:
         """Close underlying HTTP client."""

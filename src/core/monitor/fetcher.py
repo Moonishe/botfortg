@@ -352,6 +352,21 @@ async def check_periodic(user_id: int) -> list[dict]:
         )
         return []
 
+    # Batch-load all rules for all active sources (avoid N+1 per source)
+    source_ids = [s.id for s in sources]
+    async with get_session() as session:
+        all_rules_stmt = select(MonitorRule).where(
+            MonitorRule.source_id.in_(source_ids),
+            MonitorRule.is_active == True,
+        )
+        all_rules_result = await session.execute(all_rules_stmt)
+        all_rules: list[MonitorRule] = list(all_rules_result.scalars().all())
+
+    # Index rules by source_id for O(1) lookup
+    rules_by_source: dict[int, list[MonitorRule]] = {}
+    for rule in all_rules:
+        rules_by_source.setdefault(rule.source_id, []).append(rule)
+
     results: list[dict] = []
 
     for source in sources:
@@ -362,14 +377,8 @@ async def check_periodic(user_id: int) -> list[dict]:
             if not msgs:
                 continue
 
-            # Загружаем правила для источника
-            async with get_session() as session:
-                rules_stmt = select(MonitorRule).where(
-                    MonitorRule.source_id == source.id,
-                    MonitorRule.is_active == True,
-                )
-                rules_result = await session.execute(rules_stmt)
-                rules = list(rules_result.scalars().all())
+            # Получаем правила из batch-загруженного словаря
+            rules = rules_by_source.get(source.id, [])
 
             # Применяем правила к каждому сообщению
             matched_pairs: list[tuple[dict, list[MonitorRule]]] = []

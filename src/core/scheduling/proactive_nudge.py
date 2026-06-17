@@ -148,6 +148,8 @@ async def nudge_loop(owner_telegram_id: int) -> None:
                             priority=Notification.PRIORITY_HIGH,
                         )
                         logger.info("Nudge sent: %d contacts", len(nudges))
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Nudge loop error")
         await asyncio.sleep(10800)  # 3 hours

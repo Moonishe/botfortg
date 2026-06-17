@@ -61,3 +61,13 @@ def _db_init():
         asyncio.run(_drop())
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+async def _reset_circuit_breaker():
+    """Reset tool circuit breaker state before/after each test for isolation."""
+    from src.core.actions.tool_middleware import ToolCircuitBreaker
+
+    await ToolCircuitBreaker.reset()
+    yield
+    await ToolCircuitBreaker.reset()

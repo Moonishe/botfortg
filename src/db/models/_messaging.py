@@ -44,7 +44,7 @@ class Message(Base):
     sender_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     sender_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     is_outgoing: Mapped[bool] = mapped_column(Boolean, default=False)
-    date: Mapped[datetime] = mapped_column(DateTime, index=True)
+    date: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     kind: Mapped[str] = mapped_column(
         String(16), default="text", index=True
     )  # text | voice | audio | document | photo | other
@@ -81,7 +81,9 @@ class Commitment(Base):
     status: Mapped[str] = mapped_column(
         String(16), default="open"
     )  # open | done | cancelled | reminded
-    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_reminded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
@@ -161,6 +163,17 @@ class PendingAction(Base):
         DateTime, nullable=True, index=True
     )
     hmac_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Week 2 — Hybrid Approval Kernel routing metadata
+    route: Mapped[str] = mapped_column(
+        String(8), default="db", nullable=False
+    )  # db | memory
+    verb: Mapped[str] = mapped_column(
+        String(16), default="send", nullable=False
+    )  # send | tool | cron | intent
+    risk: Mapped[str] = mapped_column(
+        String(16), default="low", nullable=False
+    )  # low | medium | high | critical
+    human_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class NewsTopic(Base):
@@ -290,9 +303,9 @@ class MessageReaction(Base):
     __tablename__ = "message_reactions"
     __table_args__ = (Index("ix_reactions_msg", "chat_id", "message_id"),)
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="CASCADE")
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     chat_id: Mapped[int] = mapped_column(BigInteger)
     message_id: Mapped[int] = mapped_column(BigInteger)

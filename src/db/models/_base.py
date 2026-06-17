@@ -11,6 +11,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 if TYPE_CHECKING:
     from src.db.models._auth import ApiKey, LlmKeySlot, TelegramSession, UserSettings
     from src.db.models._messaging import ConversationSummary, ScheduledMessage
+    from src.db.models._cron import CronJob
 
 
 class Base(DeclarativeBase):
@@ -31,7 +32,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
     )
-    last_seen_online: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_seen_online: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     absence_status: Mapped[str | None] = mapped_column(
         String(16), nullable=True
     )  # null | "away" | "soon_back"
@@ -70,6 +71,11 @@ class User(Base):
         lazy="selectin",
     )
     scheduled_messages: Mapped[list[ScheduledMessage]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    cron_jobs: Mapped[list[CronJob]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",

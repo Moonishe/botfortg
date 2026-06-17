@@ -24,6 +24,7 @@ from src.core.actions.tool_registry import ToolActionSpec, tool
 from src.core.contacts.contact_resolver import resolve
 from src.db.repo import get_contact, get_contact_profile, get_or_create_user
 from src.db.session import get_session
+from src.core.security import is_confirmed_truthy
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ async def mcp_telegram(
         if action == "get_info":
             return await _get_info(client, telegram_id, peer.strip(), limit=limit)
         elif action == "send":
-            if not bool(kwargs.get("_confirmed", False)):
+            if not is_confirmed_truthy(kwargs.get("_confirmed", False)):
                 return {"error": "requires confirmation"}
             return await _send_message(client, telegram_id, peer.strip(), text)
         else:

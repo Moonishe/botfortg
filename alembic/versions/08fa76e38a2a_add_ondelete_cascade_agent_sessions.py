@@ -71,6 +71,8 @@ def _rebuild_table(
     # Disable FK checks for the duration of the table swap so that
     # dropping the old table while a dependent FK still references it
     # doesn't raise "foreign key mismatch".
+    # ponytail: SQLite PRAGMA foreign_keys is connection-local and cannot
+    # be toggled inside a transaction. The try/finally still documents intent.
     op.execute("PRAGMA foreign_keys=OFF")
     try:
         op.execute(ddl_create)

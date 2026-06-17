@@ -1,11 +1,10 @@
-"""Send Guard — единый предохранитель перед отправкой сообщения с undo-буфером."""
+"""Send Guard — единый предохранитель перед отправкой сообщения."""
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, UTC
 
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.temporal_layers import utc_naive, utcnow_naive
@@ -18,9 +17,6 @@ from src.db.repo import (
 )
 
 logger = logging.getLogger(__name__)
-
-_undo_buffer: dict[int, list] = {}
-_undo_lock = asyncio.Lock()
 
 
 @dataclass
@@ -53,13 +49,12 @@ async def build_send_guard(
         contact = await get_contact(session, owner, peer_id)
         name = contact.display_name if contact else str(peer_id)
 
-        mems = await list_memories(session, owner)
+        mems = await list_memories(session, owner, contact_id=peer_id, is_active=True)
         neg = [
             m
             for m in mems
             if m.contact_id == peer_id
             and m.sentiment == "negative"
-            and m.is_active
             and m.created_at
             and (now - utc_naive(m.created_at)).days < 14
         ]
@@ -67,7 +62,8 @@ async def build_send_guard(
             result.risk_level = "high"
             neg_texts = "; ".join(m.fact[:50] for m in neg[:3])
             result.warnings.append(
-                f"За последние 2 недели негативные факты о {sanitize_html(name)}: {sanitize_html(neg_texts)}"
+                "За последние 2 недели негативные факты о "
+                f"{sanitize_html(name)}: {sanitize_html(neg_texts)}"
             )
 
         try:
@@ -78,10 +74,8 @@ async def build_send_guard(
                         f"Стиль: {sanitize_html(prof.communication_style[:60])}"
                     )
                 if prof.communication_dos:
-                    import json as _j
-
                     dos = (
-                        _j.loads(prof.communication_dos)
+                        json.loads(prof.communication_dos)
                         if (prof.communication_dos or "").startswith("[")
                         else [prof.communication_dos]
                     )
@@ -90,10 +84,8 @@ async def build_send_guard(
                             f"✅ {sanitize_html(', '.join(dos[:3]))}"
                         )
                 if prof.communication_donts:
-                    import json as _j
-
                     donts = (
-                        _j.loads(prof.communication_donts)
+                        json.loads(prof.communication_donts)
                         if (prof.communication_donts or "").startswith("[")
                         else [prof.communication_donts]
                     )
@@ -116,30 +108,3 @@ async def build_send_guard(
             result.warnings.append("Конфликтный контакт — перепроверь сообщение.")
 
     return result
-
-
-async def store_undo(
-    telegram_id: int, peer_id: int, message_id: int, text: str
-) -> None:
-    async with _undo_lock:
-        if telegram_id not in _undo_buffer:
-            _undo_buffer[telegram_id] = []
-        _undo_buffer[telegram_id].append(
-            (peer_id, message_id, text, datetime.now(UTC))
-        )
-        _undo_buffer[telegram_id] = [
-            (p, m, t, ts)
-            for p, m, t, ts in _undo_buffer[telegram_id]
-            if (datetime.now(UTC) - ts).total_seconds() < 300
-        ]
-
-
-async def get_undo(telegram_id: int) -> tuple | None:
-    async with _undo_lock:
-        if telegram_id not in _undo_buffer or not _undo_buffer[telegram_id]:
-            return None
-        last = _undo_buffer[telegram_id][-1]
-        age = (datetime.now(UTC) - last[3]).total_seconds()
-        if age > 60:
-            return None
-        return last

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, UTC
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy import func as sa_func
@@ -52,7 +53,7 @@ DIGEST_SYSTEM = (
 )
 
 
-async def _gather_payload(owner: User) -> dict:
+async def _gather_payload(owner: User) -> dict[str, Any]:
     since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=14)
 
     async with get_session() as session:
@@ -176,19 +177,25 @@ async def build_digest(owner_telegram_id: int) -> str:
     if provider is None:
         return "Не задан LLM-ключ — не могу собрать дайджест. Открой /settings."
 
-    payload = await _gather_payload(owner)
-    raw_text = _payload_to_text(payload, tz_name)
-    if raw_text == "Активности не было.":
-        return "☀ Доброе утро! За ночь — тишина."
+    try:
+        payload = await _gather_payload(owner)
+        raw_text = _payload_to_text(payload, tz_name)
+        if raw_text == "Активности не было.":
+            return "☀ Доброе утро! За ночь — тишина."
 
-    response = await provider.chat(
-        [
-            ChatMessage(role="system", content=DIGEST_SYSTEM),
-            ChatMessage(role="user", content=raw_text),
-        ],
-        task_type=TaskType.SUMMARIZE,
-    )
-    return sanitize_html(response)
+        response = await provider.chat(
+            [
+                ChatMessage(role="system", content=DIGEST_SYSTEM),
+                ChatMessage(role="user", content=raw_text),
+            ],
+            task_type=TaskType.SUMMARIZE,
+        )
+        return sanitize_html(response)
+    finally:
+        try:
+            await provider.close()
+        except Exception:
+            logger.debug("Failed to close provider in build_digest", exc_info=True)
 
 
 async def send_digest(owner_telegram_id: int) -> None:
@@ -212,46 +219,46 @@ async def digest_scheduler_loop() -> None:
     NOTE: get_or_create_user() вызывается каждый тик (~1 раз в минуту)
     для получения свежих настроек. Для single-user бота это лёгкий SELECT.
     """
-    import asyncio
-
     last_sent: dict[int, str] = {}  # telegram_id -> "YYYY-MM-DD"
     while True:
-        # Защита от наложения: если предыдущий тик ещё не завершён — пропускаем
-        if _overlap_guard.locked():
-            await asyncio.sleep(settings.digest_check_sec)
-            continue
-        await _overlap_guard.acquire()
-        try:
-            owner_id = settings.owner_telegram_id
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = owner.settings.timezone
-                enabled = owner.settings.digest_enabled
-                target_hm = owner.settings.digest_time
-            if not target_hm:
-                logger.warning(
-                    "digest_time is not set for owner %d, skipping tick", owner_id
-                )
-                await asyncio.sleep(settings.digest_check_sec)
-                continue
-            local_now = now_in_tz(tz_name)
-            current_hm = local_now.strftime("%H:%M")
-            current_day = local_now.strftime("%Y-%m-%d")
-            # Normalize target_hm to HH:MM (handle "9:00" vs "09:00")
+        async with _overlap_guard:
             try:
-                th, tm = target_hm.split(":")
-                target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
-            except (ValueError, AttributeError):
-                continue
-            if (
-                enabled
-                and target_hm_normalized == current_hm
-                and last_sent.get(owner_id) != current_day
-            ):
-                await send_digest(owner_id)
-                last_sent[owner_id] = current_day
-        except Exception:
-            logger.exception("digest scheduler tick failed")
-        finally:
-            _overlap_guard.release()
+                owner_id = settings.owner_telegram_id
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    tz_name = owner.settings.timezone
+                    enabled = owner.settings.digest_enabled
+                    target_hm = owner.settings.digest_time
+                if not target_hm:
+                    logger.warning(
+                        "digest_time is not set for owner %d, skipping tick", owner_id
+                    )
+                    await asyncio.sleep(settings.digest_check_sec)
+                    continue
+                local_now = now_in_tz(tz_name)
+                current_hm = local_now.strftime("%H:%M")
+                current_day = local_now.strftime("%Y-%m-%d")
+                # Normalize target_hm to HH:MM (handle "9:00" vs "09:00")
+                try:
+                    th, tm = target_hm.split(":")
+                    target_hm_normalized = f"{int(th):02d}:{int(tm):02d}"
+                except (ValueError, AttributeError):
+                    logger.warning(
+                        "Malformed digest_time %r for owner %d — skipping tick",
+                        target_hm,
+                        owner_id,
+                    )
+                    await asyncio.sleep(settings.digest_check_sec)
+                    continue
+                if (
+                    enabled
+                    and target_hm_normalized == current_hm
+                    and last_sent.get(owner_id) != current_day
+                ):
+                    await send_digest(owner_id)
+                    last_sent[owner_id] = current_day
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("digest scheduler tick failed")
         await asyncio.sleep(settings.digest_check_sec)

@@ -7,6 +7,7 @@ from datetime import datetime, UTC
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -45,7 +46,7 @@ class AvitoListing(Base):
     )  # new, used, excellent, good, satisfactory
     delivery: Mapped[bool] = mapped_column(Boolean, default=False)
     seller_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    seller_rating: Mapped[float | None] = mapped_column(nullable=True)
+    seller_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     seller_reviews: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     deal_score: Mapped[int | None] = mapped_column(Integer, nullable=True)

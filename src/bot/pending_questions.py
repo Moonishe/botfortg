@@ -20,27 +20,34 @@ _lock = asyncio.Lock()
 
 
 async def get_pending(telegram_id: int) -> list[str]:
-    questions: list[str] = []
-    # DB first — load any that survived restart (safe: delete happens after)
-    try:
-        async with get_session() as session:
-            from src.db.repo import get_pending_questions, get_or_create_user
+    """Atomically load and drain pending questions from DB + in-memory queue.
 
-            owner = await get_or_create_user(session, telegram_id)
-            db_questions = await get_pending_questions(session, owner.id)
-            questions.extend(db_questions)
-            # Delete loaded questions from DB so they are not re-loaded
-            # on the next call (idempotent — only removes what was loaded).
-            if db_questions:
-                from src.core.memory.pending_questions import delete_pending_questions
-
-                await delete_pending_questions(telegram_id)
-    except Exception:
-        logger.debug("Failed to load pending questions from DB", exc_info=True)
-    # In-memory (pop after DB so questions are not lost on DB failure)
+    _lock serialises access per-user to prevent duplicate delivery
+    when two concurrent calls race on DB load+delete.
+    """
     async with _lock:
+        questions: list[str] = []
+        # DB first — load any that survived restart (safe: delete happens after)
+        try:
+            async with get_session() as session:
+                from src.db.repo import get_pending_questions, get_or_create_user
+
+                owner = await get_or_create_user(session, telegram_id)
+                db_questions = await get_pending_questions(session, owner.id)
+                questions.extend(db_questions)
+                # Delete loaded questions from DB so they are not re-loaded
+                # on the next call (idempotent — only removes what was loaded).
+                if db_questions:
+                    from src.core.memory.pending_questions import (
+                        delete_pending_questions,
+                    )
+
+                    await delete_pending_questions(telegram_id)
+        except Exception:
+            logger.debug("Failed to load pending questions from DB", exc_info=True)
+        # In-memory (pop after DB so questions are not lost on DB failure)
         questions.extend(_pending.pop(telegram_id, []))
-    return questions
+        return questions
 
 
 async def has_pending(telegram_id: int) -> bool:

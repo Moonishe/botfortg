@@ -306,27 +306,30 @@ async def apply_reval_result(
         return base
 
     if action == "invalid":
-        # Шаг 1: деактивация — в savepoint для атомарности
+        # Шаг 1: деактивация — атомарная в рамках сессии вызывающего
         try:
-            # savepoint: атомарная деактивация + аудит-трейл факта
-            async with session.begin_nested() as sp:  # noqa: F841
-                # Сохраняем версию в аудит-трейл перед деактивацией
-                from src.db.repos.memory_repo import save_memory_version
+            # Сохраняем версию в аудит-трейл перед деактивацией
+            from src.db.repos.memory_repo import save_memory_version
 
-                await save_memory_version(
-                    session,
-                    fact.id,
-                    fact.fact,
-                    edited_by="agent",
-                    reason="reval_invalid",
-                )
-                await deactivate_memory(session, fact.id, reason="reval_invalid")
+            await save_memory_version(
+                session,
+                fact.id,
+                fact.fact,
+                edited_by="agent",
+                reason="reval_invalid",
+            )
+            await deactivate_memory(session, fact.id, reason="reval_invalid")
         except Exception as exc:
+            logger.exception(
+                "apply_reval_result: invalid deactivate failed for fact %d", fact.id
+            )
+            await session.rollback()
             base.error = f"deactivate failed: {exc}"
         return base
 
     # past / permanent → create new fact and supersede old
-    # (шаги 2-3: add_memory + supersedes_link + deactivate — в одном savepoint)
+    # (шаги 2-3: add_memory + supersedes_link + deactivate — атомарно
+    # в рамках сессии вызывающего)
     # Use explicit ``is not None`` (not ``or``) so legitimate falsy values
     # (e.g. decay_rate=0.01, empty string) are preserved instead of
     # silently falling back to defaults.
@@ -357,49 +360,50 @@ async def apply_reval_result(
     new_decay = new_decay_raw if new_decay_raw is not None else 0.02
 
     try:
-        # savepoint: атомарное создание нового факта + supersedes-связь + деактивация старого
-        async with session.begin_nested() as savepoint:  # noqa: F841
-            from src.db.repos.memory_repo import add_memory
+        # Атомарное создание нового факта + supersedes-связь + деактивация старого
+        # в рамках сессии вызывающего. При ошибке откатываем всю сессию.
+        from src.db.repos.memory_repo import add_memory
 
-            new_mem = await add_memory(
+        new_mem = await add_memory(
+            session,
+            user,
+            fact=updated,
+            contact_id=fact.contact_id,
+            sentiment=fact.sentiment,
+            source="dreaming_reval",
+            confidence=max(0.6, fact.confidence or 0.5),
+            memory_type=new_type,
+            decay_rate=new_decay,
+            pinned=False,
+            deduplicate=True,
+            vector_store_obj=vector_store_obj,
+        )
+        if new_mem and new_mem.id != fact.id:
+            await add_supersedes_link(
                 session,
-                user,
-                fact=updated,
-                contact_id=fact.contact_id,
-                sentiment=fact.sentiment,
-                source="dreaming_reval",
-                confidence=max(0.6, fact.confidence or 0.5),
-                memory_type=new_type,
-                decay_rate=new_decay,
-                pinned=False,
-                deduplicate=True,
-                vector_store_obj=vector_store_obj,
+                user.id,
+                old_id=fact.id,
+                new_id=new_mem.id,
             )
-            if new_mem and new_mem.id != fact.id:
-                await add_supersedes_link(
-                    session,
-                    user.id,
-                    old_id=fact.id,
-                    new_id=new_mem.id,
-                )
-                base.new_memory_id = new_mem.id
-                # Сохраняем версию в аудит-трейл перед деактивацией старого факта
-                from src.db.repos.memory_repo import save_memory_version
+            base.new_memory_id = new_mem.id
+            # Сохраняем версию в аудит-трейл перед деактивацией старого факта
+            from src.db.repos.memory_repo import save_memory_version
 
-                await save_memory_version(
-                    session,
-                    fact.id,
-                    fact.fact,
-                    edited_by="agent",
-                    reason="superseded_by_reval",
-                )
-                # Deactivate old fact to keep recall clean
-                await deactivate_memory(session, fact.id, reason="superseded_by_reval")
-            elif new_mem and new_mem.id == fact.id:
-                # Dedup caught it — fact already exists in some form. Leave alone.
-                base.reason = (base.reason or "") + " [dedup: same fact exists]"
+            await save_memory_version(
+                session,
+                fact.id,
+                fact.fact,
+                edited_by="agent",
+                reason="superseded_by_reval",
+            )
+            # Deactivate old fact to keep recall clean
+            await deactivate_memory(session, fact.id, reason="superseded_by_reval")
+        elif new_mem and new_mem.id == fact.id:
+            # Dedup caught it — fact already exists in some form. Leave alone.
+            base.reason = (base.reason or "") + " [dedup: same fact exists]"
     except Exception as exc:
         logger.exception("apply_reval_result: add_memory failed for fact %d", fact.id)
+        await session.rollback()
         base.error = f"add_memory failed: {exc}"
         return base
 

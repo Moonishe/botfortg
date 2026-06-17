@@ -38,6 +38,7 @@ async def _proactive_scan(telegram_id: int) -> None:
     if client is None:
         return
 
+    provider = None
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, telegram_id)
@@ -130,6 +131,14 @@ async def _proactive_scan(telegram_id: int) -> None:
 
     except Exception:
         logger.exception("proactive_chat_analyzer: scan failed")
+    finally:
+        if provider is not None:
+            try:
+                await provider.close()
+            except Exception:
+                logger.debug(
+                    "Failed to close provider in proactive_scan", exc_info=True
+                )
 
 
 async def _analyze_contact(
@@ -174,6 +183,8 @@ async def _proactive_loop(telegram_id: int) -> None:
         async with _overlap_guard:
             try:
                 await _proactive_scan(telegram_id)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("proactive_analyzer iteration failed")
         await asyncio.sleep(INTERVAL_HOURS * 3600)

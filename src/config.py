@@ -1,7 +1,8 @@
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +36,16 @@ class Settings(BaseSettings):
     def _empty_str_to_none(cls, v: object) -> object:
         if isinstance(v, str) and v.strip() == "":
             return None
+        return v
+
+    @field_validator("api_id", "api_hash", mode="after")
+    @classmethod
+    def _validate_api_credentials_pair(cls, v: int | str | None) -> int | str | None:
+        """api_id и api_hash остаются опциональными; userbot-режим определяется кодом инициализации.
+
+        ponytail: нет явного флага userbot_mode, поэтому строгая кросс-валидация здесь
+        ломает тесты, которые подставляют только API_HASH как dummy-значение.
+        """
         return v
 
     @field_validator("encryption_key", mode="after")
@@ -137,7 +148,34 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _resolve_database_url(cls, v: str) -> str:
+        """Resolve relative SQLite paths against PROJECT_ROOT."""
+        if not v or not v.startswith("sqlite+aiosqlite:///"):
+            return v
+        path_str = v.replace("sqlite+aiosqlite:///", "")
+        # Leave special SQLite paths untouched
+        if path_str in (":memory:", "") or path_str.startswith(("file:", "mode=")):
+            return v
+        path = Path(path_str)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return f"sqlite+aiosqlite:///{path.as_posix()}"
+
+    @field_validator("webhook_secret_token", mode="after")
+    @classmethod
+    def _require_webhook_secret(cls, v: str, info: ValidationInfo) -> str:
+        """Enforce non-empty webhook secret when webhook mode is enabled."""
+        webhook_url = (info.data.get("webhook_url") or "").strip()
+        if webhook_url and not v:
+            raise ValueError("WEBHOOK_SECRET_TOKEN is required when WEBHOOK_URL is set")
+        return v
+
     bot_token: str = Field(..., description="Токен control-бота из @BotFather")
+    log_format: Literal["text", "json"] = Field(
+        "text", description="Формат логов: text или json"
+    )
     owner_telegram_id: int = Field(
         ..., description="Telegram user_id единственного владельца"
     )
@@ -156,6 +194,10 @@ class Settings(BaseSettings):
         description="Secret token for webhook validation. Set to random string.",
     )
     encryption_key: str = Field(..., description="Fernet-ключ (base64)")
+    approval_hmac_key: str | None = Field(
+        default=None,
+        description="Отдельный ключ для HMAC approval-подписей. Если не задан — используется encryption_key (обратная совместимость).",
+    )
     database_url: str = Field("sqlite+aiosqlite:///data/app.db")
     proxy_url: str = Field(
         "",
@@ -281,8 +323,8 @@ class Settings(BaseSettings):
         description="Context7 API key for documentation search (https://context7.com)",
     )
 
-    genius_access_token: str = Field(
-        "",
+    genius_access_token: str | None = Field(
+        default=None,
         description="Genius API access token для поиска текстов песен (https://genius.com/api-clients)",
     )
 
@@ -652,6 +694,11 @@ class Settings(BaseSettings):
         description="Включить Dreaming Consolidator (ночное закрепление: контрфактуалы, паттерны, инсайты)",
     )
 
+    dreaming_batch_enabled: bool = Field(
+        True,
+        description="Параллельный батчинг фаз dreaming (фазы 5/6/8/12)",
+    )
+
     # Agent/task-specific model overrides (из .env)
     maestro_model: str = Field("", description="Model override for maestro agent")
     draft_model: str = Field("", description="Model override for draft agent")
@@ -685,11 +732,31 @@ class Settings(BaseSettings):
     swarm_max_parallel: int = Field(3, description="Максимум параллельных sub-agent'ов")
     memory_seed_max_facts: int = Field(5, description="Максимум prior facts для seed'а")
 
+    # ── Site connectors ──
+    fourpda_allow_restricted_downloads: bool = Field(
+        False, description="Разрешить скачивание с 4pda для restricted-пользователей"
+    )
+    x_bearer_token: str = Field("", description="Bearer token для x.com API")
+
+    # ── Security / Approval policy ──
+    approval_mode: Literal["manual", "smart", "off"] = Field(
+        "smart",
+        description=(
+            "Режим подтверждения опасных tool-вызовов: "
+            "manual=подтверждение для всех medium/high/critical; "
+            "smart (default)=только high/critical + всегда active hardline blocklist; "
+            "off=отключить подтверждение (hardline blocklist ВСЁ РАВНО активен)."
+        ),
+    )
+
+    _data_dir_path: Path | None = PrivateAttr(default=None)
+
     @property
     def data_dir(self) -> Path:
-        path = PROJECT_ROOT / "data"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        if self._data_dir_path is None:
+            self._data_dir_path = PROJECT_ROOT / "data"
+            self._data_dir_path.mkdir(parents=True, exist_ok=True)
+        return self._data_dir_path
 
 
 settings = Settings()

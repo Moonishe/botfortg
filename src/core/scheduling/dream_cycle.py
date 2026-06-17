@@ -292,7 +292,8 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 summary["meta_memory_updated"] = mm_updated
                 if mm_updated:
                     logger.info(
-                        "Dream cycle: phase 10 (meta-memory) — %d importance scores updated",
+                        "Dream cycle: phase 10 (meta-memory) — "
+                        "%d importance scores updated",
                         mm_updated,
                     )
         except Exception:
@@ -346,6 +347,31 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         except Exception:
             logger.exception("Dream cycle: phase 12 (mood) failed")
             summary["mood_alert_details"] = []
+
+        # ── Phase 13: Compaction Pipeline v2 ────────────────────────────────
+        try:
+            from src.core.compaction import run_compaction_pipeline
+
+            compaction_report = await run_compaction_pipeline(owner_telegram_id)
+            summary["compaction_facts_pruned"] = compaction_report.facts_pruned
+            summary["compaction_facts_merged"] = compaction_report.facts_merged
+            summary["compaction_groups_compressed"] = (
+                compaction_report.groups_compressed
+            )
+            summary["compaction_vectors_removed"] = compaction_report.vectors_removed
+            summary["compaction_skills_extracted"] = compaction_report.skills_extracted
+            summary["compaction_ratio"] = compaction_report.compression_ratio
+            if compaction_report.facts_pruned or compaction_report.facts_merged:
+                logger.info(
+                    "Dream cycle: phase 13 (compaction) — pruned=%d merged=%d "
+                    "vectors_removed=%d skills_extracted=%d",
+                    compaction_report.facts_pruned,
+                    compaction_report.facts_merged,
+                    compaction_report.vectors_removed,
+                    compaction_report.skills_extracted,
+                )
+        except Exception:
+            logger.exception("Dream cycle: phase 13 (compaction) failed")
 
         # ── Graph statistics ──────────────────────────────────────────────
         try:
@@ -496,6 +522,28 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 if count > 2:
                     summary_lines.append(f"   …и ещё {count - 2}")
 
+            # Compaction (Phase 13)
+            compaction_pruned = summary.get("compaction_facts_pruned", 0)
+            compaction_merged = summary.get("compaction_facts_merged", 0)
+            compaction_vectors = summary.get("compaction_vectors_removed", 0)
+            compaction_skills = summary.get("compaction_skills_extracted", 0)
+            if (
+                compaction_pruned
+                or compaction_merged
+                or compaction_vectors
+                or compaction_skills
+            ):
+                parts = []
+                if compaction_pruned:
+                    parts.append(f"забыто {compaction_pruned}")
+                if compaction_merged:
+                    parts.append(f"сжато {compaction_merged}")
+                if compaction_vectors:
+                    parts.append(f"векторов удалено {compaction_vectors}")
+                if compaction_skills:
+                    parts.append(f"навыков извлечено {compaction_skills}")
+                summary_lines.append(f"• 🗜 Compaction: {', '.join(parts)}")
+
             # Graph stats
             if graph_stats:
                 gs = graph_stats
@@ -547,18 +595,28 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 session, owner, task_type=TaskType.BACKGROUND
             )
             if provider:
-                pings = await generate_pings(owner, provider, session)
-                for ping in pings:
-                    await notification_queue.enqueue(
-                        topic="proactive-ping",
-                        text=f"💡 {ping}",
-                        priority=5,  # PRIORITY_NORMAL
+                try:
+                    pings = await generate_pings(owner, provider, session)
+                    for ping in pings:
+                        await notification_queue.enqueue(
+                            topic="proactive-ping",
+                            text=f"💡 {ping}",
+                            priority=5,  # PRIORITY_NORMAL
+                        )
+                        await asyncio.sleep(1)
+                    # Очищаем pending-вопросы после того как они включены в пинги
+                    from src.core.memory.pending_questions import (
+                        delete_pending_questions,
                     )
-                    await asyncio.sleep(1)
-                # Очищаем pending-вопросы после того как они включены в пинги
-                from src.core.memory.pending_questions import delete_pending_questions
 
-                await delete_pending_questions(owner.telegram_id)
+                    await delete_pending_questions(owner.telegram_id)
+                finally:
+                    try:
+                        await provider.close()
+                    except Exception:
+                        logger.debug(
+                            "Non-critical error closing LLM provider", exc_info=True
+                        )
         except Exception:
             logger.debug("Proactive pings skipped", exc_info=True)
 

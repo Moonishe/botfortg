@@ -1,11 +1,14 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar, Token
+from typing import Any, NamedTuple
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import event, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import InvalidRequestError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import PROJECT_ROOT, settings
@@ -13,10 +16,40 @@ from src.db.models import Base
 
 logger = logging.getLogger(__name__)
 
+# ── Nested transaction tracking ──────────────────────────────────────
+# Context variable to detect when get_session() is called inside another
+# get_session() block. Enables automatic savepoint (begin_nested) usage.
+#
+# Stores (asyncio_task_id, AsyncSession) to prevent concurrent session
+# sharing across tasks. When a child task inherits the ContextVar from
+# its parent (because create_task copies the context), the task IDs will
+# mismatch and the child gets its own session instead of a dangerously
+# shared savepoint on the parent's session.
+
+
+class _OuterSession(NamedTuple):
+    task_id: int
+    session: AsyncSession
+
+
+_outer_session: ContextVar[_OuterSession | None] = ContextVar(
+    "_outer_session", default=None
+)
+
+# SQLite in-memory databases evaporate when their connection is released, so
+# keep exactly one connection alive for the entire process lifetime.
+_engine_kwargs: dict[str, Any] = {
+    "future": True,
+    "connect_args": {"check_same_thread": False},
+}
+if str(settings.database_url).endswith(":memory:"):
+    from sqlalchemy.pool import StaticPool
+
+    _engine_kwargs["poolclass"] = StaticPool
+
 engine = create_async_engine(
     settings.database_url,
-    future=True,
-    connect_args={"check_same_thread": False},
+    **_engine_kwargs,
 )
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -241,13 +274,13 @@ async def init_db() -> None:
         )  # checkpoint every 1000 pages
 
         # --- Schema: Alembic-canonical, create_all as bootstrap fallback ---
-        # Check if *any* ORM table exists (not just alembic_version).
-        # On Railway, alembic stamps the version table but create_all
-        # may have failed — we must detect this and re-create tables.
+        # Check if alembic_version table exists — the canonical marker
+        # that the ORM schema has been applied. This is immune to FTS5
+        # virtual tables and other non-ORM artefacts in sqlite_master.
         _has_orm_tables = await conn.execute(
             text(
                 "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name != 'alembic_version' LIMIT 1"
+                "WHERE type='table' AND name = 'alembic_version'"
             )
         )
         _has_orm_tables = _has_orm_tables.first() is not None
@@ -265,38 +298,43 @@ async def init_db() -> None:
             )
             await conn.run_sync(Base.metadata.create_all)
 
-        # Ensure alembic_version is stamped (needed if create_all was skipped
-        # but the version table was never created, e.g. after volume reset).
-        _has_version = await conn.execute(
-            text(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name='alembic_version'"
-            )
-        )
-        _has_version = _has_version.first() is not None
-
-        if not _has_version:
+        # Stamp alembic head if version table was just created by create_all
+        # (or is missing for any other reason — e.g. volume reset).
+        # Reuses _has_orm_tables from the check above — avoids a redundant
+        # sqlite_master query.
+        if not _has_orm_tables:
             # Stamp the head revision so Alembic knows all migrations are
             # already applied (create_all built the current ORM schema).
-            _alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
-            _script = ScriptDirectory.from_config(_alembic_cfg)
-            head_rev = _script.get_current_head()
-            await conn.execute(
-                text(
-                    "CREATE TABLE IF NOT EXISTS alembic_version "
-                    "(version_num VARCHAR(32) NOT NULL)"
+            try:
+                _alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+                _script = ScriptDirectory.from_config(_alembic_cfg)
+                head_rev = _script.get_current_head()
+                await conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS alembic_version "
+                        "(version_num VARCHAR(32) NOT NULL)"
+                    )
                 )
-            )
-            await conn.execute(
-                text(
-                    "INSERT OR IGNORE INTO alembic_version (version_num) VALUES (:rev)"
-                ),
-                {"rev": head_rev},
-            )
-            logger.info(
-                "Stamped alembic head revision %s after create_all bootstrap",
-                head_rev,
-            )
+                await conn.execute(
+                    text(
+                        "INSERT OR IGNORE INTO alembic_version (version_num) VALUES (:rev)"
+                    ),
+                    {"rev": head_rev},
+                )
+                logger.info(
+                    "Stamped alembic head revision %s after create_all bootstrap",
+                    head_rev,
+                )
+            except Exception:
+                logger.error(
+                    "Failed to stamp alembic head revision — "
+                    "is alembic.ini present at %s? "
+                    "Schema was created via create_all; "
+                    "Alembic will stamp on next normal startup via run().",
+                    PROJECT_ROOT / "alembic.ini",
+                    exc_info=True,
+                )
+                # Don't re-raise — schema was created, Alembic stamps next time
 
         # FTS5 virtual tables are not tracked by Alembic — raw SQL.
         for stmt in _FTS_SETUP:
@@ -312,10 +350,64 @@ async def init_db() -> None:
 
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
+    """Yield an async database session with automatic commit/rollback.
+
+    **Nested-call safety:** when ``get_session()`` is called while already
+    inside another ``get_session()`` block **in the same asyncio task**,
+    the inner call uses an SQLAlchemy SAVEPOINT (``begin_nested()``)
+    instead of creating a separate connection.
+
+    **Cross-task safety:** if a child task (created via
+    ``asyncio.create_task()``) inherits the outer session from the parent's
+    ContextVar, the task IDs will mismatch and the child receives its own
+    independent session — avoiding concurrent use of the same AsyncSession.
+
+    Example::
+
+        async with get_session() as outer:
+            await outer.execute(...)          # outer transaction
+            async with get_session() as inner:
+                await inner.execute(...)      # SAVEPOINT — isolated
+                # rollback here only affects the savepoint
+            # outer transaction continues safely
+    """
+    outer_data = _outer_session.get()
+    current_task_id = id(asyncio.current_task())
+
+    if outer_data is not None and outer_data.task_id == current_task_id:
+        # Nested call in the SAME task — use savepoint on the outer session.
+        # Distinguish "outer session is dead/unusable" (InvalidRequestError /
+        # OperationalError from a previously-rolled-back connection) from
+        # genuine business errors raised by the yielded body: the former
+        # warrants falling through to a fresh session, the latter MUST
+        # propagate to the caller. A bare ``except Exception`` here would
+        # silently swallow every exception raised inside a nested
+        # ``get_session()`` block and corrupt data with a clean-looking
+        # success.
+        try:
+            async with outer_data.session.begin_nested():
+                yield outer_data.session
+            return
+        except (InvalidRequestError, OperationalError) as e:
+            logger.debug(
+                "Outer session %r is not usable (%s) — falling back to new session",
+                outer_data.session,
+                e.__class__.__name__,
+            )
+            # Clear the stale ContextVar entry so subsequent nested calls
+            # won't hit the same dead session.
+            _outer_session.set(None)
+
+    # Either no outer session, or a cross-task inheritance — create new session
     async with SessionLocal() as session:
+        token: Token[  # type: ignore[valid-type]
+            _OuterSession | None
+        ] = _outer_session.set(_OuterSession(current_task_id, session))
         try:
             yield session
             await session.commit()
         except Exception:
             await session.rollback()
             raise
+        finally:
+            _outer_session.reset(token)

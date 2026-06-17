@@ -8,7 +8,7 @@ import json
 import logging
 
 from aiogram import F
-from aiogram.exceptions import TelegramBadRequest, TelegramError
+from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -156,6 +156,9 @@ async def cb_export_config(callback: CallbackQuery) -> None:
     config = await _collect_export_config(callback.from_user.id)
 
     json_str = json.dumps(config, ensure_ascii=False, indent=2)
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно", show_alert=True)
+        return
     await callback.message.answer_document(
         BufferedInputFile(
             json_str.encode("utf-8"), filename="telegram_helper_config.json"
@@ -216,7 +219,7 @@ async def step_import_config(message: Message, state: FSMContext) -> None:
 
     except json.JSONDecodeError:
         await message.answer("❌ Файл повреждён — невалидный JSON.")
-    except (TelegramError, SQLAlchemyError) as e:
+    except (TelegramAPIError, SQLAlchemyError) as e:
         logger.warning("import_config failed: %s", e)
         await message.answer("❌ Ошибка импорта конфигурации. Проверь файл")
     finally:
@@ -237,6 +240,8 @@ async def step_import_config_text(message: Message) -> None:
 @router.callback_query(F.data == SettingsCB.ANALYZE)
 async def cb_settings_analyze(callback: CallbackQuery) -> None:
     await callback.answer("Запускаю анализ...")
+    if callback.message is None:
+        return
     await callback.message.answer(
         "🧠 <b>Полный анализ переписок</b>\n\n"
         "Используй команду /analyze для полного анализа.\n\n"

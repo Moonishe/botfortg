@@ -42,7 +42,8 @@ def upgrade() -> None:
             unique=False,
         )
 
-    # 2. Unique constraint on memory_links to prevent duplicate (user_id, source_id, target_id)
+    # 2. Unique index on memory_links to prevent duplicate (user_id, source_id, target_id)
+    # ponytail: SQLite cannot add constraints via ALTER; unique index is equivalent.
     if not _index_exists("uq_memory_link", "memory_links"):
         op.create_index(
             "uq_memory_link",

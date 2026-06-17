@@ -14,6 +14,7 @@ from src.core.connectors import (
     register_builtin_connectors,
 )
 from src.core.connectors.credentials import redact_secrets
+from src.core.security import is_confirmed_truthy
 
 CONFIRMATION_RISKS = {"high", "critical"}
 EXPOSURE_MODES = {"all", "read-only"}
@@ -164,7 +165,7 @@ async def mcp_connectors(
     **runtime_kwargs: Any,
 ) -> dict[str, Any]:
     await asyncio.to_thread(register_builtin_connectors)
-    confirmed = bool(runtime_kwargs.pop("_confirmed", False))
+    confirmed = is_confirmed_truthy(runtime_kwargs.pop("_confirmed", False))
     normalized_action = (action or "list").strip().lower()
     try:
         exposure_mode = _parse_exposure(exposure)

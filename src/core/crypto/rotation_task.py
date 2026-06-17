@@ -38,13 +38,22 @@ async def _rotate_keys_async() -> None:
 
         # Определяем callback для перешифрования данных
         async def re_encrypt_data(old_dek: bytes, new_dek: bytes) -> None:
-            """Перешифровывает API-ключи и LLM-ключи со старого DEK на новый."""
+            """Перешифровывает API-ключи и LLM-ключи на новый DEK.
+
+            Пробуем все известные DEK (и KEK как fallback) для расшифровки,
+            чтобы перешифровать данные, оставшиеся под предыдущими ключами
+            после неполной ротации.
+            """
+            from cryptography.fernet import Fernet
             from sqlalchemy import select
 
             from src.db.models._auth import ApiKey, LlmKeySlot
 
             re_encrypted = 0
             errors = 0
+
+            # Все кандидаты для расшифровки: KEK fallback + все известные DEK.
+            dek_candidates = [mgr._kek_bytes, *mgr._deks.values()]
 
             for model_cls, label in [
                 (ApiKey, "api_keys"),
@@ -53,20 +62,38 @@ async def _rotate_keys_async() -> None:
                 result = await session.execute(select(model_cls))
                 rows = result.scalars().all()
                 for row in rows:
+                    if not row.key_enc:
+                        errors += 1
+                        logger.warning("Empty key_enc for %s id=%s", label, row.id)
+                        continue
+                    plaintext: str | None = None
+                    for dek in dek_candidates:
+                        try:
+                            plaintext = (
+                                Fernet(dek).decrypt(row.key_enc.encode()).decode()
+                            )
+                            break
+                        except Exception:  # noqa: S112
+                            # Wrong key candidate — expected when iterating
+                            # KEK fallback and all historical DEKs.
+                            continue
+                    if plaintext is None:
+                        errors += 1
+                        logger.warning(
+                            "Cannot decrypt %s id=%s with any known key",
+                            label,
+                            row.id,
+                        )
+                        continue
                     try:
-                        # Пробуем расшифровать старым DEK
-                        from cryptography.fernet import Fernet
-
-                        old_fernet = Fernet(old_dek)
-                        plaintext = old_fernet.decrypt(row.key_enc.encode()).decode()
-                        # Перешифровываем новым DEK
-                        new_fernet = Fernet(new_dek)
-                        row.key_enc = new_fernet.encrypt(plaintext.encode()).decode()
+                        row.key_enc = (
+                            Fernet(new_dek).encrypt(plaintext.encode()).decode()
+                        )
                         re_encrypted += 1
                     except Exception as e:
                         errors += 1
                         logger.warning(
-                            "Не удалось перешифровать %s id=%s: %s",
+                            "Cannot re-encrypt %s id=%s with new DEK: %s",
                             label,
                             row.id,
                             e,
@@ -78,27 +105,8 @@ async def _rotate_keys_async() -> None:
                 errors,
             )
 
-        # Выполняем ротацию
-        old_key_id = mgr.active_key_id
-        new_key_id = await mgr.rotate(re_encrypt_callback=re_encrypt_data)
-
-        # Сохраняем результат в БД
-        new_dek_bytes = mgr.get_dek(new_key_id)
-        if new_dek_bytes is None:
-            logger.error("DEK key_id=%s не найден после ротации", new_key_id)
-            return
-        encrypted_new_dek = mgr._encrypt_dek(new_dek_bytes)
-        await mgr.persist_rotation(
-            session,
-            new_key_id,
-            encrypted_new_dek,
-            old_key_id=old_key_id,
-        )
-        logger.info(
-            "Ротация DEK сохранена в БД: %s → %s",
-            old_key_id,
-            new_key_id,
-        )
+        # Выполняем ротацию атомарно (in-memory + БД)
+        await mgr.rotate_and_persist(session, re_encrypt_callback=re_encrypt_data)
 
 
 @task_manager.task(
@@ -131,28 +139,9 @@ async def key_rotation_loop() -> None:
                 return
 
             async with get_session() as session:
-                await mgr.load_from_db(session)
-                if mgr.active_key_id is None:
-                    # Первый запуск: создаём начальный DEK.
-                    # Запрашиваем MAX(key_id) из БД вместо хардкода 1,
-                    # чтобы избежать перезаписи старого DEK, оставшегося
-                    # от предыдущего развёртывания.
-                    logger.info("Первый запуск ротации — создаю начальный DEK")
-                    new_dek = mgr._generate_dek()
-                    from sqlalchemy import select, func
-                    from src.db.models._encryption import EncryptionKey
-
-                    max_result = await session.execute(
-                        select(func.max(EncryptionKey.key_id))
-                    )
-                    max_id = max_result.scalar()
-                    key_id = (max_id or 0) + 1
-                    mgr._deks[key_id] = new_dek
-                    mgr._active_key_id = key_id
-                    encrypted_dek = mgr._encrypt_dek(new_dek)
-                    await mgr.save_to_db(session, key_id, encrypted_dek, is_active=True)
+                key_id = await mgr.create_initial_dek(session)
+                if key_id is not None:
                     await session.commit()
-                    logger.info("Начальный DEK создан (key_id=%s)", key_id)
         except Exception:
             logger.exception(
                 "Ошибка при первичной инициализации DEK "

@@ -110,18 +110,19 @@ class TestHumanizeResponse:
         assert "15 мая" in result
         assert "14:00" in result
 
-    def test_anti_ai_mode_off_log_fix_runtime_semantics(self, caplog):
+    @pytest.mark.asyncio
+    async def test_anti_ai_mode_off_log_fix_runtime_semantics(self, caplog):
         text = "Конечно, я понимаю вашу ситуацию. Встреча 15 мая в 14:00."
 
         assert normalize_anti_ai_mode("bad", enabled=False) == "off"
         assert normalize_anti_ai_mode("", enabled=True) == "fix"
-        assert apply_anti_ai_mode(text, mode="off") == text
+        assert await apply_anti_ai_mode(text, mode="off") == text
 
         with caplog.at_level("INFO"):
-            assert apply_anti_ai_mode(text, mode="log", source="test") == text
+            assert await apply_anti_ai_mode(text, mode="log", source="test") == text
         assert "Anti-AI log" in caplog.text
 
-        fixed = apply_anti_ai_mode(text, mode="fix")
+        fixed = await apply_anti_ai_mode(text, mode="fix")
         assert fixed != text
         assert "конечно" not in fixed.lower()
         assert "15 мая" in fixed

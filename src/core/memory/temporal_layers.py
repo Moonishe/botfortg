@@ -57,6 +57,7 @@ def compute_retention(
     now: datetime | None = None,
     decay_base: float = 0.07,
     access_weight: float = 0.5,
+    decay_multiplier: float = 1.0,
 ) -> float:
     """Compute Ebbinghaus retention score for a memory fact.
 
@@ -66,6 +67,10 @@ def compute_retention(
     - t = days since last_used_at (or created_at if never recalled)
     - decay_rate = memory.decay_rate or decay_base
     - access_boost = 1.0 / (1.0 + access_weight * log(1 + use_count))
+
+    Args:
+        decay_multiplier: divides the effective decay rate (e.g. 10.0 means
+            the fact is forgotten 10 times slower). Used for tier-aware pruning.
 
     Returns value in [0, 1]. Higher = better retained.
     """
@@ -82,6 +87,8 @@ def compute_retention(
     t_days = max(0.0, (utc_naive(now) - utc_naive(ref_time)).total_seconds() / 86400.0)
 
     decay_rate = memory.decay_rate if memory.decay_rate is not None else decay_base
+    if decay_multiplier and decay_multiplier != 1.0 and decay_multiplier > 0:
+        decay_rate = decay_rate / decay_multiplier
     use_count = memory.use_count or 0
 
     # Access boost: each recall slows down forgetting
@@ -203,7 +210,7 @@ async def get_prompt_facts(
     )
     all_facts = list(result.scalars().all())
     buckets: dict[str, list] = {"recent": [], "medium": [], "longterm": []}
-    # Сортируем: pinned всегда первыми, затем по retention, затем use_count, затем confidence
+    # Сортируем: pinned первыми, затем retention, use_count, confidence
     all_facts.sort(
         key=lambda m: (
             m.pinned,
@@ -230,15 +237,29 @@ async def get_prompt_facts(
     return picked[:total_limit]
 
 
+# ── Защита от наложения (overlap guard) ───────────────────────────
+_temporal_migration_lock = None
+
+
 async def temporal_migration_loop(owner_id: int) -> None:
     """Фоновый цикл: раз в час обновляет слои."""
     import asyncio
 
+    global _temporal_migration_lock
+    if _temporal_migration_lock is None:
+        _temporal_migration_lock = asyncio.Lock()
+
     while True:
-        try:
-            await update_temporal_layers(owner_id)
-        except Exception:
-            logger.exception("Temporal migration error")
+        if _temporal_migration_lock.locked():
+            logger.warning(
+                "Temporal migration: предыдущий запуск ещё не завершён, пропускаем тик"
+            )
+        else:
+            try:
+                async with _temporal_migration_lock:
+                    await update_temporal_layers(owner_id)
+            except Exception:
+                logger.exception("Temporal migration error")
         await asyncio.sleep(settings.temporal_migration_interval_sec)
 
 

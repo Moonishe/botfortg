@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-
+import contextlib
 import logging
-
-
 from typing import Any
 
 from aiogram import Router
@@ -13,26 +11,13 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from src.config import settings
-
-
 from src.core.contacts.inbox_priority import rank_inbox
-
-
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_recall import RecallResult, recall
-
-
 from src.db.repo import get_or_create_user
-
-
 from src.db.session import get_session
-
-
 from src.llm.base import ChatMessage, TaskType
-
-
 from src.llm.router import build_provider
-import contextlib
-
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +308,7 @@ async def cmd_greet(message: Message) -> None:
     greeting_text = await generate_personalized_greeting(tg_id)
 
     if greeting_text:
-        await message.answer(greeting_text)
+        await message.answer(sanitize_html(greeting_text))
     else:
         await message.answer(
             "Пока нет данных для персонализированного приветствия. "

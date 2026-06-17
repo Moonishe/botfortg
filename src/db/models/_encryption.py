@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, UTC
 
-from sqlalchemy import Boolean, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.models._base import Base
@@ -32,14 +32,14 @@ class EncryptionKey(Base):
         server_default="0",
         comment="Является ли этот DEK текущим активным",
     )
-    created_at: Mapped[str] = mapped_column(
-        String(32),
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(UTC).isoformat(),
-        comment="ISO8601 timestamp создания",
+        default=lambda: datetime.now(UTC),
+        comment="UTC timestamp создания",
     )
-    rotated_at: Mapped[str | None] = mapped_column(
-        String(32),
+    rotated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
-        comment="ISO8601 timestamp последней ротации (для неактивных — когда заменён)",
+        comment="UTC timestamp последней ротации (для неактивных — когда заменён)",
     )

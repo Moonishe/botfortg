@@ -40,8 +40,10 @@ class MemoryJob:
     source: str = "chat"
 
 
-# Очередь заданий (configurable maxsize — защита от переполнения памяти)
-_queue: asyncio.Queue[MemoryJob] = asyncio.Queue(maxsize=settings.memory_queue_maxsize)
+# Очередь заданий (configurable maxsize — защита от переполнения памяти).
+# Clamp to at least 1 to keep the queue bounded; 0 would create an unbounded queue.
+_QUEUE_MAXSIZE = max(1, settings.memory_queue_maxsize)
+_queue: asyncio.Queue[MemoryJob] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
 
 # Dead Letter Queue — задания, не поместившиеся в основную очередь.
 # Периодически ре-инжектируются при освобождении места.
@@ -54,19 +56,33 @@ async def _retry_dlq() -> None:
     """Фоновый retry: перекладывает задания из DLQ в основную очередь."""
     while True:
         await asyncio.sleep(30)
-        async with _dlq_lock:
-            retried = 0
-            while _dlq and not _queue.full():
-                job = _dlq.pop(0)
-                _queue.put_nowait(job)
-                retried += 1
-            if _dlq:
-                # Trim oldest if DLQ overflows
-                while len(_dlq) > _DLQ_MAX:
-                    _dlq.pop(0)
-                    retried -= 1
-        if retried:
-            logger.info("DLQ: re-injected %d jobs, %d remaining", retried, len(_dlq))
+        try:
+            async with _dlq_lock:
+                retried = 0
+                while _dlq:
+                    job = _dlq.pop(0)
+                    try:
+                        _queue.put_nowait(job)
+                        retried += 1
+                    except asyncio.QueueFull:
+                        # Queue filled between check and put; push job back to DLQ
+                        _dlq.insert(0, job)
+                        break
+                dropped = 0
+                if _dlq:
+                    # Trim oldest if DLQ overflows
+                    while len(_dlq) > _DLQ_MAX:
+                        _dlq.pop(0)
+                        dropped += 1
+            if retried:
+                logger.info(
+                    "DLQ: re-injected %d jobs, %d remaining", retried, len(_dlq)
+                )
+            if dropped:
+                logger.warning("DLQ overflow: dropped %d oldest jobs", dropped)
+        except Exception:
+            logger.exception("_retry_dlq failed, will retry")
+            await asyncio.sleep(1)
 
 
 async def enqueue(job: MemoryJob) -> None:
@@ -76,7 +92,7 @@ async def enqueue(job: MemoryJob) -> None:
     после чего задание отбрасывается с error-логом.
     B5: timeout увеличен с 10с до 30с (настраивается), добавлен лог с размером очереди.
     """
-    timeout = settings.memory_queue_put_timeout
+    timeout = max(1, settings.memory_queue_put_timeout)
     try:
         await asyncio.wait_for(_queue.put(job), timeout=timeout)
     except TimeoutError:

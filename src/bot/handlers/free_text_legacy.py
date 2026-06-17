@@ -58,10 +58,10 @@ from src.core.memory.session_context import (
     save_session_context,
     resume_session,
 )
-from src.config import settings as _settings
 
-from .free_text_pipeline import (
+from .free_text import (
     _dispatch,
+    _extract_contact_hint,
     _save_intent_context,
     check_contact_rules,
     check_followup,
@@ -92,7 +92,7 @@ router.message.filter(OwnerOnly())
 _URL_RE = re.compile(r'https?://[^\s<>"]+')
 
 
-def _is_safe_url(url: str) -> bool:
+async def _is_safe_url(url: str) -> bool:
     """Проверяет что URL не ведёт на localhost/private IP."""
     host = urlparse(url).hostname
     if not host:
@@ -105,7 +105,9 @@ def _is_safe_url(url: str) -> bool:
         import socket as _socket
 
         try:
-            addrinfo = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC)
+            addrinfo = await asyncio.to_thread(
+                _socket.getaddrinfo, host, None, _socket.AF_UNSPEC
+            )
             for _family, _, _, _, sockaddr in addrinfo:
                 ip = ipaddress.ip_address(sockaddr[0])
                 if (
@@ -151,7 +153,7 @@ async def invalidate_url_cache(url: str | None = None) -> None:
 
 async def _fetch_url_content(url: str) -> str | None:
     """Фетчит содержимое URL через httpx."""
-    if not _is_safe_url(url):
+    if not await _is_safe_url(url):
         logger.warning("Blocked unsafe URL fetch: %s", url[:100])
         return None
     try:
@@ -223,11 +225,10 @@ def _now_utc() -> datetime:
 async def _check_session_resume(user_id: int) -> str | None:
     """Проверяет, вернулся ли пользователь после перерыва >30 мин.
     Возвращает текст приветствия или None."""
-    if not _settings.session_context_enabled:
+    if not settings.session_context_enabled:
         return None
     try:
         from src.db.models._session import SessionContext
-        from src.db.repos.session_repo import get_or_create_user
 
         async with get_session() as session:
             owner = await get_or_create_user(session, user_id)
@@ -238,7 +239,7 @@ async def _check_session_resume(user_id: int) -> str | None:
             ctx = result.scalar_one_or_none()
             if ctx is not None and ctx.last_active_at is not None:
                 gap = (_now_utc() - ctx.last_active_at).total_seconds()
-                gap_minutes = _settings.session_context_gap_minutes
+                gap_minutes = settings.session_context_gap_minutes
                 if gap > gap_minutes * 60:
                     return await resume_session(user_id)
     except Exception:
@@ -248,7 +249,7 @@ async def _check_session_resume(user_id: int) -> str | None:
 
 async def _save_session_context_ff(telegram_id: int, messages: list[str]) -> None:
     """Fire-and-forget: сохранить контекст сессии (не блокирует ответ)."""
-    if not _settings.session_context_enabled:
+    if not settings.session_context_enabled:
         return
 
     async def _do_save():
@@ -262,41 +263,6 @@ async def _save_session_context_ff(telegram_id: int, messages: list[str]) -> Non
             )
 
     track_ff(asyncio.create_task(_do_save()))
-
-
-# ── Contact prefetch helpers ──────────────────────────────────────────
-
-
-def _extract_contact_hint(message: Message) -> str | None:
-    """Extract a contact hint from message entities and reply context.
-
-    Checks:
-    1. @mention entities (type='mention' or type='text_mention')
-    2. Reply context (reply_to_message author name)
-
-    Returns the hint string or None.
-    """
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "mention" and entity.offset is not None and message.text:
-                mention = message.text[entity.offset : entity.offset + entity.length]
-                return mention.lstrip("@").strip()
-            if entity.type == "text_mention" and entity.user:
-                # text_mention has a User object — use first_name or username
-                if entity.user.username:
-                    return entity.user.username
-                if entity.user.first_name:
-                    return entity.user.first_name
-
-    # Reply context
-    if message.reply_to_message and message.reply_to_message.from_user:
-        replied = message.reply_to_message.from_user
-        if replied.username:
-            return replied.username
-        if replied.first_name:
-            return replied.first_name
-
-    return None
 
 
 async def _do_prefetch_contact(
@@ -558,7 +524,9 @@ async def _voice_worker() -> None:
 
                                     await message.react([ReactionTypeEmoji(emoji="✅")])
                                 except Exception:
-                                    logger.debug("Non-critical error", exc_info=True)  # реакция не критична
+                                    logger.debug(
+                                        "Non-critical error", exc_info=True
+                                    )  # реакция не критична
                         except TelegramAPIError:
                             logger.exception("failed to send transcription result")
 
@@ -1094,7 +1062,7 @@ async def _process_text(
             )
         # ── End feedback loop ─────────────────────────────────────
 
-        await message.answer(response)
+        await message.answer(sanitize_html(response))
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -1116,7 +1084,7 @@ async def _process_text(
     # Check if this message is a response to a pending contradiction question
     cr_response = await check_contradiction_response(owner_telegram_id, raw)
     if cr_response:
-        await message.answer(cr_response)
+        await message.answer(sanitize_html(cr_response))
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -1158,7 +1126,7 @@ async def _process_text(
     correction = await detect_correction(owner_telegram_id, raw)
     if correction:
         reply = await apply_correction(owner_telegram_id, correction)
-        await message.answer(reply)
+        await message.answer(sanitize_html(reply))
 
         # ── Learn from correction (Feature: Learning from Corrections) ──
         try:
@@ -1366,7 +1334,7 @@ async def _process_text(
                             t = sanitize_html(item.get("title", "?"))
                             variants.append(f"{i}. {t}")
                         text = "Какая из этих?\n" + "\n".join(variants)
-                        await message.answer(text)
+                        await message.answer(sanitize_html(text))
 
                         # Сохраняем pending для numeric selection
                         await store_pending_singalong(
@@ -1441,7 +1409,9 @@ async def _process_text(
                         await consume_pending_singalong(owner_telegram_id)
                         await _singalong_search_cache.invalidate(owner_telegram_id)
                         await message.answer(
-                            f"Не могу найти текст «{sanitize_html(title)}». Напиши название песни?"
+                            sanitize_html(
+                                f"Не могу найти текст «{title}». Напиши название песни?"
+                            )
                         )
                         return True
                     # Неверный номер — очищаем кеш
@@ -1751,6 +1721,7 @@ async def _process_text(
                         _active_tasks.pop(owner_telegram_id, None)
 
         task = asyncio.create_task(_run_maestro_background())
+        track_ff(task)
         async with _active_tasks_lock:
             _active_tasks[owner_telegram_id] = task
         await message.answer(_get_waiting_message())
@@ -1788,339 +1759,7 @@ async def _process_text(
     )
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def free_text(
-    message: Message,
-    state: FSMContext,
-    userbot_manager: UserbotManager,
-) -> None:
-    if await state.get_state() is not None:
-        return
-    raw = (message.text or "").strip()
-    if not raw:
-        return
 
-    uid = message.from_user.id
-
-    # Scan for prompt injection in user input
-    scan_result = scan_content(raw, f"user:{uid}")
-    if scan_result.blocked:
-        logger.warning(
-            "Prompt injection blocked from user %d: %s (%s)",
-            uid,
-            scan_result.category,
-            scan_result.match,
-        )
-        await message.answer(
-            "⚠️ Сообщение содержит потенциально опасные конструкции и было заблокировано.\n"
-            "Если это ошибка — переформулируйте запрос."
-        )
-        return
-
-    # 🎭 Onboarding: первый контакт → предложить настроить личность
-    is_new = False
-    async with get_session() as session:
-        owner = await get_or_create_user(session, uid)
-
-        # Atomically: UPDATE ... SET total_interactions=1 WHERE total_interactions=0
-        # If rowcount==1, this is a new user (no race condition possible).
-        # Если строки нет вообще — создаём новую запись AdaptivePersona.
-        from src.db.models._learning import AdaptivePersona
-        from sqlalchemy import update as sa_update
-
-        result = await session.execute(
-            sa_update(AdaptivePersona)
-            .where(AdaptivePersona.user_id == owner.id)
-            .where(AdaptivePersona.total_interactions == 0)
-            .values(total_interactions=1)
-        )
-        if result.rowcount > 0:  # type: ignore[attr-defined]
-            is_new = True
-        else:
-            # Проверяем, существует ли запись вообще
-            from sqlalchemy import select as sa_select
-
-            row_exists = await session.execute(
-                sa_select(AdaptivePersona.id).where(AdaptivePersona.user_id == owner.id)
-            )
-            if row_exists.first() is None:
-                session.add(AdaptivePersona(user_id=owner.id, total_interactions=1))
-                is_new = True
-
-    if is_new:
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🎭 Настроить личность",
-                        callback_data="set:sec:personality",
-                    ),
-                    InlineKeyboardButton(
-                        text="⏭ Пропустить", callback_data="persona:skip_onboarding"
-                    ),
-                ]
-            ]
-        )
-        await message.answer(
-            "🎭 <b>Привет! Давай настроим мой характер под тебя?</b>\n\n"
-            "Я умею общаться в разных стилях: профессионально, дружелюбно, "
-            "игриво, лаконично и даже с сарказмом!\n\n"
-            "Это займёт меньше минуты и улучшит наше общение. "
-            "В любой момент можно изменить в /settings → 🎭 Личность.",
-            reply_markup=kb,
-        )
-        await _save_session_context_ff(uid, [raw[:500]])
-        return
-
-    if len(raw) > 2000:
-        raw = raw[:1987] + "...(truncated)"
-
-    # ── Stage -2: Contact prefetch (fire-and-forget) ───────────────────
-    # Extract contact hints from message entities and reply context.
-    # Prefetches contact data so later resolution can skip DB queries.
-    if settings.contact_prefetch_enabled:
-        try:
-            _contact_hint = _extract_contact_hint(message)
-            if _contact_hint is not None:
-                # Fire-and-forget: prefetch contact data in background
-                track_ff(
-                    asyncio.create_task(
-                        _do_prefetch_contact(uid, _contact_hint, userbot_manager)
-                    )
-                )
-            else:
-                # No hint found — prefetch the user's contact list anyway
-                track_ff(
-                    asyncio.create_task(
-                        _do_prefetch_contact(uid, None, userbot_manager)
-                    )
-                )
-        except Exception:
-            logger.debug(
-                "Contact prefetch failed", exc_info=True
-            )  # never block message processing
-
-    # ── S1-T1: Prefetch memory recall (fire-and-forget) ───────────────
-    # Оптимистичный prefetch: запускаем recall в фоне до того,
-    # как роутинг решит, нужна ли память. Если решит что нужна —
-    # результат уже будет в кэше (экономия 50-500ms).
-    if settings.prefetch_recall_enabled:
-        try:
-            from src.core.memory.prefetch_recall import prefetch_recall as _pf_recall
-
-            track_ff(asyncio.create_task(_pf_recall(uid, raw)))
-        except Exception:
-            logger.debug(
-                "Prefetch recall task creation failed", exc_info=True
-            )  # prefetch — оптимизация, никогда не блокируем
-
-    # ── Stage -1: Scheduled message NL intent ─────────────────────────
-    # "напомни Маше про встречу завтра в 10:00" → создаём ScheduledMessage
-    try:
-        ctx_sched = await _get_owner_context(message.from_user.id)
-        sched_tz = str(ctx_sched["tz_name"])
-    except (SQLAlchemyError, KeyError, TypeError, AttributeError):
-        sched_tz = None
-    try:
-        scheduled = parse_schedule_message(raw, sched_tz)
-        if scheduled:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, uid)
-                from src.db.repo import create_scheduled as _create_scheduled
-
-                await _create_scheduled(
-                    session,
-                    owner.id,
-                    scheduled["contact"],
-                    scheduled["text"],
-                    scheduled["send_at"],
-                )
-                await session.commit()
-    except KeyError as e:
-        logger.warning(
-            "parse_schedule_message returned incomplete result: missing %s", e
-        )
-        await message.answer("❌ Не удалось разобрать сообщение. Проверь формат.")
-        return
-    except (TypeError, ValueError) as e:
-        logger.warning("parse_schedule_message error: %s", e)
-        await message.answer("❌ Ошибка формата сообщения.")
-        return
-    except SQLAlchemyError:
-        await message.answer("❌ Произошла ошибка. Попробуй ещё раз.")
-        return
-    except Exception as e:
-        # Широкий catch для неожиданных ошибок парсинга расписания
-        logger.warning("parse_schedule_message unexpected error: %s", e)
-        await message.answer("❌ Не удалось обработать сообщение.")
-        return
-
-    if scheduled:
-        send_at_str = scheduled["send_at"].strftime("%d.%m в %H:%M")
-        await message.answer(
-            sanitize_html(
-                f"✅ Запланировано:\n"
-                f"📤 <b>{scheduled['contact']}</b>\n"
-                f"📝 {scheduled['text'][:100]}\n"
-                f"🕐 {send_at_str}"
-            )
-        )
-        # ── P2: сохраняем контекст сессии ──
-        await _save_session_context_ff(uid, [raw[:500]])
-        return
-
-    # ── URL detection ──
-    urls = _URL_RE.findall(raw)
-    if urls:
-        url = urls[0]
-        is_pure_url = raw.strip() == url.strip()
-
-        if is_pure_url:
-            # Check URL summary cache first (skip HTTP + LLM if cached)
-            cached = await _get_cached_url_summary(url)
-            if cached:
-                await message.answer(sanitize_html(f"📄 {cached}\n\n🔗 {url}"))
-                await _save_session_context_ff(uid, [raw[:500]])
-                return
-
-            try:
-                await message.answer(f"🔍 Читаю {url[:50]}...")
-            except Exception:
-                logger.debug("Failed to send URL reading notification", exc_info=True)
-            content = await _fetch_url_content(url)
-            if content:
-                try:
-                    async with get_session() as session:
-                        owner_db = await get_or_create_user(
-                            session, message.from_user.id
-                        )
-                        provider = await build_provider(
-                            session, owner_db, task_type=TaskType.SUMMARIZE
-                        )
-                except SQLAlchemyError:
-                    provider = None
-
-                if provider:
-                    try:
-                        summary = await _summarize_url(url, content, provider)
-                        await _set_url_cache(url, summary)
-                        await message.answer(sanitize_html(f"📄 {summary}\n\n🔗 {url}"))
-                    except Exception:
-                        await message.answer(
-                            sanitize_html(f"📄 {content[:1000]}...\n\n🔗 {url}")
-                        )
-                else:
-                    await message.answer(
-                        sanitize_html(f"📄 {content[:1000]}...\n\n🔗 {url}")
-                    )
-            else:
-                try:
-                    await message.answer(f"❌ Не удалось загрузить {url}")
-                except Exception:
-                    logger.debug("Failed to send URL error notification", exc_info=True)
-            # ── P2: сохраняем контекст сессии ──
-            await _save_session_context_ff(uid, [raw[:500]])
-            return
-
-    # Session resume check (P2): вернулся ли пользователь после перерыва
-    resume_msg = await _check_session_resume(uid)
-    if resume_msg:
-        await message.answer(sanitize_html(resume_msg))
-
-    # Priority preemption: if a heavy task is running, cancel it for the new request
-    uid = message.from_user.id
-    async with _active_tasks_lock:
-        existing = _active_tasks.get(uid)
-        if existing and not existing.done():
-            logger.info(
-                "Preempting running task for user %s with new request: %s",
-                uid,
-                raw[:80],
-            )
-            existing.cancel()
-            _active_tasks.pop(uid, None)
-            should_send_preempt = True
-        else:
-            should_send_preempt = False
-
-    if should_send_preempt:
-        await message.answer("⏯ Прервал предыдущую задачу. Обрабатываю новый запрос…")
-
-    try:
-        with start_span("message.process", user_id=str(uid), text_len=len(raw)):
-            await _process_text(raw, message, state, userbot_manager)
-    except asyncio.CancelledError:
-        raise  # не перехватываем CancelledError — даём штатно завершиться
-    except Exception:
-        logger.exception("_process_text failed for user %s", uid)
-        try:
-            from src.core.infra.hooks import hooks
-
-            await hooks.emit(
-                "on_error",
-                error=str(sys.exc_info()[1])
-                if sys.exc_info()[1]
-                else "_process_text failed",
-                context="free_text.free_text",
-            )
-        except Exception:
-            logger.debug(
-                "free_text hooks.emit failed", exc_info=True
-            )  # hooks are optional, never break core flow
-        raise
-
-    # ── P2: сохраняем контекст сессии (fire-and-forget) ──
-    await _save_session_context_ff(uid, [raw[:500]])
-
-    # ── P3: Episodic Memory — авто-создание эпизодов (fire-and-forget) ──
-    if settings.episodic_memory_enabled:
-        try:
-            from src.core.memory.episodic import (
-                should_create_episode,
-                track_message,
-                reset_counter,
-                create_episode,
-            )
-
-            await track_message(uid, raw[:500])
-
-            if should_create_episode(uid):
-                # Снимок буфера без сброса счётчика (чтобы не терять данные при ошибке)
-                from src.core.memory.episodic import _message_buffer
-
-                buf = _message_buffer.get(uid, [])
-                messages_batch = list(buf[-settings.episodic_batch_size :])
-
-                async def _create_episode_ff():
-                    try:
-                        await create_episode(uid, messages_batch)
-                        await reset_counter(
-                            uid
-                        )  # Сброс только после успешного создания
-                    except Exception:
-                        logger.debug(
-                            "Fire-and-forget episode creation failed for user %d",
-                            uid,
-                            exc_info=True,
-                        )
-
-                track_ff(asyncio.create_task(_create_episode_ff()))
-        except Exception:
-            logger.debug("Episodic memory tracking failed", exc_info=True)
-
-    # ── Session recording (non-blocking, best-effort) ─────────────────
-    try:
-        from src.core.memory.session_recorder import record_turn
-
-        async with get_session() as rec_session:
-            await record_turn(rec_session, uid, "user", raw[:4000])
-            await record_turn(rec_session, uid, "assistant", "(ответ отправлен)")
-    except SQLAlchemyError:
-        logger.warning(
-            "Failed to record conversation turn for user %s", uid, exc_info=True
-        )
 
 
 @router.message(F.voice | F.audio)
@@ -2387,7 +2026,14 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
                     "(фото проанализировано)",
                 )
         except SQLAlchemyError:
-            pass
+            # Recording the photo-analysis turn is non-critical for the user
+            # response, but silently swallowing the error would hide data loss
+            # from the operator. Log it (mirrors _process_text's handling).
+            logger.warning(
+                "Failed to record photo-analysis turn for user %s",
+                message.from_user.id,
+                exc_info=True,
+            )
 
     except Exception as e:
         await message.answer(sanitize_html(f"❌ Ошибка анализа: {safe_str(e)}"))

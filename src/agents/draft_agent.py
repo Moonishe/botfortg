@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
+from src.agents._json_utils import extract_json_from_llm_response
 from src.llm.base import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -78,28 +77,16 @@ async def draft(
             heavy=False,
         )
     except Exception as e:
-        logger.error("Draft agent LLM error: %s", e)
+        logger.error("Draft agent LLM error: %s", e, exc_info=True)
         return {
             "draft": "Извини, не могу сейчас ответить.",
             "tone": "neutral",
             "reasoning": "fallback",
         }
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
-        raw = re.sub(r"\n?\s*```\s*$", "", raw)
-    try:
-        m = re.search(r"\{[\s\S]*\}", raw)
-        if m:
-            return json.loads(m.group(0))
-        return {"draft": raw, "tone": "neutral", "reasoning": "raw output"}
-    except Exception:
-        logger.debug("Draft parse failed: %s", raw[:100])
-        return {
-            "draft": "Извини, не могу сейчас ответить.",
-            "tone": "neutral",
-            "reasoning": "fallback",
-        }
+    parsed = extract_json_from_llm_response(raw)
+    if parsed is not None:
+        return parsed
+    return {"draft": raw.strip(), "tone": "neutral", "reasoning": "raw output"}
 
 
 async def draft_variants(
@@ -132,10 +119,9 @@ async def draft_variants(
             [ChatMessage(role="user", content=prompt)],
             heavy=False,
         )
-        m = re.search(r"\{[\s\S]*\}", raw)
-        if m:
-            data = json.loads(m.group(0))
-            return data.get("variants", [])
+        parsed = extract_json_from_llm_response(raw)
+        if parsed is not None:
+            return parsed.get("variants", [])
     except Exception:
         logger.debug("draft_variants failed", exc_info=True)
     return []

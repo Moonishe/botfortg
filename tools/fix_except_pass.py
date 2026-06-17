@@ -12,9 +12,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import re
-import sys
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +89,6 @@ class Stats:
 
 def _is_in_finally(lines: list[str], lineno: int) -> bool:
     """Check if line is inside a `finally:` block."""
-    depth = 0
     for i in range(lineno - 1, -1, -1):
         stripped = lines[i].strip()
         if stripped.startswith("finally") and stripped.rstrip(":").strip() == "finally":
@@ -120,11 +117,21 @@ def _is_in_del_or_atexit(lines: list[str], lineno: int) -> bool:
     return False
 
 
-def find_candidates(file_path: pathlib.Path) -> list[FixCandidate]:
-    """Find all `except Exception: pass` patterns that should be fixed."""
+def find_candidates(
+    file_path: pathlib.Path,
+) -> tuple[list[FixCandidate], dict[str, int]]:
+    """Find all `except Exception: pass` patterns that should be fixed.
+    Returns (candidates, skip_counts) where skip_counts tracks why items were skipped.
+    """
     text = file_path.read_text(encoding="utf-8")
     lines = text.split("\n")
     candidates: list[FixCandidate] = []
+    skip_counts: dict[str, int] = {
+        "comment": 0,
+        "noqa": 0,
+        "finally": 0,
+        "del_atexit": 0,
+    }
 
     for i, line in enumerate(lines):
         m = EXCEPT_EX.match(line)
@@ -141,20 +148,24 @@ def find_candidates(file_path: pathlib.Path) -> list[FixCandidate]:
         if not (
             next_stripped == "pass"
             or next_stripped.startswith("pass  #")
+            or next_stripped.startswith("pass #")
             or next_stripped.startswith("pass\t#")
         ):
             continue
 
         # Skip noqa / pylint
         if "noqa" in line.lower() or "pylint" in line.lower():
+            skip_counts["noqa"] += 1
             continue
 
         # Skip `finally` blocks
         if _is_in_finally(lines, i):
+            skip_counts["finally"] += 1
             continue
 
         # Skip __del__ / atexit
         if _is_in_del_or_atexit(lines, i):
+            skip_counts["del_atexit"] += 1
             continue
 
         # Skip intentional comments on the pass line
@@ -164,6 +175,7 @@ def find_candidates(file_path: pathlib.Path) -> list[FixCandidate]:
             else ""
         )
         if any(w in comment_part for w in INTENTIONAL_COMMENTS):
+            skip_counts["comment"] += 1
             continue
 
         candidates.append(
@@ -177,7 +189,7 @@ def find_candidates(file_path: pathlib.Path) -> list[FixCandidate]:
             )
         )
 
-    return candidates
+    return candidates, skip_counts
 
 
 def _has_import_logging(text: str) -> bool:
@@ -277,15 +289,23 @@ def scan_and_fix(dry_run: bool = True, verbose: bool = False) -> Stats:
 
         # Protected files
         if rel in PROTECTED_FILES:
-            cands = find_candidates(py_file)
+            cands, skips = find_candidates(py_file)
             if cands:
                 stats.skipped_protected += len(cands)
                 if verbose:
                     for c in cands:
                         print(f"  SKIP (protected): {rel}:{c.line_no}")
+            stats.skipped_comment += skips["comment"]
+            stats.skipped_noqa += skips["noqa"]
+            stats.skipped_finally += skips["finally"]
+            stats.skipped_del_atexit += skips["del_atexit"]
             continue
 
-        cands = find_candidates(py_file)
+        cands, skips = find_candidates(py_file)
+        stats.skipped_comment += skips["comment"]
+        stats.skipped_noqa += skips["noqa"]
+        stats.skipped_finally += skips["finally"]
+        stats.skipped_del_atexit += skips["del_atexit"]
         if cands:
             files_candidates[py_file] = cands
 
