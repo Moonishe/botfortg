@@ -40,15 +40,28 @@ Thumbs.db
 
 # Local tooling / diagnostics
 .codegraph/
+.codex/
 .serena/
+.zcode/
 _tools_list.txt
 opencode.json
 opencode.json.disabled
+.mcp.json
+CLAUDE.md
 check_*.py
 test_proxy*.py
 test_greenlet.py
 AGENTS.md
 SOUL.md
+
+# Temporary / scratch files
+*.diff
+bugfixes.diff
+dsm.diff
+dsm2.diff
+check_issue.txt
+ruff-output.txt
+apply_main_*.py
 
 DB_LAYER_SUMMARY.md
 explorer_output.json
@@ -69,3 +82,4 @@ clean-upgrade.db
 alembic_out.log
 uv.lock
 file
+keys_check.txt

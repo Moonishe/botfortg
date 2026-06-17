@@ -5,6 +5,7 @@
     "~/.config/opencode/rules.md",
     "~/.config/opencode/plugins/shell-strategy/shell_strategy.md"
   ],
+  "plugin": ["./.opencode/plugins/ponytail.mjs"],
   "mcp": {
     "serena": {
       "type": "local",

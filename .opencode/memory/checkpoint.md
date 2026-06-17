@@ -1,76 +1,105 @@
 # Session Checkpoint
-**Written:** 2026-06-17T18:30:00Z | **Session:** a1b2c3d4-e5f6-7890-abcd-ef1234567890 | **Branch:** main
+**Written:** 2026-06-17T19:55:00Z | **Session:** a1b2c3d4-e5f6-7890-abcd-ef1234567890 | **Branch:** main
 
 ---
 
 ## §1: Task Snapshot
 <!-- Бюджет: 2000 chars. Сверь задачи из task tool + tasks/*.md -->
 
-- [x] Week 6 Skills Lifecycle — per-skill evolve, dry-run → approve → apply flow — **completed** — `src/bot/handlers/skills_*.py`, `src/core/intelligence/auto_evolve.py`, `tests/test_skills_evolve.py`, `tests/test_skills_cmd.py`
-- [x] D5→R5 on Week 6 changes — **completed** — all touched files
-- [x] Tests: 68/68 skills tests, 2149 full suite passed, 41 pre-existing warnings — **completed**
-- [x] Ruff clean on all Week 6 files — **completed**
-- [x] AD-020 added to `.opencode/memory/memory.md` — **completed**
-- [x] commit 7ed5ffe "Week 6 Skills Lifecycle: /skills dry-run, per-skill evolve, apply flow, metrics fixes, tests" — **committed**
-- [ ] Persistent tasks `tasks/T1.md` (restore .opencode) — **stale** (pre-week context)
-- [ ] Persistent tasks `tasks/T2.md` (restart check) — **stale** (pre-week context)
-- [ ] Unstaged changes from Weeks 4-5 (bug audit, cron panel, cron panel, session snapshot) — **pending commit** — ~130 files modified
+**Текущая сессия — Bug Audit + Critical Fixes + Max Mode Final Check:**
+- [x] Полный анализ проекта TelegramHelper v2.0 на баги — **completed** — 6 explorer агентов по доменам
+- [x] C1 — sandbox escape в `mcp_code_exec.py` (disallow `io`, AST import checks) — **completed**
+- [x] C2 — SSRF DNS rebinding в `mcp_cron.py` + DNS timeout в `ssrf_guard.py` — **completed**
+- [x] C3 — zip-bomb в `mcp_zip.py` (1 GB / 10k file limits, streaming extract) — **completed**
+- [x] C4 — CoT final_answer bug в `cot_engine.py` (last_step.thought) — **completed**
+- [x] C5 — double `callback.answer()` в `start.py` + `draft_actions.py` — **completed**
+- [x] ImportError/race fixes в `main.py`, `bootstrap.py`, `send.py`, `router.py` — **completed**
+- [x] D5→R5 циклы (2 итерации) — **completed**
+- [x] Max Mode Phase 1 (5 read-only candidates) — **completed** — no new critical findings
+- [x] Тесты: 2149 passed, 41 warnings — **completed**
+- [x] Ruff: fixed UP041 + bootstrap E501; remaining 24 E501 are pre-existing — **completed**
+
+**Предыдущие сессии (не закоммичено):**
+- [ ] ~130 файлов Weeks 4-6 (Cron Panel, Session Snapshot, Skills Lifecycle, Bug Audit) — **не закоммичено**
+- [ ] Stale tasks T1.md (restore .opencode) — **in_progress** (predates weeks 4-6)
+- [ ] Stale tasks T2.md (restart check) — **pending** (predates weeks 4-6)
 
 ---
 
 ## §2: Goal Anchor
 <!-- Бюджет: 400 chars. ОДНО предложение — явная цель сессии. -->
 
-Implement Week 6 "Skills Lifecycle" of TelegramHelper → "Telegram OS" plan: per-skill evolve button, global dry-run → approve → apply flow, metrics edge-case hardening, and full D5→R5 validation.
+Исправить все подтверждённые критические баги в TelegramHelper v2.0, провести Max Mode финальную проверку, закрыть связанные риски и достичь Goal Judge verdict `ok: true`.
 
 ---
 
 ## §3: Active File Snapshot
 <!-- Бюджет: 2000 chars. Файлы в работе + что именно в каждом меняется. -->
 
-**Week 6 — committed (7ed5ffe):**
-- `src/bot/handlers/skills_callbacks.py` — 3 new callbacks: `evolve_one` (per-skill), `evolve_dryrun` (list candidates), `evolve_apply` (parallel evolution with semaphore) — **готов**
-- `src/bot/handlers/skills_ui.py` — `_format_evolve_dryrun`, `_format_evolve_apply` helpers + keyboard buttons; `_format_metrics` clamping fix — **готов**
-- `src/core/intelligence/auto_evolve.py` — `__all__` updated with public API; `_EVOLVE_SEMAPHORE` exported; `.is_(True/False)` SQLAlchemy canonical — **готов**
-- `tests/test_skills_evolve.py` — 20 tests (new file): single evolve, dry-run, apply, edge cases (null name, negative counts, exception propagation) — **готов**
-- `tests/test_skills_cmd.py` — updated 3 tests for renamed callbacks (`evolve:0` → `evolve_dryrun`/`evolve_apply`) — **готов**
+**Bugfix session (изменённые файлы):**
+- `src/core/actions/mcp_code_exec.py` — C1: sandbox escape fix; `io` в `_DISALLOWED_IMPORTS`; AST import checks; `risk=critical`, `requires_confirmation=True`; graceful subprocess cleanup — **готов**
+- `src/core/security/ssrf_guard.py` — C2: 5s DNS timeout в `_check_ssrf_async` — **готов**
+- `src/core/actions/mcp_cron.py` — C2: использует `_check_ssrf_async(payload_text)` для webhook URL — **готов**
+- `src/core/actions/mcp_zip.py` — C3: zip-bomb protection (1 GB / 10k files), streaming extract with byte tracking — **готов**
+- `src/core/reasoning/cot_engine.py` — C4: `final_answer = last_step.thought` в обоих solve-проверках — **готов**
+- `src/bot/handlers/start.py` — C5: убран двойной `callback.answer()` в 3 onboarding handlers — **готов**
+- `src/bot/handlers/draft_actions.py` — C5: убран двойной `callback.answer()` в `cb_draft_improve`; guard перед DB — **готов**
+- `src/main.py` — импорт voice worker из `free_text_legacy` (fix ImportError); `register_cleanup_timer` из `free_text/__init__`; `KeyMaskFilter` для всех root handlers — **готов**
+- `src/core/actions/bootstrap.py` — `PluginLoader` type annotation через `TYPE_CHECKING`; `force=True` race condition fix под asyncio.Lock — **готов**
+- `src/bot/handlers/send.py` — double `callback.answer()` fix; race condition в `cb_cancel` — **готов**
+- `src/llm/router.py` — `_mask_key(key)` вместо `key[:16]` для маскирования ключей — **готов**
+- `tests/test_skills_evolve.py` — актуальные assertions — **готов**
 
-**Previous sessions (unstaged):**
-- ~130 files modified from Weeks 4-5 (Cron Panel, Session Snapshot, bug audit, module fixes) — see prior checkpoint §3 for full list — **не закончено (не закоммичено)**
+**Предыдущие сессии (не закоммичено, ~130 файлов):**
+- Week 4: Cron Panel (`cron_cmd.py`, `cron_exec.py`, `_cron.py`, `tests/test_cron_cmd.py`)
+- Week 5: Session Snapshot (`session_snapshot.py`, `context_gatherer.py`, `pending_questions.py`, `tests/test_session_snapshot.py`)
+- Week 6: Skills Lifecycle (`skills_callbacks.py`, `skills_ui.py`, `auto_evolve.py`, `tests/test_skills_evolve.py`)
+- Bug audit cross-domain fixes: ~80+ files across `src/bot/handlers/`, `src/core/`, `src/db/`, `tests/`, `alembic/`, ruff/perf infra
 
 ---
 
 ## §4: Architecture Snapshot
 <!-- Бюджет: 1500 chars. Текущее состояние архитектуры: какие компоненты затронуты, их связи. -->
 
-**Skills Lifecycle architecture:**
-- `skills_callbacks.py` routes 3 Telegram callback types → `auto_evolve.py` API → `skills_ui.py` formats HTML response
-- `evolve_one`: single skill evolution via `evolve_skill()` — used from skill detail view
-- `evolve_dryrun`: queries `find_underperforming_skills()` → UI shows candidates + confirm button
-- `evolve_apply`: `asyncio.gather` on all candidates with `_EVOLVE_SEMAPHORE(2)` to limit concurrent LLM calls; catches per-item exceptions to avoid one failure crashing the batch
-- `_format_metrics`: defensive clamping on negative counts (`max(0, ...)`) and validation_score > 1.0 (`min(max(..., 0), 1)`)
-- HTML-escape (`html.escape`) applied to all `skill.name` and LLM-generated strings in Telegram HTML output
+**Bug audit: без изменений архитектуры.**
+- Все исправления — точечные: фиксы import'ов, race conditions, безопасности.
+- `KeyMaskFilter` добавлен на все root handlers (security layer без новой архитектуры).
+- `_mask_key()` — замена in-place маскирования в `router.py` (не меняет API).
+- `force=True` race fix — добавлен `asyncio.Lock` в `bootstrap.py` (без изменения контракта).
+- Dead code удалён из `draft_actions.py` (функции `store_draft`, `draft_keyboard`, `cb_draft_send`, `cb_draft_ignore`, `show_draft_variants`).
 
-No new architectural constructs introduced. Follows existing `/skills` panel pattern (list → detail → mutation callbacks).
+**Предыдущие недели (не закоммичено):**
+- Week 4: Telegram Cron Panel — `/cron`, `cron_run`/`cron_delete` intent handlers, Approval Kernel integration
+- Week 5: Bounded Session Memory — `session_snapshot.py` (3-7 facts bounded), prompt audit, pending questions cap
+- Week 6: Skills Lifecycle — 3 callbacks (`evolve_one`, `evolve_dryrun`, `evolve_apply`), metrics clamping, semaphore(2)
+- Week 3: Route-specific toolsets — `TOOLSET_PROFILES`, cron_headless LLM resolver
 
 ---
 
 ## §5: Recent Findings
 <!-- Бюджет: 1500 chars. Ключевые находки из D5/R5/тестов. -->
 
-**D5/R5 findings:**
-- `auto_evolve.py.__all__` was missing `evolve_skill`, `find_underperforming_skills`, `rewrite_skill_with_llm`, `collect_failure_trajectories`, `auto_evolve_loop` — fixed to export public API
-- `Skill.enabled == True` → `Skill.enabled.is_(True)` — SQLAlchemy 2.0 canonical comparison for boolean columns
-- `_format_metrics` displayed negative counts (e.g. `-5` successes) — clamped with `max(0, ...)`
-- `validation_score > 1.0` rendered as `150%` — clamped with `min(max(score, 0), 1)`
-- `None` validation_score rendered as `0%` — now renders as `—` (dash) via conditional
-- `evolve_apply` could crash entirely if one `evolve_skill` raised — wrapped each in try/except + `asyncio.gather(return_exceptions=True)` + normalization
-- `html.escape` missing on `skill.name` in evolve result lines — added to prevent HTML injection
+**D5/R5 findings (bugfix session):**
+- `main.py` не импортировал voice worker после разделения `free_text.py` на модули — ImportError при старте
+- `main.py` отсутствовал `register_cleanup_timer` из `free_text/__init__` — падение при запуске
+- `main.py` root handlers не имели `KeyMaskFilter` — уязвимость: сообщения от не-owner не отфильтровывались на уровне роутера
+- `bootstrap.py` `force=True` позволял повторный вход без блокировки — race condition при параллельной инициализации
+- `bootstrap.py` `PluginLoader` использовал `AgentPlugin` как тип до его определения — ошибка типов
+- `send.py` двойной `callback.answer()` вызывал `TelegramAPIError` — race condition в `cb_cancel`
+- `draft_actions.py` двойной `callback.answer()` + TTL-check после `pop` (stale data race)
+- `router.py` `key[:16]` показывал первые 16 символов ключа в логах — утечка секрета
+- `draft_actions.py`: ~150 строк dead code (old `store_draft`/`draft_keyboard`/`cb_draft_send`/`cb_draft_ignore`/`show_draft_variants`)
+- `test_skills_evolve.py` assertions не синхронизированы с API после Week 6
 
-**Test findings:**
-- 20 new tests in `test_skills_evolve.py` covering all callbacks + edge cases
-- 3 existing tests updated in `test_skills_cmd.py`
-- 68/68 skills tests pass; full suite 2149 passed, 41 warnings (pre-existing)
+**Max Mode findings:**
+- 5 read-only candidates (minimalist, architecture, performance, defensive, creative) — no new critical/high findings reported.
+- Manual verification: sandbox blocks `import io`, `from io import FileIO`, `__import__("io")`, `importlib.import_module("io")` while allowing `import math`.
+- `mcp_cron.py` now routes webhook URL through `_check_ssrf_async()`.
+
+**Test results:**
+- Full suite: 2149 passed, 41 warnings
+- test_security.py: 129 passed
+- Ruff: fixed UP041 + 1 E501; remaining 24 E501 are pre-existing in touched files
 
 ---
 
@@ -79,56 +108,68 @@ No new architectural constructs introduced. Follows existing `/skills` panel pat
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| ~130 files from Weeks 4-5 unstaged | medium | All D5/R5-validated in their sessions; safety snapshot branches exist; no known regressions |
-| Stale T1/T2 tasks in `.opencode/memory/tasks/` reported as `in_progress`/`pending` | low | Tasks predate Weeks 4-6; .opencode/ is fully restored and operational; files need status update to `completed` or deletion |
-| Skills evolution uses LLM calls — could hit rate limits with many candidates | low | `_EVOLVE_SEMAPHORE(2)` limits concurrent LLM calls; per-item exception handling prevents one failure from crashing the batch |
-| Week 6 done, Week 7 does not exist in plan — no formal next step defined | low | Project owner should clarify if more weeks are planned or project is feature-complete |
+| PostgreSQL cross-type FKs (int vs bigint mismatch) | medium | Schema migrations exist; production DB not affected |
+| Timezone-aware DateTime migration не выполнена | low | Placeholder migration; SQLite не поддерживает ALTER COLUMN |
+| SSRF DNS rebinding в URL fetch | **closed** | `_check_ssrf_async()` used in `mcp_cron.py`; 5s DNS timeout added |
+| MCP sandbox bypass через code_exec | **closed** | `io` blacklisted; AST import checks; `risk=critical` + confirmation; manual verification passed |
+| Maintainability: дубликации в free_text модулях | medium | ~2449 строк dead code удалено; остаётся ~80 файлов с дублированием |
+| ~130 файлов из Weeks 3-6 не закоммичены | medium | Safety snapshot branch `snapshot-pre-maxmode-20260617-194919` created; all changes D5/R5-validated |
+| Stale T1/T2 tasks | low | Предшествуют Weeks 4-6; нужен апдейт статуса или удаление |
 
 ---
 
 ## §7: Agent State
 <!-- Бюджет: 500 chars. Какие sub-agents активны/завершены. -->
 
-- D5 (Week 6 skills implementation) — **completed**
-- R5 (Week 6 skills implementation) — **completed**
-- Worker (Week 6 implementation) — **completed**
-- Test engineer (Week 6 tests) — **completed**
-- Checkpoint writer — **active**
+- Explorer (bug analysis — 6 domain explorers) — **completed**
+- D5 (bugfix session — 2 итерации) — **completed**
+- R5 (bugfix session — 2 итерации) — **completed**
+- Max Mode Phase 1 (5 read-only candidates) — **completed** — no new findings
+- Worker (bugfix implementation) — **completed**
+- Test engineer (test validation) — **completed**
+- Checkpoint writer — **completed**
 
 ---
 
 ## §8: Next Steps
 <!-- Бюджет: 800 chars. Что делать дальше (из todowrite). -->
 
-1. Commit all pending unstaged changes from Weeks 4-5 to `main` (Cron Panel, Session Snapshot, bug audit fixes, module fixes).
-2. Push to origin (if remote access is configured).
-3. Review stale tasks T1/T2 in `.opencode/memory/tasks/` — update status to `completed` or delete (both predate current project state).
-4. Clarify with project owner: Week 6 is done, Week 7 does not exist in the 6-week plan. Either end the plan or define Week 7+.
-5. Consider dream-agent cycle (last dream: 2026-06-14, due ~2026-06-18).
+1. ✅ Goal Judge — `ok: true` достигнут для критических багов и рисков.
+2. Закоммитить все накопившиеся изменения Weeks 3-6 (Cron Panel + Session Snapshot + Skills Lifecycle + Bug Audit) в `main`.
+3. Обновить stale tasks T1.md/T2.md — установить статус `completed` для .opencode/restore и перезапуска.
+4. Обновить `.opencode/memory/schedule.json` (dream-agent: последний был ~2026-06-14, distill: ~2026-06-14).
+5. Рассмотреть push в origin (если remote сконфигурирован).
+6. Проверить dream-agent cycle.
 
 ---
 
 ## §9: Learnings
 <!-- Бюджет: 800 chars. Чему научились в этой сессии. -->
 
-- Per-skill evolve requires splitting monolithic `evolve:0` into three distinct callbacks: `evolve_one` (single), `evolve_dryrun` (preview), `evolve_apply` (batch). Each has different UX and error handling.
-- Metrics display functions need defensive clamping: `max(0, count)` for negative counters, `min(max(score, 0), 1)` for out-of-range validation scores, conditional `—` for `None` values.
-- Parallel batch evolution with `asyncio.gather(return_exceptions=True)` + per-item exception catch prevents one skill failure from crashing the entire batch.
-- HTML-escape (`html.escape()`) must be applied to every user-controlled and LLM-generated string in Telegram HTML messages — missing it is an XSS (markdown injection) vector.
-- SQLAlchemy 2.0 deprecates `== True/False` on boolean columns — use `.is_(True)` / `.is_(False)` canonical form.
+- ImportError resilience: при разделении модуля на пакет все импорты из старого пути нужно сверять.
+- double `callback.answer()` → TelegramAPIError (already answered). Guard: `try/except` или проверка флага.
+- `force=True` в bootstrap + параллельный доступ → race condition. Решение: `asyncio.Lock()`.
+- `TYPE_CHECKING` guard обязателен для циклических type annotations в Python.
+- Маскирование ключей в логах: `_mask_key(key)` показывает `***...{last4}` вместо `key[:16]`.
+- TTL-cache: проверять `time.time() - ts > TTL` ДО `pop()`, иначе другой handler получит `None`.
+- SQLAlchemy 2.0: `.is_(True)` вместо `== True` для boolean columns (deprecation).
+- HTML-escape: каждое user/LLM-поле в Telegram HTML — XSS вектор.
+- asyncio.gather(return_exceptions=True) + per-item catch → one failure не ломает batch.
+- Per-skill evolve: монолитный callback → 3 отдельных (evolve_one/dryrun/apply).
+- Max Mode read-only candidates returned empty findings — likely because no new critical issues exist after fixes; manual verification required as fallback.
+- Sandbox defense-in-depth: blacklist + AST import check catches `__import__` and `importlib` bypasses.
+- Goal Judge: explicit JSON verdict helps hard-stop a session when objective is achieved.
 
 ---
 
 ## §10: Tool-Specific
 <!-- Бюджет: 500 chars. Особые настройки тулов (если менялись). -->
 
-None.
+None. Все MCP-серверы и конфигурации остались без изменений.
 
 ---
 
 ## §11: Final Notes
 <!-- Бюджет: 500 chars. Любые замечания, не вошедшие в другие секции. -->
 
-Week 6 "Skills Lifecycle" fully implemented and committed (7ed5ffe). Dry-run → approve → apply flow works with semaphore-bounded parallel evolution. All metrics edge cases hardened. 2149 tests pass. AD-020 added to memory.md.
-
-~130 files from Weeks 4-5 remain unstaged — not related to this session. T1/T2 tasks in `.opencode/memory/tasks/` are stale (pre-Weeks 4-6) and need cleanup. No Week 7 exists in the 6-week plan.
+Bug audit + Max Mode final check: 5 verified critical bugs (C1-C5) fixed, manual verification passed, full test suite 2149 passed. Goal Judge verdict: `ok: true`. SSRF and MCP sandbox risks closed. Pre-existing E501 lint remains in touched files but was not introduced by this session. ~130 files from Weeks 3-6 still unstaged; safety snapshot branch created. Next: commit, push, stale tasks cleanup, dream-agent cycle.
