@@ -6,11 +6,11 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from src.bot.filters import OwnerOnly
+from src.bot.filters import OwnerOnlyStrict
 from src.core.security.pairing import pairing
 
 router = Router(name="approve")
-router.message.filter(OwnerOnly())
+router.message.filter(OwnerOnlyStrict())
 
 
 @router.message(Command("approve"))
@@ -21,9 +21,15 @@ async def cmd_approve(message: Message) -> None:
         return
     try:
         sender_id = int(args[1])
-        code = args[2]
     except (ValueError, IndexError):
         await message.answer("❌ Неверный формат. Использование: /approve <id> <код>")
+        return
+    if sender_id <= 0:
+        await message.answer("❌ ID должен быть положительным числом.")
+        return
+    code = args[2].strip()
+    if not code:
+        await message.answer("❌ Код не может быть пустым.")
         return
     if await pairing.approve(sender_id, code):
         await message.answer(f"✅ Контакт {sender_id} одобрен.")
@@ -41,6 +47,9 @@ async def cmd_revoke(message: Message) -> None:
         sender_id = int(args[1])
     except (ValueError, IndexError):
         await message.answer("❌ Неверный ID.")
+        return
+    if sender_id <= 0:
+        await message.answer("❌ ID должен быть положительным числом.")
         return
     await pairing.revoke(sender_id)
     await message.answer(f"✅ Доступ для {sender_id} отозван.")

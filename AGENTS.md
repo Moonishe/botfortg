@@ -59,6 +59,23 @@ Python 3.13, aiogram 3.16, Telethon 1.39, SQLAlchemy 2.0 asyncio, SQLite + Qdran
 - Type annotations on ALL public functions/methods (pyright strict mode).
 - Ruff linting: full rule set including S (security), PT (pytest), TCH (type checking), PIE (performance).
 
+### Dependency pinning policy
+- PyPI packages: `>=floor,<next_major` (post-1.0) or `>=0.x.y,<0.(x+2).0` (pre-1.0).
+- Exact pins (`==`) are acceptable only for security-critical or ABI-sensitive deps.
+- Git dependencies: pin to SHA or release tag.
+- Upper bounds reduce supply-chain breakage; bump only after tests pass.
+- See `requirements.txt` for current pins.
+
+### Footprint Ladder for new capabilities
+When adding a new capability, prefer the cheapest option first:
+1. **Extend existing code** in the same module/service.
+2. **Add a skill or slash command** (`.opencode/skills/` or `src/bot/handlers/`).
+3. **Add a service-gated tool** (gated behind settings/permissions).
+4. **Add an MCP server** (external capability, not core code).
+5. **Add a new core tool** only if it is needed by nearly every request.
+
+Core code grows slowly; every tool added to core is sent/paid for on every call.
+
 ### Files NEVER to modify without explicit permission
 - src/config.py (Settings class)
 - alembic/versions/* (migrations)

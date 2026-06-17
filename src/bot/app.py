@@ -37,6 +37,7 @@ from src.bot.handlers import (
     free_text_legacy,
     free_text_memory,
     free_text_settings,
+    greeting,
     login,
     memory_admin_cmds,
     memory_cmd,
@@ -45,6 +46,7 @@ from src.bot.handlers import (
     news_cmd,
     news_topics,
     profile_cmd,
+    research_cb,
     pubmed_cmd,
     search,
     send,
@@ -64,6 +66,7 @@ from src.bot.handlers import (
 from src.bot.handlers.free_text import confirm_router
 from src.config import settings
 from src.core.infra.notifier import notifier
+from src.core.security.pairing import pairing
 from src.userbot.manager import UserbotManager
 
 
@@ -109,6 +112,50 @@ def _retry_wrapper(send_fn):
     return wrapper
 
 
+async def access_guard_middleware(
+    handler, event: Message | types.CallbackQuery, data: dict
+) -> None:
+    """Owner-only access guard + DM pairing for unknown contacts.
+
+    Paired contacts receive a ``_paired_user`` flag in the context data so
+    that downstream ``OwnerOnly`` filter lets them through. Unknown contacts
+    get a pairing code and cannot reach any handlers until approved.
+    """
+    user = getattr(event, "from_user", None)
+    if user is None:
+        return await handler(event, data)
+
+    tg_id = user.id
+    if tg_id == settings.owner_telegram_id:
+        return await handler(event, data)
+
+    if await pairing.is_allowed(tg_id):
+        data["_paired_user"] = True
+        return await handler(event, data)
+
+    if await pairing.is_pending(tg_id):
+        answer = getattr(event, "answer", None)
+        if answer:
+            await answer("⏳ Ваш запрос на доступ ожидает подтверждения владельца.")
+        return
+
+    try:
+        code = await pairing.start_pairing(tg_id)
+    except Exception:
+        logger.exception("pairing.start_pairing failed for tg_id=%d", tg_id)
+        answer = getattr(event, "answer", None)
+        if answer:
+            await answer("⚠️ Произошла ошибка. Попробуйте позже.")
+        return
+    answer = getattr(event, "answer", None)
+    if answer:
+        await answer(
+            f"🔐 Для доступа передай владельцу код:\n<code>{code}</code>\n"
+            f"Он выполнит: <code>/approve {tg_id} {code}</code>"
+        )
+    return
+
+
 def _setup_bot_and_dispatcher(
     userbot_manager: UserbotManager,
 ) -> tuple[Bot, Dispatcher]:
@@ -133,6 +180,10 @@ def _setup_bot_and_dispatcher(
     dp = Dispatcher(storage=MemoryStorage())
 
     dp["userbot_manager"] = userbot_manager
+
+    # ─── Access guard: owner + DM pairing ───
+    dp.message.outer_middleware()(access_guard_middleware)
+    dp.callback_query.outer_middleware()(access_guard_middleware)
 
     # ─── Онбординг-гард: фазовая блокировка команд ───
     # Кэш фазы онбординга — замыкание middleware, живёт пока жив Dispatcher
@@ -190,7 +241,7 @@ def _setup_bot_and_dispatcher(
         if phase == 4:
             return await handler(message, data)
 
-        # Фаза 1 — нет сессии: только /start, /login, /cancel (уже пропущены выше)
+        # Фаза 1 — нет сессии: только /start, /login, /cancel (уже прущены выше)
         if phase == 1:
             try:
                 await message.answer("Сначала сделай /login")
@@ -221,6 +272,7 @@ def _setup_bot_and_dispatcher(
     dp.include_router(inline_query.router)
     dp.include_router(approve_cmd.router)
     dp.include_router(ask_cmd.router)
+    dp.include_router(research_cb.router)
     dp.include_router(gates_cmd.router)
     dp.include_router(health_cmd.router)
     dp.include_router(stats_cmd.router)
@@ -228,6 +280,7 @@ def _setup_bot_and_dispatcher(
     dp.include_router(inbox_cmd.router)
     dp.include_router(install_cmd.router)
     dp.include_router(start.router)
+    dp.include_router(greeting.router)
     dp.include_router(analyze_cmd.router)
     dp.include_router(contact_cmd.router)
     dp.include_router(profile_cmd.router)

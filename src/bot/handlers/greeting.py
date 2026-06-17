@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import html
 import logging
 from typing import Any
 
@@ -10,9 +11,9 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from src.bot.filters import OwnerOnly
 from src.config import settings
 from src.core.contacts.inbox_priority import rank_inbox
-from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_recall import RecallResult, recall
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -22,6 +23,7 @@ from src.llm.router import build_provider
 logger = logging.getLogger(__name__)
 
 router = Router(name="greeting")
+router.message.filter(OwnerOnly())
 
 
 _GREETING_SYSTEM_PROMPT = (
@@ -117,7 +119,8 @@ def _build_manual_greeting(
     if count_parts:
         parts.append("У тебя " + " и ".join(count_parts) + ".")
 
-    return " ".join(parts)
+    # Escape HTML so the greeting can be safely inserted into HTML parse_mode.
+    return html.escape(" ".join(parts), quote=False)
 
 
 async def generate_personalized_greeting(
@@ -250,36 +253,19 @@ async def generate_personalized_greeting(
 
                 with contextlib.suppress(Exception):
                     await provider.close()
-
             greeting_text = (greeting_text or "").strip()
 
-            # Sanitize: escape HTML entities before injecting into
-
-            # Telegram HTML parse_mode message. Protects against
-
-            # LLM hallucinations containing <, >, &.
-
-            greeting_text = (
-                greeting_text.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-            )
-
             # Sanity: if LLM returned something weird, fall back to empty
-
             if len(greeting_text) < 5:
                 logger.debug(
                     "greeting: LLM returned too short text for user %d: %r",
                     telegram_id,
                     greeting_text,
                 )
-
                 return _build_manual_greeting(last_topic, inbox_count, task_count)
 
             # Telegram message limit is 4096 chars. Truncate if LLM hallucinated
-
             # a very long response (prompt asks for 2-3 sentences, so >2000 is abnormal).
-
             if len(greeting_text) > 4000:
                 logger.warning(
                     "greeting: LLM returned abnormally long text for user %d (%d chars), "
@@ -287,10 +273,9 @@ async def generate_personalized_greeting(
                     telegram_id,
                     len(greeting_text),
                 )
-
                 greeting_text = greeting_text[:3997] + "..."
 
-            return greeting_text
+            return html.escape(greeting_text, quote=False)
 
     except Exception:
         logger.debug("greeting: LLM call failed", exc_info=True)
@@ -308,7 +293,7 @@ async def cmd_greet(message: Message) -> None:
     greeting_text = await generate_personalized_greeting(tg_id)
 
     if greeting_text:
-        await message.answer(sanitize_html(greeting_text))
+        await message.answer(greeting_text)
     else:
         await message.answer(
             "Пока нет данных для персонализированного приветствия. "

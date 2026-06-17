@@ -1,18 +1,18 @@
-# Requirements pinned to specific versions for reproducible builds.
-# Policy: each package is pinned to its latest stable minor version
-# as of May 2026. Use `pip install -r requirements.txt` to install.
-# To upgrade, bump the minor version after testing.
-# NOTE: Consider pinning transitive deps with `pip freeze > requirements.lock`
+# Requirements pinned with upper bounds for reproducible builds.
+# Policy: >=floor,<next_major (post-1.0) or >=0.x.y,<0.(x+2).0 (pre-1.0).
+# Exact pins (==) are used only for security-critical or ABI-sensitive deps.
+# To upgrade, bump the minor version after tests pass.
+# NOTE: Consider locking transitive deps with `pip freeze > requirements.lock`
 # for reproducible builds in production environments.
 
 aiogram>=3.17.0,<4.0
 telethon==1.39.0
 SQLAlchemy[asyncio]==2.0.40
 aiosqlite==0.20.0
-pydantic>=2.11.0
+pydantic>=2.11.0,<3.0.0
 pydantic-settings==2.8.0
-cryptography>=46.0.6
-python-dotenv>=1.2.2
+cryptography>=46.0.6,<47.0.0
+python-dotenv>=1.2.2,<2.0.0
 openai==1.72.0
 anthropic==0.104.1
 google-genai==1.2.0
@@ -22,22 +22,22 @@ httpx==0.28.1
 faster-whisper==1.1.1
 
 # Документы
-pypdf>=6.10.2
+pypdf>=6.10.2,<7.0.0
 python-docx==1.1.2
 
 # Векторный поиск
 qdrant-client==1.14.0
-pytest>=8.0
+pytest>=8.0,<9.0.0
 
 # Proxy support (SOCKS5)
 aiohttp-socks==0.10.1
-aiohttp>=3.14.0
+aiohttp>=3.14.0,<4.0.0
 python-socks==2.7.2
 
 # Security-critical transitive deps (pinned to CVE-free versions)
-pillow>=12.2.0
-urllib3>=2.7.0
-idna>=3.15
+pillow>=12.2.0,<13.0.0
+urllib3>=2.7.0,<3.0.0
+idna>=3.15,<4.0.0
 
 # Fuzzy matching контактов
 rapidfuzz==3.12.2
@@ -47,9 +47,9 @@ PyYAML==6.0.2
 
 # MCP tools
 duckduckgo-search>=6.0,<7.0
-requests>=2.32.5
+requests>=2.32.5,<3.0.0
 beautifulsoup4==4.13.5
-yt-dlp>=2024.0.0
+yt-dlp>=2024.0.0,<2025.0.0
 
 # System monitoring & browser stealth
 psutil==7.2.2
@@ -59,17 +59,17 @@ playwright==1.59.0
 croniter>=6.0.0,<7.0
 
 # Миграции схемы БД
-alembic>=1.13
+alembic>=1.13,<2.0.0
 
 # Парсинг естественных дат (set_reminder)
 python-dateutil>=2.8.2,<3.0
 
 # Дополнительные MCP-инструменты
-qrcode[pil]>=8.0
-feedparser>=6.0
-plyer>=2.1
-google-api-python-client>=2.197.0
-google-auth-oauthlib>=1.4.0
-openpyxl>=3.1
-language-tool-python>=3.4
-python-whois>=0.9
+qrcode[pil]>=8.0,<9.0.0
+feedparser>=6.0,<7.0.0
+plyer>=2.1,<3.0.0
+google-api-python-client>=2.197.0,<3.0.0
+google-auth-oauthlib>=1.4.0,<2.0.0
+openpyxl>=3.1,<4.0.0
+language-tool-python>=3.4,<4.0.0
+python-whois>=0.9,<0.11.0

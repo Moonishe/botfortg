@@ -66,17 +66,22 @@ class CommandRegistry:
         return self._commands.get(name)
 
     def as_telegram_commands(
-        self, exclude_categories: tuple[str, ...] | None = None
+        self,
+        exclude_categories: tuple[str, ...] | None = None,
+        *,
+        include_admin: bool = False,
     ) -> list[BotCommand]:
         """Вернуть список для ``bot.set_my_commands()``.
 
         Args:
             exclude_categories: Категории команд, которые НЕ показывать
-                в меню бота (по умолчанию скрывает ``"admin"`` и
-                ``"diagnostics"`` — команды администратора и диагностики).
+                в меню бота. Если не заданы — скрывает ``"admin"`` и
+                ``"diagnostics"``.
+            include_admin: Если ``True`` — не исключать admin-категорию
+                (для тестов/внутреннего использования).
         """
         if exclude_categories is None:
-            exclude_categories = ("admin", "diagnostics")
+            exclude_categories = () if include_admin else ("admin", "diagnostics")
         # Snapshot via list() — защита от «dictionary changed size during
         # iteration» если register() вызывается из другого потока.
         return [
@@ -173,6 +178,7 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("help", "Показать справку по командам", "general")
     registry.register("start", "Начать работу / онбординг", "general")
     registry.register("cancel", "Отменить текущее действие", "general")
+    registry.register("ask", "Задать вопрос AI", "general")
     registry.register("me", "Информация о профиле", "general")
     registry.register("profile", "Настройки профиля", "general")
 
@@ -202,6 +208,8 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("greet", "Приветствия контактов", "chat")
     registry.register("threads", "Треды сообщений", "chat")
     registry.register("timeline", "Хронология общения", "chat")
+    registry.register("catchup", "Где остановились с контактом", "chat")
+    registry.register("style", "Стиль общения с контактом", "chat")
 
     # ── Search ──
     registry.register("search", "Поиск по сообщениям", "search")
@@ -216,6 +224,7 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("todos", "Список задач", "settings")
     registry.register("skills", "Управление навыками", "settings")
     registry.register("cron", "Управление cron-задачами", "settings")
+    registry.register("mode", "Режим работы бота", "settings")
 
     # ── Tools ──
     registry.register("install", "Установка компонентов", "tools")
@@ -226,6 +235,17 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("briefing", "Брифинг", "tools")
     registry.register("smart_digest", "Умный дайджест", "tools")
     registry.register("weekly", "Недельный отчёт", "tools")
+    registry.register("analyze", "Анализ сообщения", "tools")
+    registry.register("docs", "Документация по API", "tools")
+    registry.register("explain", "Объяснить концепцию", "tools")
+    registry.register("humanize", "Анализ AI-шаблонности", "tools")
+    registry.register("news", "Новостной дайджест", "tools")
+    registry.register("news_channels", "Источники новостей", "tools")
+    registry.register("news_topics", "Темы авто-новостей", "tools")
+    registry.register("pubmed", "Поиск в PubMed", "tools")
+    registry.register("pubmed_abstract", "Реферат статьи PubMed", "tools")
+    registry.register("pubmed_full", "Полный текст PubMed", "tools")
+    registry.register("wiki", "Поиск в Wikipedia", "tools")
 
     # ── Diagnostics ──
     registry.register("health", "Проверка здоровья системы", "diagnostics")
@@ -233,9 +253,15 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("llm_status", "Статус LLM-провайдеров", "diagnostics")
     registry.register("gates", "Состояние защитных гейтов", "diagnostics")
     registry.register("stats", "Статистика использования", "diagnostics")
+    registry.register("sessions", "Управление сессиями", "diagnostics")
+    registry.register("trajectory", "Траектория использования", "diagnostics")
+    registry.register("evolve", "Эволюция модели", "diagnostics")
 
     # ── Admin ──
     registry.register("avito", "Поиск на Avito", "admin")
     registry.register("avito_list", "Список поисков Avito", "admin")
     registry.register("avito_remove", "Удалить поиск Avito", "admin")
+    registry.register("approve", "Подтвердить запрос доступа", "admin")
+    registry.register("revoke", "Отозвать доступ", "admin")
+    registry.register("pending", "Ожидающие запросы", "admin")
     return registry

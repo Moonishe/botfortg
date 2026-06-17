@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, UTC
 from functools import partial
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from httpx import HTTPStatusError, RequestError
@@ -593,12 +593,8 @@ async def apply_skill_edit(
         skill.updated_at = datetime.now(UTC)
         await session.flush()
 
-        # Hot-reload: invalidate skill cache so next prompt uses updated skill
-        from src.core.context_cache import invalidate as cache_invalidate
-
-        await cache_invalidate(f"skills:{owner_id}:")
-
-        return {
+        # Prepare success result while we still have access to result.applied_edits
+        success_result = {
             "success": True,
             "new_version": new_version,
             "applied_edits": [e.to_dict() for e in result.applied_edits],
@@ -607,6 +603,20 @@ async def apply_skill_edit(
             ],
             "validation": validation_summary,
         }
+
+    # Session committed — cache invalidation happens AFTER commit
+    from src.core.context_cache import invalidate as cache_invalidate
+
+    try:
+        await cache_invalidate(f"skills:{owner_id}:")
+    except Exception:
+        logger.exception(
+            "Skill edit persisted for owner %d but cache invalidation failed; "
+            "cache may be stale until TTL expires.",
+            owner_id,
+        )
+
+    return success_result
 
 
 async def promote_to_global(
@@ -693,13 +703,13 @@ async def curator_stats(owner_id: int) -> dict[str, int]:
         owner = await get_or_create_user(session, owner_id)
 
         q = select(
-            func.sum(func.case((Skill.review_status == "proposed", 1), else_=0)).label(
+            func.sum(case((Skill.review_status == "proposed", 1), else_=0)).label(
                 "proposed"
             ),
-            func.sum(func.case((Skill.review_status == "approved", 1), else_=0)).label(
+            func.sum(case((Skill.review_status == "approved", 1), else_=0)).label(
                 "approved"
             ),
-            func.sum(func.case((Skill.review_status == "rejected", 1), else_=0)).label(
+            func.sum(case((Skill.review_status == "rejected", 1), else_=0)).label(
                 "rejected"
             ),
         ).where(Skill.user_id == owner.id)
@@ -752,6 +762,7 @@ async def decay_stale_skills(session: AsyncSession, telegram_id: int) -> int:
         success_rate = (skill.success_count or 0) / usage_count
         if success_rate < 0.3:
             skill.enabled = False
+            skill.disabled_at = datetime.now(UTC)
             old_desc = skill.description or ""
             skill.description = (
                 old_desc + f" [DECAYED: success_rate={success_rate:.0%}]"
@@ -769,6 +780,47 @@ async def decay_stale_skills(session: AsyncSession, telegram_id: int) -> int:
         await session.flush()
 
     return decayed
+
+
+async def archive_long_disabled(
+    session: AsyncSession, telegram_id: int, *, days: int = 90
+) -> int:
+    """Archive skills that have been disabled for more than ``days``.
+
+    Archived skills get ``review_status="archived"`` and are no longer
+    considered by the curator loops.
+    """
+    if days <= 0:
+        logger.warning(
+            "archive_long_disabled: days=%d is invalid, must be > 0. Skipping.",
+            days,
+        )
+        return 0
+
+    owner = await get_or_create_user(session, telegram_id)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    result = await session.execute(
+        select(Skill).where(
+            Skill.user_id == owner.id,
+            Skill.enabled.is_(False),
+            Skill.disabled_at.isnot(None),
+            Skill.disabled_at < cutoff,
+            Skill.review_status != "archived",
+        )
+    )
+    archived = 0
+    for skill in result.scalars().all():
+        skill.review_status = "archived"
+        skill.updated_at = datetime.now(UTC)
+        old_desc = skill.description or ""
+        skill.description = old_desc + f" [ARCHIVED: disabled >{days}d]"
+        logger.info("Skill %r archived after %d days disabled", skill.name, days)
+        archived += 1
+
+    if archived:
+        await session.flush()
+
+    return archived
 
 
 # ── background loop ──────────────────────────────────────────────────
@@ -856,6 +908,19 @@ async def curator_loop(owner_telegram_id: int) -> None:
                 )
         except SQLAlchemyError:
             logger.exception("curator_loop: decay_stale_skills failed")
+
+        # Archive skills disabled long ago (cleanup after decay)
+        try:
+            async with get_session() as session:
+                archived = await archive_long_disabled(session, owner_telegram_id)
+            if archived:
+                logger.info(
+                    "Archived %d long-disabled skills for user %d",
+                    archived,
+                    owner_telegram_id,
+                )
+        except SQLAlchemyError:
+            logger.exception("curator_loop: archive_long_disabled failed")
 
         await asyncio.sleep(interval_sec)
 

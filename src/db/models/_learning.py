@@ -206,7 +206,9 @@ class AdaptivePersona(Base):
     # Метрики
     total_interactions: Mapped[int] = mapped_column(Integer, default=0)
     total_corrections: Mapped[int] = mapped_column(Integer, default=0)
-    last_correction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_correction_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
     )
@@ -234,7 +236,9 @@ class SoulSnapshot(Base):
         String(64), nullable=False, default="system"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class Trajectory(Base):
@@ -287,10 +291,15 @@ class Skill(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     review_status: Mapped[str] = mapped_column(
         String(16), default="approved", index=True
-    )  # approved | pending | rejected
+    )  # approved | pending | rejected | archived
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
     )

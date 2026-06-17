@@ -55,3 +55,36 @@ class TestCommandRegistry:
         register_all_commands()
         registry = get_registry()
         assert "Доступные команды" in registry.format_help()
+
+    def test_register_all_commands_includes_recent_handlers(self) -> None:
+        """Commands added in recent handlers must be present in the registry."""
+        register_all_commands()
+        registry = get_registry()
+        commands = {
+            c.command for c in registry.as_telegram_commands(include_admin=True)
+        }
+        for name in (
+            "ask",
+            "catchup",
+            "style",
+            "mode",
+            "analyze",
+            "docs",
+            "explain",
+            "humanize",
+            "news",
+            "news_channels",
+            "news_topics",
+            "pubmed",
+            "pubmed_abstract",
+            "pubmed_full",
+            "wiki",
+            "sessions",
+            "trajectory",
+            "evolve",
+        ):
+            assert name in commands, f"/{name} missing from registry"
+        # Admin commands are excluded from the menu but present in the registry.
+        admin_commands = registry.by_category().get("admin", [])
+        admin_names = {c.name for c in admin_commands}
+        assert {"approve", "revoke", "pending"}.issubset(admin_names)
