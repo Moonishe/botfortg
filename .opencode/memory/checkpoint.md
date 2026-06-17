@@ -1,74 +1,70 @@
 # Session Checkpoint
-**Written:** 2026-06-17T12:00:00Z | **Session:** a1b2c3d4-e5f6-7890-abcd-ef1234567890 | **Branch:** main
+**Written:** 2026-06-17T18:00:00Z | **Session:** a1b2c3d4-e5f6-7890-abcd-ef1234567890 | **Branch:** main
 
 ---
 
 ## §1: Task Snapshot
 
-- [x] Week 4: Implement Telegram Cron Panel (`/cron` command) — **completed**
-- [x] Add `/cron` list, quick-add, blueprints, inline callbacks — **completed**
-- [x] Route destructive cron actions (`run`, `delete`) through Approval Kernel — **completed**
-- [x] Add progress card for long-running `llm_prompt` cron jobs — **completed**
-- [x] D5→R5: 1 cycle (5 debuggers + 5 reviewers) — **completed**
-- [x] Tests: 2119 passed — **completed**
-- [x] Commit Week 4 changes — **completed**
-- [x] Update project memory (AD-018) and metrics — **completed**
+- [x] Week 5: Bounded Session Memory — **completed**
+- [x] Add src/core/memory/session_snapshot.py — **completed**
+- [x] Integrate snapshot into context_gatherer._set_frozen / maestro — **completed**
+- [x] Add prompt audit in prompt_assembler — **completed**
+- [x] Add peek_pending to pending_questions.py + consolidate in-memory append — **completed**
+- [x] D5 → R5 (2 cycles for Week 5) — **completed**
+- [x] Tests: 187 targeted integration tests passed — **completed**
+- [x] Commit Week 5 + update memory — **completed**
+- [ ] Week 6: Skills Lifecycle — **pending**
+- [ ] Week 7: (not defined in 6-week plan) — **pending clarification**
 
 ---
 
 ## §2: Goal Anchor
 
-Implement Week 4 Telegram Cron Panel: `/cron` command with inline job management, Approval Kernel for destructive actions, and progress cards for long LLM executions.
+Complete Week 5 Bounded Session Memory, then proceed to Week 6 Skills Lifecycle. Week 7 needs clarification as the current 6-week plan only covers Weeks 1-6.
 
 ---
 
 ## §3: Active File Snapshot
 
-- `src/bot/handlers/cron_cmd.py` — Telegram UI for `/cron` and inline callbacks — **committed**
-- `src/bot/handlers/cron_exec.py` — Approval Kernel intent handlers `cron_run`/`cron_delete` — **committed**
-- `src/bot/handlers/free_text/_core.py` — registered intent handlers + fixed result handling — **committed**
-- `src/core/intelligence/guardrails.py` — added `cron_run`/`cron_delete` high-risk entries — **committed**
-- `src/bot/app.py` — imported `cron_cmd` and included router — **committed**
-- `src/bot/command_registry.py` — registered `/cron` in menu — **committed**
-- `tests/test_cron_cmd.py` — 16 new tests — **committed**
-- `.opencode/memory/memory.md` — added AD-018 — **updated**
-- `.opencode/memory/metrics.json` — session/task metrics — **updated**
+- `src/core/memory/session_snapshot.py` — bounded snapshot builder — **committed**
+- `src/core/memory/pending_questions.py` — `peek_pending()` + shared `_append_in_memory` — **committed**
+- `src/core/memory/__init__.py` — added pre-existing memory-provider exports to `__all__` — **committed**
+- `src/core/intelligence/context_gatherer.py` — `_set_frozen` uses snapshot — **committed**
+- `src/core/intelligence/prompt_assembler.py` — `_capacity_check` returns audit dict — **committed**
+- `src/core/intelligence/maestro.py` — passes `contact_id` to `_set_frozen` — **committed**
+- `tests/test_session_snapshot.py` — 10 tests — **committed**
+- `.opencode/memory/memory.md` — AD-019 added — **updated**
+- `.opencode/memory/metrics.json` — task/pipeline counters — **updated**
 
 ---
 
 ## §4: Architecture Snapshot
 
-Telegram Cron Panel consists of:
-1. `cron_cmd.py` — aiogram router with owner filter, command/callback handlers, inline keyboards.
-2. `cron_exec.py` — executor functions called by the unified Approval Kernel callback (`_cb_tool_confirm`).
-3. `free_text/_core.py` — `INTENT_HANDLERS` registry for `cron_run`/`cron_delete`; fixed `_cb_tool_confirm` to respect `ok/error` return values.
-4. `guardrails.py` — risk map marks both cron actions as HIGH.
+`build_session_snapshot()` gathers 4 independent sources via `asyncio.gather`:
+- `recall()` — 3-7 facts
+- `load_session_context()` — session summary + active tasks
+- `get_contact_digest()` — per-contact digest
+- `peek_pending()` — pending questions
 
-Key design choices:
-- Destructive actions (`run`/`delete`) require explicit user confirmation via Approval Kernel.
-- `user_id` is passed in intent params because `callback.message.from_user` is the bot, not the user.
-- `llm_prompt` runs show a transient progress card and are wrapped in `asyncio.timeout(60.0)`.
-- Executors live in a separate file to avoid bloating `free_text/_core.py` (SRP).
+Token budget trimming keeps formatted snapshot ≤512 tokens. `scan_content()` guards the final formatted text before injection. `_set_frozen()` populates `ctx.frozen_snapshot` (formatted block) and `ctx.session_summary` (raw summary), and feeds individual facts to `FrozenProvider`. `prompt_assembler.assemble()` logs prompt size audit.
 
 ---
 
 ## §5: Recent Findings
 
-D5 round (5 debuggers):
-- Correctness: no issues after intent result handling fix.
-- Types: callback data parsing uses safe `_parse_job_id` helper.
-- Resources: progress card cleanup guarded with `try/except` and debug log.
-- Edge cases: owner checks reject cross-user access.
-- Integration: destructive actions route through Approval Kernel with `risk="high"`.
+**D5 Round 1:**
+- Duplicate snapshot injection: `_set_frozen` set both `frozen_snapshot` and `session_summary` to same block — fixed.
+- `frozen_provider.set_frozen` awaited on sync method — fixed.
+- `_capacity_check` passed char limit to token-based `get_budget_stage` — fixed.
 
-R5 round (5 reviewers):
-- Correctness: passed.
-- Security: passed.
-- Architecture: passed.
-- Performance: passed.
-- Maintainability: passed.
+**R5 Round 1:**
+- Security: snapshot data injected without `scan_content` — fixed.
+- Correctness: `add_question` unbounded in-memory growth — fixed via shared `_append_in_memory` helper.
+- Performance: sequential awaits in snapshot builder — fixed via `asyncio.gather`.
+- Performance: `_trim_facts_to_budget` IndexError on single huge fact — fixed `while len(facts) > 1`.
+- Maintainability: dead `max_facts` parameter — removed.
 
-Final: 0 blockers. Tests: 2119 passed.
+**R5 Round 2:** 0 blockers.
 
 ---
 
@@ -76,46 +72,50 @@ Final: 0 blockers. Tests: 2119 passed.
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| `/cron` command registry depends on previous `command_registry.py` changes | low | staged together, tested |
-| `free_text/_core.py` callback fix affects all intent handlers | low | tested via full suite + free_text tests |
-| Progress card deletion may fail if message already removed | low | caught and logged at debug level |
+| `ctx.session_summary` bypassing scan_content if set elsewhere | low | only `_set_frozen` sets it; scan happens upstream in `format_snapshot` |
+| `_pending` dict grows per unique user between cleanups | medium | pre-existing; per-user cap=20; global LRU outside Week 5 scope |
+| `prompt_assembler.py` long lines (pre-existing E501) | low | not introduced by Week 5 |
 
 ---
 
 ## §7: Agent State
 
-- Worker (backend-dev) — **completed**
-- Test engineer — **completed**
-- D5 (5 debuggers) — **completed**
-- R5 (5 reviewers) — **completed**
-- Checkpoint writer — **completed**
+- Explorer — completed
+- Worker/backend-dev — completed
+- Test engineer — completed
+- D5 Round 1 — completed
+- R5 Round 1 — completed
+- D5 Round 2 — completed
+- R5 Round 2 — completed
+- Checkpoint writer — completed
 
 ---
 
 ## §8: Next Steps
 
-1. Ask user for the next milestone or proceed to Week 5 tasks.
-2. If no further task, run final audit and Goal Judge.
+1. Read Week 6 plan details (Skills Lifecycle).
+2. Implement Week 6: `/skills` inline panel, statuses, metrics, auto-evolve.
+3. Clarify Week 7 scope with user (not in 6-week plan).
 
 ---
 
 ## §9: Learnings
 
-- Approval Kernel intent flow works well for Telegram UI destructive actions.
-- Always pass `user_id` explicitly through intent params when callback message sender is the bot.
-- `asyncio.timeout` is the correct outer guard for long-running cron executions in Python 3.13.
+- `asyncio.gather(return_exceptions=True)` is the right pattern for independent I/O in snapshot building.
+- `scan_content()` should be applied at the snapshot formatting boundary, not on each individual data source.
+- Consolidating in-memory queue logic into one helper prevents divergence between `save_pending` and `add_question`.
 
 ---
 
 ## §10: Tool-Specific
 
-- `pytest tests/ -x -v`: 2119 passed.
-- `ruff check`: clean on touched files.
-- `serena_get_diagnostics_for_file`: 0 new LSP errors.
-- Git commit: `456a5fe` Week 4 Telegram Cron Panel.
+- `pytest tests/test_session_snapshot.py ...`: 187 targeted tests passed.
+- `ruff check`: clean on changed files; pre-existing E501 in `prompt_assembler.py` not touched.
+- `serena_get_diagnostics_for_file`: 0 new LSP errors (only env import-resolution noise).
+- Git commit: `23222d9` Week 5 Bounded Session Memory.
 
 ---
 
 ## §11: Final Notes
 
-Week 4 deliverable committed successfully. Project memory and metrics updated. Ready for next task.
+Week 5 committed. Memory and metrics updated. Ready to start Week 6 Skills Lifecycle. Need user clarification on Week 7.

@@ -158,6 +158,11 @@ _Major design choices with rationale. The "why" matters more than the "what" for
 **Решение:** Отдельный Telegram handler `src/bot/handlers/cron_cmd.py` с `/cron`, `/cron add`, `/cron blueprints` и inline-клавиатурой. Destructive actions (`cron_run`, `cron_delete`) маршрутизируются через Approval Kernel (`_store_intent_confirmation` + `INTENT_HANDLERS` в `free_text/_core.py`), риск HIGH. Для `llm_prompt` задач показывается progress card, удаляемая после завершения. Телеграм-специфичные executor'ы вынесены в `src/bot/handlers/cron_exec.py` вместо inline-логики в `_core.py` для соблюдения SRP. `user_id` передаётся через intent params, потому что `callback.message.from_user` — бот, а не пользователь.
 **Источник:** `src/bot/handlers/cron_cmd.py`, `src/bot/handlers/cron_exec.py`, `src/bot/handlers/free_text/_core.py`, `tests/test_cron_cmd.py`, commit 456a5fe, 2026-06-17.
 
+### AD-019: Bounded Session Memory — structured snapshot + prompt audit
+**Когда:** 2026-06-17. **Контекст:** `frozen_snapshot` содержал только 3 факта; `session_summary` в `AssemblyContext` существовал, но никогда не заполнялся; `ContactProfile.memory_digest` строился, но не попадал в промпт; pending-вопросы хранились отдельно; нет токен-бюджетирования на этапе сборки промпта.
+**Решение:** Новый модуль `src/core/memory/session_snapshot.py` собирает bounded snapshot (3-7 фактов, per-contact digest, pending-вопросы, стиль, риски, session summary) с токен-бюджетом (512) и prompt-injection-сканированием. `_set_frozen` в `context_gatherer.py` теперь заполняет `ctx.frozen_snapshot` (форматированный блок) и `ctx.session_summary` (сырой summary), прокидывает `contact_id` из `maestro.process`. `prompt_assembler.py` ведёт audit размера промпта (chars/tokens/stage) в `_capacity_check`. `pending_questions.py` получил `peek_pending()` без drain'а очереди и общий helper `_append_in_memory` с cap 20 для обоих путей записи.
+**Источник:** `src/core/memory/session_snapshot.py`, `src/core/memory/pending_questions.py`, `src/core/intelligence/context_gatherer.py`, `src/core/intelligence/prompt_assembler.py`, `src/core/intelligence/maestro.py`, `tests/test_session_snapshot.py`, commit 23222d9, 2026-06-17.
+
 ## Open Questions
 _Unresolved issues. Move to §A or §B when resolved._
 

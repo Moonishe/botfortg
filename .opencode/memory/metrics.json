@@ -1,21 +1,21 @@
 {
   "_description": "Quality metrics across all sessions. Updated at session end.",
   "sessions": {
-    "total": 10,
-    "completed": 10,
+    "total": 11,
+    "completed": 11,
     "escalated": 0,
     "completion_rate": 1.0
   },
   "tasks": {
-    "total": 82,
-    "completed": 80,
-    "avg_per_session": 8.2
+    "total": 89,
+    "completed": 88,
+    "avg_per_session": 8.0
   },
   "pipeline": {
-    "d5r5_cycles_total": 37,
-    "avg_iterations_per_task": 0.45,
+    "d5r5_cycles_total": 39,
+    "avg_iterations_per_task": 0.44,
     "max_iterations_hit": 0,
-    "goal_judge_ok": 10,
+    "goal_judge_ok": 11,
     "goal_judge_impossible": 0
   },
   "dream_distill": {
@@ -43,5 +43,5 @@
     "audit_date": "2026-06-16",
     "audit_type": "read-only full project scan"
   },
-  "updated_at": "2026-06-17T12:00:00Z"
+  "updated_at": "2026-06-17T18:00:00Z"
 }
