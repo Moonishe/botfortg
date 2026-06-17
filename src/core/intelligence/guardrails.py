@@ -4,7 +4,7 @@ Decides whether an action needs user confirmation based on risk level
 and conversational context.  Provides sanitisation, human-readable
 confirmation messages, and a single evaluation entry point.
 
-Intended for integration into maestro.py and free_text_pipeline.py
+Intended for integration into maestro.py and free_text/ package
 (Phase 2 — only the module is built here).
 """
 
@@ -105,6 +105,8 @@ _INTENT_RISK_MAP: dict[str, ActionRisk] = {
     "toggle_api_key": ActionRisk.HIGH,
     "change_owner": ActionRisk.CRITICAL,
     "schedule_reminder": ActionRisk.HIGH,
+    "cron_run": ActionRisk.HIGH,
+    "cron_delete": ActionRisk.HIGH,
     # CRITICAL — destructive, irreversible, or privilege-escalating
     "logout": ActionRisk.CRITICAL,
     "delete_data": ActionRisk.CRITICAL,
@@ -132,6 +134,7 @@ _TOOL_RISK_MAP: dict[str, ActionRisk] = {
     "mcp_oauth": ActionRisk.HIGH,
     "tg_profile": ActionRisk.LOW,
     "execute_code": ActionRisk.CRITICAL,
+    "code_exec": ActionRisk.CRITICAL,
     "list_contacts": ActionRisk.LOW,
     "draft_reply": ActionRisk.MEDIUM,
     "summarize_chat": ActionRisk.LOW,
@@ -162,9 +165,13 @@ def _registered_tool_risk(
     if spec is None:
         return None
     action_name = params.get("action") if params else None
+    risk = _risk_from_value(spec.effective_risk(action_name))
+    # Never downgrade: CRITICAL stays CRITICAL, HIGH stays HIGH.
+    # Only upgrade LOW/MEDIUM to HIGH when confirmation is required.
     if spec.effective_requires_confirmation(action_name):
-        return ActionRisk.HIGH
-    return _risk_from_value(spec.effective_risk(action_name))
+        if risk is None or risk in (ActionRisk.LOW, ActionRisk.MEDIUM):
+            return ActionRisk.HIGH
+    return risk
 
 
 def get_action_risk(intent: str) -> ActionRisk:
@@ -198,11 +205,15 @@ def _connector_action_risk(params: dict[str, Any]) -> ActionRisk:
         return ActionRisk.MEDIUM
 
     try:
-        from src.core.connectors import connector_registry, register_builtin_connectors
+        from src.core.connectors import connector_registry
     except Exception:
         return ActionRisk.MEDIUM
 
-    register_builtin_connectors()
+    # NOTE: register_builtin_connectors() is NOT called here because it is a
+    # synchronous blocking operation (importlib + sqlite3). It is already
+    # invoked via asyncio.to_thread() during bootstrap (mcp_connectors.py,
+    # mcp_tools.py). If connectors haven't been registered yet, the fallback
+    # below returns ActionRisk.MEDIUM — a safe default.
     registered = connector_registry.get(connector)
     if registered is None:
         return ActionRisk.MEDIUM
@@ -567,8 +578,8 @@ def evaluate(
     -------
     GuardrailResult
     """
+    risk = _action_risk_for_params(intent, params)
     sanitized = sanitize_action(intent, params)
-    risk = _action_risk_for_params(intent, sanitized)
     need_confirm = needs_approval(intent, context, risk=risk)
 
     reason_parts: list[str] = []

@@ -19,13 +19,13 @@ from src.bot.handlers import (
     catchup_cmd,
     chat_cmd,
     contact_cmd,
+    cron_cmd,
     digest_cmd,
     docs_cmd,
     draft_actions,
     explain_cmd,
     gates_cmd,
     health_cmd,
-    help_cmd,
     humanize_cmd,
     inbox_cmd,
     inline_query,
@@ -34,7 +34,7 @@ from src.bot.handlers import (
     mode_cmd,
     models_cmd,
     monitor_cmd,
-    free_text,
+    free_text_legacy,
     free_text_memory,
     free_text_settings,
     login,
@@ -61,7 +61,7 @@ from src.bot.handlers import (
     trajectory_cmd,
     wiki_cmd,
 )
-from src.bot.handlers.free_text_pipeline import confirm_router
+from src.bot.handlers.free_text import confirm_router
 from src.config import settings
 from src.core.infra.notifier import notifier
 from src.userbot.manager import UserbotManager
@@ -135,6 +135,10 @@ def _setup_bot_and_dispatcher(
     dp["userbot_manager"] = userbot_manager
 
     # ─── Онбординг-гард: фазовая блокировка команд ───
+    # Кэш фазы онбординга — замыкание middleware, живёт пока жив Dispatcher
+    _phase_cache: dict[int, tuple[int, float]] = {}
+    _phase_cache_ttl = 60.0
+
     @dp.message.outer_middleware()
     async def onboarding_guard_middleware(
         handler, message: Message, data: dict
@@ -173,8 +177,6 @@ def _setup_bot_and_dispatcher(
         from src.bot.filters import get_onboarding_phase
 
         # ── Cache onboarding phase (TTL 60s) — avoids DB query per message ──
-        _phase_cache: dict[int, tuple[int, float]] = {}
-        _phase_cache_ttl = 60.0
         now = time()
 
         cached = _phase_cache.get(tg_id)
@@ -222,7 +224,6 @@ def _setup_bot_and_dispatcher(
     dp.include_router(gates_cmd.router)
     dp.include_router(health_cmd.router)
     dp.include_router(stats_cmd.router)
-    dp.include_router(help_cmd.router)
     dp.include_router(docs_cmd.router)
     dp.include_router(inbox_cmd.router)
     dp.include_router(install_cmd.router)
@@ -257,6 +258,7 @@ def _setup_bot_and_dispatcher(
     dp.include_router(mode_cmd.router)
     dp.include_router(today_cmd.router)
     dp.include_router(skills_cmd.router)
+    dp.include_router(cron_cmd.router)
     dp.include_router(trajectory_cmd.router)
     dp.include_router(wiki_cmd.router)
     dp.include_router(avito_cmd.router)
@@ -264,8 +266,11 @@ def _setup_bot_and_dispatcher(
     dp.include_router(free_text_memory.router)
     dp.include_router(free_text_settings.router)
     dp.include_router(confirm_router)
+    from src.bot.handlers.nudge import nudge_router
+
+    dp.include_router(nudge_router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
-    dp.include_router(free_text.router)
+    dp.include_router(free_text_legacy.router)
 
     return bot, dp
 
@@ -276,6 +281,16 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
 
     me = await bot.get_me()
     logger.info("Control bot started as @%s (polling)", me.username)
+
+    from src.bot.command_registry import CommandRegistry, register_all_commands
+
+    registry = CommandRegistry()
+    register_all_commands(registry)
+    await bot.set_my_commands(registry.as_telegram_commands())
+    logger.info(
+        "Bot commands menu updated: %d commands",
+        len(registry.as_telegram_commands()),
+    )
 
     try:
         # close_bot_session=False — сессией управляем явно в finally
@@ -323,6 +338,12 @@ async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
 
     me = await bot.get_me()
     logger.info("Control bot started as @%s (webhook)", me.username)
+
+    from src.bot.command_registry import CommandRegistry, register_all_commands
+
+    registry = CommandRegistry()
+    register_all_commands(registry)
+    await bot.set_my_commands(registry.as_telegram_commands())
 
     # Build minimal aiohttp app for webhook ingestion
     aiohttp_app = web.Application()

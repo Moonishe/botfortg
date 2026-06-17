@@ -139,6 +139,7 @@ from src.bot.handlers.free_text_exec import (
     exec_toggle_api_key,
     exec_update_memory,
 )
+from src.bot.handlers.cron_exec import exec_cron_delete, exec_cron_run
 
 logger = logging.getLogger(__name__)
 
@@ -657,14 +658,16 @@ async def _cb_tool_confirm(
             # Avoid double-confirmation: the guardrail already asked the user.
             confirmed_params = dict(tool_params)
             confirmed_params["_confirmed"] = True
-            await handler(
+            result = await handler(
                 confirmed_params,
                 callback.message,
                 state,
                 userbot_manager,
                 tz_name=confirmed_params.get("tz_name", "UTC"),
             )
-            ok = True
+            if isinstance(result, dict) and result.get("error"):
+                raise RuntimeError(str(result["error"]))
+            ok = result.get("ok", True) if isinstance(result, dict) else True
         else:
             async with get_session() as session:
                 owner = await get_or_create_user(session, callback.from_user.id)
@@ -1247,8 +1250,11 @@ async def _execute_intent(
 
 # ── Intent handler registries ────────────────────────────────────────
 
+
 INTENT_HANDLERS: dict[str, tuple[Callable, str]] = {
     "set_setting": (h_adapter(exec_set_setting), "Изменить настройку"),
+    "cron_run": (h_adapter(exec_cron_run), "Запустить cron-задачу"),
+    "cron_delete": (h_adapter(exec_cron_delete), "Удалить cron-задачу"),
     "add_news_topic": (h_adapter(exec_add_news_topic), "Добавить новостную тему"),
     "remove_news_topic": (h_adapter(exec_remove_news_topic), "Удалить новостную тему"),
     "add_reminder": (ht_adapter(exec_add_reminder), "Добавить напоминание"),
