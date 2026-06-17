@@ -163,6 +163,11 @@ _Major design choices with rationale. The "why" matters more than the "what" for
 **Решение:** Новый модуль `src/core/memory/session_snapshot.py` собирает bounded snapshot (3-7 фактов, per-contact digest, pending-вопросы, стиль, риски, session summary) с токен-бюджетом (512) и prompt-injection-сканированием. `_set_frozen` в `context_gatherer.py` теперь заполняет `ctx.frozen_snapshot` (форматированный блок) и `ctx.session_summary` (сырой summary), прокидывает `contact_id` из `maestro.process`. `prompt_assembler.py` ведёт audit размера промпта (chars/tokens/stage) в `_capacity_check`. `pending_questions.py` получил `peek_pending()` без drain'а очереди и общий helper `_append_in_memory` с cap 20 для обоих путей записи.
 **Источник:** `src/core/memory/session_snapshot.py`, `src/core/memory/pending_questions.py`, `src/core/intelligence/context_gatherer.py`, `src/core/intelligence/prompt_assembler.py`, `src/core/intelligence/maestro.py`, `tests/test_session_snapshot.py`, commit 23222d9, 2026-06-17.
 
+### AD-020: Skills Lifecycle — dry-run → approve → apply + per-skill evolve
+**Когда:** 2026-06-17. **Контекст:** панель `/skills` уже показывала статусы и метрики, но не было ручного триггера эволюции для одного навыка и не было явного dry-run → approve → apply flow для пачки кандидатов.
+**Решение:** Добавлены callback'и `evolve_one`, `evolve_dryrun`, `evolve_apply` в `src/bot/handlers/skills_callbacks.py`. UI-вспомогательные функции (`_format_evolve_dryrun`, `_format_evolve_apply`) изолированы в `src/bot/handlers/skills_ui.py`. Пачка кандидатов эволюционируется параллельно через `asyncio.gather` с общим `asyncio.Semaphore(2)` (`_EVOLVE_SEMAPHORE` из `src/core/intelligence/auto_evolve.py`), чтобы не превысить rate limit LLM. HTML-escape применяется ко всем user/LLM-контролируемым строкам. Метрики `_format_metrics` теперь защищены от отрицательных счётчиков и `validation_score > 1`. `__all__` в `auto_evolve.py` дополнен публичным API. Добавлены тесты `tests/test_skills_evolve.py` (20 тестов) и обновлён `tests/test_skills_cmd.py`.
+**Источник:** `src/bot/handlers/skills_callbacks.py`, `src/bot/handlers/skills_ui.py`, `src/core/intelligence/auto_evolve.py`, `tests/test_skills_evolve.py`, `tests/test_skills_cmd.py`, commit 7ed5ffe, 2026-06-17.
+
 ## Open Questions
 _Unresolved issues. Move to §A or §B when resolved._
 
