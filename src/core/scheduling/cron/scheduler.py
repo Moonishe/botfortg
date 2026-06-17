@@ -181,7 +181,7 @@ class CronScheduler:
                     ChatMessage(role="user", content=prompt),
                 ]
                 text = await asyncio.wait_for(
-                    provider.chat(messages),
+                    provider.chat(messages, task_type="cron"),
                     timeout=60.0,
                 )
                 return json.dumps({"text": text or ""})

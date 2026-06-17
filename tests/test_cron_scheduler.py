@@ -569,13 +569,13 @@ class TestCronLlmPromptResolver:
         """_resolve_llm_prompt_payload generates text via a mocked LLM."""
         from src.core.scheduling.cron.scheduler import cron_scheduler
 
-        async def fake_provider_chat(messages):
+        async def fake_provider_chat(messages, **kwargs):
             return "generated text"
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
-                    return await fake_provider_chat(messages)
+                async def chat(self, messages, **kwargs):
+                    return await fake_provider_chat(messages, **kwargs)
 
             return FakeProvider()
 
@@ -615,7 +615,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     # Verify prompt appears in messages via attribute access
                     for m in messages:
                         if getattr(m, "content", "") == "just some text":
@@ -642,7 +642,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     return "generated from json"
 
             return FakeProvider()
@@ -665,7 +665,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     return "from text key"
 
             return FakeProvider()
@@ -688,7 +688,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     return "from list"
 
             return FakeProvider()
@@ -711,7 +711,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     return "from dict prompt"
 
             return FakeProvider()
@@ -734,7 +734,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     return "from dict text"
 
             return FakeProvider()
@@ -776,7 +776,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     return None  # Returns None!
 
             return FakeProvider()
@@ -800,7 +800,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     raise RuntimeError("LLM exploded")
 
             return FakeProvider()
@@ -823,7 +823,7 @@ class TestCronLlmPromptResolver:
 
         async def fake_build_provider(session, user, purpose="main"):
             class FakeProvider:
-                async def chat(self, messages):
+                async def chat(self, messages, **kwargs):
                     return "from int"
 
             return FakeProvider()
