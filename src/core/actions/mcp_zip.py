@@ -4,11 +4,13 @@ Zip/unzip file operations.
 
 Actions:
 - ``action="list" path="data/archive.zip"`` — list files inside a zip archive
-- ``action="extract" path="data/archive.zip" dest="data/extracted/"`` — extract to a directory
-- ``action="create" paths=["data/file1.txt","data/file2.txt"] output="data/packed.zip"`` — create a zip archive
+- ``action="extract" path="data/archive.zip" dest="data/extracted/"`` — extract to a
+  directory
+- ``action="create" paths=["data/file1.txt","data/file2.txt"] output="data/packed.zip"``
+  — create a zip archive
 
-Path validation uses ``_safe_resolve`` from ``mcp_tools`` — only paths under ``data/`` are
-allowed.
+Path validation uses ``_safe_resolve`` from ``mcp_tools`` — only paths under ``data/``
+are allowed.
 """
 
 from __future__ import annotations
@@ -23,6 +25,9 @@ from src.core.actions.mcp_tools import _safe_resolve
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
+
+# Error message reused when a path escapes the allowed data directory.
+_OUTSIDE_DIRS_MSG = "is outside allowed directories or contains '..'"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -113,7 +118,7 @@ async def _zip_list(file_path: str) -> dict[str, Any]:
     resolved = _safe_resolve(file_path)
     if resolved is None:
         return {
-            "error": f"Path {file_path!r} is outside allowed directories or contains '..'"
+            "error": f"Path {file_path!r} {_OUTSIDE_DIRS_MSG}"
         }
     if not resolved.is_file():
         return {"error": f"File not found: {resolved}"}
@@ -185,7 +190,7 @@ async def _zip_extract(file_path: str, dest: str) -> dict[str, Any]:
     resolved = _safe_resolve(file_path)
     if resolved is None:
         return {
-            "error": f"Path {file_path!r} is outside allowed directories or contains '..'"
+            "error": f"Path {file_path!r} {_OUTSIDE_DIRS_MSG}"
         }
     if not resolved.is_file():
         return {"error": f"File not found: {resolved}"}
@@ -193,7 +198,7 @@ async def _zip_extract(file_path: str, dest: str) -> dict[str, Any]:
     dest_resolved = _safe_resolve(dest)
     if dest_resolved is None:
         return {
-            "error": f"Dest path {dest!r} is outside allowed directories or contains '..'"
+            "error": f"Dest path {dest!r} {_OUTSIDE_DIRS_MSG}"
         }
 
     loop = asyncio.get_running_loop()
@@ -281,7 +286,7 @@ async def _zip_create(source_paths: list[str], output_path: str) -> dict[str, An
     out_resolved = _safe_resolve(output_path)
     if out_resolved is None:
         return {
-            "error": f"Output path {output_path!r} is outside allowed directories or contains '..'"
+            "error": f"Output path {output_path!r} {_OUTSIDE_DIRS_MSG}"
         }
 
     resolved_sources: list[Path] = []
@@ -289,7 +294,7 @@ async def _zip_create(source_paths: list[str], output_path: str) -> dict[str, An
         r = _safe_resolve(raw)
         if r is None:
             return {
-                "error": f"Source path {raw!r} is outside allowed directories or contains '..'"
+                "error": f"Source path {raw!r} {_OUTSIDE_DIRS_MSG}"
             }
         if not r.exists():
             return {"error": f"Source path not found: {r}"}

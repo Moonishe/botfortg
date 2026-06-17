@@ -194,7 +194,8 @@ try:
     import resource as _resource
     try:
         _resource.setrlimit(_resource.RLIMIT_CPU, (5, 5))           # 5 сек CPU
-        _resource.setrlimit(_resource.RLIMIT_AS, (128*1024*1024, 128*1024*1024))  # 128 MB
+        _MB = 128 * 1024 * 1024
+        _resource.setrlimit(_resource.RLIMIT_AS, (_MB, _MB))         # 128 MB
         _resource.setrlimit(_resource.RLIMIT_NPROC, (0, 0))         # запрет subprocess
     except (ValueError, _resource.error):
         pass  # RLIMITs недоступны на данной платформе
@@ -264,7 +265,8 @@ except Exception as e:
     description=(
         "Выполняет Python-код в изолированной песочнице и возвращает результат. "
         "Можно использовать для вычислений, обработки данных, генерации текста. "
-        "Доступны: math, json, datetime, collections, itertools, random, statistics, re, csv."
+        "Доступны: math, json, datetime, collections, itertools, random, "
+        "statistics, re, csv."
     ),
     category="utility",
     risk="critical",

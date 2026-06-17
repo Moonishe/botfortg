@@ -114,7 +114,8 @@ class CoTEngine:
         user=None,
         plan: dict | None = None,
     ) -> ReasoningTrace:
-        """Главная точка входа. Многошаговое рассуждение с инструментами и самокоррекцией.
+        """Главная точка входа. Многошаговое рассуждение с инструментами и
+самокоррекцией.
 
         Args:
             problem: задача пользователя (текст).
@@ -295,7 +296,8 @@ class CoTEngine:
             params = tc.get("params", {})
             async with sem:
                 try:
-                    # Защита от конфликта ключей: params не должны переопределять session/user
+                    # Защита от конфликта ключей: params не должны
+                    # переопределять session/user
                     params.pop("session", None)
                     params.pop("user", None)
                     result = await tool_registry.execute(

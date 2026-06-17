@@ -113,7 +113,8 @@ RETRYABLE_MARKERS = (
 
 
 def _is_retryable_llm_error(exc: Exception) -> bool:
-    """True for transient capacity/rate-limit/server errors worth trying another key/provider."""
+    """True for transient capacity/rate-limit/server errors worth trying
+    another key/provider."""
     # Timeouts are always retryable — rotate key / fallback to next provider.
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
         return True
@@ -292,7 +293,7 @@ class MultiKeyProvider:
                         if retry < MAX_RETRIES_PER_KEY - 1:
                             delay = RETRY_BASE_DELAY * (2**retry)
                             logger.warning(
-                                "LLM %s key %s attempt %d/%d failed, retrying in %.1fs: %s",
+                        "LLM %s key %s attempt %d/%d failed, retrying in %.1fs: %s",
                                 self.provider_name,
                                 _mask_key(key),
                                 retry + 1,
@@ -322,7 +323,8 @@ class MultiKeyProvider:
                                     self._slot_ids[idx],
                                 )
                         # Adaptive Provider Selection: запись метрик успеха
-                        # (try/except — потеря result при ошибке метрики дороже, чем сама метрика)
+                        # (try/except: потеря result при ошибке метрики дороже,
+    # чем сама метрика)
                         latency = asyncio.get_running_loop().time() - start_time
                         try:
                             await _record_provider_success(self.provider_name, latency)
@@ -376,7 +378,8 @@ class MultiKeyProvider:
                         try:
                             async with get_session() as fresh_s:
                                 error_msg = (
-                                    f"{type(exc).__name__}: {safe_str(exc).split(chr(10))[0]}"
+                                    f"{type(exc).__name__}: "
+                            f"{safe_str(exc).split(chr(10))[0]}"
                                 )[:256]
                                 await mark_key_failure(
                                     fresh_s,
@@ -519,10 +522,9 @@ class MultiKeyProvider:
                     if cb is not None:
                         now = asyncio.get_running_loop().time()
                         if not cb.is_ready(now) and not cb.try_half_open(now):
-                            # CLOSED → is_ready=True → skip this block.
-                            # HALF_OPEN → is_ready=True → skip this block.
-                            # OPEN (cooldown expired) → try_half_open=True → skip this block.
-                            # Only OPEN with active cooldown → both False → skip entirely.
+                            # CLOSED/HALF_OPEN ready → skip.
+                            # OPEN cooldown expired → try_half_open → skip.
+                            # Only OPEN with active cooldown → skip entirely.
                             continue
                     endpoint = (
                         self._endpoints[idx]
@@ -627,7 +629,8 @@ class MultiKeyProvider:
                                 try:
                                     async with get_session() as fresh_s:
                                         error_msg = (
-                                            f"{type(e).__name__}: {safe_str(e).split(chr(10))[0]}"
+                                            f"{type(e).__name__}: "
+                                        f"{safe_str(e).split(chr(10))[0]}"
                                         )[:256]
                                         await mark_key_failure(
                                             fresh_s,
@@ -807,7 +810,8 @@ class ProviderFallback:
             key=lambda p: _score_provider(p.provider_name, now),
             reverse=True,
         )
-        # Map None → _UNSET for MultiKeyProvider (preserves "use _default_heavy" semantic)
+        # Map None → _UNSET for MultiKeyProvider
+        # (preserves "use _default_heavy" semantic)
         mkp_heavy = _UNSET if heavy is None else heavy
         for provider in sorted_providers:
             try:
@@ -847,7 +851,8 @@ class ProviderFallback:
             key=lambda p: _score_provider(p.provider_name, now),
             reverse=True,
         )
-        # Map None → _UNSET for MultiKeyProvider (preserves "use _default_heavy" semantic)
+        # Map None → _UNSET for MultiKeyProvider
+        # (preserves "use _default_heavy" semantic)
         mkp_heavy = _UNSET if heavy is None else heavy
         for provider in sorted_providers:
             try:
@@ -883,12 +888,13 @@ class ProviderFallback:
             try:
                 result = await provider.embed(text)
                 # M8: запоминаем размерность первого успешного эмбеддинга,
-                # даже если primary не сработал — для последующей валидации размерностей.
+                # даже если primary не сработал — для валидации размерностей.
                 if self._last_primary_dim is None:
                     self._last_primary_dim = len(result)
                 elif len(result) != self._last_primary_dim:
                     raise ValueError(
-                        f"Embedding dimension mismatch: primary={self._last_primary_dim}, "
+                        f"Embedding dimension mismatch: "
+                        f"primary={self._last_primary_dim}, "
                         f"fallback {provider.name}={len(result)}. "
                         "Vectors would corrupt Qdrant index."
                     )
@@ -922,7 +928,8 @@ class ProviderFallback:
                         self._last_primary_dim = len(result[0])
                     elif len(result[0]) != self._last_primary_dim:
                         raise ValueError(
-                            f"Embedding dimension mismatch: primary={self._last_primary_dim}, "
+                            f"Embedding dimension mismatch: "
+                            f"primary={self._last_primary_dim}, "
                             f"fallback {provider.name}={len(result[0])}. "
                             "Vectors would corrupt Qdrant index."
                         )
