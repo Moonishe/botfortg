@@ -14,9 +14,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.filters import OwnerOnly
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
-    add_memory,
     add_memory_candidate,
-    delete_memory,
     get_contact,
     get_graph_stats,
     get_or_create_user,
@@ -24,6 +22,8 @@ from src.db.repo import (
     list_memories,
     search_memories,
 )
+from src.core.memory.memory_service import save_memory_single
+from src.core.memory.memory_service import delete_memory_service
 from src.db.session import get_session
 from src.core.memory.memory_recall import bump_recall_version
 from src.core.security.prompt_injection_scanner import scan_content
@@ -60,9 +60,9 @@ async def _exec_store_memory(intent, message) -> None:
             owner = await get_or_create_user(session, message.from_user.id)
         client = get_active_telethon_client(message.from_user.id)
         if client is not None:
-            from src.core.contacts.contact_resolver import resolve
+            from src.bot.contact_resolver import resolve_contact_fast
 
-            candidates = await resolve(client, owner, contact_name)
+            candidates = await resolve_contact_fast(client, owner, contact_name)
             if candidates:
                 contact_id = candidates[0].peer_id
 
@@ -80,13 +80,15 @@ async def _exec_store_memory(intent, message) -> None:
 
         if confidence >= 0.85:
             # Высокая уверенность — сразу в память
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=fact,
                 contact_id=contact_id,
                 sentiment=sentiment,
                 source="user",
+                confidence=0.5,
+                memory_type=None,
             )
             await message.answer(sanitize_html(f"🧠 Запомнил: <i>{fact}</i>"))
         else:
@@ -120,9 +122,9 @@ async def _exec_forget_memory(intent, message) -> None:
             owner = await get_or_create_user(session, message.from_user.id)
         client = get_active_telethon_client(message.from_user.id)
         if client is not None:
-            from src.core.contacts.contact_resolver import resolve
+            from src.bot.contact_resolver import resolve_contact_fast
 
-            candidates = await resolve(client, owner, contact_name)
+            candidates = await resolve_contact_fast(client, owner, contact_name)
             if candidates:
                 contact_id = candidates[0].peer_id
 
@@ -138,7 +140,7 @@ async def _exec_forget_memory(intent, message) -> None:
         # один запрос на всю сессию (N+1 → 1)
         owner2 = await get_or_create_user(session, message.from_user.id)
         for m in found:
-            await delete_memory(session, owner2, m.id)
+            await delete_memory_service(session, owner2, m.id)
 
     names = ", ".join(
         f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
@@ -156,9 +158,9 @@ async def _exec_list_memories(intent, message) -> None:
             owner = await get_or_create_user(session, message.from_user.id)
         client = get_active_telethon_client(message.from_user.id)
         if client is not None:
-            from src.core.contacts.contact_resolver import resolve
+            from src.bot.contact_resolver import resolve_contact_fast
 
-            candidates = await resolve(client, owner, contact_name)
+            candidates = await resolve_contact_fast(client, owner, contact_name)
             if candidates:
                 contact_id = candidates[0].peer_id
                 label = f" — {candidates[0].label()}"
@@ -198,9 +200,9 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
         await message.answer("Сначала /login.")
         return
 
-    from src.core.contacts.contact_resolver import resolve
+    from src.bot.contact_resolver import resolve_contact_fast
 
-    candidates = await resolve(client, owner, contact_name)
+    candidates = await resolve_contact_fast(client, owner, contact_name)
     if not candidates:
         await message.answer("Не нашёл такого контакта.")
         return
@@ -518,12 +520,13 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("mem:del:"))
 async def cb_mem_del(callback: CallbackQuery) -> None:
-    from src.db.repo import delete_memory, get_or_create_user
+    from src.db.repo import get_or_create_user
+    from src.core.memory.memory_service import delete_memory_service
 
     mid = int(callback.data.split(":")[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
-        await delete_memory(session, owner, mid)
+        await delete_memory_service(session, owner, mid)
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
             f"🗑 {callback.message.text}\n\n<i>Удалил из памяти.</i>"
@@ -600,7 +603,7 @@ async def cb_memq_delete(callback: CallbackQuery) -> None:
     mem_id = int(callback.data.split(":")[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
-        success = await delete_memory(session, owner, mem_id)
+        success = await delete_memory_service(session, owner, mem_id)
         if success:
             if isinstance(callback.message, Message):
                 await callback.message.edit_text("✅ Забыто!")
@@ -623,9 +626,9 @@ async def cb_memq_explain(callback: CallbackQuery) -> None:
         if client is not None:
             async with get_session() as session:
                 owner = await get_or_create_user(session, callback.from_user.id)
-            from src.core.contacts.contact_resolver import resolve
+            from src.bot.contact_resolver import resolve_contact_fast
 
-            candidates = await resolve(client, owner, contact_name)
+            candidates = await resolve_contact_fast(client, owner, contact_name)
             if candidates:
                 contact_id = candidates[0].peer_id
                 contact_label = candidates[0].label()

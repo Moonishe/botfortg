@@ -29,7 +29,7 @@ async def setup_db():
     """Recreate tables before each test — per-connection :memory: safety."""
     from src.db.session import engine, Base, init_db
     from sqlalchemy import text
-    from src.bot.handlers.free_text._core import _pending_confirmations
+    from src.bot.handlers.free_text._confirm import _pending_confirmations
 
     _pending_confirmations.clear()
     async with engine.begin() as conn:
@@ -91,7 +91,7 @@ async def test_verify_pending_action_hmac_accepts_valid_signature() -> None:
 
 
 async def test_pop_tool_confirmation_db_route() -> None:
-    from src.bot.handlers.free_text._core import _pop_tool_confirmation
+    from src.bot.handlers.free_text._confirm import _pop_tool_confirmation
 
     async with get_session() as session:
         user = await get_or_create_user(session, 1)
@@ -133,7 +133,7 @@ async def test_pop_tool_confirmation_db_route() -> None:
 
 
 async def test_pop_tool_confirmation_db_wrong_signature() -> None:
-    from src.bot.handlers.free_text._core import _pop_tool_confirmation
+    from src.bot.handlers.free_text._confirm import _pop_tool_confirmation
 
     async with get_session() as session:
         user = await get_or_create_user(session, 1)
@@ -157,7 +157,7 @@ async def test_pop_tool_confirmation_db_wrong_signature() -> None:
 
 
 async def test_pop_tool_confirmation_memory_route() -> None:
-    from src.bot.handlers.free_text._core import _pop_tool_confirmation
+    from src.bot.handlers.free_text._confirm import _pop_tool_confirmation
 
     action_key, entry = memory_entry(
         user_id=42,
@@ -168,14 +168,14 @@ async def test_pop_tool_confirmation_memory_route() -> None:
         metadata={"tool": "echo"},
     )
     # Inject into module-level in-memory store via its lock.
-    from src.bot.handlers.free_text import _core as core_module
+    from src.bot.handlers.free_text import _confirm as confirm_module
 
-    core_module._pending_confirmations[action_key] = entry
+    confirm_module._pending_confirmations[action_key] = entry
     pending = await _pop_tool_confirmation(action_key, 42, entry["signature"])
     assert pending is not None
     assert pending["tool"] == "echo"
     assert pending["tool_params"] == {"args": ["hi"]}
-    assert action_key not in core_module._pending_confirmations
+    assert action_key not in confirm_module._pending_confirmations
 
 
 async def test_send_confirm_keyboard_uses_unified_callbacks() -> None:
@@ -307,7 +307,7 @@ async def test_legacy_send_confirm_rejected() -> None:
 
 async def test_tool_cb_confirm_legacy_and_unified() -> None:
     """Memory-route tool confirmation accepts both legacy and unified formats."""
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _cb_tool_confirm,
         _cb_tool_cancel,
         _pending_confirmations,
@@ -382,7 +382,7 @@ async def test_tool_cb_confirm_legacy_and_unified() -> None:
 
 async def test_pop_tool_confirmation_memory_wrong_user() -> None:
     """Memory-route: wrong user_id cannot pop another user's confirmation."""
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _pop_tool_confirmation,
         _pending_confirmations,
     )
@@ -408,7 +408,7 @@ async def test_pop_tool_confirmation_memory_wrong_user() -> None:
 
 async def test_pop_tool_confirmation_memory_wrong_signature() -> None:
     """Memory-route: wrong signature returns None, puts entry back."""
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _pop_tool_confirmation,
         _pending_confirmations,
     )
@@ -432,7 +432,7 @@ async def test_pop_tool_confirmation_memory_wrong_signature() -> None:
 
 async def test_pop_tool_confirmation_memory_double_pop() -> None:
     """Memory-route: second pop returns None (already consumed)."""
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _pop_tool_confirmation,
         _pending_confirmations,
     )
@@ -460,7 +460,7 @@ async def test_pop_tool_confirmation_memory_double_pop() -> None:
 async def test_pop_tool_confirmation_memory_expired() -> None:
     """Memory-route: expired entry returns None."""
     import time
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _pop_tool_confirmation,
         _pending_confirmations,
     )
@@ -484,7 +484,7 @@ async def test_pop_tool_confirmation_memory_expired() -> None:
 
 async def test_pop_tool_confirmation_db_double_pop() -> None:
     """DB-route: second pop after first successful pop returns None."""
-    from src.bot.handlers.free_text._core import _pop_tool_confirmation
+    from src.bot.handlers.free_text._confirm import _pop_tool_confirmation
     from src.db.session import get_session
 
     async with get_session() as session:
@@ -560,7 +560,7 @@ async def test_pending_action_risk_defaults() -> None:
 
 async def test_pop_tool_confirmation_intent_memory_route() -> None:
     """Memory-route intent confirmation (ap:intent:) pops with correct handler key."""
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _pending_confirmations,
         _pop_tool_confirmation,
     )
@@ -585,7 +585,7 @@ async def test_pop_tool_confirmation_intent_memory_route() -> None:
 
 async def test_cb_tool_cancel_intent_memory_route() -> None:
     """ap:cancel:intent:{action_key} removes the in-memory intent confirmation."""
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _cb_tool_cancel,
         _pending_confirmations,
     )
@@ -624,7 +624,7 @@ async def test_store_intent_confirmation_db_route_hmac_uses_db_user_id() -> None
     (auto-increment), the HMAC computed in _store_intent_confirmation must
     match the verification in _pop_tool_confirmation which uses user.id.
     """
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _store_intent_confirmation,
         _pop_tool_confirmation,
     )
@@ -701,7 +701,7 @@ async def test_store_intent_confirmation_db_route_hmac_uses_db_user_id() -> None
 
 async def test_store_intent_confirmation_memory_route_hmac_consistent() -> None:
     """Memory route uses telegram_id throughout — should always be consistent."""
-    from src.bot.handlers.free_text._core import (
+    from src.bot.handlers.free_text._confirm import (
         _store_intent_confirmation,
         _pop_tool_confirmation,
     )

@@ -1,21 +1,21 @@
 {
   "_description": "Quality metrics across all sessions. Updated at session end.",
   "sessions": {
-    "total": 4,
-    "completed": 4,
+    "total": 6,
+    "completed": 6,
     "escalated": 0,
     "completion_rate": 1.0
   },
   "tasks": {
-    "total": 20,
-    "completed": 19,
-    "avg_per_session": 5.0
+    "total": 35,
+    "completed": 34,
+    "avg_per_session": 5.83
   },
   "pipeline": {
-    "d5r5_cycles_total": 5,
-    "avg_iterations_per_task": 0.33,
+    "d5r5_cycles_total": 11,
+    "avg_iterations_per_task": 0.31,
     "max_iterations_hit": 0,
-    "goal_judge_ok": 4,
+    "goal_judge_ok": 5,
     "goal_judge_impossible": 0
   },
   "dream_distill": {
@@ -25,9 +25,9 @@
     "skills_created": 0
   },
   "max_mode": {
-    "runs": 1,
+    "runs": 3,
     "candidates_avg_score": 0,
-    "winner_was_best": 1
+    "winner_was_best": 2
   },
-  "updated_at": "2026-06-17T22:25:00Z"
+  "updated_at": "2026-06-19T00:00:00Z"
 }

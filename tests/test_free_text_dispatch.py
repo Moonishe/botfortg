@@ -364,7 +364,7 @@ class TestDagDispatch:
             {"intent": "c", "depends_on": [1]},
         ]
 
-        with patch("src.bot.handlers.free_text._core.logger") as mock_logger:
+        with patch("src.bot.handlers.free_text._dag.logger") as mock_logger:
             await _run_dag(_cycle_dispatch, subs, msg, state, ubm)
 
         assert len(call_log) == 3, f"Expected 3 calls, got {len(call_log)}"

@@ -6,14 +6,18 @@ instructions → routing → dispatch). Parallelization is at the tool-execution
 (maestro, agent runtime, DAG dispatch for multi-intent).
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
-import re
-import hashlib
 import sys
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.dispatcher import MaestroResult
 
 # ── Module constants ─────────────────────────────────────────────────────
 _DEFAULT_SEARCH_LIMIT = 5  # элементов — лимит deep recall по умолчанию
@@ -35,20 +39,11 @@ from httpx import RequestError, HTTPStatusError
 
 from src.config import settings
 
-from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import Message
 from aiogram.exceptions import TelegramAPIError
 
-from src.bot.filters import OwnerOnly
 from src.core.actions.action_guard import guard_intent
-from src.core.actions.tool_registry import tool_registry
 from src.core.actions.trajectory import actions_from_intent
 from src.core.infra.key_guard import safe_str
 from src.core.infra.task_manager import track_ff
@@ -58,9 +53,11 @@ from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 from src.core.intelligence.maestro import run_pipeline
 from src.core.memory import conversation_context as ctx_store
 from src.core.memory.memory_recall import recall
+from src.core.memory.auto_save_batch import auto_save_single
+from src.core.memory.memory_service import save_memories_batch
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.db.repo import add_memory, create_pending_action, get_or_create_user
+from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
 
@@ -168,59 +165,19 @@ def _log_smart_routing(plan, raw: str) -> None:
 
 from src.core.cache import ManagedCache, cache_manager
 
-_last_intent_ctx: ManagedCache[int, dict] = cache_manager.register(
-    ManagedCache(name="last_intent_ctx", max_size=1000, default_ttl=900.0)
+from src.bot.handlers.free_text._shared import _LAST_INTENT_TTL
+from src.bot.handlers.free_text._confirm import (
+    _confirm_tool_keyboard,
+    _store_intent_confirmation,
+    _store_tool_confirmation,
 )
-_LAST_INTENT_TTL = 900.0
 
-# ── Pending tool confirmations ────────────────────────────────────────
-# Stores tool calls awaiting user confirmation (from maestro tool loop / guardrails).
-# Format: {uid_str: {"telegram_id": int, "kind": "tool|intent", "tool": str,
-#                    "tool_params": dict, "ts": float}}
-_pending_confirmations: dict[str, dict] = {}
-_pending_confirmations_lock = asyncio.Lock()
-_PENDING_TTL = float(
-    getattr(settings, "pending_ttl_sec", 300)
-)  # 5 минут — удаляем stale записи
-
-# ── Per-user confirm-tool lock ─────────────────────────────────────────
-# Prevents double-execution race: two concurrent callbacks for the same user
-# on the same DB PendingAction could both pass HMAC before either deletes it.
-# ponytail: dict never evicted, bounded by unique telegram_id count;
-#           add TTL-based cleanup if per-process memory matters.
-_tool_confirm_locks: dict[int, asyncio.Lock] = {}
-_tool_confirm_locks_last_used: dict[int, float] = {}
-_tool_confirm_locks_lock = asyncio.Lock()
-_TOOL_CONFIRM_LOCK_TTL_SEC = 300  # 5 minutes
+_last_intent_ctx: ManagedCache[int, dict] = cache_manager.register(
+    ManagedCache(name="last_intent_ctx", max_size=1000, default_ttl=_LAST_INTENT_TTL)
+)
 
 
-async def _get_tool_confirm_lock(telegram_id: int) -> asyncio.Lock:
-    """Return a per-user lock; serialize creation to avoid duplicate locks."""
-    now = time.monotonic()
-    async with _tool_confirm_locks_lock:
-        _cleanup_tool_confirm_locks(now)
-        lock = _tool_confirm_locks.get(telegram_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            _tool_confirm_locks[telegram_id] = lock
-        _tool_confirm_locks_last_used[telegram_id] = now
-        return lock
-
-
-def _cleanup_tool_confirm_locks(now: float) -> None:
-    """Remove stale locks that are not currently held."""
-    stale = [
-        tid
-        for tid, ts in _tool_confirm_locks_last_used.items()
-        if now - ts > _TOOL_CONFIRM_LOCK_TTL_SEC
-    ]
-    for tid in stale:
-        lock = _tool_confirm_locks.get(tid)
-        if lock is None or not lock.locked():
-            _tool_confirm_locks.pop(tid, None)
-            _tool_confirm_locks_last_used.pop(tid, None)
-
-
+# _get_tool_confirm_lock and _cleanup_tool_confirm_locks moved to _confirm.py
 async def _get_anti_ai_mode(owner_telegram_id: int) -> str:
     """Runtime mode for assistant responses: off/log/fix."""
     try:
@@ -255,543 +212,7 @@ async def _humanize_assistant_response(
     )
 
 
-def _cleanup_stale_pending() -> None:
-    """Remove entries older than ``_PENDING_TTL`` seconds."""
-    now = time.monotonic()
-    for uid in list(_pending_confirmations):
-        entry = _pending_confirmations[uid]
-        if now - entry.get("ts", 0) > _PENDING_TTL:
-            del _pending_confirmations[uid]
-
-
-# PERF-018: background timer that evicts stale pending confirmations every 60s
-_BACKGROUND_CLEANUP_INTERVAL = 60
-
-
-async def _background_cleanup_stale_pending() -> None:
-    """Periodic cleanup task — runs every ``_BACKGROUND_CLEANUP_INTERVAL`` seconds."""
-    try:
-        while True:
-            await asyncio.sleep(_BACKGROUND_CLEANUP_INTERVAL)
-            async with _pending_confirmations_lock:
-                _cleanup_stale_pending()
-    except asyncio.CancelledError:
-        logger.debug("Stale-pending cleanup timer stopped (cancelled)")
-        raise
-
-
-_cleanup_timer_registered: bool = False
-
-
-def register_cleanup_timer() -> None:
-    """Register the background stale-pending cleanup timer (fire-and-forget).
-
-    Idempotent: only registers once, even if called multiple times.
-    """
-    global _cleanup_timer_registered
-    if _cleanup_timer_registered:
-        return
-    _cleanup_timer_registered = True
-    try:
-        loop = asyncio.get_running_loop()
-        track_ff(loop.create_task(_background_cleanup_stale_pending()))
-    except RuntimeError:
-        _cleanup_timer_registered = False  # rollback — no loop, can retry later
-        pass
-
-
-def _confirm_tool_keyboard(
-    callback_data: str, cancel_data: str
-) -> InlineKeyboardMarkup:
-    """Inline-кнопки для подтверждения/отмены действия.
-
-    Week 2: accepts pre-formatted unified callback strings
-    (``ap:tool:{action_key}:{signature}`` and ``ap:cancel:tool:{action_key}``).
-    """
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text="✅ Выполнить", callback_data=callback_data),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_data),
-    )
-    return kb.as_markup()
-
-
-def _redact_confirmation_params(params: dict) -> dict:
-    redacted = {}
-    sensitive = (
-        "key",
-        "token",
-        "secret",
-        "password",
-        "credential",
-        "value",
-        "api_hash",
-        "database_url",
-        "proxy_url",
-    )
-    for name, value in params.items():
-        if any(marker in str(name).lower() for marker in sensitive):
-            redacted[name] = "***"
-        else:
-            redacted[name] = value
-    return redacted
-
-
-async def _store_tool_confirmation(
-    telegram_id: int,
-    tool: str,
-    tool_params: dict,
-    *,
-    human_summary: str = "",
-    risk: str | None = None,
-) -> tuple[str, str]:
-    """Store a tool confirmation and return (confirm_callback, cancel_callback).
-
-    Week 2: hybrid routing. HIGH/CRITICAL tools are persisted to the DB;
-    medium/read-only tools are kept in memory with HMAC-signed callbacks.
-    """
-    from src.core.security import approval
-    from src.core.actions import tool_registry
-
-    if risk is None:
-        spec = tool_registry.get(tool)
-        risk = "medium"
-        if spec is not None:
-            risk = spec.effective_risk(tool_params.get("action")) or "medium"
-
-    route = approval.route_for(risk)
-    summary = human_summary or f"Выполнить {tool}"
-    payload = dict(tool_params)
-
-    if route == "db":
-        async with get_session() as session:
-            user = await get_or_create_user(session, telegram_id)
-            action = await create_pending_action(
-                session,
-                user_id=user.id,
-                kind=tool,
-                payload=json.dumps(payload, ensure_ascii=False),
-                route="db",
-                verb="tool",
-                risk=risk,
-                human_summary=summary,
-            )
-        action_key = str(action.id)
-        sig = action.hmac_signature or ""
-        if not sig:
-            logger.error(
-                "Pending action %s created with empty HMAC signature", action_key
-            )
-            raise RuntimeError("Failed to create confirmable action: empty signature")
-    else:
-        action_key, entry = approval.memory_entry(
-            user_id=telegram_id,
-            verb="tool",
-            risk=risk,
-            human_summary=summary,
-            payload=payload,
-            metadata={"tool": tool},
-        )
-        async with _pending_confirmations_lock:
-            _cleanup_stale_pending()
-            _pending_confirmations[action_key] = entry
-        sig = entry["signature"]
-        if not sig:
-            logger.error(
-                "Memory confirmation entry %s created with empty signature", action_key
-            )
-            raise RuntimeError("Failed to create confirmable action: empty signature")
-
-    confirm_cb = approval.format_callback("tool", action_key, sig)
-    cancel_cb = approval.format_cancel_callback("tool", action_key)
-    return confirm_cb, cancel_cb
-
-
-async def _store_intent_confirmation(
-    telegram_id: int,
-    intent_name: str,
-    intent: dict,
-    *,
-    human_summary: str = "",
-    risk: str | None = None,
-) -> tuple[str, str]:
-    """Store an intent confirmation and return (confirm_callback, cancel_callback)."""
-    from src.core.security import approval
-    from src.core.intelligence.guardrails import get_action_risk
-
-    if risk is None:
-        risk = get_action_risk(intent_name).value
-
-    route = approval.route_for(risk)
-    summary = human_summary or f"Выполнить {intent_name}"
-    payload = dict(intent)
-
-    if route == "db":
-        async with get_session() as session:
-            user = await get_or_create_user(session, telegram_id)
-            action = await create_pending_action(
-                session,
-                user_id=user.id,
-                kind=intent_name,
-                payload=json.dumps(payload, ensure_ascii=False),
-                route="db",
-                verb="intent",
-                risk=risk,
-                human_summary=summary,
-            )
-        action_key = str(action.id)
-        sig = action.hmac_signature or ""
-        if not sig:
-            logger.error(
-                "Pending action %s created with empty HMAC signature", action_key
-            )
-            raise RuntimeError("Failed to create confirmable action: empty signature")
-    else:
-        action_key, entry = approval.memory_entry(
-            user_id=telegram_id,
-            verb="intent",
-            risk=risk,
-            human_summary=summary,
-            payload=payload,
-            metadata={"intent": intent_name},
-        )
-        async with _pending_confirmations_lock:
-            _cleanup_stale_pending()
-            _pending_confirmations[action_key] = entry
-        sig = entry["signature"]
-        if not sig:
-            logger.error(
-                "Memory confirmation entry %s created with empty signature", action_key
-            )
-            raise RuntimeError("Failed to create confirmable action: empty signature")
-
-    confirm_cb = approval.format_callback("intent", action_key, sig)
-    cancel_cb = approval.format_cancel_callback("intent", action_key)
-    return confirm_cb, cancel_cb
-
-
-async def _pop_tool_confirmation(
-    action_key: str, telegram_id: int, signature: str, *, legacy: bool = False
-) -> dict | None:
-    """Extract and remove a confirmation. Returns None if missing/invalid.
-
-    When ``legacy=True``, HMAC signature verification is skipped (old callbacks
-    that pre-date the Hybrid Approval Kernel don't carry signatures). Legacy is
-    only supported for the DB route; memory-route confirmations always require
-    HMAC, otherwise anyone with the action_key could consume another user's
-    pending confirmation.
-    """
-    from src.core.security import approval
-    from src.db.session import get_session
-
-    # DB route: numeric action_key refers to a PendingAction row.
-    if action_key.isdigit():
-        lock = await _get_tool_confirm_lock(telegram_id)
-        try:
-            async with asyncio.timeout(_TOOL_CONFIRM_LOCK_TTL_SEC):
-                async with lock:
-                    async with get_session() as session:
-                        from src.db.models import PendingAction
-                        from sqlalchemy import select
-
-                        user = await get_or_create_user(session, telegram_id)
-                        result = await session.execute(
-                            select(PendingAction).where(
-                                PendingAction.id == int(action_key),
-                                PendingAction.user_id == user.id,
-                            )
-                        )
-                        action = result.scalar_one_or_none()
-                        if action is None:
-                            return None
-                        from src.db.repos.commitment_repo import (
-                            is_pending_action_expired,
-                            verify_pending_action_hmac,
-                        )
-
-                        if is_pending_action_expired(action):
-                            logger.info(
-                                "_pop_tool_confirmation: expired action_id=%s",
-                                action_key,
-                            )
-                            await session.delete(action)
-                            await session.flush()
-                            return None
-                        if not legacy and not verify_pending_action_hmac(
-                            action, signature
-                        ):
-                            logger.warning(
-                                "_pop_tool_confirmation: HMAC mismatch action_id=%s",
-                                action_key,
-                            )
-                            return None
-                        try:
-                            payload = json.loads(action.payload)
-                        except (json.JSONDecodeError, TypeError) as exc:
-                            logger.warning(
-                                "_pop_tool_confirmation: corrupt payload "
-                                "action_id=%s: %s",
-                                action_key,
-                                exc,
-                            )
-                            await session.delete(action)
-                            await session.flush()
-                            return None
-                        await session.delete(action)
-                        await session.flush()
-                        return {
-                            "user_id": telegram_id,
-                            "kind": action.verb,
-                            "tool": action.kind,
-                            "tool_params": payload,
-                        }
-        except TimeoutError:
-            async with _tool_confirm_locks_lock:
-                if _tool_confirm_locks.get(telegram_id) is lock:
-                    _tool_confirm_locks[telegram_id] = asyncio.Lock()
-                    _tool_confirm_locks_last_used[telegram_id] = time.monotonic()
-            logger.warning(
-                "_pop_tool_confirmation: lock timeout for user %d", telegram_id
-            )
-            return None
-
-    # Memory route: legacy callbacks are unsupported (no signature = no security).
-    if legacy:
-        logger.warning(
-            "_pop_tool_confirmation: legacy memory callback rejected for action_key=%s",
-            action_key,
-        )
-        return None
-
-    # Memory route: lookup in the in-memory dict and verify HMAC/TTL.
-    async with _pending_confirmations_lock:
-        _cleanup_stale_pending()
-        pending = _pending_confirmations.pop(action_key, None)
-        if pending is None:
-            return None
-        if not approval.verify_memory_entry(pending, telegram_id, signature):
-            # Ownership or HMAC mismatch — put it back if not expired.
-            try:
-                if time.monotonic() <= float(pending.get("expires_at", 0)):
-                    _pending_confirmations[action_key] = pending
-            except (TypeError, ValueError):
-                pass  # expired or corrupt entry — don't put it back
-            return None
-        metadata = pending.get("metadata") or {}
-        tool_name = (
-            metadata.get("tool") or metadata.get("intent") or pending.get("tool")
-        )
-        return {
-            "user_id": telegram_id,
-            "kind": pending.get("verb", "tool"),
-            "tool": tool_name,
-            "tool_params": pending.get("payload", {}),
-        }
-
-
-# ── Tool confirmation callback router ─────────────────────────────────
-
-confirm_router = Router(name="free_text_tool_confirm")
-confirm_router.callback_query.filter(OwnerOnly())
-
-
-@confirm_router.callback_query(
-    F.data.startswith("tool:confirm:")
-    | F.data.startswith("ap:tool:")
-    | F.data.startswith("ap:intent:")
-)
-async def _cb_tool_confirm(
-    callback: CallbackQuery,
-    state: FSMContext,
-    userbot_manager: UserbotManager,
-) -> None:
-    """Callback: пользователь подтвердил выполнение инструмента.
-
-    Week 2: accepts unified ``ap:tool:{action_key}:{signature}`` and legacy
-    ``tool:confirm:{uid}`` callbacks.
-    """
-    from src.core.security import approval
-
-    data = callback.data or ""
-    legacy = data.startswith("tool:confirm:")
-    action_key = ""
-    signature = ""
-
-    if not legacy:
-        parsed = approval.parse_callback(data)
-        if parsed is None:
-            await callback.answer("⏳ Действие устарело", show_alert=True)
-            return
-        _, action_key, signature = parsed
-    else:
-        action_key = data.split(":", 2)[2]
-        signature = ""
-
-    pending = await _pop_tool_confirmation(
-        action_key, callback.from_user.id, signature, legacy=legacy
-    )
-    if pending is None:
-        await callback.answer("⏳ Действие устарело или уже выполнено", show_alert=True)
-        return
-
-    tool_name = pending["tool"]
-    tool_params = pending["tool_params"]
-    logger.info(
-        "User %d confirmed tool %s with params %s",
-        callback.from_user.id,
-        tool_name,
-        _redact_confirmation_params(tool_params),
-    )
-
-    if callback.message is None:
-        await callback.answer("⏳ Сообщение устарело", show_alert=True)
-        return
-
-    try:
-        if pending.get("kind") == "intent":
-            handler_info = INTENT_HANDLERS.get(
-                tool_name
-            ) or CLASSIC_INTENT_HANDLERS.get(tool_name)
-            if handler_info is None:
-                raise RuntimeError(f"Intent {tool_name!r} not found")
-            handler, _ = handler_info
-            # Avoid double-confirmation: the guardrail already asked the user.
-            confirmed_params = dict(tool_params)
-            confirmed_params["_confirmed"] = True
-            result = await handler(
-                confirmed_params,
-                callback.message,
-                state,
-                userbot_manager,
-                tz_name=confirmed_params.get("tz_name", "UTC"),
-            )
-            if isinstance(result, dict) and result.get("error"):
-                raise RuntimeError(str(result["error"]))
-            ok = result.get("ok", True) if isinstance(result, dict) else True
-        else:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, callback.from_user.id)
-                client = (
-                    userbot_manager.get_client(callback.from_user.id)
-                    if userbot_manager
-                    else None
-                )
-                result = await tool_registry.execute(
-                    tool_name,
-                    _confirmed=True,
-                    session=session,
-                    user=owner,
-                    client=client,
-                    userbot_manager=userbot_manager,
-                    **tool_params,
-                )
-            if isinstance(result, dict) and result.get("error"):
-                raise RuntimeError(str(result["error"]))
-            ok = result.get("ok", True) if isinstance(result, dict) else True
-        if isinstance(callback.message, Message):
-            if ok:
-                await callback.message.edit_text(
-                    sanitize_html(f"✅ {tool_name}: выполнено")
-                )
-            else:
-                await callback.message.edit_text(
-                    sanitize_html(f"⚠️ {tool_name}: выполнено с предупреждениями")
-                )
-        await callback.answer("✅ Выполнено")
-    except Exception as e:
-        logger.warning("tool_confirm_execution failed: %s", e)
-        await callback.answer("❌ Произошла ошибка. Попробуй ещё раз", show_alert=True)
-        if isinstance(callback.message, Message):
-            await callback.message.edit_text(
-                sanitize_html("❌ Произошла ошибка. Попробуй ещё раз")
-            )
-
-
-@confirm_router.callback_query(
-    F.data.startswith("tool:cancel:")
-    | F.data.startswith("ap:cancel:tool:")
-    | F.data.startswith("ap:cancel:intent:")
-)
-async def _cb_tool_cancel(
-    callback: CallbackQuery,
-    state: FSMContext,
-    userbot_manager: UserbotManager,
-) -> None:
-    """Callback: пользователь отменил выполнение инструмента.
-
-    Week 2: accepts unified ``ap:cancel:tool:{action_key}`` and legacy
-    ``tool:cancel:{uid}`` callbacks. Unified cancel callbacks do NOT carry a
-    signature (they are intentionally short), so we verify ownership via
-    user_id for DB-route and by matching the stored telegram_id for memory-route.
-    Legacy memory-route cancel callbacks are rejected to prevent action-key
-    guessing attacks.
-    """
-    from src.core.security import approval
-
-    data = callback.data or ""
-    legacy = data.startswith("tool:cancel:")
-    action_key = ""
-    if data.startswith("ap:cancel:"):
-        parsed = approval.parse_cancel_callback(data)
-        if parsed:
-            action_key = parsed[1]
-    else:
-        action_key = data.split(":", 2)[2]
-
-    if not action_key:
-        await callback.answer("⏳ Действие устарело", show_alert=True)
-        return
-
-    # DB-route: numeric action_key — delete PendingAction if it belongs to user.
-    if action_key.isdigit():
-        from src.db.session import get_session
-        from src.db.models import PendingAction
-        from sqlalchemy import select
-
-        async with get_session() as session:
-            user = await get_or_create_user(session, callback.from_user.id)
-            result = await session.execute(
-                select(PendingAction).where(
-                    PendingAction.id == int(action_key),
-                    PendingAction.user_id == user.id,
-                )
-            )
-            action = result.scalar_one_or_none()
-            if action is not None:
-                await session.delete(action)
-                await session.flush()
-                logger.info(
-                    "User %d cancelled DB action %s", callback.from_user.id, action_key
-                )
-    else:
-        # Memory route: legacy cancel without signature is rejected.
-        if legacy:
-            logger.warning(
-                "_cb_tool_cancel: legacy memory cancel rejected for action_key=%s",
-                action_key,
-            )
-            await callback.answer("⏳ Действие устарело", show_alert=True)
-            return
-
-        async with _pending_confirmations_lock:
-            _cleanup_stale_pending()
-            pending = _pending_confirmations.pop(action_key, None)
-            if pending is not None and pending.get("user_id") != callback.from_user.id:
-                # Ownership mismatch — put it back.
-                _pending_confirmations[action_key] = pending
-                pending = None
-            if pending is not None:
-                logger.info(
-                    "User %d cancelled memory action %s",
-                    callback.from_user.id,
-                    action_key,
-                )
-
-    await callback.answer("❌ Отменено")
-    if isinstance(callback.message, Message):
-        await callback.message.edit_text("❌ Действие отменено.")
-
-
+# Confirmation and cleanup code moved to _confirm.py
 _APPEND_KEYWORDS = ("добавь", "и ещё", "также", "кстати", "плюс", "ещё", "а ещё")
 _REPLACE_KEYWORDS = ("нет", "лучше", "вместо", "точнее", "не так", "исправь", "поменяй")
 _MULTI_KEYWORDS = ("и не забудь", "заодно", "и ещё")
@@ -799,70 +220,8 @@ _MULTI_KEYWORDS = ("и не забудь", "заодно", "и ещё")
 
 # ── Auto-save facts about user ───────────────────────────────────────
 
-# ── Dedup cache: prevents repeated LLM extraction for same (user, text) ──
-_dedup_cache: dict[tuple[int, str], float] = {}  # (owner_id, hash) → timestamp
-_dedup_cache_lock = asyncio.Lock()
-_DEDUP_CACHE_MAX = 200
-_DEDUP_CACHE_TTL = 60.0  # seconds
 
-
-async def _should_skip_auto_save(owner_id: int, text: str) -> bool:
-    """Check if we've already extracted facts from this text recently.
-
-    Uses SHA-256 hash of the first 500 characters of text as a content
-    fingerprint. Within the TTL window (60s), identical content from
-    the same user is skipped to save LLM tokens.
-
-    Protected by _dedup_cache_lock to prevent race conditions
-    from concurrent fire-and-forget tasks.
-    """
-    now = time.monotonic()
-    key = (owner_id, hashlib.sha256(text[:500].encode()).hexdigest())
-    async with _dedup_cache_lock:
-        if key in _dedup_cache and now - _dedup_cache[key] < _DEDUP_CACHE_TTL:
-            return True
-        # Evict old entries if cache too big
-        if len(_dedup_cache) >= _DEDUP_CACHE_MAX:
-            stale = [
-                k for k, ts in _dedup_cache.items() if now - ts > _DEDUP_CACHE_TTL * 2
-            ]
-            if stale:
-                for k in stale[:50]:
-                    _dedup_cache.pop(k, None)
-            else:
-                # All entries are fresh — forced eviction of oldest 25%
-                force_evict = max(_DEDUP_CACHE_MAX // 4, 1)
-                oldest = sorted(_dedup_cache.items(), key=lambda x: x[1])[:force_evict]
-                for k, _ in oldest:
-                    _dedup_cache.pop(k, None)
-                logger.debug(
-                    "Dedup cache forced eviction: removed %d fresh entries "
-                    "(all %d were within TTL)",
-                    len(oldest),
-                    _DEDUP_CACHE_MAX,
-                )
-        _dedup_cache[key] = now
-    return False
-
-
-_AUTO_SAVE_PROMPT = (
-    "You are a fact extractor. Given a user message and assistant reply, "
-    "extract ANY personal facts the user revealed about themselves. "
-    "Only extract facts where the user explicitly states something about:\n"
-    "- Personal details (name, birthday, job, location)\n"
-    "- Preferences (likes, dislikes, habits)\n"
-    "- Plans, commitments, goals\n"
-    "- Relationships (family, friends, colleagues)\n"
-    "- Experiences, events, memories\n\n"
-    "Ignore general questions or requests. Return ONLY JSON:\n"
-    '{"facts": [{"fact": "...", "sentiment": "positive|negative|neutral"}]} '
-    'or {"facts": []} if no personal facts revealed. '
-    "Fact must be a concise statement in third person (e.g. 'User works as a designer').\n\n"
-    "User message: {user_text}\n"
-    "Assistant reply: {assistant_text}"
-)
-
-
+# Dedup cache moved to _dag.py
 async def _extract_entities_ff(
     telegram_id: int,
     fact_texts: list[str],
@@ -895,34 +254,13 @@ async def _save_extracted_facts(
     Используется для кэшированных результатов smart_extractor.
     Возвращает количество сохранённых фактов.
     """
-    if not facts_list:
-        return 0
-
-    async with get_session() as session:
-        owner = await get_or_create_user(session, telegram_id)
-        stored = 0
-        for f in facts_list:
-            fact_text = f.get("fact", "").strip()
-            if not fact_text or len(fact_text) < 5:
-                continue
-            sentiment = f.get("sentiment", "neutral")
-            if sentiment not in ("positive", "negative", "neutral"):
-                sentiment = "neutral"
-            await add_memory(
-                session,
-                owner,
-                fact=fact_text,
-                contact_id=None,
-                sentiment=sentiment,
-                source="auto",
-            )
-            stored += 1
-        if stored:
-            logger.info(
-                "Auto-saved %d cached facts for user %d",
-                stored,
-                telegram_id,
-            )
+    stored = await save_memories_batch(telegram_id, facts_list, source="auto")
+    if stored:
+        logger.info(
+            "Auto-saved %d cached facts for user %d",
+            stored,
+            telegram_id,
+        )
     return stored
 
 
@@ -941,11 +279,14 @@ async def _maybe_auto_save_facts(
       - Выбор лёгкой/тяжёлой модели
     """
     # ── Dedup: skip if we already processed this (user, text) recently ──
+    # Lazy import to avoid circular dependency with _dag.py
+    from src.bot.handlers.free_text._dag import _should_skip_auto_save
+
     if await _should_skip_auto_save(telegram_id, user_text):
         logger.debug(
-            "Auto-save facts DEDUP: skip duplicate for user %d (text %.60s…)",
+            "Auto-save facts DEDUP: skip duplicate for user %d (text_len=%d)",
             telegram_id,
-            user_text,
+            len(user_text),
         )
         return
 
@@ -1064,91 +405,43 @@ async def _maybe_auto_save_facts(
             return
 
         # ── Одиночный режим: немедленный LLM-вызов + сохранение ──
+        stored, facts_list = await auto_save_single(
+            telegram_id, user_text, response_text, provider
+        )
+        if not stored:
+            return
+
+        # Logging is done inside auto_save_single / _save_facts_to_db;
+        # avoid duplicating PII-laden detail logs here.
+        # ── Кэшируем результат извлечения ──
         try:
-            prompt = _AUTO_SAVE_PROMPT.format(
-                user_text=user_text[:500].replace("{", "{{").replace("}", "}}"),
-                assistant_text=response_text[:300]
-                .replace("{", "{{")
-                .replace("}", "}}"),
+            from src.config import settings
+
+            if getattr(settings, "smart_extract_optimized", True):
+                from src.core.memory.smart_extractor import (
+                    cache_extraction_result,
+                )
+
+                model_mode = "light" if use_light else "heavy"
+                await cache_extraction_result(
+                    user_text,
+                    facts_list,
+                    model_mode=model_mode,
+                    user_id=telegram_id,
+                )
+        except Exception:
+            logger.debug("Failed to cache extraction result", exc_info=True)
+
+        # ── Сущности: fire-and-forget ──
+        fact_texts = [
+            f.get("fact", "").strip() for f in facts_list if f.get("fact", "").strip()
+        ]
+        if fact_texts:
+            track_ff(
+                asyncio.create_task(
+                    _extract_entities_ff(telegram_id, fact_texts, provider)
+                )
             )
-            # NOTE: LLMProvider.chat() doesn't accept max_tokens;
-            # the prompt asks for short JSON, so the LLM will return a compact response
-            # with the provider's default max_tokens.
-            raw_json = await provider.chat(
-                [ChatMessage(role="user", content=prompt)], task_type=TaskType.DEFAULT
-            )
-            # Parse LLM response as JSON
-            import json as _json
-
-            cleaned = raw_json.strip()
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```[a-z]*\s*|\s*```$", "", cleaned).strip()
-            facts_data = _json.loads(cleaned)
-            facts_list = facts_data.get("facts", [])
-            if not facts_list:
-                return
-
-            async with get_session() as session:
-                owner = await get_or_create_user(session, telegram_id)
-                stored = 0
-                for f in facts_list:
-                    fact_text = f.get("fact", "").strip()
-                    if not fact_text or len(fact_text) < 5:
-                        continue
-                    sentiment = f.get("sentiment", "neutral")
-                    if sentiment not in ("positive", "negative", "neutral"):
-                        sentiment = "neutral"
-                    await add_memory(
-                        session,
-                        owner,
-                        fact=fact_text,
-                        contact_id=None,
-                        sentiment=sentiment,
-                        source="auto",
-                    )
-                    stored += 1
-                if stored:
-                    logger.info(
-                        "Auto-saved %d facts for user %d: %s",
-                        stored,
-                        telegram_id,
-                        "; ".join(f["fact"][:50] for f in facts_list),
-                    )
-                    # ── Кэшируем результат извлечения ──
-                    try:
-                        from src.config import settings
-
-                        if getattr(settings, "smart_extract_optimized", True):
-                            from src.core.memory.smart_extractor import (
-                                cache_extraction_result,
-                            )
-
-                            model_mode = "light" if use_light else "heavy"
-                            await cache_extraction_result(
-                                user_text,
-                                facts_list,
-                                model_mode=model_mode,
-                                user_id=telegram_id,
-                            )
-                    except Exception:
-                        logger.debug("Failed to cache extraction result", exc_info=True)
-
-                    # ── Сущности: fire-and-forget ──
-                    fact_texts = [
-                        f.get("fact", "").strip()
-                        for f in facts_list
-                        if f.get("fact", "").strip()
-                    ]
-                    if fact_texts:
-                        track_ff(
-                            asyncio.create_task(
-                                _extract_entities_ff(telegram_id, fact_texts, provider)
-                            )
-                        )
-        except asyncio.CancelledError:
-            raise
-        except (RequestError, HTTPStatusError, SQLAlchemyError, json.JSONDecodeError):
-            logger.debug("Auto-save facts skipped", exc_info=True)
 
     track_ff(asyncio.create_task(_do_save()))
 
@@ -1225,7 +518,7 @@ async def _execute_intent(
         return
     # Strip any LLM-injected confirmation bypass; _confirmed is only legal
     # when injected by the verified callback path in _cb_tool_confirm.
-    intent = dict(intent)
+    intent = intent.copy()
     intent.pop("_confirmed", None)
     kind = intent.get("intent")
     if not isinstance(kind, str):
@@ -1313,135 +606,7 @@ CLASSIC_INTENT_HANDLERS: dict[str, tuple[Callable, str]] = {
 }
 
 
-# ── Dispatch ─────────────────────────────────────────────────────────
-
-
-async def _dag_dispatch(
-    sub_intents: list[dict],
-    message: Message,
-    state: FSMContext,
-    userbot_manager: UserbotManager,
-    *,
-    tz_name: str,
-) -> None:
-    """DAG-диспетчер: независимые sub-intents выполняются параллельно.
-
-    Формат sub_intent:
-      {"intent": "...", ..., "depends_on": [0, 2]}
-      depends_on — список индексов в sub_intents, которые должны выполниться ДО этого.
-      Если depends_on отсутствует или пуст — действие считается независимым.
-
-    При циклических зависимостях — fallback на последовательное выполнение.
-    """
-    if not sub_intents:
-        await message.answer("Не понял, что сделать.")
-        return
-
-    # Guard: validate all sub-intents are dicts
-    for i, sub in enumerate(sub_intents):
-        if not isinstance(sub, dict):
-            logger.error(
-                "_dag_dispatch: sub_intents[%d] is not a dict: %r (type=%s)",
-                i,
-                sub,
-                type(sub).__name__,
-            )
-            await message.answer("⚠️ Internal routing error (malformed sub-intent).")
-            return
-
-    n = len(sub_intents)
-    if n == 1:
-        await _dispatch(
-            sub_intents[0], message, state, userbot_manager, tz_name=tz_name
-        )
-        return
-
-    # Build dependency graph (Kahn's algorithm)
-    in_degree = [0] * n
-    children: list[list[int]] = [[] for _ in range(n)]
-    has_any_dep = False
-
-    for i, sub in enumerate(sub_intents):
-        deps = sub.get("depends_on") or []
-        if deps:
-            has_any_dep = True
-        for d in deps:
-            if isinstance(d, int) and 0 <= d < n and d != i:
-                children[d].append(i)
-                in_degree[i] += 1
-
-    # Если ни у одного sub-intent нет depends_on — все независимы → параллельно
-    if not has_any_dep:
-        tasks = [
-            _dispatch(sub, message, state, userbot_manager, tz_name=tz_name)
-            for sub in sub_intents
-        ]
-        await _run_dag_level(tasks, sub_intents)
-        return
-
-    # Topo-sort by levels
-    level: list[int] = [i for i in range(n) if in_degree[i] == 0]
-    levels: list[list[int]] = []
-    visited = 0
-
-    while level:
-        levels.append(level)
-        visited += len(level)
-        next_level: list[int] = []
-        for node in level:
-            for child in children[node]:
-                in_degree[child] -= 1
-                if in_degree[child] == 0:
-                    next_level.append(child)
-        level = next_level
-
-    if visited < n:
-        # Cycle detected — fallback to sequential
-        logger.warning(
-            "DAG cycle detected in multi-intent (%d/%d visited), "
-            "falling back to sequential",
-            visited,
-            n,
-        )
-        for sub in sub_intents:
-            try:
-                await _dispatch(sub, message, state, userbot_manager, tz_name=tz_name)
-            except (
-                Exception
-            ):  # NOTE: _dispatch может поднять SQLAlchemyError, TelegramAPIError,
-                # RequestError, HTTPStatusError — все они безопасно логируются здесь.
-                logger.exception(
-                    "DAG fallback: sub-intent %s failed", sub.get("intent", "?")
-                )
-        return
-
-    # Execute per level in parallel
-    for level_indices in levels:
-        tasks = [
-            _dispatch(sub_intents[i], message, state, userbot_manager, tz_name=tz_name)
-            for i in level_indices
-        ]
-        await _run_dag_level(tasks, sub_intents, level_indices)
-
-
-async def _run_dag_level(
-    tasks: list,
-    sub_intents: list[dict],
-    indices: list[int] | None = None,
-) -> None:
-    """Запускает группу sub-intents параллельно, логирует ошибки."""
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for idx, result in enumerate(results):
-        if isinstance(result, Exception):
-            i = indices[idx] if indices else idx
-            logger.error(
-                "Sub-intent %d (%s) failed: %s",
-                i,
-                sub_intents[i].get("intent", "?"),
-                result,
-            )
-
-
+# _dag_dispatch and _run_dag_level moved to _dag.py
 async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) -> None:
     if not isinstance(intent, dict):
         logger.error(
@@ -1477,7 +642,7 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
 
     # Strip any LLM-injected confirmation bypass before dispatch.
     # The verified callback path in _cb_tool_confirm re-adds _confirmed.
-    intent = dict(intent)
+    intent = intent.copy()
     intent.pop("_confirmed", None)
 
     # ── Risk-based guardrail check for HIGH/CRITICAL actions ────────
@@ -1566,11 +731,11 @@ async def check_instructions(
                 )
                 session.add(event)
                 if instr["is_safe"]:
+                    await apply_instruction(owner_telegram_id, instr["rule"])
+                    await session.flush()
                     await message.answer(
                         sanitize_html(f"✅ Понял! Больше не буду {instr['rule']}.")
                     )
-                    await apply_instruction(owner_telegram_id, instr["rule"])
-                    await session.flush()
                     return True
                 else:
                     candidate = InstructionCandidate(
@@ -1620,7 +785,7 @@ async def check_contact_rules(
         rule_text = detected["rule"]
 
         # Разрешаем контакт по имени
-        from src.core.contacts.contact_resolver import resolve
+        from src.bot.contact_resolver import resolve_contact_fast
         from src.db.repo import get_or_create_user
         from src.db.session import get_session
 
@@ -1635,7 +800,7 @@ async def check_contact_rules(
                 )
                 return False
 
-            candidates = await resolve(
+            candidates = await resolve_contact_fast(
                 client, owner, contact_name, limit=_DEFAULT_CONTACT_LIMIT, min_score=60
             )
             if candidates and candidates[0].score >= 60:
@@ -1852,31 +1017,36 @@ async def execute_instant(
     owner_telegram_id: int,
     turn_started: float,
     tz_name: str | None = None,
+    *,
+    _via_dispatcher: bool = False,
 ) -> bool:
     """Выполняет INSTANT-ответ (персонализированный). Возвращает True.
 
     S2-T5: если план пришёл из RouteCache (plan.metrics["route_cache_hit"]),
     пропускаем recall() и DB-тяжёлые операции — сразу pre-gate → humanize → send.
+
+    _via_dispatcher: когда True, пропускаем pre/post-хуки (их делает UnifiedDispatcher).
     """
-    try:
-        from src.core.infra.hooks import hooks
+    if not _via_dispatcher:
+        try:
+            from src.core.infra.hooks import hooks
 
-        await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
-    except Exception:
-        logger.debug(
-            "execute_instant hooks.emit on_message_received failed", exc_info=True
-        )  # hooks are optional, never break core flow
+            await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
+        except Exception:
+            logger.debug(
+                "execute_instant hooks.emit on_message_received failed", exc_info=True
+            )  # hooks are optional, never break core flow
 
-    # ── Smart Model Routing: логгирование решения ──────────────────
-    _log_smart_routing(plan, raw)
+        # ── Smart Model Routing: логгирование решения ──────────────────
+        _log_smart_routing(plan, raw)
 
-    # Import track_ff once for fire-and-forget session logging tasks
+        # Log user message to session (fire-and-forget)
+        from src.core.scheduling.session_logger import log_user_message
+        from src.core.infra.task_manager import track_ff
+
+        track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
+
     from src.core.infra.task_manager import track_ff
-
-    # Log user message to session (fire-and-forget)
-    from src.core.scheduling.session_logger import log_user_message
-
-    track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
 
     # ── S2-T5: RouteCache hit — быстрый путь без recall/DB ───────────
     _route_cache_hit = (
@@ -1885,37 +1055,37 @@ async def execute_instant(
         else False
     )
 
-    # ✨ Pre-LLM gate: handle greetings/farewells without LLM
-    # check_pre_gate уже вызван в Stage -2 классификатора (free_text.py:757).
-    # Повторный вызов — no-op (возвращает None для уже обработанных сообщений),
-    # но оставлен как defense-in-depth на случай пропуска Stage -2.
-    gate_response = check_pre_gate(raw)
-    if gate_response:
-        response = gate_response
-        _cache_last_humanized(owner_telegram_id, response)
-        await safe_answer(
-            message, sanitize_html(response), reply_markup=memory_quick_keyboard()
-        )
-        await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
-        _fire_record_trajectory(
-            owner_telegram_id,
-            request_text=raw,
-            route_mode="instant_gate",
-            intent_json={"intent": "chat"},
-            response_text=response,
-            success=True,
-            latency_ms=int((time.monotonic() - turn_started) * 1000),
-        )
-        await _post_turn_optimize(owner_telegram_id, raw, response)
-        # Log assistant response to session
-        from src.core.scheduling.session_logger import log_assistant_response
-
-        track_ff(
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, response)
+    if not _via_dispatcher:
+        # ✨ Pre-LLM gate: handle greetings/farewells without LLM
+        gate_response = check_pre_gate(raw)
+        if gate_response:
+            response = gate_response
+            _cache_last_humanized(owner_telegram_id, response)
+            await safe_answer(
+                message, sanitize_html(response), reply_markup=memory_quick_keyboard()
             )
-        )
-        return True
+            await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+            _fire_record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="instant_gate",
+                intent_json={"intent": "chat"},
+                response_text=response,
+                success=True,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
+            await _post_turn_optimize(owner_telegram_id, raw, response)
+            from src.core.scheduling.session_logger import log_assistant_response
+
+            track_ff(
+                asyncio.ensure_future(
+                    log_assistant_response(message.from_user.id, response)
+                )
+            )
+            return True
+
+    # Fetch anti_ai_mode once before any humanize call to avoid extra DB roundtrip.
+    anti_ai_mode = await _get_anti_ai_mode(owner_telegram_id)
 
     # ── S2-T5 быстрый путь: кэш-hit → пропускаем recall, сразу humanize ──
     if _route_cache_hit and plan.final_response:
@@ -1927,27 +1097,29 @@ async def execute_instant(
             owner_telegram_id=owner_telegram_id,
             context_hint=context_hint,
             source="free_text.execute_instant.cached",
+            mode=anti_ai_mode,
         )
         _cache_last_humanized(owner_telegram_id, response)
         await safe_answer(message, sanitize_html(response))
-        await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
-        _fire_record_trajectory(
-            owner_telegram_id,
-            request_text=raw,
-            route_mode="instant_cached",
-            intent_json={"intent": "chat"},
-            response_text=response,
-            success=True,
-            latency_ms=int((time.monotonic() - turn_started) * 1000),
-        )
-        await _post_turn_optimize(owner_telegram_id, raw, response)
-        from src.core.scheduling.session_logger import log_assistant_response
-
-        track_ff(
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, response)
+        if not _via_dispatcher:
+            await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+            _fire_record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="instant_cached",
+                intent_json={"intent": "chat"},
+                response_text=response,
+                success=True,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
             )
-        )
+            await _post_turn_optimize(owner_telegram_id, raw, response)
+            from src.core.scheduling.session_logger import log_assistant_response
+
+            track_ff(
+                asyncio.ensure_future(
+                    log_assistant_response(message.from_user.id, response)
+                )
+            )
         return True
 
     # Динамическое приветствие с учётом наличия памяти и сессии
@@ -2001,41 +1173,44 @@ async def execute_instant(
         owner_telegram_id=owner_telegram_id,
         context_hint=context_hint,
         source="free_text.execute_instant",
+        mode=anti_ai_mode,
     )
     _cache_last_humanized(owner_telegram_id, response)
 
     await safe_answer(message, sanitize_html(response))
-    await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
-    # Record action for smart correction (skip first-time/intro messages)
-    if has_memory or has_session:
-        try:
-            from src.bot.handlers.smart_correction import record_action
+    if not _via_dispatcher:
+        await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+        # Record action for smart correction (skip first-time/intro messages)
+        if has_memory or has_session:
+            try:
+                from src.bot.handlers.smart_correction import record_action
 
-            await record_action(
-                owner_telegram_id,
-                {
-                    "intent": "chat",
-                    "params": {"reply": response[:200]},
-                },
+                await record_action(
+                    owner_telegram_id,
+                    {
+                        "intent": "chat",
+                        "params": {"reply": response[:200]},
+                    },
+                )
+            except Exception:
+                logger.debug("record_action failed in execute_instant", exc_info=True)
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="instant",
+            intent_json={"intent": "chat"},
+            response_text=response,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        await _post_turn_optimize(owner_telegram_id, raw, response)
+        from src.core.scheduling.session_logger import log_assistant_response
+
+        track_ff(
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, response)
             )
-        except Exception:
-            logger.debug("record_action failed in execute_instant", exc_info=True)
-    _fire_record_trajectory(
-        owner_telegram_id,
-        request_text=raw,
-        route_mode="instant",
-        intent_json={"intent": "chat"},
-        response_text=plan.final_response,
-        success=True,
-        latency_ms=int((time.monotonic() - turn_started) * 1000),
-    )
-    await _post_turn_optimize(owner_telegram_id, raw, plan.final_response)
-    # Log assistant response to session
-    from src.core.scheduling.session_logger import log_assistant_response
-
-    track_ff(
-        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
-    )
+        )
     return True
 
 
@@ -2051,8 +1226,13 @@ async def execute_fast_route(
     history_block: str,
     turn_started: float,
     now_local_str: str,
+    *,
+    _via_dispatcher: bool = False,
 ) -> bool:
-    """Выполняет FAST_ROUTE. Возвращает True."""
+    """Выполняет FAST_ROUTE. Возвращает True.
+
+    _via_dispatcher: когда True, пропускаем trajectory/ctx/log (их делает UnifiedDispatcher).
+    """
     fast_start = time.monotonic()
     try:
         intent = await route_intent(
@@ -2069,15 +1249,16 @@ async def execute_fast_route(
         logger.exception("fast_route route_intent failed")
         plan.metrics["llm_ms"] = -1
         err_msg = safe_str(e)
-        _fire_record_trajectory(
-            owner_telegram_id,
-            request_text=raw,
-            route_mode="fast_route",
-            intent_json={"intent": "chat"},
-            success=False,
-            error=err_msg[:4000],
-            latency_ms=int((time.monotonic() - turn_started) * 1000),
-        )
+        if not _via_dispatcher:
+            _fire_record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="fast_route",
+                intent_json={"intent": "chat"},
+                success=False,
+                error=err_msg[:4000],
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
         if len(err_msg) > 300:
             err_msg = err_msg[:300] + "…"
         await safe_answer(
@@ -2101,6 +1282,9 @@ async def execute_fast_route(
     if await _check_intent_confidence(intent, message):
         return True
 
+    # Lazy import to avoid circular dependency with _dag.py
+    from src.bot.handlers.free_text._dag import _dag_dispatch
+
     if intent.get("intent") == "multi":
         actions = intent.get("actions") or []
         if not isinstance(actions, list) or not actions:
@@ -2108,8 +1292,12 @@ async def execute_fast_route(
             return True
         await _dag_dispatch(actions, message, state, userbot_manager, tz_name=tz_name)
     elif "intents" in intent:
+        sub_intents = intent.get("intents")
+        if not isinstance(sub_intents, list):
+            await message.answer("Не понял, что сделать.")
+            return True
         await _dag_dispatch(
-            intent["intents"], message, state, userbot_manager, tz_name=tz_name
+            sub_intents, message, state, userbot_manager, tz_name=tz_name
         )
     else:
         await _dispatch(intent, message, state, userbot_manager, tz_name=tz_name)
@@ -2125,27 +1313,28 @@ async def execute_fast_route(
 
     await _save_intent_context(owner_telegram_id, intent)
 
-    _fire_record_trajectory(
-        owner_telegram_id,
-        request_text=raw,
-        route_mode="fast_route",
-        intent_json=intent,
-        actions_json=actions_from_intent(intent),
-        used_skills_json=intent.get("used_skills", []),
-        response_text=_summarize_intent_for_memory(intent),
-        success=True,
-        latency_ms=int((time.monotonic() - turn_started) * 1000),
-    )
+    if not _via_dispatcher:
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="fast_route",
+            intent_json=intent,
+            actions_json=actions_from_intent(intent),
+            used_skills_json=intent.get("used_skills", []),
+            response_text=_summarize_intent_for_memory(intent),
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
 
-    summary = _summarize_intent_for_memory(intent)
-    await ctx_store.add_turn(message.from_user.id, raw, summary)
-    try:
-        if plan and plan.tasks:
-            await ctx_store.set_last_purpose(
-                message.from_user.id, plan.tasks[0].purpose.value
-            )
-    except Exception:
-        logger.exception("failed to set last purpose")
+        summary = _summarize_intent_for_memory(intent)
+        await ctx_store.add_turn(message.from_user.id, raw, summary)
+        try:
+            if plan and plan.tasks:
+                await ctx_store.set_last_purpose(
+                    message.from_user.id, plan.tasks[0].purpose.value
+                )
+        except Exception:
+            logger.exception("failed to set last purpose")
     return True
 
 
@@ -2161,55 +1350,64 @@ async def execute_maestro(
     history_block: str,
     turn_started: float,
     injected_style: str | None = None,
-) -> bool:
-    """Выполняет MAESTRO pipeline. Возвращает True если обработано, False для fallback."""
-    try:
-        from src.core.infra.hooks import hooks
+    *,
+    _via_dispatcher: bool = False,
+) -> MaestroResult:
+    """Выполняет MAESTRO pipeline. Возвращает MaestroResult — handled/response_text/used_skills/trace.
 
-        await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
-    except Exception:
-        logger.debug(
-            "execute_maestro hooks.emit on_message_received failed", exc_info=True
-        )  # hooks are optional, never break core flow
+    _via_dispatcher: когда True, пропускаем pre/post-хуки (их делает UnifiedDispatcher).
+    """
+    # Lazy import to avoid circular dep: dispatcher → _core → dispatcher
+    from src.core.dispatcher import MaestroResult
 
-    # ── Smart Model Routing: логгирование решения ──────────────────
-    _log_smart_routing(plan, raw)
+    if not _via_dispatcher:
+        try:
+            from src.core.infra.hooks import hooks
 
-    # Log user message to session (fire-and-forget)
-    from src.core.scheduling.session_logger import log_user_message
+            await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
+        except Exception:
+            logger.debug(
+                "execute_maestro hooks.emit on_message_received failed", exc_info=True
+            )  # hooks are optional, never break core flow
 
-    track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
+        # ── Smart Model Routing: логгирование решения ──────────────────
+        _log_smart_routing(plan, raw)
 
-    # ✨ Pre-LLM gate: handle greetings/farewells without LLM
-    # check_pre_gate уже вызван в Stage -2 классификатора (free_text.py:757).
-    # Повторный вызов — no-op, но оставлен как defense-in-depth.
-    gate_response = check_pre_gate(raw)
-    if gate_response:
-        response = gate_response
-        _cache_last_humanized(owner_telegram_id, response)
-        await safe_answer(
-            message, sanitize_html(response), reply_markup=memory_quick_keyboard()
-        )
-        _fire_record_trajectory(
-            owner_telegram_id,
-            request_text=raw,
-            route_mode="maestro_gate",
-            intent_json={"intent": "chat"},
-            response_text=response,
-            success=True,
-            latency_ms=int((time.monotonic() - turn_started) * 1000),
-        )
-        await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
-        await _post_turn_optimize(owner_telegram_id, raw, response)
-        # Log assistant response to session
-        from src.core.scheduling.session_logger import log_assistant_response
+        # Log user message to session (fire-and-forget)
+        from src.core.scheduling.session_logger import log_user_message
 
-        track_ff(
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, response)
+        track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
+
+        # ✨ Pre-LLM gate: handle greetings/farewells without LLM
+        # check_pre_gate уже вызван в Stage -2 классификатора (free_text.py:757).
+        # Повторный вызов — no-op, но оставлен как defense-in-depth.
+        gate_response = check_pre_gate(raw)
+        if gate_response:
+            response = gate_response
+            _cache_last_humanized(owner_telegram_id, response)
+            await safe_answer(
+                message, sanitize_html(response), reply_markup=memory_quick_keyboard()
             )
-        )
-        return True
+            _fire_record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="maestro_gate",
+                intent_json={"intent": "chat"},
+                response_text=response,
+                success=True,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
+            await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+            await _post_turn_optimize(owner_telegram_id, raw, response)
+            # Log assistant response to session
+            from src.core.scheduling.session_logger import log_assistant_response
+
+            track_ff(
+                asyncio.ensure_future(
+                    log_assistant_response(message.from_user.id, response)
+                )
+            )
+            return MaestroResult(handled=True)
 
     # 🧠 LLM Response Cache: проверяем кэш перед LLM-вызовом
     from src.core.intelligence.llm_response_cache import response_cache
@@ -2233,27 +1431,35 @@ async def execute_maestro(
         response_text = sanitize_html(humanized)
         _cache_last_humanized(owner_telegram_id, response_text)
         await safe_answer(message, response_text, reply_markup=memory_quick_keyboard())
-        await ctx_store.add_turn(message.from_user.id, raw[:200], response_text[:400])
-        _fire_record_trajectory(
-            owner_telegram_id,
-            request_text=raw,
-            route_mode="maestro_cache_hit",
-            intent_json={"intent": "chat"},
-            response_text=response_text,
-            success=True,
-            latency_ms=int((time.monotonic() - turn_started) * 1000),
-        )
-        await _post_turn_optimize(owner_telegram_id, raw, response_text)
-        # Log assistant response to session
-        from src.core.scheduling.session_logger import log_assistant_response
-
-        track_ff(
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, response_text)
+        if not _via_dispatcher:
+            await ctx_store.add_turn(
+                message.from_user.id, raw[:200], response_text[:400]
             )
-        )
+            _fire_record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="maestro_cache_hit",
+                intent_json={"intent": "chat"},
+                response_text=response_text,
+                success=True,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
+            await _post_turn_optimize(owner_telegram_id, raw, response_text)
+            # Log assistant response to session
+            from src.core.scheduling.session_logger import log_assistant_response
+
+            track_ff(
+                asyncio.ensure_future(
+                    log_assistant_response(message.from_user.id, response_text)
+                )
+            )
         logger.debug("LLM response cache HIT, bypassed LLM call: %.60s", raw)
-        return True
+        if _via_dispatcher:
+            return MaestroResult(
+                handled=True,
+                response_text=response_text,
+            )
+        return MaestroResult(handled=True)
 
     # ── Progress: память и продуктивное обдумывание ──────────────────
     _progress_msg = await message.answer(_PROGRESS_MESSAGES["recalling"])
@@ -2334,43 +1540,50 @@ async def execute_maestro(
                 sanitize_html(f"🤔 {confirm_msg}"),
                 reply_markup=_confirm_tool_keyboard(confirm_cb, cancel_cb),
             )
-            _fire_record_trajectory(
-                owner_telegram_id,
-                request_text=raw,
-                route_mode="maestro_tool_confirm",
-                intent_json={"intent": tool_name, **tool_params},
-                actions_json=pipeline_result.get("plan", []),
-                success=True,
-                error=None,
-                latency_ms=int((time.monotonic() - turn_started) * 1000),
-            )
-            await ctx_store.add_turn(
-                message.from_user.id,
-                raw[:200],
-                f"[tool confirmation: {tool_name}]",
-            )
-            trace = dict(pipeline_result.get("trace") or {})
-            log_response_trace(
-                route="maestro_tool_confirm",
-                owner_id=owner_telegram_id,
-                memory_context=getattr(plan, "memory_context", "") or "",
-                context_sources=trace.get("context_sources", []),
-                tools_proposed=trace.get("tools_proposed", []),
-                tools_executed=trace.get("tools_executed", []),
-                tools_blocked=trace.get("tools_blocked", [tool_name]),
-                guardrail_decision=trace.get("guardrail_decision", {}),
-                humanizer_mode="off",
-                humanizer_changed=False,
-            )
-            # Log assistant response to session
-            from src.core.scheduling.session_logger import log_assistant_response
-
-            track_ff(
-                asyncio.ensure_future(
-                    log_assistant_response(message.from_user.id, confirm_msg)
+            if not _via_dispatcher:
+                _fire_record_trajectory(
+                    owner_telegram_id,
+                    request_text=raw,
+                    route_mode="maestro_tool_confirm",
+                    intent_json={"intent": tool_name, **tool_params},
+                    actions_json=pipeline_result.get("plan", []),
+                    success=True,
+                    error=None,
+                    latency_ms=int((time.monotonic() - turn_started) * 1000),
                 )
-            )
-            return True
+                await ctx_store.add_turn(
+                    message.from_user.id,
+                    raw[:200],
+                    f"[tool confirmation: {tool_name}]",
+                )
+                trace = dict(pipeline_result.get("trace") or {})
+                log_response_trace(
+                    route="maestro_tool_confirm",
+                    owner_id=owner_telegram_id,
+                    memory_context=getattr(plan, "memory_context", "") or "",
+                    context_sources=trace.get("context_sources", []),
+                    tools_proposed=trace.get("tools_proposed", []),
+                    tools_executed=trace.get("tools_executed", []),
+                    tools_blocked=trace.get("tools_blocked", [tool_name]),
+                    guardrail_decision=trace.get("guardrail_decision", {}),
+                    humanizer_mode="off",
+                    humanizer_changed=False,
+                    latency_ms=int((time.monotonic() - turn_started) * 1000),
+                )
+                # Log assistant response to session
+                from src.core.scheduling.session_logger import log_assistant_response
+
+                track_ff(
+                    asyncio.ensure_future(
+                        log_assistant_response(message.from_user.id, confirm_msg)
+                    )
+                )
+            if _via_dispatcher:
+                return MaestroResult(
+                    handled=True,
+                    response_text=confirm_msg,
+                )
+            return MaestroResult(handled=True)
 
         # ── Handle streaming response ────────────────────────────────
         stream = pipeline_result.get("_stream")
@@ -2435,19 +1648,20 @@ async def execute_maestro(
             else:
                 # Non-streaming: silently accumulate text
                 sent_msg = await message.answer("⏳")
-                full_text = ""
+                chunks: list[str] = []
                 try:
                     async for chunk in stream:
-                        full_text += chunk
+                        chunks.append(chunk)
                 except Exception:
                     logger.debug("Stream interrupted", exc_info=True)
+                full_text = "".join(chunks)
 
             if not full_text.strip():
                 try:
                     await sent_msg.edit_text("⚠️ Не получилось сгенерировать ответ")
                 except TelegramAPIError:
                     await message.answer("⚠️ Не получилось сгенерировать ответ")
-                return True
+                return MaestroResult(handled=True)
 
             # Apply Anti-AI mode after streaming; off/log keep text unchanged.
             anti_ai_mode = await _get_anti_ai_mode(owner_telegram_id)
@@ -2547,45 +1761,55 @@ async def execute_maestro(
                 guardrail_decision=trace.get("guardrail_decision", {}),
                 humanizer_mode=anti_ai_mode,
                 humanizer_changed=humanizer_changed,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
                 extra={"used_skills": _used_skills},
             )
-            _fire_record_trajectory(
-                owner_telegram_id,
-                request_text=raw,
-                route_mode="maestro",
-                intent_json={"intent": "maestro"},
-                actions_json=pipeline_result.get("plan", []),
-                used_skills_json=_used_skills,
+            if not _via_dispatcher:
+                _fire_record_trajectory(
+                    owner_telegram_id,
+                    request_text=raw,
+                    route_mode="maestro",
+                    intent_json={"intent": "maestro"},
+                    actions_json=pipeline_result.get("plan", []),
+                    used_skills_json=_used_skills,
+                    response_text=response_text,
+                    success=True,
+                    error="; ".join(errors) if errors else None,
+                    latency_ms=int((time.monotonic() - turn_started) * 1000),
+                )
+                await ctx_store.add_turn(
+                    message.from_user.id, raw[:200], response_text[:400]
+                )
+                await _post_turn_optimize(owner_telegram_id, raw, response_text)
+                try:
+                    from src.core.infra.hooks import hooks
+
+                    await hooks.emit(
+                        "on_message_post_maestro",
+                        user_id=owner_telegram_id,
+                        input=raw,
+                        response=response_text,
+                        plan=pipeline_result.get("plan", []),
+                    )
+                except Exception:
+                    logger.debug(
+                        "post_maestro hooks.emit failed (stream)", exc_info=True
+                    )
+                # Log assistant response to session
+                from src.core.scheduling.session_logger import log_assistant_response
+
+                track_ff(
+                    asyncio.ensure_future(
+                        log_assistant_response(message.from_user.id, response_text)
+                    )
+                )
+                return MaestroResult(handled=True)
+            return MaestroResult(
+                handled=True,
                 response_text=response_text,
-                success=True,
-                error="; ".join(errors) if errors else None,
-                latency_ms=int((time.monotonic() - turn_started) * 1000),
+                used_skills=_used_skills,
+                trace=trace,
             )
-            await ctx_store.add_turn(
-                message.from_user.id, raw[:200], response_text[:400]
-            )
-            await _post_turn_optimize(owner_telegram_id, raw, response_text)
-            try:
-                from src.core.infra.hooks import hooks
-
-                await hooks.emit(
-                    "on_message_post_maestro",
-                    user_id=owner_telegram_id,
-                    input=raw,
-                    response=response_text,
-                    plan=pipeline_result.get("plan", []),
-                )
-            except Exception:
-                logger.debug("post_maestro hooks.emit failed (stream)", exc_info=True)
-            # Log assistant response to session
-            from src.core.scheduling.session_logger import log_assistant_response
-
-            track_ff(
-                asyncio.ensure_future(
-                    log_assistant_response(message.from_user.id, response_text)
-                )
-            )
-            return True
 
         # ── Handle tool results from tool loop ───────────────────────
         # Если maestro вернул tool_result, используем его для обогащения
@@ -2630,6 +1854,7 @@ async def execute_maestro(
 
             # Stage 2: deep humanize + self-correction (общий humanize_provider).
             # X1: build_provider с purpose="humanize" подхватывает humanize_model из настроек.
+            response_text = humanized
             humanize_provider = None
             try:
                 from src.llm.provider_manager import build_provider
@@ -2667,58 +1892,72 @@ async def execute_maestro(
                                 "humanize_deep failed, using light humanized",
                                 exc_info=True,
                             )
+
+                    response_text = humanized
+                    _cache_last_humanized(owner_telegram_id, response_text)
+
+                    # ── Self-correction loop (X2: budget ≤1, stop-if-improved) ──
+                    if (
+                        anti_ai_mode == "fix"
+                        and response_text
+                        and len(response_text) > 50
+                    ):
+                        score_before, _ = analyze_ai_score(response_text)
+                        if score_before >= 0.3:
+                            correction_prompt = (
+                                f"Твой ответ вышел слишком AI-шаблонным "
+                                f"(score={score_before:.2f}). "
+                                f"Перепиши его естественно, как человек:\n\n"
+                                f"{response_text[:1000]}"
+                            )
+                            try:
+                                rewritten = await humanize_provider.chat(
+                                    [
+                                        ChatMessage(
+                                            role="user", content=correction_prompt
+                                        )
+                                    ],
+                                    task_type=TaskType.HUMANIZE,
+                                )
+                                if rewritten and len(rewritten) > 20:
+                                    rewritten = _preservation_check(
+                                        response_text, rewritten
+                                    )
+                                    score_after, _ = analyze_ai_score(rewritten)
+                                    if score_after < score_before:
+                                        # Только если улучшило — применяем
+                                        response_text = rewritten
+                                        logger.debug(
+                                            "Self-correction improved score "
+                                            "%.2f -> %.2f",
+                                            score_before,
+                                            score_after,
+                                        )
+                                    else:
+                                        logger.debug(
+                                            "Self-correction didn't improve "
+                                            "(%.2f -> %.2f)",
+                                            score_before,
+                                            score_after,
+                                        )
+                            except Exception:
+                                logger.debug(
+                                    "Self-correction rewrite failed", exc_info=True
+                                )
             except Exception:
                 logger.debug(
                     "humanize_provider build failed, humanize skipped",
                     exc_info=True,
                 )
-
-            response_text = humanized
-            _cache_last_humanized(owner_telegram_id, response_text)
-
-            # ── Self-correction loop (X2: budget ≤1, stop-if-improved) ──
-            if anti_ai_mode == "fix" and response_text and len(response_text) > 50:
-                score_before, _ = analyze_ai_score(response_text)
-                if score_before >= 0.3 and humanize_provider:
-                    correction_prompt = (
-                        f"Твой ответ вышел слишком AI-шаблонным (score={score_before:.2f}). "
-                        f"Перепиши его естественно, как человек:\n\n{response_text[:1000]}"
-                    )
+            finally:
+                if humanize_provider:
                     try:
-                        rewritten = await humanize_provider.chat(
-                            [ChatMessage(role="user", content=correction_prompt)],
-                            task_type=TaskType.HUMANIZE,
-                        )
-                        if rewritten and len(rewritten) > 20:
-                            rewritten = _preservation_check(response_text, rewritten)
-                            score_after, _ = analyze_ai_score(rewritten)
-                            if score_after < score_before:
-                                # Только если улучшило — применяем
-                                response_text = rewritten
-                                logger.debug(
-                                    "Self-correction improved score %.2f -> %.2f",
-                                    score_before,
-                                    score_after,
-                                )
-                            else:
-                                logger.debug(
-                                    "Self-correction didn't improve (%.2f -> %.2f)",
-                                    score_before,
-                                    score_after,
-                                )
+                        await humanize_provider.close()
                     except Exception:
-                        logger.debug("Self-correction rewrite failed", exc_info=True)
-            # ── End Self-correction ────────────────────────────────────
-
-            # Закрываем humanize_provider после использования
-            if humanize_provider:
-                try:
-                    await humanize_provider.close()
-                except Exception:
-                    logger.debug(
-                        "Failed to close humanize_provider (final)",
-                        exc_info=True,
-                    )
+                        logger.debug(
+                            "Failed to close humanize_provider (final)",
+                            exc_info=True,
+                        )
             # ── End Humanizer ─────────────────────────────────────────
 
             # Auto-save: fire-and-forget сохранение фактов о пользователе
@@ -2755,6 +1994,7 @@ async def execute_maestro(
                 guardrail_decision=trace.get("guardrail_decision", {}),
                 humanizer_mode=anti_ai_mode,
                 humanizer_changed=response_text != original_response_text,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
                 extra={"used_skills": _used_skills},
             )
             # ── Убираем прогресс-сообщение перед финальным ответом ──
@@ -2767,46 +2007,53 @@ async def execute_maestro(
                 sanitize_html(response_text + extra_suffix),
                 reply_markup=memory_quick_keyboard(),
             )
-            _fire_record_trajectory(
-                owner_telegram_id,
-                request_text=raw,
-                route_mode="maestro",
-                intent_json={"intent": "maestro"},
-                actions_json=pipeline_result.get("plan", []),
-                used_skills_json=_used_skills,
+            if not _via_dispatcher:
+                _fire_record_trajectory(
+                    owner_telegram_id,
+                    request_text=raw,
+                    route_mode="maestro",
+                    intent_json={"intent": "maestro"},
+                    actions_json=pipeline_result.get("plan", []),
+                    used_skills_json=_used_skills,
+                    response_text=response_text,
+                    success=True,
+                    error="; ".join(errors) if errors else None,
+                    latency_ms=int((time.monotonic() - turn_started) * 1000),
+                )
+                await ctx_store.add_turn(
+                    message.from_user.id, raw[:200], response_text[:400]
+                )
+                await _post_turn_optimize(owner_telegram_id, raw, response_text)
+                try:
+                    from src.core.infra.hooks import hooks
+
+                    await hooks.emit(
+                        "on_message_post_maestro",
+                        user_id=owner_telegram_id,
+                        input=raw,
+                        response=response_text,
+                        plan=pipeline_result.get("plan", []),
+                    )
+                except Exception:
+                    logger.debug(
+                        "post_maestro hooks.emit failed (final_response)", exc_info=True
+                    )
+                # Log assistant response to session
+                from src.core.scheduling.session_logger import log_assistant_response
+
+                track_ff(
+                    asyncio.ensure_future(
+                        log_assistant_response(message.from_user.id, response_text)
+                    )
+                )
+                return MaestroResult(handled=True)
+            return MaestroResult(
+                handled=True,
                 response_text=response_text,
-                success=True,
-                error="; ".join(errors) if errors else None,
-                latency_ms=int((time.monotonic() - turn_started) * 1000),
+                used_skills=_used_skills,
+                trace=trace,
             )
-            await ctx_store.add_turn(
-                message.from_user.id, raw[:200], response_text[:400]
-            )
-            await _post_turn_optimize(owner_telegram_id, raw, response_text)
-            try:
-                from src.core.infra.hooks import hooks
-
-                await hooks.emit(
-                    "on_message_post_maestro",
-                    user_id=owner_telegram_id,
-                    input=raw,
-                    response=response_text,
-                    plan=pipeline_result.get("plan", []),
-                )
-            except Exception:
-                logger.debug(
-                    "post_maestro hooks.emit failed (final_response)", exc_info=True
-                )
-            # Log assistant response to session
-            from src.core.scheduling.session_logger import log_assistant_response
-
-            track_ff(
-                asyncio.ensure_future(
-                    log_assistant_response(message.from_user.id, response_text)
-                )
-            )
-            return True
-        return False
+        return MaestroResult(handled=False)
     except Exception:
         try:
             from src.core.infra.hooks import hooks
@@ -2823,7 +2070,7 @@ async def execute_maestro(
                 "execute_maestro hooks.emit failed", exc_info=True
             )  # hooks are optional, never break core flow
         logger.debug("Maestro pipeline failed, falling back to route_intent")
-        return False
+        return MaestroResult(handled=False)
 
 
 async def _check_intent_confidence(intent: dict, message: Message) -> bool:
@@ -2832,7 +2079,9 @@ async def _check_intent_confidence(intent: dict, message: Message) -> bool:
     if "confidence" not in intent:
         return False
     confidence = intent.get("confidence", 1.0)
-    if not isinstance(confidence, (int, float)):
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
         return False
     if confidence >= 0.6:
         return False

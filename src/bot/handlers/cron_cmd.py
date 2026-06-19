@@ -20,7 +20,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.bot.handlers.free_text._core import _store_intent_confirmation
+from src.bot.handlers.free_text._confirm import _store_intent_confirmation
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.scheduling.cron.blueprints import BLUEPRINTS, get_blueprint
 from src.core.scheduling.cron.parser import parse_nl_to_cron, validate_cron

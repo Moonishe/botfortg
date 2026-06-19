@@ -16,7 +16,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.core.actions.commitment_extractor import extract_and_save_commitments
 from src.core.contacts.chat_service import load_chat
-from src.core.contacts.contact_resolver import resolve, resolve_with_llm
+from src.bot.contact_resolver import resolve_contact_fast, resolve_with_llm
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import (
     fmt_local,
@@ -117,7 +117,7 @@ async def classic_resolve_contact(
         return None
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-    candidates = await resolve(client, owner, contact_query)
+    candidates = await resolve_contact_fast(client, owner, contact_query)
     if not candidates:
         await message.answer(
             sanitize_html(f"🙅 Не нашёл контакт «{contact_query}». Попробуй /sync.")
@@ -240,7 +240,7 @@ async def exec_add_reminder(intent, message, *, tz_name: str) -> None:
         if client is not None:
             async with get_session() as session:
                 owner = await get_or_create_user(session, message.from_user.id)
-            cands = await resolve(client, owner, peer_query)
+            cands = await resolve_contact_fast(client, owner, peer_query)
             if cands:
                 peer_id = cands[0].peer_id
                 peer_name = cands[0].display_name
@@ -308,7 +308,7 @@ async def exec_add_reminders_from_chat(intent, message, userbot_manager) -> None
         await message.answer("Сначала /login.")
         return
 
-    from src.core.contacts.contact_resolver import resolve
+    from src.bot.contact_resolver import resolve_contact_fast
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -317,7 +317,7 @@ async def exec_add_reminders_from_chat(intent, message, userbot_manager) -> None
         await message.answer("Нужен LLM-ключ (/settings → 🔑).")
         return
 
-    cands = await resolve(client, owner, contact_query)
+    cands = await resolve_contact_fast(client, owner, contact_query)
     if not cands:
         await message.answer(sanitize_html(f"Контакт «{contact_query}» не найден."))
         return

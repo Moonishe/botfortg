@@ -5,6 +5,7 @@ import logging
 
 from aiogram import Router
 
+from src.bot.filters import OwnerOnly
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import HM_RE, tz_short
 from src.db.repo import (
@@ -20,7 +21,8 @@ from src.core.infra.settings_cache import invalidate_settings_cache
 
 logger = logging.getLogger(__name__)
 router = Router(name="free_text_settings")
-
+router.message.filter(OwnerOnly())
+router.callback_query.filter(OwnerOnly())
 
 # Поля UserSettings, которые агент может менять через set_setting (имя → тип значения)
 # Решения auto-reply принимаются через src.core.contacts.auto_reply_decision.decide().

@@ -18,6 +18,7 @@ from src.core.infra.formatting import auto_format
 from src.core.infra.settings_cache import _settings_cache, invalidate_settings_cache  # noqa: F401  # pyright: ignore[reportUnusedImport] — re-export for late imports
 from src.core.infra.task_manager import track_ff
 from src.core.infra.timeutil import HM_RE, is_valid_tz, get_user_tz
+from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 
@@ -151,7 +152,9 @@ async def safe_answer(
 _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9@/_.:-]{1,128}$")
 
 
-async def _get_owner_context(telegram_id: int, session=None) -> dict[str, object]:
+async def _get_owner_context(
+    telegram_id: int, session: AsyncSession | None = None
+) -> dict[str, object]:
     """Возвращает {owner_telegram_id, tz_name, use_heavy, global_style_profile} с TTL-кэшем (per-user).
 
     Args:

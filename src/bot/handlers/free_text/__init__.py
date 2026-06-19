@@ -1,12 +1,15 @@
 """Free-text pipeline — backward-compatible re-export facade.
 
-All implementation in _core.py. This package exists so future splits
-(_stages.py, _executors.py, _dispatch.py etc.) can be imported here
-without breaking existing callers.
+Implementation split across:
+- _core.py: pipeline stages, intent dispatch, routing
+- _dag.py: DAG dispatch, dedup cache
+- _confirm.py: tool/intent confirmation callbacks
+- _voice.py: voice transcription handlers
+- _media.py: photo/video media handlers
+- _singalong.py: singalong (lyrics matching)
 """
 
 from src.bot.handlers.free_text._core import (
-    _dag_dispatch,
     _detect_context_hint,
     _dispatch,
     _execute_intent,
@@ -20,11 +23,19 @@ from src.bot.handlers.free_text._core import (
     check_instructions,
     check_persona,
     CLASSIC_INTENT_HANDLERS,
-    confirm_router,
     execute_fast_route,
     execute_instant,
     execute_maestro,
     INTENT_HANDLERS,
+)
+
+from src.bot.handlers.free_text._dag import (
+    _dag_dispatch,
+    _run_dag_level,
+)
+
+from src.bot.handlers.free_text._confirm import (
+    confirm_router,
     register_cleanup_timer,
 )
 
@@ -37,6 +48,7 @@ __all__ = [
     "_execute_intent",
     "_extract_contact_hint",
     "_looks_like_send_request",
+    "_run_dag_level",
     "_safe_for_deep_humanize",
     "_save_intent_context",
     "_time_of_day_greeting",
