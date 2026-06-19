@@ -334,6 +334,7 @@ async def check_contradiction_response(
     if cleaned in confirm_words or first_word in confirm_words:
         # User confirms the change — mark old fact as inactive + contradictory
         old_memory_id = pending.get("memory_id")
+        db_success = False  # Only return success if DB operations actually completed
         if old_memory_id:
             try:
                 from datetime import datetime, timedelta
@@ -358,6 +359,7 @@ async def check_contradiction_response(
 
                             await reduce_confidence(
                                 old_mem.id,
+                                link_owner.id,
                                 reason="contradiction_confirmed",
                             )
                         except Exception:
@@ -371,6 +373,7 @@ async def check_contradiction_response(
 
                         await save_memory_version(
                             link_session,
+                            link_owner,
                             old_mem.id,
                             old_mem.fact,
                             edited_by="system",
@@ -449,6 +452,8 @@ async def check_contradiction_response(
                             )
 
                         await link_session.commit()
+                        db_success = True  # Commit succeeded — all DB ops committed
+
                         await bump_recall_version(link_owner.telegram_id)
                         # Emit memory mutation event
                         from src.core.events.event_bus import event_bus, MEMORY_MUTATED
@@ -470,7 +475,21 @@ async def check_contradiction_response(
 
                             await invalidate_contact_digest(old_mem.contact_id)
             except Exception:
-                logger.debug("Failed to mark contradicted fact", exc_info=True)
+                logger.exception(
+                    "check_contradiction_response: DB operations failed for "
+                    "memory_id=%d, pending contradiction will be re-queued",
+                    old_memory_id,
+                )
+
+        if not db_success:
+            # Re-store the pending contradiction so the user can retry
+            # (the pop at the top removed it, but DB operations failed).
+            import time as _time2
+
+            pending["stored_at"] = _time2.monotonic()
+            async with _pending_lock:
+                _pending_contradictions[telegram_id] = pending
+            return None  # Don't ack — let the message be processed as normal text
 
         # ---- Phase 2: record contradiction metric ----
         try:

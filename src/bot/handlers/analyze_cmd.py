@@ -46,13 +46,15 @@ async def _resolve_contact_names(
         # 2. Fuzzy через contact_resolver
         if not found:
             try:
-                from src.core.contacts.contact_resolver import resolve
+                from src.bot.contact_resolver import resolve_contact_fast
 
                 client = (
                     userbot_manager.get_client(telegram_id) if userbot_manager else None
                 )
                 if client:
-                    candidates = await resolve(client, name)
+                    async with get_session() as _s:
+                        owner = await get_or_create_user(_s, telegram_id)
+                    candidates = await resolve_contact_fast(client, owner, name)
                     if candidates:
                         resolved.append(candidates[0].peer_id)
                         found = True

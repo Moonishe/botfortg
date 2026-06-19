@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery
 
 from src.bot.filters import OwnerOnly
 from src.core.compaction.nudge import apply_nudge_decision, parse_memory_id
+from src.db.repos.session_repo import get_or_create_user
 from src.db.session import get_session
 
 nudge_router = Router(name="compaction_nudge")
@@ -25,8 +26,8 @@ async def _cb_nudge_confirm(callback: CallbackQuery) -> None:
         return
 
     async with get_session() as session:
-        ok = await apply_nudge_decision(session, memory_id, "confirm")
-        await session.commit()
+        owner = await get_or_create_user(session, callback.from_user.id)
+        ok = await apply_nudge_decision(session, owner, memory_id, "confirm")
 
     if ok and callback.message:
         await callback.message.edit_text("✅ Факт подтверждён.")
@@ -45,8 +46,8 @@ async def _cb_nudge_forget(callback: CallbackQuery) -> None:
         return
 
     async with get_session() as session:
-        ok = await apply_nudge_decision(session, memory_id, "forget")
-        await session.commit()
+        owner = await get_or_create_user(session, callback.from_user.id)
+        ok = await apply_nudge_decision(session, owner, memory_id, "forget")
 
     if ok and callback.message:
         await callback.message.edit_text("🗑 Факт забыт.")

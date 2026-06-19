@@ -4,7 +4,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from src.config import settings
-from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -13,7 +13,9 @@ CLOUDFLARE_CHAT_LIGHT = "@cf/qwen/qwen3-30b-a3b-fp8"
 CLOUDFLARE_CHAT_HEAVY = "@cf/moonshotai/kimi-k2.6"
 
 
-class CloudflareProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
+class CloudflareProvider(
+    OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMProvider
+):
     """Cloudflare Workers AI провайдер (OpenAI-совместимый API).
 
     Использует AsyncOpenAI с кастомным base_url на Cloudflare Accounts AI Gateway.
@@ -45,17 +47,19 @@ class CloudflareProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
                     "Добавь CLOUDFLARE_ACCOUNT_ID=<твой account_id> в .env"
                 )
             url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+        # Создаём клиент ДО super().__init__(), чтобы _client был доступен
+        # при любой будущей инициализации в BaseLLMProvider (как в CustomProvider).
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=url,
+            timeout=httpx.Timeout(120.0, connect=10.0),
+        )
         # Базовая инициализация: сохраняет api_key, model, embed_model
         super().__init__(
             api_key=api_key,
             base_url=None,
             model=model,
             embed_model=embed_model,
-        )
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=url,
-            timeout=httpx.Timeout(120.0, connect=10.0),
         )
 
     async def chat(

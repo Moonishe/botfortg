@@ -172,18 +172,19 @@ class BackgroundReviewer:
         """Persist a fact to the user's memory store."""
         try:
             from src.db.session import get_session
-            from src.db.repo import add_memory, get_or_create_user
+            from src.db.repo import get_or_create_user
+            from src.core.memory.memory_service import save_memory_single
 
             async with get_session() as session:
                 user = await get_or_create_user(session, user_id)
-                await add_memory(
+                await save_memory_single(
                     session,
                     user,
                     fact=fact,
                     source="background_review",
                     confidence=0.45,
                     memory_tier=1,
-                )
+                    memory_type=None)
             logger.debug(
                 "BackgroundReviewer: saved fact for user %d: %.80s",
                 user_id,

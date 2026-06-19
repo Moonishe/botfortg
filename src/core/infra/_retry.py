@@ -26,10 +26,14 @@ async def send_with_retry(
     - aiogram.exceptions.TelegramNetworkError → retry с backoff
     - telethon.errors.FloodWaitError → ждать указанное время + retry
     """
+    last_exception: Exception | None = None
     for attempt in range(max_retries):
         try:
             return await send_fn(*args, **kwargs)
         except TelegramRetryAfter as e:
+            last_exception = e
+            if attempt == max_retries - 1:
+                raise
             delay = max(e.retry_after, base_delay * (2**attempt))
             logger.warning(
                 "Telegram 429: waiting %.1fs (attempt %d/%d)",
@@ -39,6 +43,7 @@ async def send_with_retry(
             )
             await asyncio.sleep(delay)
         except TelegramNetworkError as e:
+            last_exception = e
             if attempt == max_retries - 1:
                 logger.exception("Telegram network error, max retries reached")
                 raise
@@ -53,8 +58,11 @@ async def send_with_retry(
             await asyncio.sleep(delay)
         except Exception as e:
             # Telethon FloodWaitError (optional dependency — string match)
+            last_exception = e
             exc_name = type(e).__name__
             if "FloodWaitError" in exc_name:
+                if attempt == max_retries - 1:
+                    raise
                 wait = getattr(e, "seconds", base_delay * (2**attempt))
                 logger.warning(
                     "FloodWait %ds (attempt %d/%d)",
@@ -68,4 +76,4 @@ async def send_with_retry(
             logger.exception("Unexpected error in send_with_retry: %s", exc_name)
             raise
 
-    raise RuntimeError(f"Send failed after {max_retries} retries")
+    raise RuntimeError(f"Send failed after {max_retries} retries") from last_exception

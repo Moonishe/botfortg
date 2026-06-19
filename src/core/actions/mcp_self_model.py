@@ -7,14 +7,28 @@ from typing import Any
 
 from sqlalchemy import select, update as sa_update
 
+from src.core.actions.tool_registry import tool
 from src.db.models._auth import LlmKeySlot
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
 
+@tool(
+    name="mcp_self_model",
+    description="Управление LLM-моделью: current | switch | list_providers | list_models",
+    category="admin",
+    risk="medium",
+    requires_confirmation=True,
+    params={
+        "action": "str — current | list_providers | list_models | switch (default: current)",
+        "provider": "str — provider name (for switch)",
+        "model": "str — model name (for switch)",
+        "slot_id": "int — slot ID (for switch/list_models)",
+    },
+)
 async def mcp_self_model(
-    action: str,
+    action: str = "current",
     provider: str = "",
     model: str = "",
     slot_id: int = 0,

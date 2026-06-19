@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, UTC
 
 from sqlalchemy import func, select, update as sa_update
@@ -80,15 +81,18 @@ def calculate_importance(
 
 async def boost_confidence(
     memory_id: int,
+    user_id: int,
     amount: float | None = None,
     reason: str = "corroboration",
 ) -> bool:
     """Повышает confidence факта при подтверждении.
 
     Также инкрементирует corroboration_count и обновляет last_corroborated_at.
+    Операция применяется только к фактам, принадлежащим указанному пользователю.
 
     Args:
         memory_id: ID факта в БД.
+        user_id: Внутренний ID владельца факта.
         amount: Величина повышения (по умолчанию из конфига).
         reason: Причина повышения (для логов).
 
@@ -96,13 +100,19 @@ async def boost_confidence(
         True если обновление успешно, False иначе.
     """
     boost = amount if amount is not None else settings.meta_memory_confidence_boost
+    if not math.isfinite(boost) or boost <= 0:
+        logger.warning(
+            "boost_confidence: amount must be finite and > 0, got %r - skipping",
+            boost,
+        )
+        return False
     now = datetime.now(UTC)
 
     try:
         async with get_session() as session:
             result = await session.execute(
                 sa_update(Memory)
-                .where(Memory.id == memory_id)
+                .where(Memory.id == memory_id, Memory.user_id == user_id)
                 .values(
                     confidence=func.least(1.0, Memory.confidence + boost),
                     corroboration_count=Memory.corroboration_count + 1,
@@ -136,6 +146,7 @@ async def boost_confidence(
 
 async def reduce_confidence(
     memory_id: int,
+    user_id: int,
     amount: float | None = None,
     reason: str = "contradiction",
 ) -> bool:
@@ -143,6 +154,7 @@ async def reduce_confidence(
 
     Args:
         memory_id: ID факта в БД.
+        user_id: Внутренний ID владельца факта.
         amount: Величина снижения (по умолчанию из конфига).
         reason: Причина снижения (для логов).
 
@@ -150,14 +162,20 @@ async def reduce_confidence(
         True если обновление успешно, False иначе.
     """
     decay = amount if amount is not None else settings.meta_memory_confidence_decay
+    if not math.isfinite(decay) or decay <= 0:
+        logger.warning(
+            "reduce_confidence: amount must be finite and > 0, got %r - skipping",
+            decay,
+        )
+        return False
     now = datetime.now(UTC)
 
     try:
         async with get_session() as session:
-            # Снижаем confidence, но не ниже 0.0
+            # Снижаем confidence, но не ниже 0.0, только для факта владельца
             result = await session.execute(
                 sa_update(Memory)
-                .where(Memory.id == memory_id)
+                .where(Memory.id == memory_id, Memory.user_id == user_id)
                 .values(
                     confidence=func.greatest(0.0, Memory.confidence - decay),
                     updated_at=now,

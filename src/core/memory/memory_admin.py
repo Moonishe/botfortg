@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, UTC
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.db.models._base import User
 from src.db.models._memory import Memory, MemoryLink
 
 logger = logging.getLogger(__name__)
@@ -91,28 +92,49 @@ async def deactivate_memory(
     memory_id: int,
     *,
     reason: str,
+    user_id: int,
 ) -> None:
     """Mark a memory inactive.
 
     Sets ``is_active=False`` and updates ``updated_at``. Does *not* delete —
     history is preserved for audit and undo.
 
+    Acquires the per-user lock to prevent races with concurrent
+    ``_add_memory_core``, which may merge into a memory after we've
+    decided it should be deactivated.
+
     Args:
         session: Active DB session.
         memory_id: ID of the memory row to deactivate.
         reason: Short explanation (e.g. ``"reval_invalid"``, ``"manual_reject"``).
+        user_id: Owner ID for ownership validation.
+            If the memory belongs to a different user,
+            deactivation is silently skipped.
     """
-    mem = await session.get(Memory, memory_id)
-    if not mem or mem.user_id is None:
-        return
-    mem.is_active = False
-    mem.updated_at = datetime.now(UTC)
-    await session.flush()
-    logger.info("Deactivated memory %d (reason=%s)", memory_id, reason)
+    from src.db.repos.session_repo import _get_user_lock
+
+    lock = _get_user_lock(user_id)
+    async with lock:
+        mem = await session.get(Memory, memory_id)
+        if not mem or mem.user_id is None:
+            return
+        if mem.user_id != user_id:
+            logger.warning(
+                "deactivate_memory: memory_id=%d does not belong to user %d (got %d)",
+                memory_id,
+                mem.user_id,
+                user_id,
+            )
+            return
+        mem.is_active = False
+        mem.updated_at = datetime.now(UTC)
+        await session.flush()
+        logger.info("Deactivated memory %d (reason=%s)", memory_id, reason)
 
 
 async def update_memory_text(
     session: AsyncSession,
+    user: User,
     memory_id: int,
     new_fact: str,
     *,
@@ -140,6 +162,15 @@ async def update_memory_text(
     if not mem:
         return None
 
+    # Ownership check — must match before modifying the fact
+    if mem.user_id != user.id:
+        logger.warning(
+            "update_memory_text: memory_id=%d does not belong to user %d",
+            memory_id,
+            user.id,
+        )
+        return None
+
     # Оптимистическая блокировка: проверяем, что факт не был изменён
     # параллельно с момента чтения клиентом.
     if request_version is not None and mem.updated_at != request_version:
@@ -155,7 +186,7 @@ async def update_memory_text(
     from src.db.repos.memory_repo import save_memory_version
 
     await save_memory_version(
-        session, memory_id, new_fact, edited_by="user", reason=edit_reason
+        session, user, memory_id, new_fact, edited_by="user", reason=edit_reason
     )
 
     if new_memory_type is not None and new_memory_type in ALLOWED_MEMORY_TYPES:
@@ -209,6 +240,19 @@ async def add_supersedes_link(
         relation_type: Type of relationship (default ``"supersedes"``).
     """
     if old_id == new_id:
+        return None
+    # Verify both memories belong to the user (defense-in-depth).
+    old_mem = await session.get(Memory, old_id)
+    new_mem = await session.get(Memory, new_id)
+    if not old_mem or not new_mem:
+        return None
+    if old_mem.user_id != user_id or new_mem.user_id != user_id:
+        logger.warning(
+            "add_supersedes_link: ownership mismatch (user_id=%d, old=%d, new=%d)",
+            user_id,
+            old_id,
+            new_id,
+        )
         return None
     # Check existing
     existing_q = await session.execute(

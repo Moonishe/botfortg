@@ -46,7 +46,7 @@ def make_message() -> Callable[[int, str], Message]:
 @pytest.fixture
 def setup_dp(owner_id: int):
     """Build a minimal dispatcher with the pairing guard and a test handler."""
-    from src.bot.app import access_guard_middleware
+    from src.bot.app import universal_access_guard
     from src.core.security.pairing import PairingManager
 
     router = Router(name="test")
@@ -59,7 +59,7 @@ def setup_dp(owner_id: int):
     router.message.filter(OwnerOnly())
 
     dp = Dispatcher(storage=MemoryStorage())
-    dp.message.outer_middleware(access_guard_middleware)
+    dp.update.outer_middleware(universal_access_guard)
     dp.include_router(router)
 
     return dp, handler, PairingManager

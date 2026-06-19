@@ -13,13 +13,17 @@ from __future__ import annotations
 import logging
 from datetime import datetime, UTC
 
+from aiogram import Bot
+
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
 
 class AmbientIntelligence:
     """Проактивные уведомления на основе контекстных изменений."""
 
-    def __init__(self, bot) -> None:
+    def __init__(self, bot: Bot) -> None:
         """Инициализация с экземпляром Telegram-бота.
 
         Args:
@@ -42,6 +46,8 @@ class AmbientIntelligence:
                 - active_tasks (list[str])
                 - recent_insights (list[str])
         """
+        if not settings.ambient_intelligence_enabled:
+            return
         if self._is_first_message_today(context):
             await self._send_morning_briefing(user_id, context)
         else:
@@ -110,6 +116,9 @@ class AmbientIntelligence:
         last_active = context.get("last_active_at")
         if last_active is None:
             return True  # Первое сообщение — считаем новым днём
+        if not isinstance(last_active, datetime):
+            # Defensive: if not a datetime (e.g., corrupted value), treat as first message
+            return True
         now = datetime.now(UTC)
         # NOTE: UTC date comparison — ignores user timezone.
         # Acceptable tradeoff for single-user bot; multi-user would need

@@ -12,6 +12,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.callback_utils import safe_callback_edit
 from src.bot.filters import OwnerOnly
 from src.core.infra.rate_limiter import check_rate_limit
 from src.bot.pending_questions import get_pending, has_pending
@@ -28,7 +29,7 @@ from src.core.contacts.chat_service import load_chat
 from src.core.memory.memory_extractor import extract_and_save_memories
 from src.core.memory.smart_memory import smart_extract_after_sync
 from src.core.contacts.contact_memory_digest import get_contact_digest
-from src.core.contacts.contact_resolver import ContactCandidate, resolve
+from src.bot.contact_resolver import ContactCandidate, resolve_contact_fast
 from src.db.repo import (
     add_watched_peer,
     get_contact,
@@ -198,7 +199,7 @@ async def cmd_chat(
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
 
-    candidates = await resolve(client, owner, query)
+    candidates = await resolve_contact_fast(client, owner, query)
     if not candidates:
         await message.answer(
             "Не нашёл такого контакта. Уточни имя/ник или попробуй /sync."
@@ -234,8 +235,7 @@ async def _show_actions(message: Message, candidate: ContactCandidate) -> None:
 
 @router.callback_query(F.data.startswith("chat:cancel:"))
 async def cb_cancel(callback: CallbackQuery) -> None:
-    if callback.message:
-        await callback.message.edit_text("Отменено.")
+    await safe_callback_edit(callback, "Отменено.")
     await callback.answer()
 
 
@@ -821,7 +821,7 @@ async def cb_extract_memories(
     )
     total = 0
     for ct, result in zip(targets, results, strict=True):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             logger.exception("memory extraction failed for %s", ct.display_name)
         elif result:
             total += result

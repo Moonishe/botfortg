@@ -154,12 +154,6 @@ class TestSSRFGuard:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 3.  Pairing — PairingManager security layer
-# ══════════════════════════════════════════════════════════════════════════
-
-
-@pytest.mark.asyncio
-# ══════════════════════════════════════════════════════════════════════════
 # 2b. SSRF guard — extended unit & advanced tests
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -465,6 +459,8 @@ class TestSSRFGuardExtended:
 class TestPairing:
     """src.core.security.pairing — PairingManager approval flow."""
 
+    pytestmark = pytest.mark.asyncio
+
     @pytest.fixture(autouse=True)
     def _no_db(self) -> None:
         """Isolate tests from the database — mock get_session and repo functions."""
@@ -554,12 +550,12 @@ class TestPairing:
         with tempfile.TemporaryDirectory() as tmp:
             pm = PairingManager(data_dir=Path(tmp))
             code = await pm.start_pairing(sender_id=3)
-        await pm.approve(sender_id=3, code=code)
-        assert await pm.is_allowed(sender_id=3) is True
+            await pm.approve(sender_id=3, code=code)
+            assert await pm.is_allowed(sender_id=3) is True
 
-        await pm.revoke(sender_id=3)
-        assert await pm.is_allowed(sender_id=3) is False
-        assert await pm.allowlist_size() == 0
+            await pm.revoke(sender_id=3)
+            assert await pm.is_allowed(sender_id=3) is False
+            assert await pm.allowlist_size() == 0
 
 
 # ══════════════════════════════════════════════════════════════════════════

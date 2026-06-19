@@ -1,5 +1,6 @@
 """/today — главный пульт управления ответами. /radar — быстрый срез."""
 
+import html
 import logging
 from datetime import datetime, timedelta, UTC
 
@@ -54,6 +55,36 @@ def _radar_keyboard(item: RadarItem) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def _format_ops_lines_for_today(alerts: list[str]) -> list[str]:
+    """Format a compact ops block for /today."""
+    if not alerts:
+        return []
+
+    visible = alerts[:3]
+    lines = ["<b>Система:</b>"]
+    lines.extend(f"• {html.escape(alert, quote=False)}" for alert in visible)
+    if len(alerts) > len(visible):
+        lines.append(f"<i>Ещё {len(alerts) - len(visible)}: /ops</i>")
+    else:
+        lines.append("<i>/ops — детали</i>")
+    return lines
+
+
+async def _ops_lines_for_today(telegram_id: int) -> list[str]:
+    try:
+        from src.bot.handlers.ops_cmd import (
+            collect_ops_snapshot,
+            ops_alerts_for_snapshot,
+        )
+
+        snapshot = await collect_ops_snapshot(telegram_id)
+        alerts = ops_alerts_for_snapshot(snapshot)
+    except Exception:
+        logger.debug("today ops summary failed", exc_info=True)
+        return []
+    return _format_ops_lines_for_today(alerts)
+
+
 @router.message(Command("today"))
 async def cmd_today(message: Message):
     """Главный пульт: радар + обязательства + память + конфликты."""
@@ -89,6 +120,7 @@ async def cmd_today(message: Message):
 
     # Inbox Priority
     inbox = await rank_inbox(telegram_id, limit=5)
+    ops_lines = await _ops_lines_for_today(telegram_id)
 
     lines = ["<b>📡 Пульт управления</b>", ""]
 
@@ -143,6 +175,10 @@ async def cmd_today(message: Message):
         lines.append(
             f"📥 <b>Memory Inbox:</b> {len(candidates)} неподтверждённых фактов. /memory --inbox"
         )
+        lines.append("")
+
+    if ops_lines:
+        lines.extend(ops_lines)
         lines.append("")
 
     # Health + Streak
@@ -266,10 +302,9 @@ async def cb_radar_snooze(callback: CallbackQuery):
             conv.radar_snoozed_until = utcnow_naive() + timedelta(hours=24)
             await session.commit()
     await callback.answer("Отложено на 24ч")
-    if callback.message:
-        await callback.message.edit_text(
-            callback.message.text + "\n\n⏰ Отложено на 24ч"
-        )
+    if isinstance(callback.message, Message):
+        text = callback.message.text or ""
+        await callback.message.edit_text(f"{text}\n\n⏰ Отложено на 24ч")
 
 
 async def _daily_reply_streak(telegram_id: int) -> str:

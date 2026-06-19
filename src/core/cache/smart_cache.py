@@ -20,7 +20,8 @@ from typing import Any
 from sqlalchemy import func, select
 
 from src.db.models._cache import SmartCacheEntry
-from src.db.repo import add_memory, get_or_create_user
+from src.db.repo import get_or_create_user
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ class SmartCache:
     """3-level cache with automatic promotion and anti-bloat measures.
 
     L0 is per-instance (OrderedDict, max 500). L1 is SQLite (shared).
-    L2 is Memory.fact (via add_memory).
+    L2 is Memory.fact (via save_memory_single).
     """
 
     # SQLite stores naive datetimes even with DateTime(timezone=True) — helper:
@@ -465,7 +466,7 @@ class SmartCache:
         owner_id: int,
         session: Any,
     ) -> None:
-        """Promote a cache entry to L2 (Memory.fact) via add_memory()."""
+        """Promote a cache entry to L2 (Memory.fact) via save_memory_single."""
         if entry.graduated:
             return
 
@@ -482,7 +483,7 @@ class SmartCache:
         fact = f"[{entry.source}] {entry.cache_value[:500]}"
 
         owner = await get_or_create_user(session, owner_id)
-        await add_memory(
+        await save_memory_single(
             session,
             owner,
             fact=fact,

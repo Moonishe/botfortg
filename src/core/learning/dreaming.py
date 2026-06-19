@@ -20,6 +20,7 @@ from datetime import datetime, UTC
 from typing import Any
 
 from src.config import settings
+from src.db.models import Notification
 
 logger = logging.getLogger(__name__)
 
@@ -766,7 +767,7 @@ class DreamingConsolidator:
                     await notification_queue.enqueue(
                         topic="insight",
                         text=f"💡 {insight.text}",
-                        priority=5,  # PRIORITY_NORMAL
+                        priority=Notification.PRIORITY_MEDIUM,
                     )
 
             except Exception:

@@ -28,6 +28,7 @@ from src.llm.provider_catalog import (
     get_providers_by_category,
 )
 
+from src.bot.callback_utils import safe_callback_edit
 from src.bot.callbacks import KeysCB
 from src.bot.filters import OwnerOnly
 from src.core.infra.text_sanitizer import sanitize_html
@@ -1065,8 +1066,7 @@ async def cb_keys_remove(callback: CallbackQuery) -> None:
             text = f"✅ Слот #{slot_id} ({sanitize_html(provider)}/{sanitize_html(purpose)}) удалён."
         else:
             text = "❌ Слот не найден или не твой."
-    if callback.message:
-        await callback.message.edit_text(text)
+    await safe_callback_edit(callback, text)
     await callback.answer()
 
 

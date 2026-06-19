@@ -19,6 +19,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime, timedelta, UTC
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, text
@@ -37,7 +38,8 @@ from src.core.compaction.nudge import (
     select_nudge_candidates,
 )
 from src.db.models import Memory, MemoryVersion
-from src.db.repo import add_memory, get_or_create_user
+from src.db.repo import get_or_create_user
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 
 OWNER_TG_ID = 123456789
@@ -111,7 +113,7 @@ async def _make_memory(
     if needed, then commits.
     """
     async with get_session() as session:
-        m = await add_memory(
+        m = await save_memory_single(
             session,
             owner,
             fact=fact,
@@ -120,9 +122,10 @@ async def _make_memory(
             memory_type=memory_type,
             pinned=pinned,
             **kwargs,
+            source="chat",
         )
         if m is None:
-            raise RuntimeError(f"add_memory returned None for fact={fact!r}")
+            raise RuntimeError(f"save_memory_single returned None for fact={fact!r}")
         if temporal_layer is not None:
             m.temporal_layer = temporal_layer
         if not is_active:
@@ -487,7 +490,7 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "confirm")
+            result = await apply_nudge_decision(session, owner, mem.id, "confirm")
         assert result is True
 
         async with get_session() as session:
@@ -505,7 +508,7 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "confirm")
+            result = await apply_nudge_decision(session, owner, mem.id, "confirm")
         assert result is True
 
         async with get_session() as session:
@@ -523,7 +526,7 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "confirm")
+            result = await apply_nudge_decision(session, owner, mem.id, "confirm")
         assert result is True
 
         async with get_session() as session:
@@ -547,7 +550,7 @@ class TestApplyNudgeDecision:
         before = datetime.now(UTC).replace(tzinfo=None)
 
         async with get_session() as session:
-            await apply_nudge_decision(session, mem.id, "confirm")
+            await apply_nudge_decision(session, owner, mem.id, "confirm")
 
         async with get_session() as session:
             updated = await session.get(Memory, mem.id)
@@ -568,7 +571,7 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "forget")
+            result = await apply_nudge_decision(session, owner, mem.id, "forget")
         assert result is True
 
         async with get_session() as session:
@@ -588,7 +591,7 @@ class TestApplyNudgeDecision:
         before = datetime.now(UTC).replace(tzinfo=None)
 
         async with get_session() as session:
-            await apply_nudge_decision(session, mem.id, "forget")
+            await apply_nudge_decision(session, owner, mem.id, "forget")
 
         async with get_session() as session:
             updated = await session.get(Memory, mem.id)
@@ -606,7 +609,7 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            await apply_nudge_decision(session, mem.id, "forget")
+            await apply_nudge_decision(session, owner, mem.id, "forget")
 
         async with get_session() as session:
             updated = await session.get(Memory, mem.id)
@@ -628,6 +631,7 @@ class TestApplyNudgeDecision:
         async with get_session() as session:
             result = await apply_nudge_decision(
                 session,
+                owner,
                 mem.id,
                 "edit",
                 new_fact="updated fact",
@@ -651,6 +655,7 @@ class TestApplyNudgeDecision:
         async with get_session() as session:
             result = await apply_nudge_decision(
                 session,
+                owner,
                 mem.id,
                 "edit",
                 new_fact="versioned fact",
@@ -683,6 +688,7 @@ class TestApplyNudgeDecision:
         async with get_session() as session:
             await apply_nudge_decision(
                 session,
+                owner,
                 mem.id,
                 "edit",
                 new_fact="revised fact",
@@ -706,13 +712,14 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "bogus_action")
+            result = await apply_nudge_decision(session, owner, mem.id, "bogus_action")
         assert result is False
 
     async def test_nonexistent_memory_returns_false(self):
         """Non-existent memory_id returns False for any action."""
+        fake_user = SimpleNamespace(id=1)
         async with get_session() as session:
-            result = await apply_nudge_decision(session, 99999, "confirm")
+            result = await apply_nudge_decision(session, fake_user, 99999, "confirm")
         assert result is False
 
     async def test_edit_without_new_fact_returns_false(self):
@@ -726,7 +733,7 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "edit")
+            result = await apply_nudge_decision(session, owner, mem.id, "edit")
         assert result is False
 
     async def test_forget_already_inactive_still_succeeds(self):
@@ -741,7 +748,7 @@ class TestApplyNudgeDecision:
             is_active=False,
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "forget")
+            result = await apply_nudge_decision(session, owner, mem.id, "forget")
         assert result is True
 
     async def test_confirm_on_inactive_returns_false(self):
@@ -756,7 +763,7 @@ class TestApplyNudgeDecision:
             is_active=False,
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "confirm")
+            result = await apply_nudge_decision(session, owner, mem.id, "confirm")
         assert result is False
 
     async def test_edit_with_empty_new_fact_returns_false(self):
@@ -770,7 +777,9 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "edit", new_fact="")
+            result = await apply_nudge_decision(
+                session, owner, mem.id, "edit", new_fact=""
+            )
         assert result is False
 
     async def test_edit_with_whitespace_only_new_fact(self):
@@ -784,17 +793,20 @@ class TestApplyNudgeDecision:
             temporal_layer="medium",
         )
         async with get_session() as session:
-            result = await apply_nudge_decision(session, mem.id, "edit", new_fact="   ")
+            result = await apply_nudge_decision(
+                session, owner, mem.id, "edit", new_fact="   "
+            )
         # update_memory_text may accept or reject whitespace; either is fine
         # The key is that the function doesn't crash
         assert result is False or result is True
 
     async def test_negative_memory_id_returns_false(self):
         """Memory ID of 0 or negative returns False (not found)."""
+        fake_user = SimpleNamespace(id=1)
         async with get_session() as session:
-            result = await apply_nudge_decision(session, 0, "confirm")
+            result = await apply_nudge_decision(session, fake_user, 0, "confirm")
         assert result is False
 
         async with get_session() as session:
-            result = await apply_nudge_decision(session, -1, "confirm")
+            result = await apply_nudge_decision(session, fake_user, -1, "confirm")
         assert result is False

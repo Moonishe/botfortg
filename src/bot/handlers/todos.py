@@ -7,11 +7,11 @@ from src.bot.filters import OwnerOnly
 from src.core.infra.timeutil import fmt_local
 from src.db.models import Commitment
 from src.db.repo import (
-    add_memory,
     get_or_create_user,
     list_open_commitments,
-    update_commitment_status,
+    update_commitment_status
 )
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 
 
@@ -67,14 +67,14 @@ async def cb_done(callback: CallbackQuery) -> None:
         if c:
             await update_commitment_status(session, cid, "done")
             owner = await get_or_create_user(session, callback.from_user.id)
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=f"Выполнено: {c.text}",
                 source="commitment",
                 memory_type="task",
                 contact_id=c.peer_id,
-            )
+                confidence=0.5)
     if callback.message:
         await callback.message.edit_text(callback.message.html_text + "\n\n✅ Готово")
     await callback.answer()

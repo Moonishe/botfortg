@@ -10,7 +10,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.core.actions.conflict_resolver import find_conflicts
 from src.db.repo import get_or_create_user, list_memories, get_memory_graph
 from src.db.session import get_session
@@ -126,7 +126,7 @@ async def _resolve_contact(owner_id: int, contact_name: str, userbot_manager=Non
 
     client = userbot_manager.get_client(owner_id) if userbot_manager else None
     if client is not None:
-        candidates = await resolve(client, owner, contact_name)
+        candidates = await resolve_contact_fast(client, owner, contact_name)
         if candidates:
             return candidates[0].peer_id, candidates[0].label()
     return None, ""

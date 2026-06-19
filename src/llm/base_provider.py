@@ -25,8 +25,10 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from src.llm.base import ChatMessage
+from src.llm.tool_calling.models import ChatResponse, ToolDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +85,60 @@ class BaseLLMProvider(ABC):
         """
         return self._model or (self._HEAVY_MODEL if heavy else self._LIGHT_MODEL)
 
-    def _fmt_messages(self, messages: list[ChatMessage]) -> list[dict]:
+    def _fmt_messages(self, messages: list[ChatMessage]) -> list[dict[str, Any]]:
         """Конвертирует ChatMessage → OpenAI-совместимый формат.
 
         Каждый ChatMessage становится {"role": ..., "content": ...}.
+        Tool-related fields (tool_calls, tool_call_id, name) are included when present.
         Провайдеры с нестандартным форматом (Anthropic, Gemini) переопределяют этот метод.
         """
-        return [{"role": m.role, "content": m.content} for m in messages]
+        result: list[dict[str, Any]] = []
+        for m in messages:
+            msg: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.tool_calls:
+                msg["tool_calls"] = m.tool_calls
+            if m.tool_call_id:
+                msg["tool_call_id"] = m.tool_call_id
+            if m.name:
+                msg["name"] = m.name
+            result.append(msg)
+        return result
+
+    @staticmethod
+    def _tools_to_openai(
+        tools: list[ToolDefinition],
+    ) -> list[dict[str, Any]]:
+        """Convert ToolDefinition list to OpenAI function-calling format."""
+        result: list[dict[str, Any]] = []
+        for tool in tools:
+            result.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+            )
+        return result
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition] | None = None,
+        *,
+        task_type: str = "default",
+    ) -> ChatResponse:
+        """Chat completion with tool definitions. Default: raises NotImplementedError.
+
+        OpenAI-compatible providers override this to send ``tools=...``
+        and parse ``choice.message.tool_calls``.
+
+        Returns:
+            ChatResponse with optional tool_calls.
+        """
+        raise NotImplementedError(f"chat_with_tools not supported by {self.name}")
 
     # ── Абстрактные методы ────────────────────────────────────────────
 

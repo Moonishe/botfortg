@@ -2,7 +2,16 @@ import logging
 from typing import Any
 
 from aiogram.filters import BaseFilter
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    ChatJoinRequest,
+    ChatMemberUpdated,
+    ChosenInlineResult,
+    InlineQuery,
+    Message,
+    PreCheckoutQuery,
+    ShippingQuery,
+)
 
 from src.config import settings
 from src.core.onboarding import get_onboarding_phase, is_onboarded  # re-export
@@ -21,7 +30,18 @@ logger = logging.getLogger(__name__)
 class OwnerOnlyStrict(BaseFilter):
     """Допускает только владельца (не paired-контакты)."""
 
-    async def __call__(self, event: Message | CallbackQuery) -> bool:
+    async def __call__(
+        self,
+        event: Message
+        | CallbackQuery
+        | InlineQuery
+        | ChatMemberUpdated
+        | ChosenInlineResult
+        | ChatJoinRequest
+        | PreCheckoutQuery
+        | ShippingQuery,
+        **kwargs: Any,
+    ) -> bool:
         if event.from_user is None:
             return False
         owner_id = settings.owner_telegram_id
@@ -43,7 +63,18 @@ class OwnerOnly(BaseFilter):
     защита от случайного открытия доступа всем.
     """
 
-    async def __call__(self, event: Message | CallbackQuery, **kwargs: Any) -> bool:
+    async def __call__(
+        self,
+        event: Message
+        | CallbackQuery
+        | InlineQuery
+        | ChatMemberUpdated
+        | ChosenInlineResult
+        | ChatJoinRequest
+        | PreCheckoutQuery
+        | ShippingQuery,
+        **kwargs: Any,
+    ) -> bool:
         # Канальные посты приходят с from_user=None — явно отклоняем
         if event.from_user is None:
             return False

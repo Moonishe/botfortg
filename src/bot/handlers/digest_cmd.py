@@ -13,7 +13,8 @@ from src.bot.filters import OwnerOnly
 from src.core.scheduling.digest import build_digest
 from src.core.scheduling.smart_digest import build_smart_digest, collect_recent_messages
 from src.core.infra.timeutil import HM_RE, tz_short
-from src.db.repo import add_memory, get_or_create_user, list_contacts
+from src.db.repo import get_or_create_user, list_contacts
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 
 
@@ -191,14 +192,15 @@ async def cmd_weekly(message: Message) -> None:
         for c in contacts[:10]:
             facts = await summarize_contact_week(provider, message.from_user.id, c)
             for f in facts:
-                await add_memory(
+                await save_memory_single(
                     session,
                     owner,
                     fact=f.get("fact", ""),
                     contact_id=c.peer_id,
                     sentiment=f.get("sentiment"),
                     source="weekly",
-                )
+                    confidence=0.5,
+                    memory_type=None)
                 total += 1
         await message.answer(
             f"✅ Готово! {total} фактов сохранено в память "

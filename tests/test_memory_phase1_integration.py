@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.db.session import get_session
-from src.db.repo import add_memory, get_or_create_user, link_memories
+from src.db.repo import get_or_create_user, link_memories
+from src.core.memory.memory_service import save_memory_single
 from src.core.memory.pre_filter import should_extract, score_transcript
 from src.core.memory.memory_chain import (
     follow_supersedes_chain,
@@ -52,13 +53,13 @@ async def _make_memory(owner, fact: str, created_offset_sec: int = 0):
     from src.db.models import Memory
 
     async with get_session() as session:
-        m = await add_memory(
+        m = await save_memory_single(
             session,
             owner,
             fact=fact,
             source="chat",
             confidence=0.9,
-        )
+            memory_type=None)
         if m is None:
             return None
         new_ts = datetime.now(timezone.utc) - timedelta(seconds=created_offset_sec)

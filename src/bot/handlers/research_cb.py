@@ -36,7 +36,8 @@ from src.core.infra.key_guard import safe_str
 from src.core.actions.mcp_tools import _safe_resolve
 from src.core.rag.deep_research_pipeline import get_deep_research_pipeline
 from src.core.rag.types import ResearchResult
-from src.db.repo import add_memory, get_or_create_user
+from src.db.repo import get_or_create_user
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 
 
@@ -376,15 +377,14 @@ async def cb_research_save_memory(callback: CallbackQuery) -> None:
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, callback.from_user.id)
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=f"[Исследование: {result.query[:120]}]: {memory_fact}",
                 source="research",
                 confidence=0.7,
                 importance=0.6,
-                memory_type="fact",
-            )
+                memory_type="fact",)
     except Exception:
         logger.exception(
             "Failed to save research memory for job %s, user %d",

@@ -11,13 +11,15 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.callback_utils import safe_callback_edit
 from src.bot.filters import OwnerOnly
 from src.core.infra.rate_limiter import check_rate_limit
 from src.bot.handlers.free_text_common import _confirm_keyboard
 from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
-from src.core.contacts.contact_resolver import ContactCandidate, resolve
+from src.bot.contact_resolver import ContactCandidate, resolve_contact_fast
 from src.core.contacts.send_guard import build_send_guard
 from src.core.security import approval
+from src.core.security.prompt_guard import fence_user_text
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
     create_pending_action,
@@ -166,7 +168,7 @@ async def cmd_send(
             parsed_raw = await provider.chat(
                 [
                     ChatMessage(role="system", content=PARSE_SYSTEM),
-                    ChatMessage(role="user", content=raw),
+                    ChatMessage(role="user", content=fence_user_text(raw)),
                 ],
                 task_type=TaskType.DEFAULT,
             )
@@ -188,7 +190,7 @@ async def cmd_send(
     if owner is None:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-    candidates = await resolve(client, owner, recipient_query)
+    candidates = await resolve_contact_fast(client, owner, recipient_query)
     if not candidates:
         await message.answer(
             sanitize_html(
@@ -309,15 +311,15 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
         logger.warning("send guard failed", exc_info=True)
 
     await state.clear()
-    if callback.message:
-        await callback.message.edit_text(
-            sanitize_html(
-                f"🤔 <b>Готов отправить</b>\n\n"
-                f"→ <b>Кому:</b> {label}\n"
-                f"→ <b>Текст:</b>\n{text}{guard_hint}"
-            ),
-            reply_markup=_confirm_keyboard(action.id, sig),
-        )
+    await safe_callback_edit(
+        callback,
+        sanitize_html(
+            f"🤔 <b>Готов отправить</b>\n\n"
+            f"→ <b>Кому:</b> {label}\n"
+            f"→ <b>Текст:</b>\n{text}{guard_hint}"
+        ),
+        reply_markup=_confirm_keyboard(action.id, sig),
+    )
     await callback.answer()
 
 
@@ -349,8 +351,7 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
             user = await get_or_create_user(session, callback.from_user.id)
             await delete_pending_action(session, action_id, user)
     await state.clear()
-    if callback.message:
-        await callback.message.edit_text("❌ Отправка отменена. 🚫")
+    await safe_callback_edit(callback, "❌ Отправка отменена. 🚫")
     await callback.answer()
 
 
@@ -367,9 +368,13 @@ async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(SendStates.waiting_edit)
     await state.set_data({"action_id": action_id})
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.answer("Введи новый текст сообщения. /cancel — отмена.")
-    await callback.answer()
+        await callback.answer()
+    else:
+        await callback.answer(
+            "Введи новый текст сообщения. /cancel — отмена.", show_alert=True
+        )
 
 
 @router.message(SendStates.waiting_edit)
@@ -548,12 +553,12 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
                     await callback.answer(
                         "❌ Ошибка отправки. Попробуй ещё раз.", show_alert=True
                     )
-                    if callback.message:
-                        await callback.message.edit_text(
-                            sanitize_html(
-                                "❌ Не удалось отправить сообщение. Попробуй ещё раз"
-                            )
-                        )
+                    await safe_callback_edit(
+                        callback,
+                        sanitize_html(
+                            "❌ Не удалось отправить сообщение. Попробуй ещё раз"
+                        ),
+                    )
                     return
 
                 # M-44: удаляем PendingAction только после успешной отправки.
@@ -596,18 +601,19 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
 
     after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
 
-    if callback.message:
-        await callback.message.edit_text(
-            sanitize_html(f"✅ Отправлено «{label}»: {snippet}"), reply_markup=after_kb
-        )
+    await safe_callback_edit(
+        callback,
+        sanitize_html(f"✅ Отправлено «{label}»: {snippet}"),
+        reply_markup=after_kb,
+    )
     await callback.answer("Отправлено")
 
 
 @router.callback_query(F.data.startswith("send:again:"))
 async def cb_send_again(callback: CallbackQuery) -> None:
     await callback.answer("Открой меню отправки")
-    if callback.message:
-        await callback.message.edit_text(
-            "✏️ Используй /chat или отправь сообщение напрямую чтобы написать ещё.",
-            reply_markup=smart_post_action_keyboard("general"),
-        )
+    await safe_callback_edit(
+        callback,
+        "✏️ Используй /chat или отправь сообщение напрямую чтобы написать ещё.",
+        reply_markup=smart_post_action_keyboard("general"),
+    )

@@ -12,7 +12,7 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
+from src.llm._openai_compat_mixin import OpenAICompatBaseMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -23,7 +23,7 @@ GROK_CHAT_LIGHT = "grok-4.3"
 GROK_CHAT_HEAVY = "grok-4.20-0309-reasoning"
 
 
-class GrokProvider(OpenAICompatBaseMixin, BaseLLMProvider):
+class GrokProvider(OpenAICompatToolMixin, OpenAICompatBaseMixin, BaseLLMProvider):
     """Провайдер для Grok (xAI) — OpenAI-совместимый API. Без embeddings."""
 
     name = "grok"

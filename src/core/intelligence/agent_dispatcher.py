@@ -12,6 +12,8 @@ import importlib
 import logging
 from typing import Any
 
+from sqlalchemy import select
+
 from src.core.infra.key_guard import safe_str
 from src.db.repo import (
     fetch_my_messages_global,
@@ -54,10 +56,62 @@ async def _invoke_search(func, provider, query, owner_id, **kwargs):
 async def _invoke_memory(func, provider, query, owner_id, **kwargs):
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
-        facts_obj = await search_memories(session, owner, query)
-        facts_list = [m.fact for m in facts_obj] if facts_obj else []
+        facts_list = await _hybrid_memory_facts(session, owner, query)
     data = await func(provider, query, facts_list)
     return {"data": data, "success": True}
+
+
+async def _hybrid_memory_facts(
+    session, owner, query: str, *, limit: int = 10
+) -> list[str]:
+    """Hybrid search: FTS5 + vector + RRF fusion → scored fact strings.
+
+    Falls back to FTS5-only if vector store or embedding is unavailable.
+    Returns list of formatted fact strings with relevance scores.
+    """
+    # 1. Skip empty queries
+    if not query or not query.strip():
+        return []
+
+    # 2. Hybrid search via shared function (Issue 4 dedup)
+    from src.core.memory.hybrid_search import search_memories_hybrid
+
+    fused = await search_memories_hybrid(
+        session,
+        owner,
+        query,
+        limit=limit,
+    )
+
+    # 3. Batch-fetch fact texts (avoid N+1)
+    facts: list[str] = []
+    fetched: set[int] = set()
+    fact_lookup: dict[int, str] = {}
+
+    missing_ids = [mid for mid, _ in fused[:limit]]
+    if missing_ids:
+        from src.db.models import Memory
+
+        rows = await session.execute(
+            select(Memory.id, Memory.fact).where(Memory.id.in_(missing_ids)),
+        )
+        for mid, fact_text in rows.all():
+            fact_lookup[mid] = fact_text or ""
+
+    for mem_id, score in fused[:limit]:
+        fact = fact_lookup.get(mem_id)
+        if fact and mem_id not in fetched:
+            fetched.add(mem_id)
+            facts.append(f"{fact} (score: {score:.0%})")
+
+    # 4. Fallback to FTS5 without scores if no results
+    if not facts:
+        from src.db.repo import search_memories
+
+        facts_obj = await search_memories(session, owner, query)
+        facts = [m.fact for m in facts_obj] if facts_obj else []
+
+    return facts
 
 
 async def _invoke_urgency(func, _provider, query, _owner_id, **kwargs):
@@ -327,5 +381,5 @@ async def _execute_agents_parallel(
                 }
             )
         else:
-            results.append(r)
+            results.append(r)  # type: ignore[arg-type]  # isinstance narrows to dict
     return results

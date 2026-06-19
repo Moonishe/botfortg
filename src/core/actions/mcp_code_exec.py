@@ -5,6 +5,7 @@ import logging
 from typing import Any
 import ast
 
+from src.config import settings
 from src.core.actions.tool_registry import tool
 from src.core.infra.key_guard import safe_str
 
@@ -53,49 +54,6 @@ _SANDBOX_BLACKLIST = frozenset(
         "gc",
         "issubclass",
         "isinstance",
-    }
-)
-
-_SANDBOX_ALLOWED_NODES = frozenset(
-    {
-        ast.Expression,
-        ast.Call,
-        ast.Name,
-        ast.Constant,
-        ast.Load,
-        ast.BinOp,
-        ast.UnaryOp,
-        ast.Compare,
-        ast.BoolOp,
-        ast.Add,
-        ast.Sub,
-        ast.Mult,
-        ast.Div,
-        ast.Mod,
-        ast.Pow,
-        ast.Eq,
-        ast.NotEq,
-        ast.Lt,
-        ast.LtE,
-        ast.Gt,
-        ast.GtE,
-        ast.And,
-        ast.Or,
-        ast.Not,
-        ast.Attribute,
-        ast.Subscript,
-        ast.Index,
-        ast.Slice,
-        ast.Tuple,
-        ast.List,
-        ast.Set,
-        ast.Dict,
-        ast.ListComp,
-        ast.SetComp,
-        ast.DictComp,
-        ast.GeneratorExp,
-        ast.comprehension,
-        ast.IfExp,
     }
 )
 
@@ -179,9 +137,26 @@ _DISALLOWED_IMPORTS = {
     "threading",
     "signal",
     "io",
+    "pickle",
+    "marshal",
+    "code",
+    "codeop",
+    "inspect",
+    "traceback",
+    "pdb",
+    "runpy",
+    "fcntl",
+    "posix",
+    "nt",
+    "_thread",
+    "pty",
+    "atexit",
+    "faulthandler",
 }
 
-# Места для подстановки: __DISALLOWED__ — repr(list) запрещённого,
+# Места для подстановки: __DISALLOWED__ — repr(tuple) запрещённого (tuple —
+# иммутабелен, чтобы пользовательский код не мог очистить блок-лист через
+# builtins.__import__.__defaults__[0].clear()),
 # __USER_CODE__ — индентированный код пользователя.
 _WRAPPER_TEMPLATE = """\
 import builtins
@@ -230,9 +205,9 @@ for name in _DISALLOWED:
 
 _original_import = builtins.__import__
 
-
-def _safe_import(name, *args, **kwargs):
-    if name.split(".")[0] in _DISALLOWED:
+# Capture _DISALLOWED in closure via default arg so it survives `del` below.
+def _safe_import(name, *args, _blocked=_DISALLOWED, **kwargs):
+    if name.split(".")[0] in _blocked:
         raise ImportError(f"Module '{name}' is not allowed in sandbox")
     return _original_import(name, *args, **kwargs)
 
@@ -246,6 +221,7 @@ builtins.open = None
 _stderr = sys.stderr
 
 # Скрываем внутренние переменные от пользовательского кода
+# ponytail: _DISALLOWED captured via default arg in _safe_import, safe to del here
 del _original_import, _safe_import, _SAFE_BUILTINS, _DISALLOWED, builtins, sys
 
 # Выполняем код пользователя
@@ -258,6 +234,35 @@ except TimeoutError:
 except Exception as e:
     print(f"Error: {type(e).__name__}: {e}", file=_stderr)
 """
+
+
+async def _run_code_in_sandbox(wrapper: str, timeout: int) -> dict[str, Any]:
+    """Execute *wrapper* inside a Docker sandbox via :class:`SandboxManager`."""
+    from src.core.sandbox import SandboxManager
+
+    manager = SandboxManager(settings)
+    try:
+        result = await manager.exec(
+            ["python", "-c", wrapper],
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        return {"error": safe_str(exc)[:300]}
+
+    stdout = (result["stdout"] or "").strip()
+    stderr = (result["stderr"] or "").strip()
+
+    if result["returncode"] != 0 or stderr:
+        return {
+            "ok": False,
+            "output": stdout[:2000] if stdout else "",
+            "error": stderr[:1000] if stderr else f"Exit code {result['returncode']}",
+        }
+
+    return {
+        "ok": True,
+        "output": stdout[:2000],
+    }
 
 
 @tool(
@@ -296,10 +301,13 @@ async def code_exec(
 
     # Подставляем запрещённые импорты и код пользователя в шаблон
     wrapper = _WRAPPER_TEMPLATE.replace(
-        "__DISALLOWED__", repr(list(_DISALLOWED_IMPORTS))
+        "__DISALLOWED__", repr(tuple(_DISALLOWED_IMPORTS))
     ).replace("__USER_CODE__", indented)
 
-    # Запускаем в subprocess с ограничениями
+    # Запускаем в subprocess с ограничениями (или в Docker-песочнице)
+    if settings.sandbox_enabled:
+        return await _run_code_in_sandbox(wrapper, timeout)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "python",

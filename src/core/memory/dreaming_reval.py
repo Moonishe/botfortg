@@ -26,7 +26,7 @@ Safety nets:
   - LLM errors fall back to "skip" (no destructive changes)
   - Empty / malformed / out-of-whitelist actions are dropped
   - Pinned facts are NEVER touched (user explicit opt-out)
-  - New fact must pass ``add_memory()`` dedup (won't create duplicates)
+  - New fact must pass ``save_memory_single`` dedup (won't create duplicates)
 
 DB helpers live in :mod:`src.core.memory.memory_admin`;
 history / rollback functions live in :mod:`src.core.memory.dreaming_reval_history`.
@@ -57,6 +57,7 @@ from src.core.memory.memory_admin import (
 )
 from src.core.security.prompt_injection_scanner import scan_content
 from src.db.models._memory import Memory
+from src.db.models._base import User
 
 if TYPE_CHECKING:
     from src.llm.base import LLMProvider
@@ -268,7 +269,7 @@ async def reval_fact(
 
 async def apply_reval_result(
     session: AsyncSession,
-    user,
+    user: User,
     fact: Memory,
     parsed: dict[str, Any] | None,
     *,
@@ -277,8 +278,8 @@ async def apply_reval_result(
     """Apply parsed LLM decision to a fact. Returns RevalResult with outcome.
 
     Actions:
-      - ``past``:       create new fact via ``add_memory()``, supersede old
-      - ``permanent``:  create new fact via ``add_memory()``, supersede old
+      - ``past``:       create new fact via ``save_memory_single``, supersede old
+      - ``permanent``:  create new fact via ``save_memory_single``, supersede old
       - ``invalid``:    deactivate old fact
       - ``skip``:       do nothing
       - ``parsed=None``: treat as skip
@@ -313,12 +314,15 @@ async def apply_reval_result(
 
             await save_memory_version(
                 session,
+                user,
                 fact.id,
                 fact.fact,
                 edited_by="agent",
                 reason="reval_invalid",
             )
-            await deactivate_memory(session, fact.id, reason="reval_invalid")
+            await deactivate_memory(
+                session, fact.id, reason="reval_invalid", user_id=user.id
+            )
         except Exception as exc:
             logger.exception(
                 "apply_reval_result: invalid deactivate failed for fact %d", fact.id
@@ -328,7 +332,7 @@ async def apply_reval_result(
         return base
 
     # past / permanent → create new fact and supersede old
-    # (шаги 2-3: add_memory + supersedes_link + deactivate — атомарно
+    # (шаги 2-3: save_memory_single + supersedes_link + deactivate — атомарно
     # в рамках сессии вызывающего)
     # Use explicit ``is not None`` (not ``or``) so legitimate falsy values
     # (e.g. decay_rate=0.01, empty string) are preserved instead of
@@ -362,9 +366,9 @@ async def apply_reval_result(
     try:
         # Атомарное создание нового факта + supersedes-связь + деактивация старого
         # в рамках сессии вызывающего. При ошибке откатываем всю сессию.
-        from src.db.repos.memory_repo import add_memory
+        from src.core.memory.memory_service import save_memory_single
 
-        new_mem = await add_memory(
+        new_mem = await save_memory_single(
             session,
             user,
             fact=updated,
@@ -391,20 +395,25 @@ async def apply_reval_result(
 
             await save_memory_version(
                 session,
+                user,
                 fact.id,
                 fact.fact,
                 edited_by="agent",
                 reason="superseded_by_reval",
             )
             # Deactivate old fact to keep recall clean
-            await deactivate_memory(session, fact.id, reason="superseded_by_reval")
+            await deactivate_memory(
+                session, fact.id, reason="superseded_by_reval", user_id=user.id
+            )
         elif new_mem and new_mem.id == fact.id:
             # Dedup caught it — fact already exists in some form. Leave alone.
             base.reason = (base.reason or "") + " [dedup: same fact exists]"
     except Exception as exc:
-        logger.exception("apply_reval_result: add_memory failed for fact %d", fact.id)
+        logger.exception(
+            "apply_reval_result: save_memory_single failed for fact %d", fact.id
+        )
         await session.rollback()
-        base.error = f"add_memory failed: {exc}"
+        base.error = f"save_memory_single failed: {exc}"
         return base
 
     return base
@@ -477,7 +486,7 @@ async def _reval_run_impl(
     Semaphore bounding concurrent LLM calls. Each fact gets its own session
     for the apply step because AsyncSession is NOT safe for concurrent awaits.
 
-    Per-fact session is safe: ``add_memory()`` holds a per-user lock
+    Per-fact session is safe: ``save_memory_single`` holds a per-user lock
     internally, so concurrent calls for the same owner serialize at insert,
     but the LLM calls themselves run in parallel (the actual bottleneck).
 
@@ -648,7 +657,7 @@ async def _reval_run_impl(
         from src.core.memory.memory_recall import bump_recall_version
 
         await invalidate("mem_")
-        await bump_recall_version(owner.telegram_id)
+        await bump_recall_version(owner_telegram_id)
     except Exception:
         logger.warning(
             "Dreaming reval: recall cache invalidation failed", exc_info=True
@@ -683,7 +692,7 @@ async def _process_one_fact(
       2. DB apply in a fresh ``get_session()`` context (auto-commits on exit).
 
     Per-fact session is required: ``AsyncSession`` is NOT safe for concurrent
-    awaits on the same instance.  Concurrent ``add_memory()`` calls for the
+    awaits on the same instance.  Concurrent ``save_memory_single`` calls for the
     same owner serialize internally via the per-user lock from
     ``_get_user_lock(user.id)`` — see ``src/db/repos/memory_repo.py:307``.
 

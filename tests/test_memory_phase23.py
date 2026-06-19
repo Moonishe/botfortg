@@ -364,7 +364,8 @@ async def test_worldview_empty_user(setup_env):
 async def test_worldview_categorization(setup_env):
     await _reset_db()
 
-    from src.db.repo import get_or_create_user, add_memory
+    from src.db.repo import get_or_create_user
+    from src.core.memory.memory_service import save_memory_single
     from src.db.session import get_session
 
     async with get_session() as session:
@@ -381,7 +382,9 @@ async def test_worldview_categorization(setup_env):
     ]
     async with get_session() as session:
         for fact in facts:
-            await add_memory(session, owner, fact=fact, source="test")
+            await save_memory_single(session, owner, fact=fact, source="test",
+                confidence=0.5,
+                memory_type=None)
 
     from src.core.memory.user_worldview import build_worldview
 
@@ -407,12 +410,15 @@ async def test_worldview_categorization(setup_env):
 async def test_worldview_summary(setup_env):
     await _reset_db()
 
-    from src.db.repo import get_or_create_user, add_memory
+    from src.db.repo import get_or_create_user
+    from src.core.memory.memory_service import save_memory_single
     from src.db.session import get_session
 
     async with get_session() as session:
         owner = await get_or_create_user(session, 99001)
-        await add_memory(session, owner, fact="Я люблю кофе", source="test")
+        await save_memory_single(session, owner, fact="Я люблю кофе", source="test",
+            confidence=0.5,
+            memory_type=None)
 
     from src.core.memory.user_worldview import build_worldview
 
@@ -446,14 +452,21 @@ async def test_system2_empty_user(setup_env):
 async def test_system2_with_facts(setup_env):
     await _reset_db()
 
-    from src.db.repo import get_or_create_user, add_memory, link_memories
+    from src.db.repo import get_or_create_user, link_memories
+    from src.core.memory.memory_service import save_memory_single
     from src.db.session import get_session
 
     async with get_session() as session:
         owner = await get_or_create_user(session, 99001)
-        m1 = await add_memory(session, owner, fact="Я работаю в Google", source="test")
-        m2 = await add_memory(session, owner, fact="Я работаю в Яндексе", source="test")
-        m3 = await add_memory(session, owner, fact="Я люблю Python", source="test")
+        m1 = await save_memory_single(session, owner, fact="Я работаю в Google", source="test",
+            confidence=0.5,
+            memory_type=None)
+        m2 = await save_memory_single(session, owner, fact="Я работаю в Яндексе", source="test",
+            confidence=0.5,
+            memory_type=None)
+        m3 = await save_memory_single(session, owner, fact="Я люблю Python", source="test",
+            confidence=0.5,
+            memory_type=None)
 
     if m1 and m2:
         async with get_session() as session:
@@ -486,15 +499,19 @@ async def test_system2_with_facts(setup_env):
 async def test_system2_supersedes_chain(setup_env):
     await _reset_db()
 
-    from src.db.repo import get_or_create_user, add_memory, link_memories
+    from src.db.repo import get_or_create_user, link_memories
+    from src.core.memory.memory_service import save_memory_single
     from src.db.session import get_session
 
     async with get_session() as session:
         owner = await get_or_create_user(session, 99001)
-        m1 = await add_memory(session, owner, fact="Я пью кофе", source="test")
-        m2 = await add_memory(
-            session, owner, fact="Я перестал пить кофе", source="test"
-        )
+        m1 = await save_memory_single(session, owner, fact="Я пью кофе", source="test",
+            confidence=0.5,
+            memory_type=None)
+        m2 = await save_memory_single(
+            session, owner, fact="Я перестал пить кофе", source="test",
+            confidence=0.5,
+            memory_type=None)
 
     if m1 and m2:
         async with get_session() as session:
@@ -525,15 +542,24 @@ async def test_system2_supersedes_chain(setup_env):
 async def test_system2_insights(setup_env):
     await _reset_db()
 
-    from src.db.repo import get_or_create_user, add_memory, link_memories
+    from src.db.repo import get_or_create_user, link_memories
+    from src.core.memory.memory_service import save_memory_single
     from src.db.session import get_session
 
     async with get_session() as session:
         owner = await get_or_create_user(session, 99001)
-        m1 = await add_memory(session, owner, fact="Я люблю кофе", source="test")
-        m2 = await add_memory(session, owner, fact="Я не люблю кофе", source="test")
-        m3 = await add_memory(session, owner, fact="Кофе вреден", source="test")
-        m4 = await add_memory(session, owner, fact="Пью чай", source="test")
+        m1 = await save_memory_single(session, owner, fact="Я люблю кофе", source="test",
+            confidence=0.5,
+            memory_type=None)
+        m2 = await save_memory_single(session, owner, fact="Я не люблю кофе", source="test",
+            confidence=0.5,
+            memory_type=None)
+        m3 = await save_memory_single(session, owner, fact="Кофе вреден", source="test",
+            confidence=0.5,
+            memory_type=None)
+        m4 = await save_memory_single(session, owner, fact="Пью чай", source="test",
+            confidence=0.5,
+            memory_type=None)
 
     if m1 and m2 and m3 and m4:
         async with get_session() as session:

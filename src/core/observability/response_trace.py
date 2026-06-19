@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,27 @@ _SECRET_KEYS = (
     "secret",
     "token",
 )
+
+
+@dataclass(slots=True)
+class ResponseRouteMetrics:
+    """Aggregated latency metrics for one assistant response route."""
+
+    route: str
+    call_count: int = 0
+    total_latency_ms: int = 0
+    max_latency_ms: int = 0
+    last_latency_ms: int = 0
+
+    @property
+    def avg_latency_ms(self) -> float:
+        if self.call_count <= 0:
+            return 0.0
+        return round(self.total_latency_ms / self.call_count, 1)
+
+
+_ROUTE_METRICS: dict[str, ResponseRouteMetrics] = {}
+_MAX_ROUTES = 50
 
 
 def _redact(value: Any) -> Any:
@@ -72,6 +94,49 @@ def _tool_names(items: Iterable[Any] | None) -> list[str]:
     return names[:20]
 
 
+def _record_latency(route: str, latency_ms: int | None) -> None:
+    if latency_ms is None or latency_ms < 0:
+        return
+    key = (route or "unknown")[:80]
+    metrics = _ROUTE_METRICS.get(key)
+    if metrics is None:
+        if len(_ROUTE_METRICS) >= _MAX_ROUTES:
+            oldest = min(
+                _ROUTE_METRICS.items(), key=lambda item: item[1].call_count
+            )[0]
+            del _ROUTE_METRICS[oldest]
+        metrics = ResponseRouteMetrics(route=key)
+        _ROUTE_METRICS[key] = metrics
+    metrics.call_count += 1
+    metrics.total_latency_ms += latency_ms
+    metrics.last_latency_ms = latency_ms
+    metrics.max_latency_ms = max(metrics.max_latency_ms, latency_ms)
+
+
+def get_response_trace_metrics() -> dict[str, Any]:
+    """Return a read-only snapshot of response route latency metrics."""
+    routes = [
+        {
+            "route": m.route,
+            "calls": m.call_count,
+            "avg_ms": m.avg_latency_ms,
+            "max_ms": m.max_latency_ms,
+            "last_ms": m.last_latency_ms,
+        }
+        for m in _ROUTE_METRICS.values()
+    ]
+    routes.sort(key=lambda item: (item["avg_ms"], item["calls"]), reverse=True)
+    return {
+        "routes": routes,
+        "total_calls": sum(int(item["calls"]) for item in routes),
+    }
+
+
+def reset_response_trace_metrics_for_test() -> None:
+    """Clear response metrics. Intended for tests only."""
+    _ROUTE_METRICS.clear()
+
+
 def log_response_trace(
     *,
     route: str,
@@ -84,15 +149,18 @@ def log_response_trace(
     guardrail_decision: dict[str, Any] | None = None,
     humanizer_mode: str = "off",
     humanizer_changed: bool = False,
+    latency_ms: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
     """Emit a compact response trace without user text or secrets."""
 
+    _record_latency(route, latency_ms)
     sources = set(context_sources or [])
     sources.update(_context_sources(memory_context))
     payload = {
         "route": route,
         "owner_id": owner_id,
+        "latency_ms": latency_ms,
         "context_sources": sorted(sources),
         "memory_facts_count": _count_memory_facts(memory_context),
         "tools_proposed": _tool_names(tools_proposed),

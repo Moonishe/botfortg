@@ -10,7 +10,7 @@ from src.bot.filters import OwnerOnly
 from src.core.infra.rate_limiter import check_rate_limit
 from src.core.contacts.chat_service import load_chat
 from src.core.infra.text_sanitizer import sanitize_html
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.core.actions.indexer import index_chat
 from src.core.actions.vector_store import get_vector_store
 from src.db.models import Message as DBMessage
@@ -62,7 +62,7 @@ async def cmd_index(
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-    candidates = await resolve(client, owner, query)
+    candidates = await resolve_contact_fast(client, owner, query)
     if not candidates:
         await message.answer("Не нашёл контакт. Попробуй /sync.")
         return

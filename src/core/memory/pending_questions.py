@@ -137,3 +137,24 @@ async def add_question(telegram_id: int, question: str) -> None:
             await add_pending_question(session, owner.id, question)
     except Exception:
         logger.debug("Failed to persist pending question", exc_info=True)
+
+
+# ── Snapshot support (Issue 2: public API for SnapshotEngine) ──────
+
+
+async def capture_state():
+    """Public snapshot of _pending (JSON-serializable)."""
+    async with _pending_lock:
+        return {str(tg): qs for tg, qs in _pending.items()}
+
+
+async def restore_state(data):
+    """Restore _pending from a snapshot dict."""
+    if not data:
+        return
+    async with _pending_lock:
+        for tg_str, qs in data.items():
+            try:
+                _pending[int(tg_str)] = qs
+            except Exception:
+                pass

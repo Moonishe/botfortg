@@ -15,7 +15,7 @@ from src.core.compaction.filters import non_task_memory_type_filter
 from src.core.compaction.models import NudgeCandidate
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_admin import update_memory_text
-from src.db.models import Memory
+from src.db.models import Memory, User
 from src.db.repos.memory_repo import save_memory_version
 
 if TYPE_CHECKING:
@@ -104,14 +104,20 @@ async def select_nudge_candidates(
 
 
 async def apply_nudge_decision(
-    session: AsyncSession, memory_id: int, action: str, new_fact: str | None = None
+    session: AsyncSession,
+    user: User,
+    memory_id: int,
+    action: str,
+    new_fact: str | None = None,
 ) -> bool:
     """Apply user decision: confirm / forget / edit.
 
-    Returns True if the memory was found and updated.
+    Returns True if the memory was found, owned by *user*, and updated.
     """
     mem = await session.get(Memory, memory_id)
     if not mem:
+        return False
+    if mem.user_id != user.id:
         return False
     if not mem.is_active and action != "forget":
         return False
@@ -130,7 +136,12 @@ async def apply_nudge_decision(
         mem.validity_end = now
         mem.updated_at = now
         await save_memory_version(
-            session, memory_id, mem.fact, edited_by="user", reason="nudge_forget"
+            session,
+            user,
+            memory_id,
+            mem.fact,
+            edited_by="user",
+            reason="nudge_forget",
         )
         await session.flush()
         return True
@@ -139,7 +150,11 @@ async def apply_nudge_decision(
         if not new_fact:
             return False
         updated = await update_memory_text(
-            session, memory_id, new_fact, edit_reason="nudge_edit"
+            session,
+            user,
+            memory_id,
+            new_fact,
+            edit_reason="nudge_edit",
         )
         return updated is not None
 

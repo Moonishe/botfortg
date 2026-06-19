@@ -3,6 +3,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+from src.core.security.prompt_guard import sanitize_pii
 from datetime import datetime, UTC
 from src.db.session import get_session
 from src.db.repo import get_or_create_user
@@ -27,7 +28,7 @@ async def log_user_message(telegram_id: int, text: str) -> None:
                     await session.flush()
                     sid = new_sess.id
                     _active_sessions[telegram_id] = sid
-            msg = AgentSessionMessage(session_id=sid, role="user", content=text[:2000])
+            msg = AgentSessionMessage(session_id=sid, role="user", content=sanitize_pii(text)[:2000])
             session.add(msg)
             # Update turn count
             sess = await session.get(AgentSession, sid)
@@ -52,7 +53,7 @@ async def log_assistant_response(telegram_id: int, text: str) -> None:
                     sid = new_sess.id
                     _active_sessions[telegram_id] = sid
             msg = AgentSessionMessage(
-                session_id=sid, role="assistant", content=text[:2000]
+                session_id=sid, role="assistant", content=sanitize_pii(text)[:2000]
             )
             session.add(msg)
             sess = await session.get(AgentSession, sid)

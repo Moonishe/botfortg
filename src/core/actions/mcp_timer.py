@@ -23,12 +23,14 @@ from typing import Any
 
 from src.core.actions.tool_registry import ToolActionSpec, tool
 from src.core.security import is_confirmed_truthy
+from src.db.models import Notification
 from src.db.repo import (
     delete_expired_timers,
     delete_timer,
     list_pending_timers,
     persist_timer,
 )
+
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -498,7 +500,7 @@ async def _timer_task(tid: int, duration_sec: int, label: str) -> None:
         await notification_queue.enqueue(
             topic="timer",
             text=f"⏰ {label}",
-            priority=50,  # HIGH
+            priority=Notification.PRIORITY_HIGH,
             category="timer",
         )
     except Exception:

@@ -22,6 +22,32 @@ _KEY_PATTERNS = [
 
 _MASKED_REPLACEMENT = "***"
 
+# PII patterns — applied to LLM-bound text only (not logs, where PII may be needed for debugging)
+# Order matters: longest/most-specific patterns FIRST to prevent partial masking by shorter ones.
+_PII_PATTERNS = [
+    re.compile(
+        r"\b\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}\b"
+    ),  # credit card (16 digits) — BEFORE phone
+    re.compile(
+        r"\b\d{3}[ -]?\d{3}[ -]?\d{3}[ -]?\d{2}\b"
+    ),  # СНИЛС (11 digits: XXX-XXX-XXX YY) — BEFORE phone
+    re.compile(r"\b\d{10}\b|\b\d{12}\b"),  # ИНН (10/12 digits) — BEFORE phone
+    re.compile(
+        r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
+    ),  # IPv4 (strict: 0-255 per octet)
+    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]{2,}"),  # email
+    re.compile(r"\+7[ -]?\d{3}[ -]?\d{3}[ -]?\d{2}[ -]?\d{2}"),  # Russian phone +7XXX
+    re.compile(
+        r"\+?\d{1,3}[ -]?\d{3}[ -]?\d{3}[ -]?\d{2,4}"
+    ),  # generic international phone — LAST (shortest, may partial-match)
+    re.compile(
+        r"(?<!\w)@(?!(?:dataclass|staticmethod|classmethod|property|abstractmethod|"
+        r"contextmanager|cached_property|wraps|overload|final|override|lru_cache|"
+        r"singledispatch|asynccontextmanager|abstractproperty|"
+        r"tool|app|router|bp|get|post|put|delete|patch)\b|\w+\.)\w{5,32}\b"
+    ),  # Telegram @username (not decorator / dotted decorator @module.name)
+]
+
 
 def mask_keys(text: str) -> str:
     """Replace all API keys in string with ***."""
@@ -29,6 +55,19 @@ def mask_keys(text: str) -> str:
         return text
     for pattern in _KEY_PATTERNS:
         text = re.sub(pattern, _MASKED_REPLACEMENT, text)
+    return text
+
+
+def mask_pii(text: str) -> str:
+    """Mask PII (email, phone, @username) in text bound for external LLM.
+
+    Chains with mask_keys: mask_pii(mask_keys(text)) for full protection.
+    ponytail: separate from mask_keys — logs may need PII for debugging, LLM never does.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    for pattern in _PII_PATTERNS:
+        text = pattern.sub(_MASKED_REPLACEMENT, text)
     return text
 
 

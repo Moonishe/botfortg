@@ -17,7 +17,7 @@ from src.core.compaction.filters import non_task_memory_type_filter
 from src.core.compaction.models import CompressResult
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.models import Memory, MemoryLink, User
-from src.db.repos.memory_repo import add_memory
+from src.core.memory.memory_service import save_memory_single
 
 if TYPE_CHECKING:
     from src.core.actions.vector_store import VectorStore
@@ -140,7 +140,7 @@ async def temporal_compress(
             continue
 
         # Create the compressed memory
-        new_mem = await add_memory(
+        new_mem = await save_memory_single(
             session,
             user,
             fact=compressed_text,
@@ -149,8 +149,7 @@ async def temporal_compress(
             confidence=0.9,
             memory_type="personal" if contact_id is None else "contact_fact",
             decay_rate=0.02,
-            deduplicate=False,
-        )
+            deduplicate=False,)
         if new_mem is None:
             continue
 

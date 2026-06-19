@@ -16,38 +16,14 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.agents.proactive_scheduler import BackgroundGoal
 from src.db.models import User
 
 logger = logging.getLogger(__name__)
-
-
-# ═════════════════════════════════════════════════════════════════════════
-#  BackgroundGoal — фоновое намерение, извлечённое из NL
-# ═════════════════════════════════════════════════════════════════════════
-
-
-@dataclass
-class BackgroundGoal:
-    """Фоновая цель, созданная из естественно-языкового описания.
-
-    Используется планировщиком для автоматического выполнения
-    повторяющихся действий (сбор встреч, дайджесты, напоминания).
-    """
-
-    id: str  # Уникальный идентификатор: "nl_{user_id}_{timestamp}"
-    user_id: int
-    description: str  # Человеко-читаемое описание цели
-    frequency: str  # Cron-подобная строка или "daily 9:00", "weekly monday 9:00"
-
-    def __repr__(self) -> str:
-        return (
-            f"BackgroundGoal(id={self.id!r}, user_id={self.user_id}, "
-            f"description={self.description!r}, frequency={self.frequency!r})"
-        )
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -85,12 +61,12 @@ class NLProgrammer:
         Returns:
             BackgroundGoal при успешном парсинге, None при ошибке.
         """
-        from src.llm.base import ChatMessage
+        from src.llm.base import ChatMessage, TaskType
         from src.llm.router import build_provider
 
         try:
             provider = await build_provider(
-                session, user, purpose="reasoning", task_type="background"
+                session, user, purpose="reasoning", task_type=TaskType.BACKGROUND
             )
         except Exception:
             logger.exception(
@@ -138,16 +114,16 @@ class NLProgrammer:
             )
             return None
 
-        if not isinstance(parsed, dict) or "description" not in parsed:
+        if not isinstance(parsed, dict) or not parsed.get("description"):
             logger.warning(
-                "NLProgrammer: ответ LLM не содержит 'description' (user=%s): %s",
+                "NLProgrammer: ответ LLM не содержит непустого 'description' (user=%s): %s",
                 user.telegram_id,
                 parsed,
             )
             return None
 
         goal = BackgroundGoal(
-            id=f"nl_{user.telegram_id}_{int(time.time())}",
+            id=f"nl_{user.telegram_id}_{uuid.uuid4().hex[:12]}",
             user_id=user.telegram_id,
             description=str(parsed.get("description", "")),
             frequency=str(parsed.get("frequency", "daily 9:00")),

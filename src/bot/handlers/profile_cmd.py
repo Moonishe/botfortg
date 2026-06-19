@@ -13,7 +13,7 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.core.contacts.profile_builder import build_profile
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
@@ -239,7 +239,7 @@ async def cmd_profile(
         try:
             peer_id = int(args)
         except ValueError:
-            candidates = await resolve(client, owner, args)
+            candidates = await resolve_contact_fast(client, owner, args)
             if not candidates:
                 await message.answer(
                     f"🙅 Не нашёл контакт «{sanitize_html(args)}». Попробуй /sync."

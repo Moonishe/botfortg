@@ -342,11 +342,11 @@ async def handle_memory_correction(
     Returns a response string to send to the user.
     """
     from src.db.repo import (
-        delete_memory,
         get_or_create_user,
-        search_memories,
-        add_memory,
+        search_memories
     )
+    from src.core.memory.memory_service import save_memory_single
+    from src.core.memory.memory_service import delete_memory_service
     from src.db.session import get_session
 
     keywords = correction["old_fact_keywords"]
@@ -367,9 +367,9 @@ async def handle_memory_correction(
             # No old fact found — just add the new one
             async with get_session() as session:
                 owner = await get_or_create_user(session, telegram_id)
-                await add_memory(
-                    session, owner, fact=new_fact or "", source="user", confidence=0.85
-                )
+                await save_memory_single(
+                    session, owner, fact=new_fact or "", source="user", confidence=0.85,
+                    memory_type=None)
             return "🤔 Не нашёл что удалить, но запомнил новое. Спасибо за уточнение!"
         return "🤔 Не нашёл такого в памяти. Может, я ещё не запомнил? Уточни, что именно поправить."
 
@@ -379,7 +379,7 @@ async def handle_memory_correction(
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         for mem in found_all[:5]:  # max 5 deletions
-            success = await delete_memory(session, owner, mem.id)
+            success = await delete_memory_service(session, owner, mem.id)
             if success:
                 deleted_count += 1
                 if mem.fact:
@@ -389,9 +389,9 @@ async def handle_memory_correction(
         # Add the corrected fact
         async with get_session() as session:
             owner = await get_or_create_user(session, telegram_id)
-            await add_memory(
-                session, owner, fact=new_fact, source="user", confidence=0.9
-            )
+            await save_memory_single(
+                session, owner, fact=new_fact, source="user", confidence=0.9,
+                memory_type=None)
         if deleted_facts:
             return f"🧠 Понял! Забыл про «{deleted_facts[0]}…» и запомнил: «{new_fact[:80]}»."
         return f"🧠 Запомнил: «{new_fact[:80]}»."

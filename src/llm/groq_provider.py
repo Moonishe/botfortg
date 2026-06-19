@@ -12,7 +12,7 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
+from src.llm._openai_compat_mixin import OpenAICompatBaseMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -23,7 +23,7 @@ GROQ_CHAT_LIGHT = "llama-3.3-70b-versatile"
 GROQ_CHAT_HEAVY = "mixtral-8x7b-32768"
 
 
-class GroqProvider(OpenAICompatBaseMixin, BaseLLMProvider):
+class GroqProvider(OpenAICompatToolMixin, OpenAICompatBaseMixin, BaseLLMProvider):
     """Провайдер для Groq — OpenAI-совместимый API. Без embeddings."""
 
     name = "groq"

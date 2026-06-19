@@ -17,8 +17,13 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from aiogram.filters import Command
 from aiogram.types import BotCommand
+
+if TYPE_CHECKING:
+    from aiogram import Dispatcher, Router
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +127,40 @@ class CommandRegistry:
                 lines.append(f"  /{info.name} — {info.description}")
 
         return "\n".join(lines)
+
+    def validate_against_routers(self, dp: Dispatcher) -> list[str]:
+        """Collect commands from all routers and compare against registry.
+
+        Returns commands present in routers but missing from the registry.
+        Warning-only — does not raise or block startup.
+        """
+        missing: list[str] = []
+
+        def _collect_commands(router: Router) -> set[str]:
+            cmds: set[str] = set()
+            handler_groups = (
+                router.message.handlers,
+                router.callback_query.handlers,
+                router.inline_query.handlers,
+                router.edited_message.handlers,
+                router.channel_post.handlers,
+                router.edited_channel_post.handlers,
+            )
+            for handlers in handler_groups:
+                for handler in handlers:
+                    for f in handler.filters or ():
+                        if isinstance(f, Command):
+                            cmds.update(f.commands)
+            for sub in router.sub_routers:
+                cmds |= _collect_commands(sub)
+            return cmds
+
+        router_commands = _collect_commands(dp)
+        for cmd_name in sorted(router_commands):
+            if cmd_name not in self._commands:
+                missing.append(cmd_name)
+
+        return missing
 
 
 def _category_title(cat: str) -> str:
@@ -249,6 +288,7 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
 
     # ── Diagnostics ──
     registry.register("health", "Проверка здоровья системы", "diagnostics")
+    registry.register("ops", "Единый операционный дашборд", "diagnostics")
     registry.register("monitor", "Мониторинг в реальном времени", "diagnostics")
     registry.register("llm_status", "Статус LLM-провайдеров", "diagnostics")
     registry.register("gates", "Состояние защитных гейтов", "diagnostics")
@@ -264,4 +304,5 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("approve", "Подтвердить запрос доступа", "admin")
     registry.register("revoke", "Отозвать доступ", "admin")
     registry.register("pending", "Ожидающие запросы", "admin")
+    registry.register("audit", "Аудит безопасности", "admin")
     return registry

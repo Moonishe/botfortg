@@ -8,12 +8,12 @@ from datetime import datetime, UTC
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     JSON,
     String,
     Text,
-    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -237,7 +237,7 @@ class SoulSnapshot(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
 
@@ -265,6 +265,11 @@ class Trajectory(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), index=True
     )
+    # ── MemOS reward loop fields ──
+    reward_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reflection: Mapped[str | None] = mapped_column(Text, nullable=True)
+    step_index: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    value_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Skill(Base):
@@ -298,7 +303,7 @@ class Skill(Base):
         DateTime(timezone=True), nullable=True
     )
     disabled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, default=None
+        DateTime(timezone=True), nullable=True, default=None, index=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
@@ -327,6 +332,14 @@ class Skill(Base):
     last_compressed_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, default=None
     )  # timestamp of last skill body compression
+    # ── MemOS crystallization fields ──
+    policy_signature: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    induction_gain: Mapped[float | None] = mapped_column(Float, nullable=True)
+    episode_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    eta_alpha: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0")
+    eta_beta: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0")
 
 
 class SkillUsage(Base):

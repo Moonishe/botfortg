@@ -460,10 +460,16 @@ class AgentRuntime:
             return_exceptions=True,
         )
 
+        # Не даём CancelledError затеряться — propagation обязателен
+        # (return_exceptions=True ловит ВСЁ, включая CancelledError)
+        for r in raw_results:
+            if isinstance(r, asyncio.CancelledError):
+                raise r
+
         # Нормализуем результаты
         normalized: list[dict[str, Any]] = []
         for i, r in enumerate(raw_results):
-            if isinstance(r, Exception):
+            if isinstance(r, BaseException):
                 tool_name = (
                     tool_calls[i].get("tool", "?") if i < len(tool_calls) else "?"
                 )

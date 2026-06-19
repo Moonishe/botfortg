@@ -2,7 +2,7 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -11,7 +11,7 @@ OPENAI_CHAT_LIGHT = "gpt-5-mini"
 OPENAI_CHAT_HEAVY = "gpt-5.5"
 
 
-class OpenAIProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
+class OpenAIProvider(OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMProvider):
     name = "openai"
     _LIGHT_MODEL = OPENAI_CHAT_LIGHT
     _HEAVY_MODEL = OPENAI_CHAT_HEAVY

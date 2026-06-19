@@ -3,7 +3,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.core.contacts.style_profile import update_style_profile_for_contact
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -39,7 +39,7 @@ async def cmd_style(
         await message.answer("Сначала добавь LLM-ключ в /settings.")
         return
 
-    candidates = await resolve(client, owner, query)
+    candidates = await resolve_contact_fast(client, owner, query)
     if not candidates:
         await message.answer("Контакт не найден.")
         return

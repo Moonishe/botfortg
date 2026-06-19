@@ -14,20 +14,20 @@ Hybrid search combines FTS5 (keywords) + Qdrant (semantic) via RRF.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import re
 import threading
+from datetime import UTC
 from pathlib import Path
-from typing import TYPE_CHECKING
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
-from src.config import PROJECT_ROOT, settings
-from src.core.infra.task_manager import track_ff
+from src.config import settings
+from src.core.infra.sqlite_persistent import get_db_path
 from src.core.security.prompt_injection_scanner import safe_read_context_file
-from datetime import UTC
 
 if TYPE_CHECKING:
     from qdrant_client import QdrantClient
@@ -106,16 +106,6 @@ def _fts5_simple_query(query: str) -> str:
     if not parts:
         return ""
     return " OR ".join(parts)
-
-
-def _get_db_path() -> Path:
-    """Resolve the SQLite database file path from settings.database_url."""
-    db_url = str(settings.database_url)
-    parsed = urlparse(db_url)
-    db_path = Path(parsed.path.lstrip("/"))
-    if not db_path.is_absolute():
-        db_path = PROJECT_ROOT / db_path
-    return db_path
 
 
 # Per-file locks for thread-safe append (TOCTOU prevention)
@@ -276,14 +266,6 @@ def append_to_context(key: str, text: str, max_lines: int = 500) -> None:
         current_lines = existing.split("\n")
         if len(current_lines) >= max_lines:
             # Remove oldest fact line (keep header)
-            header_end = 0
-            for i, line_text in enumerate(current_lines):
-                if line_text.startswith("- ["):
-                    header_end = i
-                    break
-            if header_end > 0:
-                current_lines.pop(header_end)
-            # Remove first fact line after header
             for i, line_text in enumerate(current_lines):
                 if line_text.startswith("- ["):
                     current_lines.pop(i)
@@ -313,7 +295,7 @@ async def _sync_search_in_contexts(query: str, limit: int = 5) -> list[dict]:
     if not CONTEXTS_DIR.exists():
         return []
 
-    db_path = _get_db_path()
+    db_path = get_db_path()
 
     # ── Try FTS5 first (aiosqlite) ───────────────────────────────────
     if db_path.exists():
@@ -407,7 +389,7 @@ async def index_contexts_to_fts() -> int:
         logger.debug("Contexts directory does not exist, skipping FTS5 indexing")
         return 0
 
-    db_path = _get_db_path()
+    db_path = get_db_path()
     if not db_path.exists():
         logger.warning("Database file not found at %s, skipping FTS5 indexing", db_path)
         return 0
@@ -491,7 +473,7 @@ _BROAD_SELF_FACT_RE = re.compile(
 
 
 async def try_extract_context_updates(
-    session,
+    session: Any,
     user_text: str,
     assistant_text: str,
     owner_id: int,
@@ -609,7 +591,27 @@ def _get_qdrant() -> QdrantClient:
     return _qdrant_client
 
 
-async def index_context_for_semantic(key: str, content: str, provider=None) -> bool:
+def close_qdrant() -> None:
+    """Close the embedded Qdrant client and release its file locks.
+
+    Holds ``_qdrant_init_lock`` for the entire close operation so that a
+    concurrent ``_get_qdrant`` caller cannot create a new client while the
+    old one is still being closed.
+    """
+    global _qdrant_client, _qdrant_dim
+    with _qdrant_init_lock:
+        client = _qdrant_client
+        _qdrant_client = None
+        _qdrant_dim = None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client.close()
+            logger.debug("Qdrant client closed")
+
+
+async def index_context_for_semantic(
+    key: str, content: str, provider: Any = None
+) -> bool:
     """Embed context file content and store in Qdrant 'contexts' collection."""
     if provider is None:
         return False
@@ -655,7 +657,9 @@ async def index_context_for_semantic(key: str, content: str, provider=None) -> b
         return False
 
 
-async def search_contexts_semantic(query: str, provider, limit: int = 5) -> list[dict]:
+async def search_contexts_semantic(
+    query: str, provider: Any, limit: int = 5
+) -> list[dict]:
     """Search context files semantically via Qdrant embeddings."""
     try:
         embedding = await provider.embed(query)
@@ -693,7 +697,7 @@ async def search_contexts_semantic(query: str, provider, limit: int = 5) -> list
 
 
 async def search_contexts_hybrid(
-    query: str, provider=None, limit: int = 5
+    query: str, provider: Any = None, limit: int = 5
 ) -> list[dict]:
     """Hybrid search: FTS5 + semantic via RRF.
 
@@ -726,7 +730,7 @@ async def search_contexts_hybrid(
     return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
 
 
-async def rebuild_semantic_index(provider) -> int:
+async def rebuild_semantic_index(provider: Any) -> int:
     """Re-index ALL context files into Qdrant. Returns count of indexed files."""
     if not CONTEXTS_DIR.exists():
         return 0
@@ -745,19 +749,43 @@ async def rebuild_semantic_index(provider) -> int:
 
 # PERF-019: dedup in-flight/duplicate indexing by content hash
 _indexed_hashes: set[str] = set()
+_index_lock: asyncio.Lock | None = None
+# PERF-020: main-loop ref for run_coroutine_threadsafe from to_thread
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Store the main event loop for thread-safe semantic indexing.
+
+    Call once at startup (on the main loop).  `_schedule_semantic_index`
+    uses this when it runs inside `asyncio.to_thread` where
+    `get_running_loop()` raises RuntimeError.
+    """
+    global _main_loop
+    _main_loop = loop
 
 
 def _schedule_semantic_index(key: str, content: str) -> None:
     """Fire-and-forget: schedule semantic indexing for a context file.
 
-    Tries to get a running event loop and create a task.
-    Gracefully skips if no event loop is running.
+    Tries ``_main_loop`` first (set by ``set_main_loop`` at startup),
+    then falls back to ``asyncio.get_running_loop()``.  Uses
+    ``run_coroutine_threadsafe`` so the call works from
+    ``asyncio.to_thread`` as well as from the main event loop.
+    If no loop is available the scheduling is silently skipped.
     """
-    try:
-        loop = asyncio.get_running_loop()
-        track_ff(loop.create_task(_index_with_provider(key, content)))
-    except RuntimeError:
-        pass  # no running event loop — skip
+    global _main_loop
+    loop: asyncio.AbstractEventLoop | None = _main_loop
+    if loop is None:
+        with contextlib.suppress(RuntimeError):
+            loop = asyncio.get_running_loop()
+    if loop is not None:
+        asyncio.run_coroutine_threadsafe(_index_with_provider(key, content), loop)
+    else:
+        logger.debug(
+            "Semantic index scheduling skipped for '%s': set_main_loop was not called",
+            key,
+        )
 
 
 async def _index_with_provider(key: str, content: str) -> None:
@@ -765,11 +793,21 @@ async def _index_with_provider(key: str, content: str) -> None:
 
     PERF-019: skips re-indexing if the content hash was already indexed
     in this process lifetime, avoiding redundant provider builds.
+
+    PERF-020: guards ``_indexed_hashes`` with an ``asyncio.Lock`` to
+    prevent races when multiple ``_schedule_semantic_index`` tasks
+    race on the same content hash.
     """
+    global _index_lock
+    if _index_lock is None:
+        _index_lock = asyncio.Lock()
+
     content_hash = hashlib.sha256(content.encode()).hexdigest()
-    if content_hash in _indexed_hashes:
-        return  # already indexed this exact content
-    _indexed_hashes.add(content_hash)
+
+    async with _index_lock:
+        if content_hash in _indexed_hashes:
+            return  # already indexed this exact content
+        _indexed_hashes.add(content_hash)
 
     try:
         from src.llm.base import TaskType

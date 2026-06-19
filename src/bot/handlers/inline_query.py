@@ -104,13 +104,24 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
         return_exceptions=True,
     )
 
-    # Если gather вернул Exception вместо списка — заменяем на []
-    if isinstance(memory_results, Exception):
+    # Если gather вернул BaseException (вкл. CancelledError) вместо списка — заменяем на []
+    cancelled_count = 0
+    if isinstance(memory_results, BaseException):
+        if isinstance(memory_results, asyncio.CancelledError):
+            cancelled_count += 1
         memory_results = []
-    if isinstance(context_results, Exception):
+    if isinstance(context_results, BaseException):
+        if isinstance(context_results, asyncio.CancelledError):
+            cancelled_count += 1
         context_results = []
-    if isinstance(message_results, Exception):
+    if isinstance(message_results, BaseException):
+        if isinstance(message_results, asyncio.CancelledError):
+            cancelled_count += 1
         message_results = []
+    if cancelled_count == 3:
+        logger.warning(
+            "Inline query: all 3 search tasks cancelled for query=%r", query[:100]
+        )
 
     # ── Сборка inline-результатов ──────────────────────────────────
     inline_results: list[InlineQueryResultArticle] = []
@@ -156,13 +167,14 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
         idx += 1
 
     if not inline_results:
+        safe_query = sanitize_html(query[:50])
         inline_results.append(
             InlineQueryResultArticle(
                 id="no_results",
                 title="Ничего не найдено",
-                description=f"По запросу «{query[:50]}» ничего не найдено",
+                description=f"По запросу «{safe_query}» ничего не найдено",
                 input_message_content=InputTextMessageContent(
-                    message_text=f"🔍 По запросу «{query}» ничего не найдено в памяти."
+                    message_text=f"🔍 По запросу «{safe_query}» ничего не найдено в памяти."
                 ),
             )
         )

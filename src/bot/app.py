@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import logging
+import re
+from collections.abc import Awaitable, Callable
 from time import time
+from typing import Any
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
@@ -15,6 +20,7 @@ from src.bot.handlers import (
     analyze_cmd,
     approve_cmd,
     ask_cmd,
+    audit_cmd,
     avito_cmd,
     catchup_cmd,
     chat_cmd,
@@ -45,6 +51,8 @@ from src.bot.handlers import (
     memory_inbox,
     news_cmd,
     news_topics,
+    nudge,
+    ops_cmd,
     profile_cmd,
     research_cb,
     pubmed_cmd,
@@ -72,21 +80,32 @@ from src.userbot.manager import UserbotManager
 
 logger = logging.getLogger(__name__)
 
+# Pre-compiled regex for stripping HTML tags in InlineQuery.switch_pm_text.
+_STRIP_HTML = re.compile(r"</?[^>]+>")
 
-def _retry_wrapper(send_fn):
+
+def _retry_wrapper(
+    send_fn: Callable[..., Awaitable[Any]],
+) -> Callable[..., Any]:
     """Wrap bot.send_message with exponential backoff on 429 / network errors.
 
     This covers ALL callers (message.answer(), notifier, safe_send, etc.)
     with zero changes to handler code.
     """
 
-    async def wrapper(chat_id, text, **kwargs):
+    async def wrapper(chat_id: int | str, text: str, **kwargs: Any) -> Any:
+        # Guard: Telegram API rejects empty/None text
+        if not text:
+            logger.warning("send_message called with empty text, skipping")
+            return None
         max_retries = 3
         base_delay = 2.0
+        last_exc: Exception | None = None
         for attempt in range(max_retries):
             try:
                 return await send_fn(chat_id, text, **kwargs)
             except TelegramRetryAfter as e:
+                last_exc = e
                 delay = max(e.retry_after, base_delay * (2**attempt))
                 logger.warning(
                     "Telegram 429: waiting %.1fs (attempt %d/%d)",
@@ -95,7 +114,8 @@ def _retry_wrapper(send_fn):
                     max_retries,
                 )
                 await asyncio.sleep(delay)
-            except TelegramNetworkError:
+            except TelegramNetworkError as e:
+                last_exc = e
                 if attempt == max_retries - 1:
                     logger.exception("Telegram network error, max retries reached")
                     raise
@@ -107,52 +127,99 @@ def _retry_wrapper(send_fn):
                     max_retries,
                 )
                 await asyncio.sleep(delay)
-        raise RuntimeError(f"send_message failed after {max_retries} retries")
+        # This line is reachable only if TelegramRetryAfter exhausted all retries;
+        # TelegramNetworkError is re-raised above. Preserve the original exception.
+        raise RuntimeError(
+            f"send_message failed after {max_retries} retries"
+        ) from last_exc
 
     return wrapper
 
 
-async def access_guard_middleware(
-    handler, event: Message | types.CallbackQuery, data: dict
-) -> None:
-    """Owner-only access guard + DM pairing for unknown contacts.
+async def universal_access_guard(
+    handler: Callable[[types.Update, dict[str, Any]], Awaitable[Any]],
+    update: types.Update,
+    data: dict[str, Any],
+) -> Any:
+    """Owner-only access guard + DM pairing — update-level middleware.
 
-    Paired contacts receive a ``_paired_user`` flag in the context data so
-    that downstream ``OwnerOnly`` filter lets them through. Unknown contacts
-    get a pairing code and cannot reach any handlers until approved.
+    Extracts inner event (message, callback_query, etc.) for access checks
+    and user-facing responses, but delegates to ``handler`` with the
+    **original Update** so that aiogram's ``_listen_update`` can resolve
+    ``update.event_type`` and ``update.event`` correctly.
+
+    Passing the inner event directly would break the update dispatcher
+    because ``Message`` / ``CallbackQuery`` lack ``event_type`` / ``event``
+    properties that ``_listen_update`` requires.
     """
-    user = getattr(event, "from_user", None)
+    _EVENT_ATTRS = (
+        "message",
+        "callback_query",
+        "inline_query",
+        "edited_message",
+        "message_reaction",
+        "chat_member",
+        "my_chat_member",
+        "chat_join_request",
+        "pre_checkout_query",
+        "shipping_query",
+        "poll",
+        "poll_answer",
+    )
+    inner = None
+    for attr in _EVENT_ATTRS:
+        inner = getattr(update, attr, None)
+        if inner is not None:
+            break
+
+    if inner is None:
+        # No inner event (e.g. poll, poll_answer) — pass through unchecked
+        return await handler(update, data)
+
+    user = getattr(inner, "from_user", None)
     if user is None:
-        return await handler(event, data)
+        return await handler(update, data)
+
+    # Helper: reply safely — inline queries need an empty result list with a PM hint
+    async def _reply(text: str) -> None:
+        if isinstance(inner, types.InlineQuery):
+            # InlineQuery.answer() expects a results list; show a plain-text PM hint.
+            # Telegram limits switch_pm_text to 64 characters and renders it as plain text.
+            pm_text = _STRIP_HTML.sub("", text).replace("\n", " ")[:64]
+            await inner.answer([], switch_pm_text=pm_text or "🔐 Доступ ограничен")
+            return
+        answer_fn = getattr(inner, "answer", None)
+        if answer_fn:
+            await answer_fn(text)
 
     tg_id = user.id
-    if tg_id == settings.owner_telegram_id:
-        return await handler(event, data)
+    owner_id = settings.owner_telegram_id
+    if owner_id <= 0:
+        logger.critical(
+            "OWNER_TELEGRAM_ID is %d (not set or invalid). "
+            "REJECTING ALL USERS for safety.",
+            owner_id,
+        )
+        return
+    if tg_id == owner_id:
+        return await handler(update, data)
 
     if await pairing.is_allowed(tg_id):
         data["_paired_user"] = True
-        return await handler(event, data)
-
-    if await pairing.is_pending(tg_id):
-        answer = getattr(event, "answer", None)
-        if answer:
-            await answer("⏳ Ваш запрос на доступ ожидает подтверждения владельца.")
-        return
+        return await handler(update, data)
 
     try:
+        # start_pairing is idempotent: returns existing code if already pending,
+        # which avoids the race between is_pending() and start_pairing().
         code = await pairing.start_pairing(tg_id)
     except Exception:
         logger.exception("pairing.start_pairing failed for tg_id=%d", tg_id)
-        answer = getattr(event, "answer", None)
-        if answer:
-            await answer("⚠️ Произошла ошибка. Попробуйте позже.")
+        await _reply("⚠️ Произошла ошибка. Попробуйте позже.")
         return
-    answer = getattr(event, "answer", None)
-    if answer:
-        await answer(
-            f"🔐 Для доступа передай владельцу код:\n<code>{code}</code>\n"
-            f"Он выполнит: <code>/approve {tg_id} {code}</code>"
-        )
+    await _reply(
+        f"🔐 Для доступа передай владельцу код:\n<code>{code}</code>\n"
+        f"Он выполнит: <code>/approve {tg_id} {code}</code>"
+    )
     return
 
 
@@ -182,18 +249,20 @@ def _setup_bot_and_dispatcher(
     dp["userbot_manager"] = userbot_manager
 
     # ─── Access guard: owner + DM pairing ───
-    dp.message.outer_middleware()(access_guard_middleware)
-    dp.callback_query.outer_middleware()(access_guard_middleware)
+    # ponytail: single update-level middleware covers ALL update types
+    dp.update.outer_middleware()(universal_access_guard)  # type: ignore[arg-type]
 
     # ─── Онбординг-гард: фазовая блокировка команд ───
     # Кэш фазы онбординга — замыкание middleware, живёт пока жив Dispatcher
     _phase_cache: dict[int, tuple[int, float]] = {}
     _phase_cache_ttl = 60.0
 
-    @dp.message.outer_middleware()
+    @dp.message.outer_middleware()  # type: ignore[arg-type]
     async def onboarding_guard_middleware(
-        handler, message: Message, data: dict
-    ) -> None:
+        handler: Callable[[Message, dict[str, Any]], Awaitable[Any]],
+        message: Message,
+        data: dict[str, Any],
+    ) -> Any:
         """Перенаправляет не-онбордингнутых пользователей на нужный шаг.
 
         Фазы:
@@ -203,7 +272,8 @@ def _setup_bot_and_dispatcher(
           4 (готов)          — без ограничений
         """
         if not message.from_user:
-            return  # channel posts, no user context
+            # Channel posts or anonymous admins — no onboarding context, pass through.
+            return await handler(message, data)
 
         tg_id = message.from_user.id
         if tg_id != settings.owner_telegram_id:
@@ -234,6 +304,10 @@ def _setup_bot_and_dispatcher(
         if cached and now - cached[1] < _phase_cache_ttl:
             phase = cached[0]
         else:
+            if cached is not None:
+                # Evict stale entry so the dict never accumulates dead keys
+                # (e.g. if owner_telegram_id changes).
+                _phase_cache.pop(tg_id, None)
             phase = await get_onboarding_phase(tg_id)
             _phase_cache[tg_id] = (phase, now)
 
@@ -271,10 +345,12 @@ def _setup_bot_and_dispatcher(
     # Inline-режим — самый первый, чтобы ловить @botname до команд
     dp.include_router(inline_query.router)
     dp.include_router(approve_cmd.router)
+    dp.include_router(audit_cmd.router)
     dp.include_router(ask_cmd.router)
     dp.include_router(research_cb.router)
     dp.include_router(gates_cmd.router)
     dp.include_router(health_cmd.router)
+    dp.include_router(ops_cmd.router)
     dp.include_router(stats_cmd.router)
     dp.include_router(docs_cmd.router)
     dp.include_router(inbox_cmd.router)
@@ -297,8 +373,8 @@ def _setup_bot_and_dispatcher(
     dp.include_router(models_cmd.router)
     dp.include_router(keys_cmd.router)
     dp.include_router(memory_inbox.router)
-    dp.include_router(memory_admin_cmds.router)
     dp.include_router(memory_cmd.router)
+    dp.include_router(memory_admin_cmds.router)
     dp.include_router(memory_correction.router)  # FSM consumer for /memory --correct
     dp.include_router(news_cmd.router)
     dp.include_router(draft_actions.router)
@@ -319,13 +395,35 @@ def _setup_bot_and_dispatcher(
     dp.include_router(free_text_memory.router)
     dp.include_router(free_text_settings.router)
     dp.include_router(confirm_router)
-    from src.bot.handlers.nudge import nudge_router
-
-    dp.include_router(nudge_router)
+    dp.include_router(nudge.nudge_router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text_legacy.router)
 
     return bot, dp
+
+
+async def _setup_commands_and_allowlist(bot: Bot, dp: Dispatcher) -> None:
+    """Shared post-setup: register commands, validate routers, warm allowlist."""
+    from src.bot.command_registry import CommandRegistry, register_all_commands
+
+    registry = CommandRegistry()
+    register_all_commands(registry)
+
+    # Validation: warn about commands in routers but missing from registry
+    missing = registry.validate_against_routers(dp)
+    for name in missing:
+        logger.warning(
+            "Command /%s has a handler but is missing from CommandRegistry", name
+        )
+
+    await bot.set_my_commands(registry.as_telegram_commands())
+    logger.info(
+        "Bot commands menu updated: %d commands",
+        len(registry.as_telegram_commands()),
+    )
+
+    # Warm pairing allowlist to avoid cold-start DB queries per message
+    await pairing.warm_allowlist()
 
 
 async def run_bot(userbot_manager: UserbotManager) -> None:
@@ -335,15 +433,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     me = await bot.get_me()
     logger.info("Control bot started as @%s (polling)", me.username)
 
-    from src.bot.command_registry import CommandRegistry, register_all_commands
-
-    registry = CommandRegistry()
-    register_all_commands(registry)
-    await bot.set_my_commands(registry.as_telegram_commands())
-    logger.info(
-        "Bot commands menu updated: %d commands",
-        len(registry.as_telegram_commands()),
-    )
+    await _setup_commands_and_allowlist(bot, dp)
 
     try:
         # close_bot_session=False — сессией управляем явно в finally
@@ -363,8 +453,6 @@ async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
     """
     from aiohttp import web
 
-    bot, dp = _setup_bot_and_dispatcher(userbot_manager)
-
     webhook_url = (settings.webhook_url or "").rstrip("/")
     webhook_path = settings.webhook_path or "/webhook"
     webhook_port = settings.webhook_port
@@ -372,6 +460,8 @@ async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
     if not webhook_url:
         logger.error("webhook_url is empty — falling back to polling")
         return await run_bot(userbot_manager)
+
+    bot, dp = _setup_bot_and_dispatcher(userbot_manager)
 
     # Set Telegram webhook
     full_webhook_url = f"{webhook_url}{webhook_path}"
@@ -392,11 +482,7 @@ async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
     me = await bot.get_me()
     logger.info("Control bot started as @%s (webhook)", me.username)
 
-    from src.bot.command_registry import CommandRegistry, register_all_commands
-
-    registry = CommandRegistry()
-    register_all_commands(registry)
-    await bot.set_my_commands(registry.as_telegram_commands())
+    await _setup_commands_and_allowlist(bot, dp)
 
     # Build minimal aiohttp app for webhook ingestion
     aiohttp_app = web.Application()
@@ -412,7 +498,7 @@ async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
             update = types.Update(**data)
             await dp.feed_webhook_update(bot, update)
         except Exception:
-            logger.debug("Webhook update processing failed", exc_info=True)
+            logger.warning("Webhook update processing failed", exc_info=True)
         return web.Response(status=200)
 
     aiohttp_app.router.add_post(webhook_path, _handle_update)
@@ -433,5 +519,22 @@ async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
         stop_event = asyncio.Event()
         await stop_event.wait()
     finally:
-        await runner.cleanup()
-        await bot.session.close()
+        # Unregister webhook from Telegram — prevents orphaned delivery
+        # attempts after the server is gone. Each cleanup step is independent,
+        # so failures must not block the rest. CancelledError is re-raised
+        # after cleanup to preserve graceful cancellation semantics.
+        _cancelled = False
+        for coro, name in (
+            (runner.cleanup(), "aiohttp runner cleanup"),
+            (bot.delete_webhook(drop_pending_updates=False), "delete webhook"),
+            (bot.session.close(), "bot session close"),
+        ):
+            try:
+                await coro
+            except asyncio.CancelledError:
+                logger.debug("%s cancelled during shutdown", name)
+                _cancelled = True
+            except Exception:
+                logger.exception("Failed to %s during shutdown", name)
+        if _cancelled:
+            raise asyncio.CancelledError()

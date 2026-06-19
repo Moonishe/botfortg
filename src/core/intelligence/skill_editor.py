@@ -25,6 +25,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Shared constant: max rejected edits kept in rejected_edits_json
+# Used by skill_editor, skills_curator, correction_learner
+MAX_REJECTED_EDITS = 10
+
+logger = logging.getLogger(__name__)
+
 # ── Constants ──
 
 PROTECTED_START = "<!-- PROTECTED_START -->"
@@ -202,7 +208,9 @@ def apply_edits(
                 applied.append(edit)
 
                 # Determine version bump type
-                if (edit.op == EditOp.REPLACE and len(edit.content) > 100) or edit.op == EditOp.DELETE:
+                if (
+                    edit.op == EditOp.REPLACE and len(edit.content) > 100
+                ) or edit.op == EditOp.DELETE:
                     version_bump = "minor"
             else:
                 rejected.append((edit, "edit could not be applied (target not found)"))
@@ -306,11 +314,12 @@ def format_rejected_edits(rejected: list[dict[str, Any]] | None) -> str:
     lines.append(
         "The following edits were previously rejected. DO NOT propose similar changes:"
     )
-    for entry in rejected[-5:]:  # Last 5 rejected
+    for entry in rejected[-5:]:  # Last 5 rejected for prompt display
         op = entry.get("op", "unknown")
-        reason = entry.get("reason", "")
+        # Security: repr() escaping on reason prevents stored injection replay
+        reason = entry.get("reason", "")[:200]
         target = str(entry.get("target", "") or "")[:50]
-        lines.append(f"  - [{op}] target={target!r}: {reason}")
+        lines.append(f"  - [{op}] target={target!r}: {reason!r}")
     lines.append("</rejected_edits_feedback>")
     return "\n".join(lines)
 
@@ -331,3 +340,47 @@ def create_edit_from_proposal(
         content=proposal.get("content", ""),
         reason=proposal.get("reason", ""),
     )
+
+
+def parse_nl_feedback(
+    feedback: str,
+    skill_name: str = "",
+    target: str | None = None,
+) -> dict[str, Any] | None:
+    """Convert natural language user feedback into a rejected_edit entry.
+
+    When a user says "that was wrong" or "don't do X", this creates a
+    structured rejection record for ``rejected_edits_json``.
+
+    Returns None if feedback contains prompt injection patterns (fail-closed).
+    """
+    from datetime import UTC, datetime
+
+    from src.core.infra.key_guard import mask_keys, mask_pii
+    from src.core.security.prompt_injection_scanner import scan_content
+
+    # Guard: empty/whitespace-only feedback is meaningless
+    if not feedback or not feedback.strip():
+        return None
+
+    # Security: scan for prompt injection before storing
+    scan = scan_content(feedback, "nl_feedback")
+    if scan.blocked:
+        logger.warning(
+            "parse_nl_feedback blocked by injection scanner: %s", scan.category
+        )
+        return None
+
+    # Sanitize: mask PII + API keys before persistence
+    safe_feedback = mask_pii(mask_keys(feedback.strip()[:500]))
+    safe_target = mask_pii(mask_keys((target or "")[:200])) if target else ""
+
+    return {
+        "op": "replace",
+        "target": safe_target,
+        "content": "",
+        "reason": safe_feedback,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "source": "nl_feedback",
+        "skill_name": skill_name,
+    }

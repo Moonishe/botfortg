@@ -159,6 +159,7 @@ class VectorStore:
         importance: float = 0.5,
         confidence: float = 0.5,
         created_at: str | None = None,
+        payload_type: str = "fact",
     ) -> None:
         """Сохраняет эмбеддинг факта памяти в коллекцию memory_facts."""
         await self._ensure_memory_collection(len(embedding))
@@ -186,6 +187,7 @@ class VectorStore:
                             "importance": importance,
                             "confidence": confidence,
                             "created_at": created_at,
+                            "payload_type": payload_type,
                         },
                     )
                 ],
@@ -222,6 +224,7 @@ class VectorStore:
         limit: int = 5,
         contact_id: int | None = None,
         with_vectors: bool = False,
+        payload_type: str | None = None,
     ) -> list[dict]:
         """Поиск похожих фактов в коллекции memory_facts по cosine similarity.
 
@@ -232,6 +235,7 @@ class VectorStore:
             with_vectors: If True, include the Qdrant vector in the result
                 (needed by callers that do MMR re-ranking). Defaults to False
                 to avoid transferring unused vector payloads.
+            payload_type: If not None, filter results by payload_type.
         """
         await self._ensure_memory_collection(len(embedding))
         if self._memory_reindex_required:
@@ -270,6 +274,12 @@ class VectorStore:
                 ),
                 qmodels.FieldCondition(key="contact_id", is_null=True),
             ]
+        if payload_type is not None:
+            flt.must.append(
+                qmodels.FieldCondition(
+                    key="payload_type", match=qmodels.MatchValue(value=payload_type)
+                )
+            )
 
         def _do() -> list[qmodels.ScoredPoint]:
             response = self._client.query_points(

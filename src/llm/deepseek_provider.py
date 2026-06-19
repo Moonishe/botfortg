@@ -9,7 +9,7 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -20,7 +20,7 @@ DEEPSEEK_CHAT_LIGHT = "deepseek-chat"
 DEEPSEEK_CHAT_HEAVY = "deepseek-reasoner"
 
 
-class DeepSeekProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
+class DeepSeekProvider(OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMProvider):
     """Провайдер для DeepSeek API (OpenAI-совместимый).
 
     Поддерживает chat (deepseek-chat, deepseek-reasoner) и embeddings (deepseek-embedding).

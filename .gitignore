@@ -56,9 +56,6 @@ SOUL.md
 
 # Temporary / scratch files
 *.diff
-bugfixes.diff
-dsm.diff
-dsm2.diff
 check_issue.txt
 ruff-output.txt
 apply_main_*.py

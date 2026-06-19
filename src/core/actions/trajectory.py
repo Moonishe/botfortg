@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+from src.core.security.prompt_guard import sanitize_pii
 from typing import Any
 
 from src.db.repo import add_trajectory, get_or_create_user
 from src.db.session import get_session
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,24 +26,52 @@ async def record_trajectory(
     success: bool = True,
     error: str | None = None,
     latency_ms: int | None = None,
+    # ── MemOS reward loop fields ──
+    reward_value: float | None = None,
+    reflection: str | None = None,
+    step_index: int = 0,
+    value_estimate: float | None = None,
 ) -> int | None:
     """Best-effort trajectory write. Never breaks the user-facing turn."""
     try:
+        # ── Compute reward BEFORE opening DB session (avoids holding session
+        #     open during potentially slow LLM rubric call — up to 30s) ──
+        computed_r = reward_value
+        computed_refl = reflection
+        if settings.reward_loop_enabled and reward_value is None:
+            try:
+                from src.core.learning.reward_loop import compute_reward
+
+                computed_r, computed_refl = await compute_reward(
+                    success=success,
+                    latency_ms=latency_ms,
+                    response_text=response_text,
+                    used_skills_json=used_skills_json,
+                    route_mode=route_mode,
+                )
+                computed_refl = computed_refl[:4000] if computed_refl else None
+            except Exception:
+                logger.debug("Reward computation failed", exc_info=True)
+
         async with get_session() as session:
             owner = await get_or_create_user(session, telegram_id)
             row = await add_trajectory(
                 session,
                 owner,
-                request_text=request_text,
+                request_text=sanitize_pii(request_text),
                 route_mode=route_mode,
                 intent_json=intent_json,
                 actions_json=actions_json,
                 used_skills_json=used_skills_json,
                 memory_ids_json=memory_ids_json,
-                response_text=response_text,
+                response_text=sanitize_pii(response_text),
                 success=success,
                 error=error,
                 latency_ms=latency_ms,
+                reward_value=computed_r,
+                reflection=computed_refl,
+                step_index=step_index,
+                value_estimate=value_estimate,
             )
 
             # Feature 2: Pattern cache recording — только при успехе и opt-in

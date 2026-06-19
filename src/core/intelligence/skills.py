@@ -28,6 +28,22 @@ from src.llm.base import TaskType
 logger = logging.getLogger(__name__)
 
 
+def bayesian_skill_score(skill: Skill, alpha: float = 5.0, prior: float = 0.7) -> float:
+    """Bayesian shrinkage: pull observed success rate toward a prior.
+
+    Skills with few uses get shrunk toward ``prior`` (0.7 by default),
+    preventing one-shot flukes from dominating ranking.
+    Returns a float in [0, ~10] range for compatibility with match scores.
+    """
+    s = skill.success_count or 0
+    f = skill.failure_count or 0
+    total = s + f
+    if total == 0:
+        return 0.0
+    shrunken = (s + alpha * prior) / (total + alpha)
+    return shrunken * 10  # scale to match-score range
+
+
 def _matches(text: str, patterns: Iterable[str] | None) -> int:
     if not patterns:
         return 0
@@ -76,14 +92,14 @@ async def list_relevant_skills(
             limit=100,
         )
 
-    ranked: list[tuple[int, Skill]] = []
+    ranked: list[tuple[float, Skill]] = []
     for skill in skills:
         patterns = skill.trigger_patterns_json or []
         score = _matches(user_text, patterns)
         if route_mode and route_mode.lower() in [str(p).lower() for p in patterns]:
             score += 2
         if score:
-            ranked.append((score + (skill.success_count or 0), skill))
+            ranked.append((score + bayesian_skill_score(skill), skill))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
     return [skill for _, skill in ranked[:limit]]
@@ -103,10 +119,10 @@ def format_skill_index(skills: list[Skill]) -> str:
         if desc:
             header += f": {desc[:160]}"
         lines.append(header)
-        body = (skill.body or "").strip()
-        if body:
-            lines.append(f"  procedure: {body[:700]}")
     lines.append("</skill_index>")
+    lines.append(
+        "_Используй `use_skill(skill_name)` для получения полного содержимого навыка._"
+    )
 
     # Inject rejected edits feedback for LLM to avoid repeating failed patterns
     from src.core.intelligence.skill_editor import format_rejected_edits
@@ -765,6 +781,17 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
                 logger.debug("skill_optimizer_loop: no edits from corrections")
         except Exception:
             logger.exception("skill_optimizer_loop correction-based analysis failed")
+
+        # Step 4: L2 policy induction (MemOS)
+        if settings.reward_loop_enabled:
+            try:
+                from src.core.learning import reward_loop
+
+                induced = await reward_loop.induce_policies(telegram_id)
+                if induced:
+                    logger.info("L2 induction: %d new candidate policies", induced)
+            except Exception:
+                logger.debug("L2 policy induction failed", exc_info=True)
 
         await asyncio.sleep(settings.skill_optimizer_interval_sec)
 

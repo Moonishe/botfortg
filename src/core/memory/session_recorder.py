@@ -71,9 +71,7 @@ async def record_turn(
             )
             if cached_started:
                 gap = datetime.now(UTC) - cached_started
-                inactivity = datetime.now(UTC) - (
-                    cached_last_active or cached_started
-                )
+                inactivity = datetime.now(UTC) - (cached_last_active or cached_started)
                 if (
                     gap > SESSION_INACTIVITY_TIMEOUT
                     and inactivity > SESSION_INACTIVITY_TIMEOUT
@@ -243,3 +241,37 @@ async def get_session_history(
         )
 
     return formatted
+
+
+# ── Snapshot support (Issue 2: public API for SnapshotEngine) ──────
+
+
+async def capture_state():
+    """Public snapshot of _active_sessions (JSON-serializable)."""
+    async with _active_sessions_lock:
+        return {
+            str(tg): {
+                "session_id": s[0],
+                "started_at": s[1].isoformat(),
+                "last_active": s[2].isoformat(),
+            }
+            for tg, s in _active_sessions.items()
+        }
+
+
+async def restore_state(data):
+    """Restore _active_sessions from a snapshot dict."""
+    if not data:
+        return
+    from datetime import datetime
+
+    async with _active_sessions_lock:
+        for tg_str, d in data.items():
+            try:
+                _active_sessions[int(tg_str)] = (
+                    d["session_id"],
+                    datetime.fromisoformat(d["started_at"]),
+                    datetime.fromisoformat(d["last_active"]),
+                )
+            except Exception:
+                pass

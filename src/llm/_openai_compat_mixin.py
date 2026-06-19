@@ -7,6 +7,7 @@ NOTE: Используется openai>=1.0.0 API (AsyncOpenAI). Устаревш
 Hierarchy:
     OpenAICompatBaseMixin  — validate_key, list_models, close
         └── OpenAICompatEmbedMixin  — embed, embed_batch (requires _embed_model)
+    OpenAICompatToolMixin  — chat_with_tools (requires _client, _resolve_model, _fmt_messages)
 
 OpenRouter uses only the base (no embeddings).
 OpenAI, DeepSeek, Mistral, Cloudflare use the full embed mixin.
@@ -18,13 +19,19 @@ Requires subclasses to set:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from openai import APIConnectionError, AuthenticationError, PermissionDeniedError
 
 from src.core.actions.embedding_cache import aget, aset
-import logging
-
+from src.llm.base import ChatMessage
+from src.llm.tool_calling.models import (
+    ChatResponse,
+    ToolCall,
+    ToolDefinition,
+    safe_parse_tool_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,3 +118,45 @@ class OpenAICompatEmbedMixin(OpenAICompatBaseMixin):
                 results[idx] = emb
 
         return results  # type: ignore[return-value]
+
+
+class OpenAICompatToolMixin:
+    """OpenAI-compatible `chat_with_tools` implementation shared across providers.
+
+    Requires subclasses to set:
+        self._client  — AsyncOpenAI-compatible client
+    And inherit from BaseLLMProvider for:
+        self._resolve_model(), self._fmt_messages(), self._tools_to_openai()
+    """
+
+    _client: Any  # AsyncOpenAI
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition] | None = None,
+        *,
+        task_type: str = "default",
+    ) -> ChatResponse:
+        heavy = task_type not in ("draft", "default", "memory", "classify")
+        model = self._resolve_model(heavy)  # type: ignore[attr-defined]
+        kwargs: dict[str, Any] = dict(
+            model=model,
+            messages=self._fmt_messages(messages),  # type: ignore[attr-defined]
+        )
+        if tools:
+            kwargs["tools"] = self._tools_to_openai(tools)  # type: ignore[attr-defined]
+        resp = await self._client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        text = choice.message.content or ""
+        tool_calls: list[ToolCall] | None = None
+        if choice.message.tool_calls:
+            tool_calls = [
+                ToolCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    arguments=safe_parse_tool_args(tc.function.arguments),
+                )
+                for tc in choice.message.tool_calls
+            ]
+        return ChatResponse(text=text, tool_calls=tool_calls)

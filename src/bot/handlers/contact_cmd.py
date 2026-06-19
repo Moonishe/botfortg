@@ -9,7 +9,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.core.contacts.health_score import get_contact_health
 from src.core.memory.context_files import get_contact_context
 from src.core.memory.memory_recall import recall
@@ -110,7 +110,7 @@ async def cmd_contact(
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         # 1. Resolve contact via fuzzy matching (inside session — resolve may access owner.settings etc.)
-        candidates = await resolve(client, owner, name)
+        candidates = await resolve_contact_fast(client, owner, name)
     if not candidates:
         await message.answer(
             f"❌ Не нашёл контакт «{sanitize_html(name)}». Сделай /sync."

@@ -22,10 +22,10 @@ from src.core.security.prompt_injection_scanner import scan_content
 from src.db.models import Memory, MemoryCandidate
 from src.db.repo import (
     add_commitment,
-    add_memory,
     get_commitment_by_source_memory,
-    get_or_create_user,
+    get_or_create_user
 )
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 
 
@@ -68,7 +68,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
 
         if action == "confirm":
             # Перенести в Memory как есть
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=candidate.fact,
@@ -77,7 +77,8 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
                 source=candidate.source,
                 importance=candidate.importance,
                 decay_rate=candidate.decay_rate,
-            )
+                confidence=0.5,
+                memory_type=None)
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
                 f"✅ Запомнил: <i>{sanitize_html(candidate.fact)}</i>"
@@ -93,7 +94,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
 
         elif action == "temporary":
             # Перенести с memory_type="temporary", decay_rate=0.3 (быстро протухнет)
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=candidate.fact,
@@ -103,7 +104,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
                 memory_type="temporary",
                 importance=candidate.importance,
                 decay_rate=0.3,
-            )
+                confidence=0.5)
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
                 f"⏳ Сохранено на неделю: <i>{sanitize_html(candidate.fact)}</i>"
@@ -112,7 +113,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
 
         elif action == "permanent":
             # Перенести с decay_rate=0.01 (почти не протухнет)
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=candidate.fact,
@@ -121,7 +122,8 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
                 source=candidate.source,
                 importance=min(1.0, candidate.importance + 0.2),
                 decay_rate=0.01,
-            )
+                confidence=0.5,
+                memory_type=None)
             await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
                 f"♾ Сохранено навсегда: <i>{sanitize_html(candidate.fact)}</i>"

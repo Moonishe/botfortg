@@ -46,8 +46,10 @@ class PluginLoader:
         try:
             for d in self._plugins_dir.iterdir():
                 try:
+                    # ponytail: cheap string check first, before fs calls
                     if (
-                        d.is_dir()
+                        not d.name.startswith("_")  # skip _template, __pycache__, etc.
+                        and d.is_dir()
                         and not d.is_symlink()
                         and (d / "plugin.yaml").exists()
                     ):

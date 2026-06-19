@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.db.session import get_session
-from src.db.repo import add_memory, get_or_create_user, link_memories
+from src.core.memory.memory_service import save_memory_single
+from src.db.repo import get_or_create_user, link_memories
 from src.core.memory.memory_chain import follow_supersedes_chain
 
 
@@ -43,10 +44,8 @@ async def _make_owner(tg_id: int = OWNER_TG_ID):
 
 async def _make_memory(owner, fact: str, created_offset_sec: int = 0):
     """Создаёт Memory с управляемым created_at (смещение в секундах от now)."""
-    from src.db.models import Memory
-
     async with get_session() as session:
-        m = await add_memory(
+        m = await save_memory_single(
             session,
             owner,
             fact=fact,

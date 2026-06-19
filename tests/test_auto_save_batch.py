@@ -32,14 +32,15 @@ from src.core.memory.auto_save_batch import (
     _build_batch_prompt,
     _parse_single_facts,
     _parse_batch_facts,
-    _save_single,
+    auto_save_single,
     _save_facts_to_db,
     get_batch_buffer,
     reset_batch_buffer,
 )
 from src.llm.base import ChatMessage, TaskType
 from src.db.session import get_session, init_db
-from src.db.repo import add_memory, get_or_create_user
+from src.db.repo import get_or_create_user
+from src.core.memory.memory_service import save_memory_single
 
 OWNER_TG_ID = 123456789
 
@@ -869,7 +870,7 @@ class TestFactBatchBuffer:
             ]
         )
 
-        await _save_single(OWNER_TG_ID, "Я живу в Москве", "Понял", provider)
+        await auto_save_single(OWNER_TG_ID, "Я живу в Москве", "Понял", provider)
 
         # Verify DB write
         async with get_session() as session:

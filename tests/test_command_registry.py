@@ -82,6 +82,7 @@ class TestCommandRegistry:
             "sessions",
             "trajectory",
             "evolve",
+            "ops",
         ):
             assert name in commands, f"/{name} missing from registry"
         # Admin commands are excluded from the menu but present in the registry.

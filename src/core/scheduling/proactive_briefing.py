@@ -26,8 +26,8 @@ from src.db.models import (
     Notification,
     UserSettings,
 )
+from src.core.memory.stats import get_memory_stats
 from src.db.repo import (
-    get_memory_stats,
     get_or_create_user,
     list_active_conversations,
     list_memories,

@@ -172,7 +172,7 @@ async def _send_image(url: str, **kwargs: Any) -> dict[str, Any]:
     if bot is None:
         from src.core.infra.notifier import notifier
 
-        bot = notifier._bot
+        bot = notifier.get_bot()
     if bot is None:
         return {"error": "Нет экземпляра бота — control bot не запущен"}
 

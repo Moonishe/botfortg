@@ -18,6 +18,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 # ── Must set env BEFORE importing src to avoid Settings validation errors ──
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
@@ -99,12 +100,12 @@ def _make_candidate(
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.fixture(autouse=True)
-def _clean_cache():
+@pytest_asyncio.fixture(autouse=True)
+async def _clean_cache():
     """Ensure cache is clean before and after each test."""
-    invalidate_all()
+    await invalidate_all()
     yield
-    invalidate_all()
+    await invalidate_all()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -382,38 +383,33 @@ async def test_prefetch_contact_handles_db_error():
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_invalidate_contact():
+@pytest.mark.asyncio
+async def test_invalidate_contact():
     """Invalidate removes user's cache entry."""
     contacts = [_make_contact(1, "Alice")]
-
-    async def _setup():
-        async with _CACHE_LOCK:
-            _contact_cache[100] = _make_cached_entry(contacts=contacts)
-
-    asyncio.run(_setup())
+    async with _CACHE_LOCK:
+        _contact_cache[100] = _make_cached_entry(contacts=contacts)
     assert 100 in _contact_cache
 
-    invalidate_contact(100)
+    await invalidate_contact(100)
     assert 100 not in _contact_cache
 
 
-def test_invalidate_contact_missing():
+@pytest.mark.asyncio
+async def test_invalidate_contact_missing():
     """Invalidating a non-existent user does nothing."""
-    invalidate_contact(99999)  # should not raise
+    await invalidate_contact(99999)  # should not raise
 
 
-def test_invalidate_all():
+@pytest.mark.asyncio
+async def test_invalidate_all():
     """Invalidate all clears entire cache."""
-
-    async def _setup():
-        async with _CACHE_LOCK:
-            _contact_cache[100] = _make_cached_entry(contacts=[])
-            _contact_cache[200] = _make_cached_entry(contacts=[])
-
-    asyncio.run(_setup())
+    async with _CACHE_LOCK:
+        _contact_cache[100] = _make_cached_entry(contacts=[])
+        _contact_cache[200] = _make_cached_entry(contacts=[])
     assert len(_contact_cache) == 2
 
-    invalidate_all()
+    await invalidate_all()
     assert len(_contact_cache) == 0
 
 
@@ -491,7 +487,7 @@ async def test_concurrent_invalidate_and_read():
 
     async def invalidator():
         for _ in range(10):
-            invalidate_contact(100)
+            await invalidate_contact(100)
             await asyncio.sleep(0)
 
     await asyncio.gather(reader(), invalidator())
@@ -607,7 +603,7 @@ def test_extract_contact_hint_none():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Tests: _refresh_ttl
+# Tests: _get_cache_ttl (replaces old _refresh_ttl)
 # ══════════════════════════════════════════════════════════════════════
 
 

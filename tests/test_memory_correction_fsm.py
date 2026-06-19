@@ -18,13 +18,13 @@ Verifies:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 
 # ── Environment setup BEFORE importing src modules ──────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -46,9 +46,31 @@ from src.bot.handlers.memory_cmd import _cmd_memory_correct, cb_memreval
 from src.bot.states import MemoryCorrectionStates
 from src.db.models import Memory
 from src.db.repo import get_or_create_user
-from src.db.session import get_session
+from src.db.session import get_session, init_db
 
 OWNER_TG_ID = 123456789
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Fixtures
+# ═══════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture(autouse=True)
+async def _fsm_db_setup():
+    """Recreate tables before each FSM test; other tests may dispose the global engine."""
+    from src.db.session import engine, Base
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+        await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
+    await init_db()
+    yield
+
+
 BOT_ID = 0  # sentinel — MemoryStorage doesn't check it
 EXPECTED_STATE = MemoryCorrectionStates.waiting_new_text.state
 
@@ -92,26 +114,32 @@ def _make_user_fsm(user_id: int = OWNER_TG_ID) -> tuple[MemoryStorage, FSMContex
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def owner_with_fact():
-    """Create an owner user + a Memory row owned by them; return (user, memory)."""
+@pytest_asyncio.fixture
+async def owner_with_fact():
+    """Create an owner user + a Memory row owned by them; return (user, memory).
 
-    async def _create():
-        async with get_session() as session:
-            owner = await get_or_create_user(session, OWNER_TG_ID)
-            fact = Memory(
-                user_id=owner.id,
-                fact="оригинальный факт для исправления",
-                memory_type="contact_fact",
-                sentiment="neutral",
-                is_active=True,
-            )
-            session.add(fact)
-            await session.commit()
-            await session.refresh(fact)
-            return owner.id, fact.id, fact.fact
+    Ensures DB tables exist on the current event loop (workaround for
+    session-scoped _db_init using asyncio.run() which may lose tables
+    after many tests on different event loops).
+    """
+    from src.db.session import engine, Base
 
-    return asyncio.run(_create())
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, OWNER_TG_ID)
+        fact = Memory(
+            user_id=owner.id,
+            fact="оригинальный факт для исправления",
+            memory_type="contact_fact",
+            sentiment="neutral",
+            is_active=True,
+        )
+        session.add(fact)
+        await session.commit()
+        await session.refresh(fact)
+        return owner.id, fact.id, fact.fact
 
 
 # ═══════════════════════════════════════════════════════════════════

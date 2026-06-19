@@ -9,13 +9,13 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 
-class CustomProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
+class CustomProvider(OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMProvider):
     """Провайдер для кастомного OpenAI-совместимого endpoint.
 
     Конфигурация передаётся через конструктор, а не через Settings.
@@ -77,10 +77,3 @@ class CustomProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
-
-    async def embed(self, text: str) -> list[float]:
-        return await super().embed(text)
-
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        # Используем кэш родительского класса через super().embed_batch()
-        return await super().embed_batch(texts)

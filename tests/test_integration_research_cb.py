@@ -26,7 +26,19 @@ def _reset_engine_pool() -> None:
 
         engine.sync_engine.dispose()
     except Exception:
-        pass
+        pass  # ponytail: engine may not be initialised in DB-mocked tests
+
+
+@pytest.fixture(autouse=True)
+def _patch_send_rich_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub send_rich_message to avoid network calls and unawaited AsyncMock warnings.
+
+    Tests in this module exercise the fallback edit_text/answer_document path.
+    """
+    monkeypatch.setattr(
+        "src.bot.rich_messages.send_rich_message",
+        AsyncMock(return_value=None),
+    )
 
 
 # ── Вспомогательные фабрики ──────────────────────────────────────────
@@ -126,48 +138,49 @@ class TestCbResearchViewSuccess:
         )
 
         # Создаём временную директорию и SUMMARY.md
-        tmp_dir = Path(tempfile.mkdtemp())
-        research_dir = tmp_dir / "data" / "research" / "abc123"
-        research_dir.mkdir(parents=True)
-        summary_file = research_dir / "SUMMARY.md"
-        summary_file.write_text("Полный отчёт исследования", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            research_dir = tmp_dir / "data" / "research" / "abc123"
+            research_dir.mkdir(parents=True)
+            summary_file = research_dir / "SUMMARY.md"
+            summary_file.write_text("Полный отчёт исследования", encoding="utf-8")
 
-        _patch_safe_resolve(monkeypatch, tmp_dir)
+            _patch_safe_resolve(monkeypatch, tmp_dir)
 
-        with (
-            patch(
-                "src.bot.handlers.research_cb.get_deep_research_pipeline",
-            ) as mock_get_pipeline,
-            patch(
-                "src.bot.handlers.research_cb.isinstance",
-                side_effect=_fake_isinstance_factory(cb.message),
-            ),
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.get_status = AsyncMock(return_value=mock_result)
-            mock_get_pipeline.return_value = mock_pipeline
+            with (
+                patch(
+                    "src.bot.handlers.research_cb.get_deep_research_pipeline",
+                ) as mock_get_pipeline,
+                patch(
+                    "src.bot.handlers.research_cb.isinstance",
+                    side_effect=_fake_isinstance_factory(cb.message),
+                ),
+            ):
+                mock_pipeline = MagicMock()
+                mock_pipeline.get_status = AsyncMock(return_value=mock_result)
+                mock_get_pipeline.return_value = mock_pipeline
 
-            await cb_research_view(cb)
+                await cb_research_view(cb)
 
-            # Проверка: edit_text вызван со сводкой
-            cb.message.edit_text.assert_called_once()
-            call_kwargs = cb.message.edit_text.call_args[1]
-            text_arg = cb.message.edit_text.call_args[0][0]
-            assert "Полный отчёт исследования" in text_arg, (
-                f"Expected summary in message, got: {text_arg}"
-            )
-            assert "📋" in text_arg, f"Expected result header, got: {text_arg}"
+                # Проверка: edit_text вызван со сводкой
+                cb.message.edit_text.assert_called_once()
+                call_kwargs = cb.message.edit_text.call_args[1]
+                text_arg = cb.message.edit_text.call_args[0][0]
+                assert "Полный отчёт исследования" in text_arg, (
+                    f"Expected summary in message, got: {text_arg}"
+                )
+                assert "📋" in text_arg, f"Expected result header, got: {text_arg}"
 
-            # Проверка: reply_markup содержит 3 кнопки
-            reply_markup = call_kwargs.get("reply_markup")
-            assert reply_markup is not None, "Expected reply_markup with buttons"
-            if hasattr(reply_markup, "inline_keyboard"):
-                rows = reply_markup.inline_keyboard
-            else:
-                rows = reply_markup.get("inline_keyboard", [])
-            assert len(rows) == 3, f"Expected 3 button rows, got {len(rows)}"
+                # Проверка: reply_markup содержит 3 кнопки
+                reply_markup = call_kwargs.get("reply_markup")
+                assert reply_markup is not None, "Expected reply_markup with buttons"
+                if hasattr(reply_markup, "inline_keyboard"):
+                    rows = reply_markup.inline_keyboard
+                else:
+                    rows = reply_markup.get("inline_keyboard", [])
+                assert len(rows) == 3, f"Expected 3 button rows, got {len(rows)}"
 
-            cb.answer.assert_any_call("✅ Отчёт загружен!")
+                cb.answer.assert_any_call("✅ Отчёт загружен!")
 
     @pytest.mark.asyncio
     async def test_edits_message_with_fallback_summary_when_file_missing(
@@ -182,35 +195,36 @@ class TestCbResearchViewSuccess:
             "abc123", "Test query", summary="In-memory summary"
         )
 
-        tmp_dir = Path(tempfile.mkdtemp())
-        _patch_safe_resolve(monkeypatch, tmp_dir)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            _patch_safe_resolve(monkeypatch, tmp_dir)
 
-        with (
-            patch(
-                "src.bot.handlers.research_cb.get_deep_research_pipeline",
-            ) as mock_get_pipeline,
-            patch(
-                "src.bot.handlers.research_cb.isinstance",
-                side_effect=_fake_isinstance_factory(cb.message),
-            ),
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.get_status = AsyncMock(return_value=mock_result)
-            mock_get_pipeline.return_value = mock_pipeline
+            with (
+                patch(
+                    "src.bot.handlers.research_cb.get_deep_research_pipeline",
+                ) as mock_get_pipeline,
+                patch(
+                    "src.bot.handlers.research_cb.isinstance",
+                    side_effect=_fake_isinstance_factory(cb.message),
+                ),
+            ):
+                mock_pipeline = MagicMock()
+                mock_pipeline.get_status = AsyncMock(return_value=mock_result)
+                mock_get_pipeline.return_value = mock_pipeline
 
-            await cb_research_view(cb)
+                await cb_research_view(cb)
 
-            cb.message.edit_text.assert_called_once()
-            text_arg = cb.message.edit_text.call_args[0][0]
-            assert "In-memory summary" in text_arg, (
-                f"Expected in-memory summary, got: {text_arg}"
-            )
+                cb.message.edit_text.assert_called_once()
+                text_arg = cb.message.edit_text.call_args[0][0]
+                assert "In-memory summary" in text_arg, (
+                    f"Expected in-memory summary, got: {text_arg}"
+                )
 
-            call_kwargs = cb.message.edit_text.call_args[1]
-            reply_markup = call_kwargs.get("reply_markup")
-            assert reply_markup is not None
+                call_kwargs = cb.message.edit_text.call_args[1]
+                reply_markup = call_kwargs.get("reply_markup")
+                assert reply_markup is not None
 
-            cb.answer.assert_any_call("✅ Отчёт загружен!")
+                cb.answer.assert_any_call("✅ Отчёт загружен!")
 
 
 # ── cb_research_file: success-path ────────────────────────────────────
@@ -232,42 +246,43 @@ class TestCbResearchFileSuccess:
             "abc123", "Как работает Python GIL?", summary="Summary from disk"
         )
 
-        tmp_dir = Path(tempfile.mkdtemp())
-        research_dir = tmp_dir / "data" / "research" / "abc123"
-        research_dir.mkdir(parents=True)
-        summary_file = research_dir / "SUMMARY.md"
-        summary_file.write_text("Полный отчёт исследования", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            research_dir = tmp_dir / "data" / "research" / "abc123"
+            research_dir.mkdir(parents=True)
+            summary_file = research_dir / "SUMMARY.md"
+            summary_file.write_text("Полный отчёт исследования", encoding="utf-8")
 
-        _patch_safe_resolve(monkeypatch, tmp_dir)
+            _patch_safe_resolve(monkeypatch, tmp_dir)
 
-        with (
-            patch(
-                "src.bot.handlers.research_cb.get_deep_research_pipeline",
-            ) as mock_get_pipeline,
-            patch(
-                "src.bot.handlers.research_cb.FSInputFile",
-            ) as mock_fs_input,
-            patch(
-                "src.bot.handlers.research_cb.isinstance",
-                side_effect=_fake_isinstance_factory(cb.message),
-            ),
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.get_status = AsyncMock(return_value=mock_result)
-            mock_get_pipeline.return_value = mock_pipeline
+            with (
+                patch(
+                    "src.bot.handlers.research_cb.get_deep_research_pipeline",
+                ) as mock_get_pipeline,
+                patch(
+                    "src.bot.handlers.research_cb.FSInputFile",
+                ) as mock_fs_input,
+                patch(
+                    "src.bot.handlers.research_cb.isinstance",
+                    side_effect=_fake_isinstance_factory(cb.message),
+                ),
+            ):
+                mock_pipeline = MagicMock()
+                mock_pipeline.get_status = AsyncMock(return_value=mock_result)
+                mock_get_pipeline.return_value = mock_pipeline
 
-            await cb_research_file(cb)
+                await cb_research_file(cb)
 
-            mock_fs_input.assert_called_once()
-            call_args = mock_fs_input.call_args
-            assert call_args is not None
-            file_path_arg = str(call_args[0][0])
-            assert "abc123" in file_path_arg or "SUMMARY" in file_path_arg, (
-                f"Expected path to contain job_id, got: {file_path_arg}"
-            )
+                mock_fs_input.assert_called_once()
+                call_args = mock_fs_input.call_args
+                assert call_args is not None
+                file_path_arg = str(call_args[0][0])
+                assert "abc123" in file_path_arg or "SUMMARY" in file_path_arg, (
+                    f"Expected path to contain job_id, got: {file_path_arg}"
+                )
 
-            cb.message.answer_document.assert_called_once()
-            cb.answer.assert_any_call("✅ Файл отправлен!")
+                cb.message.answer_document.assert_called_once()
+                cb.answer.assert_any_call("✅ Файл отправлен!")
 
     @pytest.mark.asyncio
     async def test_sends_report_via_buffered_when_file_missing(
@@ -282,30 +297,31 @@ class TestCbResearchFileSuccess:
             "abc123", "Test query", summary="In-memory summary"
         )
 
-        tmp_dir = Path(tempfile.mkdtemp())
-        _patch_safe_resolve(monkeypatch, tmp_dir)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            _patch_safe_resolve(monkeypatch, tmp_dir)
 
-        with (
-            patch(
-                "src.bot.handlers.research_cb.get_deep_research_pipeline",
-            ) as mock_get_pipeline,
-            patch(
-                "src.bot.handlers.research_cb.BufferedInputFile",
-            ) as mock_buffered,
-            patch(
-                "src.bot.handlers.research_cb.isinstance",
-                side_effect=_fake_isinstance_factory(cb.message),
-            ),
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.get_status = AsyncMock(return_value=mock_result)
-            mock_get_pipeline.return_value = mock_pipeline
+            with (
+                patch(
+                    "src.bot.handlers.research_cb.get_deep_research_pipeline",
+                ) as mock_get_pipeline,
+                patch(
+                    "src.bot.handlers.research_cb.BufferedInputFile",
+                ) as mock_buffered,
+                patch(
+                    "src.bot.handlers.research_cb.isinstance",
+                    side_effect=_fake_isinstance_factory(cb.message),
+                ),
+            ):
+                mock_pipeline = MagicMock()
+                mock_pipeline.get_status = AsyncMock(return_value=mock_result)
+                mock_get_pipeline.return_value = mock_pipeline
 
-            await cb_research_file(cb)
+                await cb_research_file(cb)
 
-            mock_buffered.assert_called_once()
-            cb.message.answer_document.assert_called_once()
-            cb.answer.assert_any_call("✅ Файл отправлен!")
+                mock_buffered.assert_called_once()
+                cb.message.answer_document.assert_called_once()
+                cb.answer.assert_any_call("✅ Файл отправлен!")
 
 
 # ── cb_research_dig_deeper: success-path ─────────────────────────────

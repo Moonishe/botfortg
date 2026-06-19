@@ -22,6 +22,7 @@ import random
 from datetime import datetime, timedelta, UTC
 
 from src.config import settings
+from src.db.models import Notification
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -373,6 +374,37 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         except Exception:
             logger.exception("Dream cycle: phase 13 (compaction) failed")
 
+        # ── Phase 14: Reward backpropagation (MemOS) ─────────────────
+        if settings.reward_loop_enabled:
+            try:
+                from src.core.learning import reward_loop
+
+                updated = await reward_loop.backprop_values(owner_telegram_id)
+                summary["backprop_updated"] = updated
+                if updated:
+                    logger.info(
+                        "Dream cycle: phase 14 (backprop) — updated %d trajectories",
+                        updated,
+                    )
+            except Exception:
+                logger.debug("Reward backprop failed", exc_info=True)
+                summary["backprop_error"] = True
+
+        # ── Phase 15: L3 world-model abstraction (MemOS) ─────────────
+        if settings.world_model_enabled and settings.reward_loop_enabled:
+            try:
+                from src.core.learning import reward_loop
+
+                wm_result = await reward_loop.update_world_model(owner_telegram_id)
+                summary["world_model"] = wm_result
+                logger.info(
+                    "Dream cycle: phase 15 (world model) — %d abstractions",
+                    wm_result.get("abstracted", 0),
+                )
+            except Exception:
+                logger.debug("World model abstraction failed", exc_info=True)
+                summary["world_model_error"] = True
+
         # ── Graph statistics ──────────────────────────────────────────────
         try:
             from src.db.repos.memory_repo import get_graph_stats
@@ -601,7 +633,7 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                         await notification_queue.enqueue(
                             topic="proactive-ping",
                             text=f"💡 {ping}",
-                            priority=5,  # PRIORITY_NORMAL
+                            priority=Notification.PRIORITY_MEDIUM,
                         )
                         await asyncio.sleep(1)
                     # Очищаем pending-вопросы после того как они включены в пинги

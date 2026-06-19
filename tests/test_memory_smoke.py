@@ -18,15 +18,15 @@ os.environ["OWNER_TELEGRAM_ID"] = "123456789"
 from src.db.session import init_db, get_session
 from src.db.models import MemoryCandidate
 from src.db.repo import (
-    add_memory,
     add_memory_candidate,
     get_or_create_user,
     add_commitment,
     update_commitment_status,
     list_memories,
     upsert_conversation_state,
-    upsert_message,
+    upsert_message
 )
+from src.core.memory.memory_service import save_memory_single
 from src.core.actions.conflict_predictor import detect_silence_triggers
 from src.core.memory.temporal_layers import get_prompt_facts
 from src.core.memory.memory_checker import _run_decay_and_validation
@@ -93,7 +93,7 @@ async def test_memory_candidate_confirm():
         owner2 = await get_or_create_user(session, OWNER_TG_ID)
         cand = await session.get(MemoryCandidate, cand_id)
         assert cand is not None
-        await add_memory(
+        await save_memory_single(
             session,
             owner2,
             fact=cand.fact,
@@ -102,7 +102,8 @@ async def test_memory_candidate_confirm():
             source=cand.source,
             importance=cand.importance,
             decay_rate=cand.decay_rate,
-        )
+            confidence=0.5,
+            memory_type=None)
         await session.delete(cand)
 
     # Проверка
@@ -119,7 +120,7 @@ async def test_memory_candidate_temporary():
     _owner = await _get_owner()
     async with get_session() as session:
         owner2 = await get_or_create_user(session, OWNER_TG_ID)
-        await add_memory(
+        await save_memory_single(
             session,
             owner2,
             fact="Временный факт",
@@ -127,7 +128,7 @@ async def test_memory_candidate_temporary():
             memory_type="temporary",
             decay_rate=0.3,
             importance=0.5,
-        )
+            confidence=0.5)
     async with get_session() as session:
         owner3 = await get_or_create_user(session, OWNER_TG_ID)
         mems = await list_memories(session, owner3)
@@ -143,14 +144,15 @@ async def test_permanent_decay_rate():
     _owner = await _get_owner()
     async with get_session() as session:
         owner2 = await get_or_create_user(session, OWNER_TG_ID)
-        await add_memory(
+        await save_memory_single(
             session,
             owner2,
             fact="Вечный факт",
             source="user",
             decay_rate=0.01,
             importance=1.0,
-        )
+            confidence=0.5,
+            memory_type=None)
     async with get_session() as session:
         owner3 = await get_or_create_user(session, OWNER_TG_ID)
         mems = await list_memories(session, owner3)
@@ -180,13 +182,13 @@ async def test_commitment_to_task_memory():
     async with get_session() as session:
         await update_commitment_status(session, cid, "done")
         owner3 = await get_or_create_user(session, OWNER_TG_ID)
-        await add_memory(
+        await save_memory_single(
             session,
             owner3,
             fact="Выполнено: Позвонить маме",
             source="commitment",
             memory_type="task",
-        )
+            confidence=0.5)
 
     async with get_session() as session:
         owner4 = await get_or_create_user(session, OWNER_TG_ID)
@@ -203,12 +205,14 @@ async def test_get_prompt_facts_is_active():
     _owner = await _get_owner()
     async with get_session() as session:
         owner2 = await get_or_create_user(session, OWNER_TG_ID)
-        await add_memory(
-            session, owner2, fact="Активный", source="chat", importance=0.8
-        )
-        await add_memory(
-            session, owner2, fact="Неактивный", source="chat", importance=0.5
-        )
+        await save_memory_single(
+            session, owner2, fact="Активный", source="chat", importance=0.8,
+            confidence=0.5,
+            memory_type=None)
+        await save_memory_single(
+            session, owner2, fact="Неактивный", source="chat", importance=0.5,
+            confidence=0.5,
+            memory_type=None)
         mems = await list_memories(session, owner2)
         inactive = next(m for m in mems if m.fact == "Неактивный")
         inactive.is_active = False
@@ -226,8 +230,12 @@ async def test_get_prompt_facts_skips_expired_and_tracks_usage():
     только в recall() (Phase 0.2: убран двойной бамп)."""
     async with get_session() as session:
         owner = await get_or_create_user(session, OWNER_TG_ID)
-        await add_memory(session, owner, fact="Свежий факт", source="chat")
-        await add_memory(session, owner, fact="Истекший факт", source="chat")
+        await save_memory_single(session, owner, fact="Свежий факт", source="chat",
+            confidence=0.5,
+            memory_type=None)
+        await save_memory_single(session, owner, fact="Истекший факт", source="chat",
+            confidence=0.5,
+            memory_type=None)
         mems = await list_memories(session, owner)
         expired = next(m for m in mems if m.fact == "Истекший факт")
         expired.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
@@ -246,9 +254,10 @@ async def test_decay_processes_all_expired_without_offset_skip():
     async with get_session() as session:
         owner = await get_or_create_user(session, OWNER_TG_ID)
         for idx in range(3):
-            await add_memory(
-                session, owner, fact=f"Временный факт {idx}", source="chat"
-            )
+            await save_memory_single(
+                session, owner, fact=f"Временный факт {idx}", source="chat",
+                confidence=0.5,
+                memory_type=None)
         mems = await list_memories(session, owner)
         for mem in mems:
             mem.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
@@ -293,20 +302,24 @@ async def test_conflict_predictor_uses_historical_outgoing_before_negative():
             kind="text",
             text="пишу второй раз",
         )
-        first_neg = await add_memory(
+        first_neg = await save_memory_single(
             session,
             owner,
             fact="контакт раздражён из-за молчания",
             contact_id=contact_id,
             sentiment="negative",
-        )
-        second_neg = await add_memory(
+            source="chat",
+            confidence=0.5,
+            memory_type=None)
+        second_neg = await save_memory_single(
             session,
             owner,
             fact="контакт снова недоволен долгим ответом",
             contact_id=contact_id,
             sentiment="negative",
-        )
+            source="chat",
+            confidence=0.5,
+            memory_type=None)
         first_neg.created_at = now - timedelta(hours=30)
         second_neg.created_at = now - timedelta(hours=10)
         await upsert_conversation_state(

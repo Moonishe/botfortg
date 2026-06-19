@@ -240,31 +240,23 @@ async def get_cached_contact(
     return None
 
 
-def invalidate_contact(user_id: int) -> None:
-    """Invalidate cache for this user (called on contact add/update).
-
-    Synchronous — safe to call from any context without awaiting.
-    NOTE: dict.pop атомарен в asyncio (однопоточном event loop) —
-    между pop и последующим чтением не может выполниться другой coroutine.
-    Гонка бенигна: читатель получит cache miss.
-    """
+async def invalidate_contact(user_id: int) -> None:
+    """Invalidate cache for this user (called on contact add/update)."""
     try:
-        _contact_cache.pop(user_id, None)
+        async with _CACHE_LOCK:
+            await _cleanup_stale()
+            _contact_cache.pop(user_id, None)
         logger.debug("invalidated contact cache for user %d", user_id)
     except Exception:
         logger.debug("Non-critical error", exc_info=True)
 
 
-def invalidate_all() -> None:
+async def invalidate_all() -> None:
     """Clear all cached contact data (e.g. on settings change)."""
     try:
-        _contact_cache.clear()
+        async with _CACHE_LOCK:
+            await _cleanup_stale()
+            _contact_cache.clear()
         logger.debug("invalidated all contact caches")
     except Exception:
         logger.debug("Non-critical error", exc_info=True)
-
-
-# NOTE: TTL читается динамически через _get_cache_ttl(),
-# поэтому _refresh_ttl больше не нужна — оставлена для обратной совместимости.
-def _refresh_ttl() -> None:
-    pass

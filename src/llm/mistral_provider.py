@@ -2,7 +2,7 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -13,7 +13,7 @@ MISTRAL_CHAT_LIGHT = "mistral-small-latest"
 MISTRAL_CHAT_HEAVY = "mistral-medium-latest"
 
 
-class MistralProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
+class MistralProvider(OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMProvider):
     name = "mistral"
     _LIGHT_MODEL = MISTRAL_CHAT_LIGHT
     _HEAVY_MODEL = MISTRAL_CHAT_HEAVY

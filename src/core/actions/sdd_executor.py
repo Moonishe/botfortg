@@ -18,6 +18,7 @@ import subprocess
 import sys
 from typing import Any
 
+from src.config import settings
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,13 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
           2000 chars), or ``None`` if not set.
         - ``"error"``: error message on failure, or ``None`` on success.
     """
+    if not code or not isinstance(code, str) or not code.strip():
+        return {
+            "output": "",
+            "result": None,
+            "error": "code parameter is required",
+        }
+
     # 1. Parse and validate AST
     try:
         tree = ast.parse(code, mode="exec")
@@ -247,6 +255,32 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
         "    result = {'output': output_buffer.getvalue().strip()[:2000], 'result': None, 'error': str(e)[:500]}\n"
         "sys.stdout.write(json.dumps(result))\n"
     )
+
+    # Docker sandbox — execute inside container instead of host subprocess.
+    if settings.sandbox_enabled:
+        from src.core.sandbox import SandboxManager
+
+        manager = SandboxManager(settings)
+        try:
+            sandbox_result = await manager.exec(
+                ["python", "-c", script],
+                timeout=5,
+            )
+        except RuntimeError as exc:
+            return {
+                "error": f"sandbox error: {exc}",
+                "output": "",
+                "result": None,
+            }
+        sandbox_stdout = sandbox_result.get("stdout", "")
+        try:
+            return json.loads(sandbox_stdout)
+        except json.JSONDecodeError:
+            return {
+                "error": f"execution failed: {sandbox_result.get('stderr', '')[:500]}",
+                "output": "",
+                "result": None,
+            }
 
     try:
         proc = await asyncio.to_thread(

@@ -230,6 +230,7 @@ async def rewrite_skill_with_llm(
     skill_body: str,
     failures: list[TrajectoryData],
     rejected_edits: list | None = None,
+    policy_context: str | None = None,
 ) -> str | None:
     """Use LLM to rewrite a skill body so it handles failure cases better.
 
@@ -242,6 +243,7 @@ async def rewrite_skill_with_llm(
         skill_body: Current body text of the skill.
         failures: List of failure trajectory snapshots.
         rejected_edits: Previously rejected edits for negative feedback.
+        policy_context: Optional policy context from L2 induction (MemOS).
 
     Returns:
         New skill body text, or ``None`` if the LLM call failed.
@@ -302,7 +304,11 @@ async def rewrite_skill_with_llm(
         f"Примеры неудачных сценариев (запрос → ответ):\n"
         + "\n---\n".join(example_lines)
         + feedback
-        + "\n\nПерепиши тело навыка так, чтобы он лучше обрабатывал эти случаи. "
+    )
+    if policy_context:
+        user_content += f"\n\n## Policy Context (from L2 induction)\n{policy_context}"
+    user_content += (
+        "\n\nПерепиши тело навыка так, чтобы он лучше обрабатывал эти случаи. "
         "Сохрани YAML frontmatter (если есть). "
         "Используй тот же формат (YAML или plain text). "
         "Ответь ТОЛЬКО новым телом навыка, без пояснений и лишнего форматирования."
@@ -478,6 +484,11 @@ async def evolve_skill(owner_id: int, skill: Skill) -> dict:
                 f"{len(edit_result.get('applied_edits', []))} edit(s) applied"
             )
             logger.info("evolve_skill: '%s' evolved — %s", skill_name, result["reason"])
+            # Update η posterior (MemOS)
+            if settings.reward_loop_enabled and hasattr(skill, "eta_alpha"):
+                from src.core.learning import reward_loop
+
+                await reward_loop.update_eta_posterior(skill, success=True)
         else:
             result["reason"] = edit_result.get("error", "Unknown failure")
             result["validation"] = edit_result.get("validation", {})
@@ -486,6 +497,11 @@ async def evolve_skill(owner_id: int, skill: Skill) -> dict:
                 skill_name,
                 result["reason"],
             )
+            # Update η posterior on failure (MemOS)
+            if settings.reward_loop_enabled and hasattr(skill, "eta_alpha"):
+                from src.core.learning import reward_loop
+
+                await reward_loop.update_eta_posterior(skill, success=False)
 
     except Exception as exc:
         logger.exception("evolve_skill: unexpected error for '%s': %s", skill_name, exc)
@@ -521,6 +537,21 @@ async def auto_evolve_loop(owner_telegram_id: int) -> None:
 
     while True:
         cycle_start = datetime.now(UTC)
+
+        # Crystallize L2 policies (MemOS)
+        if settings.reward_loop_enabled:
+            try:
+                from src.core.learning import reward_loop
+
+                result = await reward_loop.crystallize_policies(owner_telegram_id)
+                if result["crystallized"] or result["rejected"]:
+                    logger.info(
+                        "Crystallization: %d approved, %d rejected",
+                        result["crystallized"],
+                        result["rejected"],
+                    )
+            except Exception:
+                logger.debug("Crystallization failed", exc_info=True)
 
         # 1. Find candidates
         try:

@@ -89,7 +89,8 @@ async def resolve_conflict(
     resolution: "positive_wins" | "negative_wins" | "both_stale" | "context_explains"
     """
     from src.db.models import Memory
-    from src.db.repo import add_memory, link_memories
+    from src.db.repo import link_memories
+    from src.core.memory.memory_service import save_memory_single
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
@@ -113,10 +114,10 @@ async def resolve_conflict(
         else:  # context_explains
             reason = f"Контекст объясняет противоречие: «{pos.fact[:50]}» vs «{neg.fact[:50]}»"
 
-        # NOTE: savepoint ensures atomicity. If add_memory fails,
+        # NOTE: savepoint ensures atomicity. If save_memory_single fails,
         # deactivation is rolled back, preventing partial state.
         # Сохраняем resolution как факт
-        res = await add_memory(
+        res = await save_memory_single(
             session,
             owner,
             fact=reason,
@@ -125,6 +126,8 @@ async def resolve_conflict(
             contact_id=pos.contact_id,
             importance=0.7,
             memory_tier=2,
+            confidence=0.5,
+            memory_type=None,
         )
         if res:
             await link_memories(

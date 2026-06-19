@@ -15,9 +15,7 @@ from functools import partial
 from typing import Any
 
 from sqlalchemy import case, func, select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from httpx import HTTPStatusError, RequestError
 
 from src.config import settings
 from src.core.infra.task_manager import task_manager
@@ -28,11 +26,13 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+from src.core.intelligence.skill_editor import MAX_REJECTED_EDITS
+
 # ── Rate limiting for skill edits ──
 # Key: (owner_id, skill_name_lower), Value: last edit timestamp
 _edit_cooldowns: dict[tuple[int, str], datetime] = {}
 _cooldown_lock = asyncio.Lock()
-EDIT_COOLDOWN_SECONDS = 60  # Minimum 60 seconds between edits to the same skill
+_overlap_guard = asyncio.Lock()  # Prevent overlapping curator_loop iterations
 _COOLDOWN_TTL_SECONDS = 3600  # Evict entries older than 1 hour
 MIN_USAGE_FOR_CALIBRATION = 5  # less than 5 uses → raw confidence only
 
@@ -64,10 +64,10 @@ def _get_yaml_confidence(skill: Skill) -> float:
     """
     patterns = skill.trigger_patterns_json or []
     for p in patterns:
-        if isinstance(p, dict) and "__yaml__" in p:
+        if isinstance(p, dict) and isinstance(p.get("__yaml__"), dict):
             try:
                 return float(p["__yaml__"].get("confidence", 0))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, AttributeError):
                 return 0.0
     return 0.0
 
@@ -113,7 +113,9 @@ def _calibrate_confidence(skill: Skill) -> float:
 # ── curator API ──────────────────────────────────────────────────────
 
 
-async def auto_approve_high_confidence() -> int:
+async def auto_approve_high_confidence(
+    owner_telegram_id: int | None = None,
+) -> int:
     """Auto-approve proposed skills with confidence > 0.85.
 
     V2: Now includes validation gate — skills are validated against held-out
@@ -127,18 +129,22 @@ async def auto_approve_high_confidence() -> int:
     Sends one notification to the owner summarising how many skills were
     approved.
 
+    Args:
+        owner_telegram_id: Owner Telegram ID; falls back to settings.
+
     Returns:
         Number of skills approved.
     """
-    from src.config import settings
     from src.core.intelligence.skill_validator import (
         TrajectoryData,
         validate_skill_candidate,
     )
     from src.db.models import SkillUsage, Trajectory
 
+    _owner_id = owner_telegram_id or settings.owner_telegram_id
+
     async with get_session() as session:
-        owner = await get_or_create_user(session, settings.owner_telegram_id)
+        owner = await get_or_create_user(session, _owner_id)
         proposed = await list_skills(
             session, owner, review_status="proposed", limit=200
         )
@@ -187,14 +193,21 @@ async def auto_approve_high_confidence() -> int:
             if confidence > 0.85:
                 # V2: Validation gate — validate before approval
                 if settings.skill_validation_enabled:
-                    validation = await validate_skill_candidate(
-                        owner.id,
-                        skill.name,
-                        skill.body,
-                        pre_fetched_trajectories=pre_fetched_trajs,
-                        pre_fetched_used_ids=usage_map.get(skill.id, set()),
-                        existing_skill_name=skill.name,
-                    )
+                    try:
+                        validation = await validate_skill_candidate(
+                            owner.id,
+                            skill.name,
+                            skill.body,
+                            pre_fetched_trajectories=pre_fetched_trajs,
+                            pre_fetched_used_ids=usage_map.get(skill.id, set()),
+                            existing_skill_name=skill.name,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "curator: validation failed for %r — skipping", skill.name
+                        )
+                        continue
+
                     if not validation.accepted:
                         skill.review_status = "rejected"
                         skill.enabled = False
@@ -224,20 +237,23 @@ async def auto_approve_high_confidence() -> int:
         await session.flush()
 
     if approved_count:
-        await notification_queue.enqueue(
-            topic="skills",
-            category="curator",
-            priority=2,
-            text=(
-                f"🧠 Curator auto-approved {approved_count} skill(s) "
-                f"with confidence > 85%."
-                + (
-                    f" Rejected {rejected_count} by validation gate."
-                    if rejected_count
-                    else ""
-                )
-            ),
-        )
+        try:
+            await notification_queue.enqueue(
+                topic="skills",
+                category="curator",
+                priority=2,
+                text=(
+                    f"🧠 Curator auto-approved {approved_count} skill(s) "
+                    f"with confidence > 85%."
+                    + (
+                        f" Rejected {rejected_count} by validation gate."
+                        if rejected_count
+                        else ""
+                    )
+                ),
+            )
+        except Exception:
+            logger.exception("curator: notification enqueue failed after auto-approval")
         logger.info(
             "curator: auto-approved %d skills, rejected %d by validation",
             approved_count,
@@ -368,7 +384,7 @@ async def reject_skill(
                 }
             )
             # Keep only last 10 rejections
-            skill.rejected_edits_json = rejected[-10:]
+            skill.rejected_edits_json = rejected[-MAX_REJECTED_EDITS:]
 
         skill.updated_at = datetime.now(UTC)
         await session.flush()
@@ -406,7 +422,6 @@ async def apply_skill_edit(
     Returns:
         Dict with success, new_version, applied_edits, rejected_edits, validation
     """
-    from src.config import settings
     from src.core.intelligence.skill_editor import (
         EditOp,
         SkillEdit,
@@ -482,7 +497,7 @@ async def apply_skill_edit(
                         "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
-            skill.rejected_edits_json = rejected[-10:]
+            skill.rejected_edits_json = rejected[-MAX_REJECTED_EDITS:]
 
             await session.flush()
             return {
@@ -518,7 +533,7 @@ async def apply_skill_edit(
                         "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
-                skill.rejected_edits_json = rejected[-10:]
+                skill.rejected_edits_json = rejected[-MAX_REJECTED_EDITS:]
                 await session.flush()
 
                 return {
@@ -533,34 +548,65 @@ async def apply_skill_edit(
             skill.validation_score = validation.score_after
 
             # Auto-rollback if score dropped below threshold
-            if validation.score_after < 0.3 and skill.best_body:
-                # Score is critically low — rollback to best_body
-                skill.body = skill.best_body
-                skill.validation_score = None  # Will be recalculated
-                logger.warning(
-                    "auto-rollback: score %.2f < 0.3 for %r, reverting to best_body",
-                    validation.score_after,
-                    skill_name,
-                )
-                # Still record the edit in history as "auto-rollback"
-                history = skill.edit_history_json or []
-                history.append(
+            if validation.score_after < 0.3:
+                if skill.best_body:
+                    # Score is critically low — rollback to best_body
+                    skill.body = skill.best_body
+                    skill.validation_score = None  # Will be recalculated
+                    logger.warning(
+                        "auto-rollback: score %.2f < 0.3 for %r, reverting to best_body",
+                        validation.score_after,
+                        skill_name,
+                    )
+                    # Still record the edit in history as "auto-rollback"
+                    history = skill.edit_history_json or []
+                    history.append(
+                        {
+                            "op": "auto-rollback",
+                            "timestamp": datetime.now(UTC).isoformat(),
+                            "reason": (
+                                f"Score dropped to {validation.score_after:.2f} "
+                                f"(< 0.3 threshold)"
+                            ),
+                        }
+                    )
+                    skill.edit_history_json = history[-20:]
+                    await session.flush()
+                    return {
+                        "success": False,
+                        "error": "Auto-rollback: score dropped below threshold",
+                        "auto_rolled_back": True,
+                        "validation": validation_summary,
+                    }
+
+                # No safe baseline to roll back to — reject the edit outright
+                rejected = skill.rejected_edits_json or []
+                rejected.append(
                     {
-                        "op": "auto-rollback",
-                        "timestamp": datetime.now(UTC).isoformat(),
+                        **edit.to_dict(),
                         "reason": (
                             f"Score dropped to {validation.score_after:.2f} "
-                            f"(< 0.3 threshold)"
+                            f"(< 0.3 threshold) and no best_body baseline exists"
                         ),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
-                skill.edit_history_json = history[-20:]
+                skill.rejected_edits_json = rejected[-MAX_REJECTED_EDITS:]
                 await session.flush()
                 return {
                     "success": False,
-                    "error": "Auto-rollback: score dropped below threshold",
-                    "auto_rolled_back": True,
+                    "error": (
+                        "Auto-rollback: score dropped below threshold and no "
+                        "best_body baseline exists"
+                    ),
+                    "auto_rolled_back": False,
                     "validation": validation_summary,
+                    "rejected_edits": [
+                        {
+                            "edit": edit.to_dict(),
+                            "reason": "Score too low, no baseline",
+                        }
+                    ],
                 }
 
             # Only update best_body AFTER rollback check (to avoid overwriting
@@ -650,6 +696,14 @@ async def promote_to_global(
                 "curator: promote_to_global %r not found for %d",
                 skill_name,
                 owner_id,
+            )
+            return False
+
+        if skill.review_status != "approved":
+            logger.warning(
+                "curator: promote_to_global %r rejected — status=%r (not approved)",
+                skill_name,
+                skill.review_status,
             )
             return False
 
@@ -745,10 +799,16 @@ async def decay_stale_skills(session: AsyncSession, telegram_id: int) -> int:
     Возвращает количество отключённых навыков.
     """
     owner = await get_or_create_user(session, telegram_id)
+    # push usage_count >= 10 filter to SQL, keep only success_rate check in Python
     result = await session.execute(
         select(Skill).where(
             Skill.user_id == owner.id,
-            Skill.enabled,
+            Skill.enabled.is_(True),
+            (
+                func.coalesce(Skill.success_count, 0)
+                + func.coalesce(Skill.failure_count, 0)
+            )
+            >= 10,
         )
     )
     skills = result.scalars().all()
@@ -756,10 +816,7 @@ async def decay_stale_skills(session: AsyncSession, telegram_id: int) -> int:
     decayed = 0
     for skill in skills:
         usage_count = (skill.success_count or 0) + (skill.failure_count or 0)
-        if usage_count < 10:
-            continue
-
-        success_rate = (skill.success_count or 0) / usage_count
+        success_rate = (skill.success_count or 0) / max(usage_count, 1)
         if success_rate < 0.3:
             skill.enabled = False
             skill.disabled_at = datetime.now(UTC)
@@ -843,86 +900,118 @@ async def curator_loop(owner_telegram_id: int) -> None:
 
     interval_sec = 6 * 3600  # 6 hours
 
-    while True:
-        try:
-            approved = await auto_approve_high_confidence()
-            if approved:
-                logger.info("curator_loop: auto-approved %d skills", approved)
-        except SQLAlchemyError:
-            logger.exception("curator_loop: auto_approve_high_confidence failed")
+    try:
+        while True:
+            async with _overlap_guard:
+                try:
+                    approved = await auto_approve_high_confidence(owner_telegram_id)
+                    if approved:
+                        logger.info("curator_loop: auto-approved %d skills", approved)
+                except Exception:
+                    logger.exception(
+                        "curator_loop: auto_approve_high_confidence failed"
+                    )
 
-        try:
-            suggested = await suggest_skills_from_trajectories(owner_telegram_id)
-            if suggested:
-                await notification_queue.enqueue(
-                    topic="skills",
-                    category="curator",
-                    priority=2,
-                    text=(
-                        f"🧠 Curator suggested {suggested} new skill(s) "
-                        f"from recent trajectories."
-                    ),
-                )
-        except (SQLAlchemyError, RequestError, HTTPStatusError):
-            logger.exception("curator_loop: suggest_skills_from_trajectories failed")
+                try:
+                    suggested = await suggest_skills_from_trajectories(
+                        owner_telegram_id
+                    )
+                    if suggested:
+                        try:
+                            await notification_queue.enqueue(
+                                topic="skills",
+                                category="curator",
+                                priority=2,
+                                text=(
+                                    f"🧠 Curator suggested {suggested} new skill(s) "
+                                    f"from recent trajectories."
+                                ),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "curator_loop: notification enqueue failed after suggest"
+                            )
+                except Exception:
+                    logger.exception(
+                        "curator_loop: suggest_skills_from_trajectories failed"
+                    )
 
-        try:
-            proposed = await propose_skills_from_analysis(owner_telegram_id)
-            if proposed:
-                names = [s["name"] for s in proposed]
-                await notification_queue.enqueue(
-                    topic="skills",
-                    category="curator",
-                    priority=2,
-                    text=(
-                        f"🧠 Curator proposed {len(proposed)} skill(s) "
-                        f"from analysis: {', '.join(names[:5])}."
-                    ),
-                )
-        except (SQLAlchemyError, RequestError, HTTPStatusError):
-            logger.exception("curator_loop: propose_skills_from_analysis failed")
+                try:
+                    proposed = await propose_skills_from_analysis(owner_telegram_id)
+                    if proposed:
+                        names = [s["name"] for s in proposed]
+                        try:
+                            await notification_queue.enqueue(
+                                topic="skills",
+                                category="curator",
+                                priority=2,
+                                text=(
+                                    f"🧠 Curator proposed {len(proposed)} skill(s) "
+                                    f"from analysis: {', '.join(names[:5])}."
+                                ),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "curator_loop: notification enqueue failed after propose"
+                            )
+                except Exception:
+                    logger.exception(
+                        "curator_loop: propose_skills_from_analysis failed"
+                    )
 
-        # V3: Auto-rollback regressed skills (0 токенов)
-        try:
-            rolled_back = await rollback_all_regressed(owner_telegram_id)
-            if rolled_back:
-                await notification_queue.enqueue(
-                    topic="skills",
-                    category="curator",
-                    priority=3,
-                    text=(
-                        f"♻️ Curator auto-rolled back {rolled_back} regressed skill(s). "
-                        f"Check /skills for details."
-                    ),
-                )
-        except SQLAlchemyError:
-            logger.exception("curator_loop: rollback_all_regressed failed")
+                # V3: Auto-rollback regressed skills (0 токенов)
+                try:
+                    rolled_back = await rollback_all_regressed(owner_telegram_id)
+                    if rolled_back:
+                        try:
+                            await notification_queue.enqueue(
+                                topic="skills",
+                                category="curator",
+                                priority=3,
+                                text=(
+                                    f"♻️ Curator auto-rolled back {rolled_back} regressed skill(s). "
+                                    f"Check /skills for details."
+                                ),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "curator_loop: notification enqueue failed after rollback"
+                            )
+                except Exception:
+                    logger.exception("curator_loop: rollback_all_regressed failed")
 
-        # Health decay: отключаем мёртвые навыки
-        try:
-            async with get_session() as session:
-                decayed = await decay_stale_skills(session, owner_telegram_id)
-            if decayed:
-                logger.info(
-                    f"Decayed {decayed} stale skills for user {owner_telegram_id}"
-                )
-        except SQLAlchemyError:
-            logger.exception("curator_loop: decay_stale_skills failed")
+                # Health decay: отключаем мёртвые навыки
+                try:
+                    async with get_session() as session:
+                        decayed = await decay_stale_skills(session, owner_telegram_id)
+                    if decayed:
+                        logger.info(
+                            "Decayed %d stale skills for user %d",
+                            decayed,
+                            owner_telegram_id,
+                        )
+                except Exception:
+                    logger.exception("curator_loop: decay_stale_skills failed")
 
-        # Archive skills disabled long ago (cleanup after decay)
-        try:
-            async with get_session() as session:
-                archived = await archive_long_disabled(session, owner_telegram_id)
-            if archived:
-                logger.info(
-                    "Archived %d long-disabled skills for user %d",
-                    archived,
-                    owner_telegram_id,
-                )
-        except SQLAlchemyError:
-            logger.exception("curator_loop: archive_long_disabled failed")
+                # Archive skills disabled long ago (cleanup after decay)
+                try:
+                    async with get_session() as session:
+                        archived = await archive_long_disabled(
+                            session, owner_telegram_id
+                        )
+                    if archived:
+                        logger.info(
+                            "Archived %d long-disabled skills for user %d",
+                            archived,
+                            owner_telegram_id,
+                        )
+                except Exception:
+                    logger.exception("curator_loop: archive_long_disabled failed")
 
-        await asyncio.sleep(interval_sec)
+            await asyncio.sleep(interval_sec)
+    except asyncio.CancelledError:
+        logger.info("curator_loop: cancelled, shutting down")
+        raise
 
 
 # ── task registration ────────────────────────────────────────────────

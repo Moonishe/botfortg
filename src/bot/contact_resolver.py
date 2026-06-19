@@ -60,6 +60,10 @@ async def resolve_contact_fast(
     Returns:
         List of ContactCandidate matching the query (empty if no match).
     """
+    # Guard: empty/whitespace-only query → no candidates possible
+    if not query or not query.strip():
+        return []
+
     uid = user_id if user_id is not None else owner.telegram_id
 
     # 1. Try prefetch cache

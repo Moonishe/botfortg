@@ -10,7 +10,8 @@ import pytest
 from datetime import datetime, timedelta, timezone
 
 from src.db.session import get_session
-from src.db.repo import get_or_create_user, add_memory, add_commitment
+from src.db.repo import get_or_create_user, add_commitment
+from src.core.memory.memory_service import save_memory_single
 from src.core.memory.memory_recall import (
     recall,
     format_recall_for_prompt,
@@ -60,13 +61,15 @@ async def test_pinned_above_normal():
     async with get_session() as session:
         owner = await get_or_create_user(session, 123456)
         # pinned с низким confidence
-        await add_memory(
-            session, owner, fact="закреплённый факт", pinned=True, confidence=0.2
-        )
+        await save_memory_single(
+            session, owner, fact="закреплённый факт", pinned=True, confidence=0.2,
+            source="chat",
+            memory_type=None)
         # обычный с высоким confidence
-        await add_memory(
-            session, owner, fact="обычный важный факт", pinned=False, confidence=0.95
-        )
+        await save_memory_single(
+            session, owner, fact="обычный важный факт", pinned=False, confidence=0.95,
+            source="chat",
+            memory_type=None)
         await session.commit()
 
     result = await recall(123456, limit=5)
@@ -80,7 +83,9 @@ async def test_task_priority():
     """Факты с memory_type=task и активным commitment попадают в результат."""
     async with get_session() as session:
         owner = await get_or_create_user(session, 123457)
-        mem = await add_memory(session, owner, fact="сделать отчёт", memory_type="task")
+        mem = await save_memory_single(session, owner, fact="сделать отчёт", memory_type="task",
+            source="chat",
+            confidence=0.5)
         await session.flush()
         await add_commitment(
             session,
@@ -107,8 +112,14 @@ async def test_expires_at_excludes():
     async with get_session() as session:
         owner = await get_or_create_user(session, 123458)
         past = utc_naive() - timedelta(hours=1)
-        await add_memory(session, owner, fact="просроченный факт", expires_at=past)
-        await add_memory(session, owner, fact="живой факт")
+        await save_memory_single(session, owner, fact="просроченный факт", expires_at=past,
+            source="chat",
+            confidence=0.5,
+            memory_type=None)
+        await save_memory_single(session, owner, fact="живой факт",
+            source="chat",
+            confidence=0.5,
+            memory_type=None)
         await session.commit()
 
     result = await recall(123458, limit=5)
@@ -124,7 +135,9 @@ async def test_use_count_increments():
 
     async with get_session() as session:
         owner = await get_or_create_user(session, 123459)
-        await add_memory(session, owner, fact="тестовый факт", confidence=0.8)
+        await save_memory_single(session, owner, fact="тестовый факт", confidence=0.8,
+            source="chat",
+            memory_type=None)
         await session.commit()
 
     # первый вызов
@@ -162,8 +175,14 @@ async def test_self_vs_contact_facts():
     """Self и contact факты корректно разделяются."""
     async with get_session() as session:
         owner = await get_or_create_user(session, 123460)
-        await add_memory(session, owner, fact="я люблю кофе", contact_id=None)
-        await add_memory(session, owner, fact="Настя любит чай", contact_id=999)
+        await save_memory_single(session, owner, fact="я люблю кофе", contact_id=None,
+            source="chat",
+            confidence=0.5,
+            memory_type=None)
+        await save_memory_single(session, owner, fact="Настя любит чай", contact_id=999,
+            source="chat",
+            confidence=0.5,
+            memory_type=None)
         await session.commit()
 
     result = await recall(123460, contact_id=999, limit=10)
@@ -179,7 +198,10 @@ async def test_format_recall_for_prompt():
     """Форматтер выдаёт XML-тег <recall_context>."""
     async with get_session() as session:
         owner = await get_or_create_user(session, 123461)
-        await add_memory(session, owner, fact="памятный факт", pinned=True)
+        await save_memory_single(session, owner, fact="памятный факт", pinned=True,
+            source="chat",
+            confidence=0.5,
+            memory_type=None)
         await session.commit()
 
     result = await recall(123461, limit=5)
@@ -279,7 +301,9 @@ async def test_recall_cache_key_includes_limit():
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         for i in range(5):
-            await add_memory(session, owner, fact=f"факт {i}", confidence=0.9)
+            await save_memory_single(session, owner, fact=f"факт {i}", confidence=0.9,
+                source="chat",
+                memory_type=None)
         await session.commit()
 
     small = await recall(telegram_id, limit=1, mode="normal")

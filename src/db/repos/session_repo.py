@@ -1,4 +1,7 @@
-"""Session repository — User, UserSettings, TelegramSession, SelfProfile, AdaptivePersona."""
+"""Session repository.
+
+User, UserSettings, TelegramSession, SelfProfile, AdaptivePersona.
+"""
 
 from __future__ import annotations
 
@@ -96,6 +99,18 @@ async def get_or_create_user(
         # returning a detached instance after the session closes.
         await cache_put(f"user:{telegram_id}", user.id, ttl=30)
     return user
+
+
+async def get_user_by_telegram_id(
+    session: AsyncSession, telegram_id: int
+) -> User | None:
+    """Return an existing user by Telegram ID without creating one."""
+    result = await session.execute(
+        select(User)
+        .where(User.telegram_id == telegram_id)
+        .options(selectinload(User.key_slots))
+    )
+    return result.scalar_one_or_none()
 
 
 async def save_telegram_session(

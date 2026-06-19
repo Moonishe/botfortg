@@ -109,6 +109,13 @@ def _register_defaults() -> None:
         description_for_prompt="prepare a message for a contact",
     )
     r.register(
+        "ask_chat",
+        required=["contact"],
+        allowed=["contact", "query"],
+        risk_level="medium",
+        description_for_prompt="analyze a chat with a contact",
+    )
+    r.register(
         "summarize_chat",
         required=["contact"],
         risk_level="medium",

@@ -47,6 +47,11 @@ async def add_trajectory(
     success: bool = True,
     error: str | None = None,
     latency_ms: int | None = None,
+    # ── MemOS reward loop fields ──
+    reward_value: float | None = None,
+    reflection: str | None = None,
+    step_index: int = 0,
+    value_estimate: float | None = None,
 ) -> Trajectory:
     row = Trajectory(
         user_id=user.id,
@@ -60,6 +65,10 @@ async def add_trajectory(
         success=success,
         error=error[:4000] if error else None,
         latency_ms=latency_ms,
+        reward_value=reward_value,
+        reflection=reflection[:4000] if reflection else None,
+        step_index=step_index,
+        value_estimate=value_estimate,
     )
     session.add(row)
     await session.flush()

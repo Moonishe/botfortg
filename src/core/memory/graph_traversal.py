@@ -133,6 +133,8 @@ async def traverse(
                 neighbors = adjacency.get(current_id, set())
                 for neighbor_id, relation, weight in neighbors:
                     if neighbor_id not in visited:
+                        if len(visited) >= MAX_NODES:
+                            break
                         visited.add(neighbor_id)
                         distance[neighbor_id] = dist + 1
                         queue.append((neighbor_id, dist + 1))

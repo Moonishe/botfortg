@@ -14,7 +14,6 @@ Uses in-memory SQLite following the project test pattern
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -49,7 +48,8 @@ from src.core.memory.memory_admin import (
 )
 from src.core.memory.dreaming_reval_history import rollback_reval_history
 from src.db.session import get_session, init_db
-from src.db.repo import add_memory, get_or_create_user
+from src.core.memory.memory_service import save_memory_single
+from src.db.repo import get_or_create_user
 from src.db.models import Memory, MemoryLink
 from src.llm.base import ChatMessage, TaskType
 
@@ -60,7 +60,7 @@ OWNER_TG_ID = 123456789
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+async def setup_db():
     """Recreate all tables before each test (in-memory SQLite).
 
     Uses Base.metadata.create_all directly (like conftest._db_init)
@@ -76,22 +76,19 @@ def setup_db():
     )
     from sqlalchemy import text
 
-    async def _recreate():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
-            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            for stmt in _FTS_SETUP:
-                await conn.execute(text(stmt))
-            for stmt in _SESSION_FTS_SETUP:
-                await conn.execute(text(stmt))
-            for stmt in _MEMORY_FTS_SETUP:
-                await conn.execute(text(stmt))
-
-    asyncio.run(_recreate())
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+        await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        for stmt in _FTS_SETUP:
+            await conn.execute(text(stmt))
+        for stmt in _SESSION_FTS_SETUP:
+            await conn.execute(text(stmt))
+        for stmt in _MEMORY_FTS_SETUP:
+            await conn.execute(text(stmt))
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -122,7 +119,7 @@ async def _make_memory(
     and is_active if needed, then commits.
     """
     async with get_session() as session:
-        m = await add_memory(
+        m = await save_memory_single(
             session,
             owner,
             fact=fact,
@@ -134,7 +131,7 @@ async def _make_memory(
             **kwargs,
         )
         if m is None:
-            raise RuntimeError(f"add_memory returned None for fact={fact!r}")
+            raise RuntimeError(f"save_memory_single returned None for fact={fact!r}")
         if created_offset_days != 0:
             new_ts = datetime.now(timezone.utc) - timedelta(days=created_offset_days)
             m.created_at = new_ts
@@ -562,7 +559,7 @@ async def test_deactivate_memory_sets_inactive():
     mem = await _make_memory(owner, "Факт", created_offset_days=10)
 
     async with get_session() as session:
-        await deactivate_memory(session, mem.id, reason="test")
+        await deactivate_memory(session, mem.id, reason="test", user_id=owner.id)
         await session.commit()
 
     async with get_session() as session:
@@ -575,7 +572,7 @@ async def test_deactivate_memory_nonexistent_no_error():
     """deactivate_memory on nonexistent ID does not crash."""
     async with get_session() as session:
         # Should not raise
-        await deactivate_memory(session, 99999, reason="test")
+        await deactivate_memory(session, 99999, reason="test", user_id=0)
 
 
 # ═══════════════════════════════════════════════════════════════════

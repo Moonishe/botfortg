@@ -18,6 +18,7 @@ AGENT_COMPLETED = "agent.completed"
 TOOL_EXECUTED = "tool.executed"
 EVOLUTION_CHAIN_DETECTED = "evolution_chain.detected"
 RESEARCH_COMPLETED = "research.completed"
+CIRCUIT_STATE = "circuit.state"
 
 
 class EventBus:

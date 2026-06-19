@@ -85,7 +85,7 @@ async def mcp_memory_edit(
         if action == "history":
             from src.db.repos.memory_repo import get_memory_history
 
-            versions = await get_memory_history(session, memory_id)
+            versions = await get_memory_history(session, owner, memory_id)
             if not versions:
                 return {
                     "ok": True,
@@ -125,6 +125,7 @@ async def mcp_memory_edit(
             try:
                 updated = await update_memory_text(
                     session,
+                    owner,
                     memory_id,
                     new_text.strip(),
                 )
@@ -141,7 +142,7 @@ async def mcp_memory_edit(
                 # Получаем актуальную историю после коммита
                 from src.db.repos.memory_repo import get_memory_history
 
-                versions = await get_memory_history(session, memory_id)
+                versions = await get_memory_history(session, owner, memory_id)
                 history_count = len(versions)
 
                 return {
@@ -164,7 +165,7 @@ async def mcp_memory_edit(
 
             from src.db.repos.memory_repo import rollback_memory
 
-            rolled_back = await rollback_memory(session, memory_id, version)
+            rolled_back = await rollback_memory(session, owner, memory_id, version)
             if rolled_back is None:
                 return {
                     "error": (

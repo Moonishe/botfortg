@@ -797,6 +797,15 @@ class ToolRegistry:
     # Execution
     # ------------------------------------------------------------------
 
+
+    def reset_budget(self) -> None:
+        """Reset the iteration budget for a new request.
+
+        Called at the start of each user request before the tool loop begins.
+        Prevents cross-request budget exhaustion.
+        """
+        self._tool_budget.reset()
+
     async def execute(self, name: str, **params: Any) -> dict[str, Any]:
         """Execute a tool by name, passing *params* to its handler.
 

@@ -156,7 +156,24 @@ async def get_commitment_by_source_memory(
     return result.scalar_one_or_none()
 
 
-# ─── Pending Actions ────────────────────────────────────────────────────
+async def get_commitments_by_source_memory_ids(
+    session: AsyncSession, user_id: int, source_memory_ids: list[int]
+) -> dict[int, Commitment]:
+    """Batch-fetch commitments by source memory IDs."""
+    if not source_memory_ids:
+        return {}
+
+    result = await session.execute(
+        select(Commitment).where(
+            Commitment.user_id == user_id,
+            Commitment.source_memory_id.in_(source_memory_ids),
+        )
+    )
+    return {
+        c.source_memory_id: c
+        for c in result.scalars().all()
+        if c.source_memory_id is not None
+    }
 
 
 async def create_pending_action(

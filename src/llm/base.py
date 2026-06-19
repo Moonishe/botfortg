@@ -1,9 +1,12 @@
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from src.llm.tool_calling.models import ChatResponse, ToolDefinition
 
 
-Role = Literal["system", "user", "assistant"]
+Role = Literal["system", "user", "assistant", "tool"]
 
 
 class TaskType:
@@ -28,6 +31,9 @@ class TaskType:
 class ChatMessage:
     role: Role
     content: str
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
 
 
 class LLMProvider(Protocol):
@@ -76,6 +82,21 @@ class LLMProvider(Protocol):
 
     async def close(self) -> None:
         """Close underlying HTTP client and release connections."""
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: list["ToolDefinition"] | None = None,
+        *,
+        task_type: str = "default",
+    ) -> "ChatResponse":
+        """Chat completion with tool definitions, returning ChatResponse.
+
+        Providers that support tool calling override this.
+        Returns ChatResponse with optional tool_calls.
+        Raises NotImplementedError if unsupported.
+        """
+        raise NotImplementedError
 
 
 class VisionProvider(Protocol):

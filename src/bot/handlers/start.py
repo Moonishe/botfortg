@@ -25,6 +25,7 @@ from src.db.models._memory import Memory
 from src.db.repo import add_key_slot, get_or_create_user, upsert_api_key
 from src.db.session import get_session
 from src.core.infra.key_guard import safe_str
+from src.core.infra.provider_names import provider_display_name
 from src.core.infra.timeutil import TZ_PRESETS, is_valid_tz, tz_short
 from src.llm.anthropic_provider import AnthropicProvider
 from src.llm.cloudflare_provider import CloudflareProvider
@@ -45,18 +46,6 @@ router.callback_query.filter(OwnerOnly())
 
 
 # ─── helpers ──────────────────────────────────────────────────────────
-
-
-def _pretty_provider(name: str | None) -> str:
-    """Человеческое имя провайдера для отображения."""
-    names = {
-        "openrouter": "OpenRouter (DeepSeek V4)",
-        "openai": "OpenAI",
-        "gemini": "Gemini",
-        "mistral": "Mistral",
-        "cloudflare": "Cloudflare",
-    }
-    return names.get(name or "", "—")
 
 
 WELCOME = (
@@ -170,7 +159,7 @@ async def _show_regular_greeting(message: Message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         has_session = owner.session is not None
-        llm = _pretty_provider(owner.settings.llm_provider)
+        llm = provider_display_name(owner.settings.llm_provider, pretty_openrouter=True)
         tz = tz_short(owner.settings.timezone) if owner.settings.timezone else "UTC"
 
         # Проверяем, новый ли пользователь (нет persona или 0 взаимодействий)
@@ -192,6 +181,23 @@ async def _show_regular_greeting(message: Message) -> None:
     context_section = ""
     if personalized:
         context_section = f"{personalized}\n\n"
+
+    # ── Ambient Intelligence (Phase 6) ——
+    from src.config import settings as _settings
+
+    if _settings.ambient_intelligence_enabled:
+        try:
+            from src.bot.ambient import AmbientIntelligence
+
+            ambient = AmbientIntelligence(message.bot)
+            ctx: dict = {
+                "last_active_at": owner.last_seen_online,
+                "active_tasks": [],  # ponytail: recall() adds latency; empty for greeting
+                "recent_insights": [],  # ponytail: ditto
+            }
+            await ambient.check_and_notify(message.from_user.id, ctx)
+        except Exception:
+            logger.debug("ambient check failed for /start", exc_info=True)
 
     auth_status = "Ты авторизован ✅" if has_session else "Не авторизован ❌"
 
@@ -228,7 +234,7 @@ async def cmd_help(message: Message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         auth_status = "✅" if owner.session else "❌"
-        llm = _pretty_provider(owner.settings.llm_provider)
+        llm = provider_display_name(owner.settings.llm_provider, pretty_openrouter=True)
     header = (
         f"📖 <b>Помощь по командам</b>\n"
         f"{'Ты авторизован' if auth_status == '✅' else 'Не авторизован'} {auth_status} · "
@@ -957,24 +963,6 @@ async def step_custom_provider_model(message: Message, state: FSMContext) -> Non
     )
 
 
-def provider_display_name(provider: str) -> str:
-    """Возвращает человекочитаемое имя провайдера."""
-    names = {
-        "openai": "OpenAI",
-        "gemini": "Gemini",
-        "mistral": "Mistral",
-        "anthropic": "Anthropic",
-        "deepseek": "DeepSeek",
-        "grok": "Grok (xAI)",
-        "groq": "Groq",
-        "mimo": "MiMo (Xiaomi)",
-        "cloudflare": "Cloudflare",
-        "openrouter": "OpenRouter",
-        "custom": "Свой провайдер",
-    }
-    return names.get(provider, provider)
-
-
 async def _validate_key_v2(provider: str, key: str) -> tuple[bool, str | None]:
     """Валидирует ключ через провайдера. Возвращает (valid, error_hint)."""
     try:
@@ -1343,7 +1331,9 @@ async def _finish_onboarding(chat_id: int, bot, tg_id: int, extra: str = "") -> 
         providers = sorted(
             {k.provider for k in owner.key_slots if getattr(k, "enabled", True)}
         )
-        key_names = ", ".join(_pretty_provider(p) for p in providers)
+        key_names = ", ".join(
+            provider_display_name(p, pretty_openrouter=True) for p in providers
+        )
         if not key_names:
             key_names = "—"
 

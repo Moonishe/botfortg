@@ -15,7 +15,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.core.services.chat_actions import ask_chat_action
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -98,7 +98,7 @@ async def ask_cmd(
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            candidates = await resolve(client, owner, name)
+            candidates = await resolve_contact_fast(client, owner, name)
     except Exception as e:
         logger.warning("ask_resolve failed: %s", e)
         await status_msg.edit_text("❌ Ошибка поиска чата. Попробуй позже")

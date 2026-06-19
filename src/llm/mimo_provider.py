@@ -9,7 +9,7 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -26,7 +26,7 @@ MIMO_CHAT_LIGHT = "mimo-v2-flash"
 MIMO_CHAT_HEAVY = "mimo-v2.5-pro"
 
 
-class MiMoProvider(OpenAICompatEmbedMixin, BaseLLMProvider):
+class MiMoProvider(OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMProvider):
     """Провайдер для MiMo (Xiaomi) — OpenAI-совместимый API."""
 
     name = "mimo"

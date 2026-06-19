@@ -30,7 +30,8 @@ os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 from src.core.compaction.models import CompactionReport, CompressResult
 from src.core.compaction.orchestrator import run_compaction_pipeline
 from src.db.session import get_session
-from src.db.repo import add_memory, get_or_create_user
+from src.db.repo import get_or_create_user
+from src.core.memory.memory_service import save_memory_single
 
 OWNER_TG_ID = 123456789
 
@@ -117,7 +118,7 @@ async def _make_memory(
 ):
     """Create a Memory row."""
     async with get_session() as session:
-        m = await add_memory(
+        m = await save_memory_single(
             session,
             owner,
             fact=fact,
@@ -129,7 +130,7 @@ async def _make_memory(
             **kwargs,
         )
         if m is None:
-            raise RuntimeError(f"add_memory returned None for fact={fact!r}")
+            raise RuntimeError(f"save_memory_single returned None for fact={fact!r}")
         if not is_active:
             m.is_active = False
         await session.commit()

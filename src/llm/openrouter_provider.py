@@ -11,7 +11,7 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
+from src.llm._openai_compat_mixin import OpenAICompatBaseMixin, OpenAICompatToolMixin
 from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
@@ -24,7 +24,7 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"
 HEAVY_MODEL = "deepseek/deepseek-v4-flash:free"
 
 
-class OpenRouterProvider(OpenAICompatBaseMixin, BaseLLMProvider):
+class OpenRouterProvider(OpenAICompatToolMixin, OpenAICompatBaseMixin, BaseLLMProvider):
     """Провайдер для OpenRouter free models (DeepSeek V4 Flash и другие).
 
     OpenAI-совместимый API. Не поддерживает embeddings (free tier без эмбеддингов).

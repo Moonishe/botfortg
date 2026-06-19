@@ -18,6 +18,7 @@ from src.core.memory.memory_recall import RecallResult, recall
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import ChatMessage, TaskType
+from src.core.security.prompt_guard import fence_user_text
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -238,7 +239,7 @@ async def generate_personalized_greeting(
 
             messages: list[ChatMessage] = [
                 ChatMessage(role="system", content=_GREETING_SYSTEM_PROMPT),
-                ChatMessage(role="user", content=user_prompt),
+                ChatMessage(role="user", content=fence_user_text(user_prompt)),
             ]
 
             try:

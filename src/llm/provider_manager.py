@@ -878,6 +878,24 @@ async def build_provider(
     provider_name = user.settings.llm_provider if user.settings else "openai"
     use_heavy = user.settings.use_heavy_model if user.settings else False
 
+    # Resolve embed_model default per provider if not specified
+    if embed_model is None:
+        from src.config import settings as _settings
+
+        _embed_defaults = {
+            "openai": _settings.openai_embed_model,
+            "gemini": _settings.gemini_embed_model,
+            "mistral": _settings.mistral_embed_model,
+        }
+        embed_model = _embed_defaults.get(provider_name)
+        if embed_model is None:
+            logger.warning(
+                "No embed model default for provider %r — embed_model remains None, "
+                "provider will use its own default. Known providers: %s",
+                provider_name,
+                sorted(_embed_defaults.keys()),
+            )
+
     # Попытка через новую систему LlmKeySlot
     providers: list[MultiKeyProvider] = []
     all_slot_ids: list[int] = []

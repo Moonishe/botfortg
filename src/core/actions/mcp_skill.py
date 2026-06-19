@@ -9,6 +9,19 @@ from src.core.infra.key_guard import safe_str
 logger = logging.getLogger(__name__)
 
 
+def _resolve_user_id(kwargs: dict[str, Any]) -> int | None:
+    """Извлекает telegram_id из runtime kwargs (User ORM или int)."""
+    _user_val = kwargs.get("user")
+    if _user_val is None:
+        return None
+    if hasattr(_user_val, "telegram_id"):
+        return int(_user_val.telegram_id)  # type: ignore[union-attr]
+    try:
+        return int(_user_val)
+    except (TypeError, ValueError):
+        return None
+
+
 @tool(
     name="use_skill",
     description=(
@@ -27,35 +40,36 @@ async def use_skill(
     params: dict | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Активирует скилл и возвращает результат."""
+    """Активирует скилл и возвращает его полное содержимое."""
     if not skill_name:
         return {"error": "skill_name обязателен"}
 
-    try:
-        # NOTE: core→bot layering tradeoff — intentionally avoids
-        # importing from src.bot.handlers. skill resolution is delegated
-        # to the registry wired at bot startup.
-        # Layering fix: src/core/* must not import from src/bot/*.
-        # The previous `from src.bot.handlers import skills` import was broken
-        # (the target file does not exist), and `find_skill` is not defined
-        # anywhere in the codebase. Inline the None-fallback here and rely on
-        # the registry to be wired later.
-        skill = None
+    telegram_id = _resolve_user_id(kwargs)
+    if telegram_id is None:
+        return {"error": "Не удалось определить пользователя для поиска скилла"}
 
-        if not skill:
+    try:
+        from src.db.repos.skill_repo import get_skill_by_name
+        from src.db.repo import get_or_create_user
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            skill = await get_skill_by_name(session, owner, skill_name)
+
+        if skill is None:
             return {
-                "error": f"Скилл '{skill_name}' не найден. Доступные скиллы: /skills"
+                "error": f"Скилл '{skill_name}' не найден. "
+                "Используй /skills для просмотра доступных скиллов."
             }
 
         return {
             "ok": True,
-            "skill": skill_name,
-            "body": (
-                skill.get("body", "")[:2000]
-                if isinstance(skill, dict)
-                else str(skill)[:2000]
-            ),
+            "skill": skill.name,
+            "description": skill.description or "",
+            "body": (skill.body or "")[:2000],
             "note": "Скилл загружен. Примени его инструкции к текущей задаче.",
         }
     except Exception as e:
+        logger.exception("use_skill failed for '%s'", skill_name)
         return {"error": safe_str(e)}

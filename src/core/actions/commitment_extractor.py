@@ -7,7 +7,8 @@ from datetime import datetime
 
 from src.core.contacts.chat_service import message_to_text
 from src.db.models import Message
-from src.db.repo import add_commitment, add_memory, get_or_create_user, search_memories
+from src.db.repo import add_commitment, get_or_create_user, search_memories
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
 
@@ -124,14 +125,14 @@ async def extract_and_save_commitments(
             )
 
             # Создаём факт памяти с типом task
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=f"Обещание: {text}",
                 source="commitment",
                 memory_type="task",
                 contact_id=contact_peer_id,
-            )
+                confidence=0.5)
 
             saved.append(item)
     return saved

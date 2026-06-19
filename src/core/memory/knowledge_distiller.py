@@ -4,7 +4,8 @@ import json
 import logging
 import re
 
-from src.db.repo import add_memory, get_or_create_user, list_memories
+from src.db.repo import get_or_create_user, list_memories
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 from src.config import settings
 from src.core.scheduling.notification_queue import notification_queue
@@ -113,7 +114,7 @@ async def run_distillation(owner_id: int, contact_id: int | None = None) -> dict
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         # Сохраняем distillation-знание как tier-3 (месячное) с высокой важностью
-        await add_memory(
+        await save_memory_single(
             session,
             owner,
             fact=f"💡 {fact}",  # маркер distillation
@@ -123,7 +124,8 @@ async def run_distillation(owner_id: int, contact_id: int | None = None) -> dict
             importance=0.9,
             decay_rate=0.02,  # очень медленный decay — важное знание
             memory_tier=3,
-        )
+            confidence=0.5,
+            memory_type=None)
         # Недеструктивно: факты остаются активными, summary добавляется как новый факт
         # Для подсчёта сколько фактов "покрыто" дистилляцией
         memories = await list_memories(session, owner, contact_id=contact_id)

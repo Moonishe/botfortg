@@ -19,6 +19,7 @@ from aiogram.types import (
     Message,
 )
 
+from src.bot.callback_utils import safe_callback_edit
 from src.bot.filters import OwnerOnly
 from src.core.contacts.contact_resolver import resolve
 from src.core.infra.text_sanitizer import sanitize_html
@@ -29,10 +30,13 @@ from src.core.memory.memory_fuel import (
     get_fuel_stats,
 )
 from src.core.memory.memory_neighbors import format_neighbors, get_neighbors
+from src.core.memory.memory_service import (
+    bulk_delete_memory_service,
+    save_memory_single,
+)
+from src.core.memory.stats import get_memory_stats
 from src.db.repo import (
-    add_memory,
-    delete_memory,
-    get_memory_stats,
+    get_contact,
     get_or_create_user,
     get_persona,
     list_key_slots,
@@ -94,11 +98,8 @@ async def cb_memory_clear_negative(callback: CallbackQuery) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         items = await list_memories(session, owner)
-        removed = 0
-        for m in items:
-            if m.sentiment == "negative":
-                await delete_memory(session, owner, m.id)
-                removed += 1
+        negative_ids = [m.id for m in items if m.sentiment == "negative"]
+        removed = await bulk_delete_memory_service(session, owner, negative_ids)
     if callback.message:
         await callback.message.edit_text(f"🧹 Удалено {removed} негативных фактов.")
     await callback.answer(f"Удалено {removed}")
@@ -201,7 +202,7 @@ async def cmd_remember(
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        await add_memory(
+        await save_memory_single(
             session, owner, fact=fact, contact_id=contact_id, source="user"
         )
 
@@ -262,8 +263,7 @@ async def cmd_forget(
 
     async with get_session() as session:
         owner = await session.merge(owner)
-        for m in found:
-            await delete_memory(session, owner, m.id)
+        await bulk_delete_memory_service(session, owner, [m.id for m in found])
 
     names = ", ".join(
         f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
@@ -326,35 +326,36 @@ async def cb_pattern_action(callback: CallbackQuery) -> None:
     contact_id = int(data[2]) if len(data) > 2 else 0
 
     if action == "dismiss":
-        if callback.message:
-            await callback.message.edit_text(
-                callback.message.text + "\n\n🔕 Ок, не сейчас."
-            )
+        existing = (
+            callback.message.text if isinstance(callback.message, Message) else None
+        )
+        await safe_callback_edit(
+            callback,
+            f"{existing}\n\n🔕 Ок, не сейчас." if existing else "🔕 Ок, не сейчас.",
+        )
         await callback.answer()
         return
 
     if action == "remind":
-        from src.db.repo import get_contact, get_or_create_user
-
         async with get_session() as session:
             owner = await get_or_create_user(session, callback.from_user.id)
             contact = await get_contact(session, owner, contact_id)
             name = contact.display_name if contact else str(contact_id)
             # Сохраняем факт в память
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=f"Пользователь хочет напоминание о созвоне с {name}",
                 source="user",
                 sentiment="neutral",
             )
-        if callback.message:
-            await callback.message.edit_text(
-                sanitize_html(
-                    f"📅 Напоминание для <b>{name}</b>\n"
-                    f"Напиши: <code>/remind за час до созвона с {name}</code>"
-                )
-            )
+        await safe_callback_edit(
+            callback,
+            sanitize_html(
+                f"📅 Напоминание для <b>{name}</b>\n"
+                f"Напиши: <code>/remind за час до созвона с {name}</code>"
+            ),
+        )
         await callback.answer(f"Напоминание для {sanitize_html(name)}")
         return
 
@@ -467,10 +468,15 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
         callback.from_user.id, positive_id, negative_id, resolution
     )
     if success:
-        if callback.message:
-            await callback.message.edit_text(
-                callback.message.text + "\n\n✅ Конфликт разрешён."
-            )
+        existing = (
+            callback.message.text if isinstance(callback.message, Message) else None
+        )
+        await safe_callback_edit(
+            callback,
+            f"{existing}\n\n✅ Конфликт разрешён."
+            if existing
+            else "✅ Конфликт разрешён.",
+        )
         await callback.answer()
     else:
         await callback.answer("Ошибка при разрешении конфликта")
@@ -605,7 +611,7 @@ async def cb_summary_save(callback: CallbackQuery) -> None:
 
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
-        await add_memory(
+        await save_memory_single(
             session,
             owner,
             fact=f"[Пересказ чата #{chat_id}]: {clean_text[:500]}",

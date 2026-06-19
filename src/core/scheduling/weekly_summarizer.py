@@ -11,14 +11,14 @@ from src.core.scheduling.notification_queue import notification_queue
 from src.db.models import Notification
 from src.core.infra.timeutil import now_in_tz
 from src.db.repo import (
-    add_memory,
     fetch_chat_messages,
     get_or_create_user,
     list_active_conversations,
     list_contacts,
     list_open_commitments,
-    upsert_memory_cluster,
+    upsert_memory_cluster
 )
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 from src.llm.base import ChatMessage, TaskType
 from src.config import settings
@@ -157,14 +157,15 @@ async def weekly_summary_loop(owner_id: int) -> None:
                         for coro in asyncio.as_completed(contact_tasks):
                             contact, facts = await coro
                             for f in facts:
-                                await add_memory(
+                                await save_memory_single(
                                     session,
                                     owner_safe,
                                     fact=f.get("fact", ""),
                                     contact_id=contact.peer_id,
                                     sentiment=f.get("sentiment"),
                                     source="weekly",
-                                )
+                                    confidence=0.5,
+                                    memory_type=None)
                                 sentiment = f.get("sentiment")
                                 if sentiment in sentiment_counts:
                                     sentiment_counts[sentiment] += 1
@@ -327,7 +328,7 @@ async def consolidate_tier(
 
                 if summary:
                     # Сохраняем консолидированный факт как tier=to_tier
-                    await add_memory(
+                    await save_memory_single(
                         session,
                         owner,
                         fact=summary,
@@ -337,7 +338,8 @@ async def consolidate_tier(
                         importance=0.7,
                         decay_rate=0.03,
                         memory_tier=to_tier,
-                    )
+                        confidence=0.5,
+                        memory_type=None)
 
                     # Сохраняем кластер
                     await upsert_memory_cluster(

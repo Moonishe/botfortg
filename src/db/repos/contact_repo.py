@@ -194,6 +194,12 @@ async def remove_allowed_contact(session: AsyncSession, telegram_id: int) -> Non
         await session.flush()
 
 
+async def list_allowed_contacts(session: AsyncSession) -> list[int]:
+    """Return all telegram_ids from the allowed_contacts table."""
+    r = await session.execute(select(AllowedContact.telegram_id))
+    return [row[0] for row in r.all()]
+
+
 async def upsert_folders(session: AsyncSession, user, folders_data: list[dict]) -> int:
     """Сохраняет/обновляет папки. folders_data: [{'telegram_folder_id': int, 'title': str, 'emoji': str|None}]."""
     lock = _get_user_lock(user.id)

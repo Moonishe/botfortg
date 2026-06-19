@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.session import init_db, get_session, engine, Base
 from src.db.models._memory import Entity, EntityRelation
 from src.db.repo import get_or_create_user
-from src.core.memory.graph_traversal import traverse, MAX_HOPS
+from src.core.memory.graph_traversal import traverse, MAX_HOPS, MAX_NODES
 
 OWNER_TG_ID = 123456789
 
@@ -299,12 +299,7 @@ async def test_traverse_max_nodes_cap():
         await session.commit()
 
     result = await traverse(OWNER_TG_ID, "Star0", hops=2)
-    # NOTE: текущая реализация добавляет всех соседей внутри for-цикла
-    # до проверки while-условия len(visited) < MAX_NODES.
-    # Звезда из 60 узлов → все 60 попадают в visited.
-    # Это известный баг в graph_traversal.py — TODO: добавить
-    # проверку внутри for-цикла.
-    assert result["total_nodes"] == 60  # баг: должно быть ≤ 50
+    assert result["total_nodes"] <= MAX_NODES
 
 
 @pytest.mark.asyncio

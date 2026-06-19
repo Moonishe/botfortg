@@ -6,7 +6,7 @@ from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
 from src.bot.handlers.chat_cmd import _actions_keyboard, _candidates_keyboard
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
@@ -30,7 +30,7 @@ async def cmd_catchup(
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        candidates = await resolve(client, owner, query)
+        candidates = await resolve_contact_fast(client, owner, query)
     if not candidates:
         await message.answer("Контакт не найден. Попробуй /sync.")
         return

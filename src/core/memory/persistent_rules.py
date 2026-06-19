@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from src.db.models._memory import Memory
 from src.db.repo import get_or_create_user
-from src.db.repos.memory_repo import add_memory as _add_memory
+from src.core.memory.memory_service import save_memory_single  # was: add_memory alias
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ async def add_rule(telegram_id: int, rule_text: str) -> bool:
     """Add a persistent rule for the user. Returns True if added.
 
     Deduplication: identical rules will increment times_mentioned
-    rather than creating duplicates (handled by add_memory).
+    rather than creating duplicates (handled by save_memory_single).
     """
     rule_text = rule_text.strip()
     if len(rule_text) < 3:
@@ -43,7 +43,7 @@ async def add_rule(telegram_id: int, rule_text: str) -> bool:
             logger.warning("User not found for telegram_id=%d", telegram_id)
             return False
 
-        await _add_memory(
+        await save_memory_single(
             session,
             user,
             fact=rule_text,

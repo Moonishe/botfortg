@@ -52,6 +52,18 @@ _DLQ_MAX = 50
 _dlq_lock = asyncio.Lock()
 
 
+async def get_queue_stats() -> dict[str, int]:
+    """Return a read-only snapshot of memory queue pressure."""
+    async with _dlq_lock:
+        dlq_size = len(_dlq)
+    return {
+        "size": _queue.qsize(),
+        "max_size": _queue.maxsize,
+        "dlq_size": dlq_size,
+        "dlq_max_size": _DLQ_MAX,
+    }
+
+
 async def _retry_dlq() -> None:
     """Фоновый retry: перекладывает задания из DLQ в основную очередь."""
     while True:

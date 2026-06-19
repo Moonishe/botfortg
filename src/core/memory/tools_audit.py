@@ -19,7 +19,7 @@ AGENTMEMORY_MAPPING: dict[str, dict[str, Any]] = {
     # ── Memory CRUD ──────────────────────────────────────────────────
     "create_memory": {
         "exists": True,
-        "impl": "memory_repo.add_memory() / add_memory_candidate()",
+        "impl": "memory_service.save_memory_single() / add_memory_candidate()",
         "nl": "store_memory",
     },
     "read_memory": {
@@ -39,7 +39,7 @@ AGENTMEMORY_MAPPING: dict[str, dict[str, Any]] = {
     },
     "delete_memory": {
         "exists": True,
-        "impl": "memory_repo.delete_memory()",
+        "impl": "memory_service.delete_memory_service()",
         "nl": "forget_memory",
     },
     "list_memories": {
