@@ -279,7 +279,8 @@ class ManagedCache(Generic[K, V]):
             return len(keys_to_remove)
 
     async def cleanup_expired(self) -> int:
-        """Remove all expired entries. Call periodically."""
+        """Remove all expired entries. Call periodically.
+        Also evicts stale _write_events entries to prevent memory leaks."""
         async with self._lock:
             now = time.monotonic()
             expired_keys = [
@@ -287,6 +288,10 @@ class ManagedCache(Generic[K, V]):
             ]
             for key in expired_keys:
                 self._evict(key, expired=True)
+            # Cleanup stale _write_events: remove events for keys no longer in cache
+            stale_events = [k for k in self._write_events if k not in self._cache]
+            for key in stale_events:
+                self._write_events.pop(key, None)
             return len(expired_keys)
 
     async def get_metadata(self, key: K) -> dict | None:

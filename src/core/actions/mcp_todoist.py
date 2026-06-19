@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 
 from src.core.actions.tool_registry import tool
@@ -30,8 +29,10 @@ _TASKS_LIMIT_MAX = 50
 
 
 def _get_api_token() -> str:
-    """Retrieve the Todoist API token from settings or environment."""
-    token = os.environ.get("TODOIST_API_TOKEN", "")
+    """Retrieve the Todoist API token from settings."""
+    from src.config import settings
+
+    token = settings.todoist_api_token
     if not token:
         raise ValueError("Set TODOIST_API_TOKEN in .env or environment variable")
     return token

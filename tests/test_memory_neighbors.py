@@ -19,7 +19,8 @@ os.environ.setdefault("BOT_TOKEN", "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
 from src.core.memory.memory_neighbors import find_cross_contact_bridges
-from src.db.repo import add_memory, get_or_create_user
+from src.db.repo import get_or_create_user
+from src.core.memory.memory_service import save_memory_single
 from src.db.session import get_session
 
 OWNER_TG_ID = 123456789
@@ -60,11 +61,14 @@ async def _seed_memories() -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, OWNER_TG_ID)
         for i in range(12):
-            await add_memory(
+            await save_memory_single(
                 session,
                 owner,
                 fact=f"fact about topic {i % 3} number {i}",
                 contact_id=1000 + (i % 3),
+                source="chat",
+                confidence=0.5,
+                memory_type=None,
             )
 
 
@@ -93,7 +97,11 @@ async def test_find_cross_contact_bridges_uses_batch_embedding():
     fake_contact.display_name = "Test Contact"
 
     with (
-        patch("src.core.memory.memory_neighbors.build_provider", return_value=provider),
+        patch(
+            "src.core.memory.memory_neighbors.build_provider",
+            new_callable=AsyncMock,
+            return_value=provider,
+        ),
         patch(
             "src.core.actions.vector_store.get_vector_store",
             new_callable=AsyncMock,
@@ -119,7 +127,11 @@ async def test_find_cross_contact_bridges_uses_batch_embedding():
 async def test_find_cross_contact_bridges_no_provider():
     """Returns empty list when provider is not available."""
     await _seed_memories()
-    with patch("src.core.memory.memory_neighbors.build_provider", return_value=None):
+    with patch(
+        "src.core.memory.memory_neighbors.build_provider",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
         bridges = await find_cross_contact_bridges(OWNER_TG_ID)
     assert bridges == []
 
@@ -132,7 +144,9 @@ async def test_find_cross_contact_bridges_embed_batch_failure():
     provider.embed_batch = AsyncMock(side_effect=RuntimeError("embedding failed"))
 
     with patch(
-        "src.core.memory.memory_neighbors.build_provider", return_value=provider
+        "src.core.memory.memory_neighbors.build_provider",
+        new_callable=AsyncMock,
+        return_value=provider,
     ):
         bridges = await find_cross_contact_bridges(OWNER_TG_ID)
 

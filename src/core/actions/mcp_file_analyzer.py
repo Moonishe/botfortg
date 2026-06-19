@@ -8,8 +8,8 @@ Actions:
 - **stats** — return lines, words, chars, and size for a file.
 
 Safety:
-    Path validation via ``_safe_resolve()`` — only files under ``data/``
-    are accessible (same policy as ``mcp_filesystem``).
+    Path validation via ``mcp_tools._safe_resolve()`` — symlink-protected,
+    denied-prefix/suffix checked, restricted to ``data/`` directory.
 """
 
 from __future__ import annotations
@@ -30,33 +30,10 @@ _FATAL_EXCEPTIONS: tuple[type[BaseException], ...] = (
     SystemExit,
 )
 
-from src.config import settings
+from src.core.actions.mcp_tools import _safe_resolve
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
-
-
-# ── Safe path resolution (inlined to avoid circular import with mcp_tools) ──
-
-
-def _safe_resolve(root_str: str) -> Path | None:
-    """Resolve *root_str* to an absolute path, returning ``None`` if unsafe.
-
-    Only paths under ``settings.data_dir`` are allowed. Symlinks are resolved,
-    and ``..`` components are rejected explicitly.
-    """
-    raw = Path(root_str)
-    if any(part == ".." for part in raw.parts):
-        return None
-    root = Path(raw).resolve(strict=False)
-    allowed = [settings.data_dir.resolve()]
-    for a in allowed:
-        try:
-            root.relative_to(a)
-            return root
-        except ValueError:
-            continue
-    return None
 
 
 # ── Supported extensions ──────────────────────────────────────────────────
@@ -355,7 +332,9 @@ def _analyze_yaml(resolved: Path) -> dict[str, Any]:
         import yaml  # type: ignore[import-untyped]
     except ImportError:
         return {
-            "error": "PyYAML is required to parse .yaml files. Install: pip install pyyaml"
+            "error": (
+                "PyYAML is required to parse .yaml files. Install: pip install pyyaml"
+            )
         }
 
     try:

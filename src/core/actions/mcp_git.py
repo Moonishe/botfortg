@@ -17,6 +17,7 @@ import subprocess
 from typing import Any
 
 from src.config import PROJECT_ROOT
+from src.core.actions.mcp_tools import _safe_resolve
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,16 @@ async def mcp_git(
         elif action == "diff":
             if not file or not file.strip():
                 return {"error": "file parameter is required for action='diff'"}
-            return await _run_git(["diff", "--", file.strip()])
+            fname = file.strip()
+            # Security: validate the file path via _safe_resolve before
+            # passing to git. Reject paths outside data_dir or denied files.
+            resolved = _safe_resolve(fname)
+            if resolved is None:
+                return {
+                    "error": f"File {fname!r} is outside allowed directories or denied"
+                }
+            # Pass the already-validated resolved path to git
+            return await _run_git(["diff", "--", str(resolved)])
         else:  # branch
             return await _run_git(["branch", "--list"])
     except Exception as exc:

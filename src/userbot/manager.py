@@ -68,6 +68,12 @@ class UserbotManager:
 
     def __post_init__(self) -> None:
         global _MANAGER_SINGLETON
+        if _MANAGER_SINGLETON is not None and _MANAGER_SINGLETON is not self:
+            logger.error(
+                "UserbotManager singleton already exists — overwriting "
+                "dangles clients on the old instance. Use set_global_manager() "
+                "or shutdown the old one first."
+            )
         _MANAGER_SINGLETON = self
 
     async def restore_all(self) -> None:
@@ -133,7 +139,7 @@ class UserbotManager:
                         e.seconds,
                         user.telegram_id,
                     )
-                    await asyncio.sleep(e.seconds)
+                    await asyncio.sleep(min(e.seconds, 300))
                     await client.connect()
                     if await client.is_user_authorized():
                         self._clients[user.telegram_id] = client
@@ -263,7 +269,7 @@ class UserbotManager:
         for tg_id, client in list(self._clients.items()):
             try:
                 await client.disconnect()
-            except RPCError:
+            except (RPCError, ConnectionError, OSError):
                 logger.exception("Error disconnecting client %s", tg_id)
         self._clients.clear()
 
@@ -271,7 +277,7 @@ class UserbotManager:
         for tg_id, pending in list(self._pending.items()):
             try:
                 await pending.client.disconnect()
-            except RPCError:
+            except (RPCError, ConnectionError, OSError):
                 logger.exception("Error disconnecting pending client %s", tg_id)
         self._pending.clear()
 
@@ -328,6 +334,24 @@ class UserbotManager:
                                 exc_info=True,
                             )
                         self._clients.pop(tg_id, None)
+                except asyncio.CancelledError:
+                    raise  # propagate for clean shutdown
+                except (RPCError, ConnectionError, OSError):
+                    # Reconnect failed — disconnect to release resources
+                    logger.warning(
+                        "Health check reconnect failed for tg_id=%d — disconnecting",
+                        tg_id,
+                        exc_info=True,
+                    )
+                    try:
+                        await client.disconnect()
+                    except (RPCError, OSError):
+                        logger.debug(
+                            "client.disconnect() after failed reconnect for tg_id=%d",
+                            tg_id,
+                            exc_info=True,
+                        )
+                    self._clients.pop(tg_id, None)
                 except Exception:
                     logger.debug(
                         "Health check for tg_id=%d failed (non-critical)",

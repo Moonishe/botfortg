@@ -43,23 +43,38 @@ def _user_refers_to_self(msg: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _SOUL_MD: str | None = None
+_soul_md_loaded: bool = False
 
 _soul_md_path = Path(__file__).resolve().parent.parent.parent.parent / "SOUL.md"
-if _soul_md_path.exists():
-    _SOUL_MD = _soul_md_path.read_text(encoding="utf-8").strip()
-    if _SOUL_MD:
-        # Scan for prompt injection before accepting
-        scan = scan_content(_SOUL_MD, _soul_md_path.name)
-        if scan.blocked:
-            logger.warning(
-                "SOUL.md blocked by prompt injection scanner: %s",
-                scan.message,
-            )
-            _SOUL_MD = scan.message  # inject blocking message instead
-        else:
-            logger.info("SOUL.md loaded (%d chars)", len(_SOUL_MD))
-    else:
-        _SOUL_MD = None
+
+
+def _load_soul_md() -> str | None:
+    """Lazy-load SOUL.md — avoids blocking file I/O at import time."""
+    global _SOUL_MD, _soul_md_loaded
+    if _soul_md_loaded:
+        return _SOUL_MD
+    _soul_md_loaded = True
+    if _soul_md_path.exists():
+        try:
+            content = _soul_md_path.read_text(encoding="utf-8").strip()
+            if content:
+                # Scan for prompt injection before accepting
+                scan = scan_content(content, _soul_md_path.name)
+                if scan.blocked:
+                    logger.warning(
+                        "SOUL.md blocked by prompt injection scanner: %s",
+                        scan.message,
+                    )
+                    _SOUL_MD = scan.message  # inject blocking message instead
+                else:
+                    _SOUL_MD = content
+                    logger.info("SOUL.md loaded (%d chars)", len(_SOUL_MD))
+            else:
+                _SOUL_MD = None
+        except Exception:
+            logger.warning("Failed to read SOUL.md", exc_info=True)
+            _SOUL_MD = None
+    return _SOUL_MD
 
 
 def _truncate_smart(text: str, max_chars: int) -> str:
@@ -136,18 +151,34 @@ class PromptAssembler:
 
     def __init__(self):
         self._blocks = _load_blocks()
+        # ponytail: memoize stable tier + tier2 static prefix.
+        # Invalidated by update_context_block(). Add TTL if blocks become dynamic.
+        self._tier1_cache: dict[str, str] = {}
+        self._tier2_static_cache: dict[str, str] = {}
+
+    def clear_prompt_cache(self) -> None:
+        """Clear prompt caches (for tests / block updates)."""
+        self._tier1_cache.clear()
+        self._tier2_static_cache.clear()
 
     # ------------------------------------------------------------------
     # Tier helpers
     # ------------------------------------------------------------------
 
     def _tier1_stable(self, target: str) -> str:
-        """Tier 1 — неизменяемый якорь."""
+        """Tier 1 — неизменяемый якорь (cached)."""
+        if target not in self._tier1_cache:
+            self._tier1_cache[target] = self._compute_tier1(target)
+        return self._tier1_cache[target]
+
+    def _compute_tier1(self, target: str) -> str:
+        """Compute Tier 1 content (uncached)."""
         if target == "maestro":
             # SOUL.md загружен → используем его вместо hardcoded блоков
-            if _SOUL_MD is not None:
+            soul_md = _load_soul_md()
+            if soul_md is not None:
                 return (
-                    _SOUL_MD
+                    soul_md
                     + "\n\n## ПРАВИЛА\nСледуй границам, стилю и правилам из SOUL.md."
                 )
             return (
@@ -162,8 +193,14 @@ class PromptAssembler:
         else:
             return ""
 
-    def _tier2_context(self, target: str, ctx: AssemblyContext) -> str:
-        """Tier 2 — полу-стабильный контекст."""
+    def _tier2_static(self, target: str) -> str:
+        """Static prefix of Tier 2 — agent list, intents, format, tool hints."""
+        if target not in self._tier2_static_cache:
+            self._tier2_static_cache[target] = self._compute_tier2_static(target)
+        return self._tier2_static_cache[target]
+
+    def _compute_tier2_static(self, target: str) -> str:
+        """Compute static prefix of Tier 2 (uncached)."""
         parts = []
 
         # Agent list / intents / format для maestro
@@ -195,17 +232,23 @@ class PromptAssembler:
                 "Для деталей о каждом инструменте используй list_for_prompt() в туллупе.\n"
             )
             parts.append(tool_hints)
-
-            # Correction learning — feed recent user corrections into prompt
-            if ctx.correction_context:
-                parts.append("")
-                parts.append(
-                    "[УЧТИ ИСПРАВЛЕНИЯ] Пользователь поправлял: "
-                    + ctx.correction_context
-                )
         elif target == "agent":
             parts.append(self._blocks["context_agent_intents"])
             parts.append(self._blocks["context_agent_format"])
+
+        return "\n".join(parts)
+
+    def _tier2_context(self, target: str, ctx: AssemblyContext) -> str:
+        """Tier 2 — полу-стабильный контекст (static prefix cached + dynamic suffix)."""
+        parts = [self._tier2_static(target)]
+
+        # Dynamic parts — change per turn
+        # Correction learning — feed recent user corrections into prompt
+        if target == "maestro" and ctx.correction_context:
+            parts.append("")
+            parts.append(
+                "[УЧТИ ИСПРАВЛЕНИЯ] Пользователь поправлял: " + ctx.correction_context
+            )
 
         # Anti-AI block (controlled by per-user setting)
         if ctx.anti_ai:
@@ -346,7 +389,62 @@ class PromptAssembler:
                 cand_lines.append(f"- {c}")
             parts.append("\n".join(cand_lines))
 
+        # Context source visibility — let LLM know which sources are active
+        sources_block = self._format_context_sources(ctx)
+        if sources_block:
+            parts.append(sources_block)
+
         return "\n\n".join(parts)
+
+    def _format_context_sources(self, ctx: AssemblyContext) -> str:
+        """Summarize which context sources are active for LLM visibility.
+
+        Helps the LLM understand what information it already has, reducing
+        unnecessary tool calls for data that's already in the prompt.
+        """
+        sources: list[str] = []
+        if ctx.rag_context:
+            sources.append("RAG (история переписок)")
+        if ctx.persona_block:
+            sources.append("Persona (адаптивный профиль)")
+        if ctx.style_match_block:
+            sources.append("Style match (анализ стиля)")
+        if ctx.confirmed_rules:
+            sources.append(f"Rules ({len(ctx.confirmed_rules)} активных)")
+        if ctx.deep_memory:
+            sources.append("Deep memory (tier 2-3 + граф)")
+        if ctx.skill_index:
+            sources.append("Skills index (доступные навыки)")
+        if ctx.frozen_snapshot:
+            sources.append("Frozen snapshot (топ-факты сессии)")
+        if ctx.memory_context:
+            sources.append("Memory context (ContextEngine)")
+        if ctx.self_profile:
+            sources.append("Self profile (информация о владельце)")
+        if ctx.contact_graph:
+            sources.append("Contact graph (связи между контактами)")
+        if ctx.dsm_context:
+            sources.append("DSM (проектная память)")
+        if ctx.correction_context:
+            sources.append("Corrections (недавние исправления)")
+        if ctx.session_summary:
+            sources.append("Session summary (replay)")
+        if ctx.contact_rules_block:
+            sources.append("Contact rules (per-contact)")
+        if ctx.transcription_meta:
+            sources.append("Voice transcription metadata")
+
+        if not sources:
+            return ""
+
+        lines = ["<context_sources>", "Активные источники контекста в этом промпте:"]
+        for s in sources:
+            lines.append(f"- {s}")
+        lines.append(
+            "Не вызывай инструменты для данных, уже предоставленных этими источниками."
+        )
+        lines.append("</context_sources>")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Public API
@@ -465,7 +563,9 @@ class PromptAssembler:
             )
             return False
         self._blocks[name] = new_text
-        logger.info("update_context_block: блок '%s' обновлён", name)
+        # Invalidate prompt caches — block change means cached tiers are stale
+        self.clear_prompt_cache()
+        logger.info("update_context_block: блок '%s' обновлён (caches cleared)", name)
         return True
 
     def get_context_blocks(self) -> dict[str, str]:

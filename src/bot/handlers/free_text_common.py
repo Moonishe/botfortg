@@ -7,7 +7,9 @@ import re
 import time
 from datetime import UTC
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Any
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.reply_dedup import dedup
@@ -93,11 +95,14 @@ def _hard_split(text: str, max_len: int) -> list[str]:
 
 
 async def safe_answer(
-    message, text: str, max_len: int = TELEGRAM_SAFE_MAX, **kwargs
+    message: Message, text: str, max_len: int = TELEGRAM_SAFE_MAX, **kwargs: Any
 ) -> None:
     """Send ``text`` via ``message.answer()``, splitting into multiple messages if too long.
     ``reply_markup`` (if any) is attached only to the last message.
     """
+    # Guard: empty text is a no-op (Telegram rejects empty message)
+    if not text or not text.strip():
+        return
     # Reaction engine: short responses → emoji reaction instead of text
     if len(text) < 50 and "```" not in text:
         emoji = get_reaction(text)
@@ -508,6 +513,17 @@ async def _post_turn_optimize(
         stale = [uid for uid, ts in _post_turn_last_call.items() if now - ts > 3600]
         for uid in stale:
             del _post_turn_last_call[uid]
+        # Cleanup: удаляем completed/cancelled tasks из _post_turn_tasks
+        stale_tasks = [
+            uid for uid, t in _post_turn_tasks.items() if t.done() or (uid in stale)
+        ]
+        for uid in stale_tasks:
+            _post_turn_tasks.pop(uid, None)
+        # Guard: prevent unbounded growth if cleanup is ineffective
+        if len(_post_turn_tasks) > 100:
+            oldest = sorted(_post_turn_tasks.keys())[:50]
+            for uid in oldest:
+                _post_turn_tasks.pop(uid, None)
         if telegram_id in _post_turn_last_call:
             if now - _post_turn_last_call[telegram_id] < 300:
                 return  # rate-limited
@@ -540,12 +556,14 @@ async def _post_turn_optimize(
                     background_reviewer,
                 )
 
-                asyncio.create_task(  # noqa: RUF006
-                    background_reviewer.review_response(
-                        user_id=telegram_id,
-                        user_text=user_message,
-                        assistant_response=assistant_response,
-                        provider=None,  # build own cheap background provider
+                track_ff(
+                    asyncio.create_task(
+                        background_reviewer.review_response(
+                            user_id=telegram_id,
+                            user_text=user_message,
+                            assistant_response=assistant_response,
+                            provider=None,  # build own cheap background provider
+                        )
                     )
                 )
             except asyncio.CancelledError:
@@ -563,4 +581,13 @@ async def _post_turn_optimize(
         existing = _post_turn_tasks.get(telegram_id)
         if existing and not existing.done():
             existing.cancel()
-        _post_turn_tasks[telegram_id] = asyncio.create_task(_do_optimize())
+
+            # Retrieve exception to suppress "Task exception was never retrieved"
+            # asyncio warning when the cancelled task is garbage-collected.
+            def _retrieve_exc(t: asyncio.Task) -> None:
+                t.exception()
+
+            existing.add_done_callback(_retrieve_exc)
+        _post_turn_tasks[telegram_id] = track_ff(
+            asyncio.create_task(_do_optimize(), name="post-turn-optimize")
+        )

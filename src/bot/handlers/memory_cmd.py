@@ -13,22 +13,23 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from aiogram.filters.command import CommandObject
 
 from src.bot.filters import OwnerOnly
 from src.bot.states import MemoryCorrectionStates
 from src.config import settings
-from src.core.contacts.contact_resolver import resolve
+from src.bot.contact_resolver import resolve_contact_fast
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_fuel import (
     format_depleted_contacts,
     format_fuel_line,
     get_fuel_stats,
 )
-from src.db.models import Commitment, Memory, MemoryLink
+from src.db.models import Episode, Memory, MemoryLink
+from src.core.memory.stats import get_memory_stats
 from src.db.repo import (
-    get_commitment_by_source_memory,
+    get_commitments_by_source_memory_ids,
     get_graph_stats,
-    get_memory_stats,
     get_or_create_user,
     list_memories,
     list_memory_candidates,
@@ -116,6 +117,13 @@ async def cmd_memory(
     if "--history" in raw:
         memory_id_str = raw.replace("--history", "", 1).strip()
         return await _cmd_memory_history(message, memory_id_str)
+    if raw.startswith("summary ") or raw == "summary":
+        # ponytail: admin summary kept in memory_admin_cmds to avoid duplication
+        from src.bot.handlers.memory_admin_cmds import cmd_memory_summary
+
+        summary_args = raw[8:].strip() if raw.startswith("summary ") else ""
+        cmd_obj = CommandObject(command="/memory", args=summary_args, prefix="/")
+        return await cmd_memory_summary(message, cmd_obj, userbot_manager)
 
     # default = view
     return await _cmd_memory_view(message, userbot_manager, raw)
@@ -258,13 +266,17 @@ async def _cmd_memory_correct(
         original = fact.fact
         await session.commit()
     # Set FSM state — consumer is handle_pending_correction in
-    # memory_correction router. Lazy TTL via set_at_ts in state data.
+    # memory_correction router. Lazy TTL via set_at_ts in state data
+    # + background cleanup task for the case when no next message arrives.
+    from src.bot.handlers.memory_correction import schedule_correction_ttl_cleanup
+
     await state.set_state(MemoryCorrectionStates.waiting_new_text)
     await state.update_data(
         memory_id=memory_id,
         original_fact=original,
         set_at_ts=time.monotonic(),
     )
+    await schedule_correction_ttl_cleanup(state)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -389,7 +401,7 @@ async def _cmd_memory_impact(
         if client is None:
             await message.answer("⚠️ Userbot не подключён.")
             return
-        candidates = await resolve(client, owner, contact_name)
+        candidates = await resolve_contact_fast(client, owner, contact_name)
         if not candidates:
             await message.answer(f"Контакт «{contact_name}» не найден.")
             return
@@ -499,11 +511,9 @@ async def _cmd_memory_view(
 
         # Отделяем task-факты для показа с кнопками и статусом Commitment
         task_memories = [m for m in all_items if m.memory_type == "task"]
-        task_commitments: dict[int, Commitment | None] = {}
-        for m in task_memories:
-            task_commitments[m.id] = await get_commitment_by_source_memory(
-                session, owner.id, m.id
-            )
+        task_commitments = await get_commitments_by_source_memory_ids(
+            session, owner.id, [m.id for m in task_memories]
+        )
 
     items = [m for m in all_items if m.memory_type != "task"]
 
@@ -656,7 +666,7 @@ async def _resolve_contact(
     )
     if client is None:
         return None, ""
-    candidates = await resolve(client, owner, contact_name)
+    candidates = await resolve_contact_fast(client, owner, contact_name)
     if candidates:
         return candidates[0].peer_id, f" — {candidates[0].label()}"
     return None, ""
@@ -680,6 +690,10 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
         # Clear pending correction FSM state if the user was in it.
         current = await state.get_state()
         if current == MemoryCorrectionStates.waiting_new_text.state:
+            _data = await state.get_data()
+            _t = _data.get("_ttl_cleanup_task")
+            if _t is not None and not _t.done():
+                _t.cancel()
             await state.clear()
         await callback.message.edit_text("❌ Отменено.")
         await callback.answer()
@@ -718,16 +732,23 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
             return
 
         if action == "reject":
-            from src.core.memory.memory_admin import deactivate_memory
+            from src.core.memory.memory_service import delete_memory_service
 
-            await deactivate_memory(session, memory_id, reason="manual_reject")
-            await session.commit()
-            fact_text = sanitize_html(mem.fact)
-            await callback.message.edit_text(f"🗑 Деактивирован: <i>{fact_text}</i>")
-            await callback.answer("Факт деактивирован")
+            deleted = await delete_memory_service(session, owner, memory_id)
+            if deleted:
+                await session.commit()
+                fact_text = sanitize_html(mem.fact)
+                await callback.message.edit_text(f"🗑 Деактивирован: <i>{fact_text}</i>")
+            await callback.answer(
+                "Факт деактивирован" if deleted else "Не удалось деактивировать"
+            )
             # Clear pending correction FSM state if the user was in it.
             current = await state.get_state()
             if current == MemoryCorrectionStates.waiting_new_text.state:
+                _data = await state.get_data()
+                _t = _data.get("_ttl_cleanup_task")
+                if _t is not None and not _t.done():
+                    _t.cancel()
                 await state.clear()
 
         elif action == "permanent":
@@ -735,6 +756,7 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
 
             await update_memory_text(
                 session,
+                owner,
                 memory_id,
                 mem.fact,
                 new_memory_type=(
@@ -752,6 +774,10 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
             # Clear pending correction FSM state if the user was in it.
             current = await state.get_state()
             if current == MemoryCorrectionStates.waiting_new_text.state:
+                _data = await state.get_data()
+                _t = _data.get("_ttl_cleanup_task")
+                if _t is not None and not _t.done():
+                    _t.cancel()
                 await state.clear()
 
         else:
@@ -791,7 +817,7 @@ async def _cmd_memory_history(message: Message, memory_id_str: str) -> None:
             return
 
         current_fact = mem.fact
-        versions = await get_memory_history(session, memory_id)
+        versions = await get_memory_history(session, owner, memory_id)
 
     if not versions:
         await message.answer(
@@ -956,7 +982,7 @@ async def cb_memcard_history(callback: CallbackQuery) -> None:
             return
 
         current_fact = mem.fact
-        versions = await get_memory_history(session, memory_id)
+        versions = await get_memory_history(session, owner, memory_id)
 
     if not versions:
         await callback.answer("История пуста — факт не редактировался", show_alert=True)
@@ -1000,12 +1026,23 @@ async def cb_memcard_react(callback: CallbackQuery) -> None:
 
     memory_id = int(memory_id_str)
 
-    # Применяем реакцию: 👍 → boost, 👎 → reduce
+    # Проверяем владельца ДО применения мутации confidence
     from src.core.memory.meta_memory import boost_confidence, reduce_confidence
+    from src.db.repos.session_repo import get_or_create_user
+    from src.db.session import get_session
 
+    async with get_session() as owner_session:
+        owner = await get_or_create_user(owner_session, callback.from_user.id)
+
+    if not owner:
+        await callback.answer("Ошибка пользователя", show_alert=True)
+        return
+
+    # Применяем реакцию: 👍 → boost, 👎 → reduce
     if reaction == "👍":
         success = await boost_confidence(
             memory_id,
+            owner.id,
             amount=0.2,  # +20% confidence
             reason="memcard_reaction_thumbs_up",
         )
@@ -1013,6 +1050,7 @@ async def cb_memcard_react(callback: CallbackQuery) -> None:
     elif reaction == "👎":
         success = await reduce_confidence(
             memory_id,
+            owner.id,
             amount=0.2,  # -20% confidence
             reason="memcard_reaction_thumbs_down",
         )
@@ -1027,7 +1065,6 @@ async def cb_memcard_react(callback: CallbackQuery) -> None:
 
     # Загружаем обновлённый факт для отображения новой confidence
     async with get_session() as session:
-        owner = await get_or_create_user(session, callback.from_user.id)
         mem = await session.get(Memory, memory_id)
         if not mem or mem.user_id != owner.id:
             await callback.answer("Факт не найден", show_alert=True)
@@ -1169,11 +1206,10 @@ async def cb_episode_detail(callback: CallbackQuery) -> None:
     """Показать подробности эпизода."""
     ep_id = int(callback.data.split(":")[2])
 
-    from src.db.models._memory import Episode
-
     async with get_session() as session:
         ep = await session.get(Episode, ep_id)
-        if not ep or ep.user_id != callback.from_user.id:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        if not ep or ep.user_id != owner.id:
             await callback.answer("Эпизод не найден", show_alert=True)
             return
 
@@ -1212,11 +1248,10 @@ async def cb_episode_facts(callback: CallbackQuery) -> None:
 
     ep_id = int(callback.data.split(":")[2])
 
-    from src.db.models._memory import Episode
-
     async with get_session() as session:
         ep = await session.get(Episode, ep_id)
-        if not ep or ep.user_id != callback.from_user.id:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        if not ep or ep.user_id != owner.id:
             await callback.answer("Эпизод не найден", show_alert=True)
             return
 
@@ -1237,6 +1272,7 @@ async def cb_episode_facts(callback: CallbackQuery) -> None:
                 await session.execute(
                     select(Memory).where(
                         Memory.id.in_(mem_ids),
+                        Memory.user_id == owner.id,
                         Memory.is_active.is_(True),
                     )
                 )

@@ -6,8 +6,9 @@ sets `MemoryCorrectionStates.waiting_new_text` and stores the pending data
 in FSM storage. This module owns the consumer handler.
 
 TTL semantics: aiogram FSM has no built-in TTL, so we store `set_at_ts` in
-state data and check it lazily on the next message — the same opportunistic
-cleanup the legacy filter used to perform.
+state data and check it lazily on the next message. Additionally, a background
+asyncio task (`schedule_correction_ttl_cleanup`) is spawned after setting the
+state to clear it after CORRECTION_TTL_SECONDS if no message arrives.
 
 Cancel paths: the global `/cancel` handler in `login.cmd_cancel` clears any
 FSM state, so no dedicated cancel command is needed here. The
@@ -17,6 +18,7 @@ FSM state, so no dedicated cancel command is needed here. The
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -26,6 +28,7 @@ from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
 from src.bot.states import MemoryCorrectionStates
+from src.core.infra.task_manager import track_ff
 from src.db.models import Memory
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -39,6 +42,44 @@ router.message.filter(OwnerOnly())
 CORRECTION_TTL_SECONDS = 300
 
 
+async def schedule_correction_ttl_cleanup(state: FSMContext) -> None:
+    """Schedule a background task that clears the FSM state after TTL.
+
+    Called by ``memory_cmd`` after setting ``waiting_new_text`` state.
+    The task is tracked via ``track_ff`` for graceful shutdown.
+
+    The task is stored in FSM data under ``_ttl_cleanup_task`` so that
+    ``handle_pending_correction`` can cancel it if the user submits a
+    correction before the TTL fires.
+    """
+
+    # Cancel any previous TTL cleanup task for this state to avoid orphaned
+    # tasks when the user invokes /memory --correct multiple times.
+    data = await state.get_data()
+    old_task = data.get("_ttl_cleanup_task")
+    if old_task is not None and not old_task.done():
+        old_task.cancel()
+
+    async def _cleanup() -> None:
+        try:
+            await asyncio.sleep(CORRECTION_TTL_SECONDS)
+            current = await state.get_state()
+            if current == MemoryCorrectionStates.waiting_new_text.state:
+                await state.clear()
+        except asyncio.CancelledError:
+            # Task was cancelled — either by a new schedule_correction_ttl_cleanup
+            # call, by handle_pending_correction receiving a message, or by
+            # cb_memreval/cmd_cancel clearing the state.  Do nothing.
+            pass
+
+    task = asyncio.create_task(_cleanup())
+    track_ff(task)
+    # Store the task in FSM data so it can be cancelled on early correction.
+    # Note: works with MemoryStorage; RedisStorage would need JSON-serialisable keys.
+    # ponytail: FSM inline task storage — upgrade path is a module-level dict.
+    await state.update_data(_ttl_cleanup_task=task)
+
+
 @router.message(MemoryCorrectionStates.waiting_new_text)
 async def handle_pending_correction(message: Message, state: FSMContext) -> None:
     """Обрабатывает текст, если у пользователя есть pending /memory --correct."""
@@ -48,6 +89,13 @@ async def handle_pending_correction(message: Message, state: FSMContext) -> None
     # stored by the writer (cmd_memory --correct) on each message.
     data = await state.get_data()
     set_at_ts = data.get("set_at_ts", 0)
+
+    # Cancel the background TTL cleanup task (if still running) —
+    # user has submitted a correction before the TTL fired.
+    cleanup_task = data.get("_ttl_cleanup_task")
+    if cleanup_task is not None and not cleanup_task.done():
+        cleanup_task.cancel()
+
     if time.monotonic() - set_at_ts > CORRECTION_TTL_SECONDS:
         await state.clear()
         await message.answer(
@@ -96,7 +144,7 @@ async def handle_pending_correction(message: Message, state: FSMContext) -> None
             await message.answer("❌ Факт не найден, отменяю.")
             return
         old_fact = mem.fact
-        await update_memory_text(session, memory_id, new_text)
+        await update_memory_text(session, owner, memory_id, new_text)
         await session.commit()
 
     await state.clear()

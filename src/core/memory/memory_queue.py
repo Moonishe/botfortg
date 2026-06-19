@@ -12,10 +12,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.memory._queue_core import (
     MemoryJob,
-    MemoryQueueFullError,
     _queue,
     _retry_dlq,
-    enqueue,
+    enqueue,  # pyright: ignore[reportUnusedImport] — re-exported for external callers
 )
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -68,11 +67,14 @@ async def _process_job(job: MemoryJob) -> None:
 
 async def _handle_save(session, owner, job: MemoryJob) -> None:
     """Сохранить готовые факты (job_type='save')."""
-    from src.db.repo import add_memory, link_memories
+    from src.db.repo import link_memories
+    from src.core.memory.memory_service import save_memory_single
     from src.core.actions.vector_store import get_vector_store
 
     facts = list(job.facts or [])
-    saved_by_index: dict[int, object] = {}
+    from src.db.models import Memory
+
+    saved_by_index: dict[int, Memory] = {}
     for i, fact_data in enumerate(facts):
         try:
             # savepoint: изолирует каждый факт — ошибка в одном не откатывает другие
@@ -80,7 +82,7 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
                 _vector_store = (
                     await get_vector_store() if fact_data.get("embedding") else None
                 )
-                mem = await add_memory(
+                mem = await save_memory_single(
                     session,
                     owner,
                     fact=fact_data.get("fact", ""),
@@ -92,6 +94,7 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
                     memory_type=fact_data.get("memory_type"),
                     embedding=fact_data.get("embedding"),
                     vector_store_obj=_vector_store,
+                    confidence=0.5,
                 )
             if mem:
                 saved_by_index[i] = mem
@@ -260,7 +263,13 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
 
 
 def _spawn_dlq_task() -> None:
-    """Create the DLQ retry task and attach a crash-restart callback."""
+    """Create the DLQ retry task and attach a crash-restart callback.
+
+    Must NOT be called outside _worker_lock — otherwise it races with
+    stop_worker() which cancels + sets _dlq_task = None.
+    """
+    if not _worker_lock.locked():
+        raise RuntimeError("_spawn_dlq_task must be called under _worker_lock")
     global _dlq_task
     if _dlq_task is None or _dlq_task.done():
         _dlq_task = asyncio.create_task(_retry_dlq(), name="memory-dlq-retry")
@@ -275,8 +284,18 @@ def _on_dlq_done(task: asyncio.Task) -> None:
     if exc:
         logger.exception("DLQ retry loop died unexpectedly", exc_info=exc)
         # Restart after a short delay to avoid tight crash loops.
+        # Must acquire _worker_lock to avoid racing with stop_worker().
         loop = asyncio.get_event_loop()
-        loop.call_later(5, _spawn_dlq_task)
+
+        def _restart() -> None:
+            if not _worker_lock.locked():
+                _ = loop.create_task(_restart_under_lock())
+
+        async def _restart_under_lock() -> None:
+            async with _worker_lock:
+                _spawn_dlq_task()
+
+        loop.call_later(5, _restart)
 
 
 async def start_worker() -> asyncio.Task:

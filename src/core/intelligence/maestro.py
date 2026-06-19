@@ -19,6 +19,7 @@ from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider, TaskType
 from src.llm.router import ExhaustedError
+from src.core.security.prompt_guard import fence_user_text
 
 from src.core.actions import register_builtin_tools
 from src.core.actions.tool_registry import tool_registry
@@ -237,6 +238,9 @@ async def process(
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     await asyncio.to_thread(register_builtin_tools)
 
+    # ── Reset iteration budget for this request ──
+    tool_registry.reset_budget()
+
     # Override provider model if maestro_model is configured.
     # Use a lock because the same provider instance may be shared across
     # concurrent process() calls.
@@ -317,9 +321,9 @@ async def process(
 
     context_str = "\n\n".join(ctx_parts) if ctx_parts else ""
     user_msg = (
-        f"{context_str}\n\nПользователь: {user_text}"
+        f"{context_str}\n\nПользователь: {fence_user_text(user_text)}"
         if context_str
-        else f"Пользователь: {user_text}"
+        else f"Пользователь: {fence_user_text(user_text)}"
     )
 
     # ═══════════════════════════════════════════════════════════════════
@@ -1222,7 +1226,10 @@ async def run_pipeline(
         promo = MAESTRO_AFTER_AGENTS.format(agent_results=combined)
         synthesis_messages = [
             ChatMessage(role="system", content=promo),
-            ChatMessage(role="user", content=f"Пользователь сказал: {user_text}"),
+            ChatMessage(
+                role="user",
+                content=f"Пользователь сказал: {fence_user_text(user_text)}",
+            ),
         ]
 
         # Try streaming for final response

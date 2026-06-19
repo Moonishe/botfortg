@@ -84,7 +84,7 @@ class TestGoalVerdict:
 
 def _make_mock_session() -> AsyncMock:
     """Создать mock AsyncSession."""
-    return MagicMock(spec=[])
+    return AsyncMock()
 
 
 def _make_mock_user() -> MagicMock:

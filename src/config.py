@@ -323,6 +323,10 @@ class Settings(BaseSettings):
         description="Context7 API key for documentation search (https://context7.com)",
     )
 
+    todoist_api_token: str = Field(
+        "",
+        description="Todoist API token for task management (https://todoist.com/app/settings/integrations)",
+    )
     genius_access_token: str | None = Field(
         default=None,
         description="Genius API access token для поиска текстов песен (https://genius.com/api-clients)",
@@ -331,6 +335,19 @@ class Settings(BaseSettings):
     embedding_dim: int = Field(
         1536,
         description="Размерность эмбеддингов (OpenAI text-embedding-3-small: 1536, BGE-M3: 1024, Gemini text-embedding-004: 768)",
+    )
+    # Embedding model defaults — used by build_provider when embed_model=None
+    openai_embed_model: str = Field(
+        "text-embedding-3-small",
+        description="Default OpenAI embedding model",
+    )
+    gemini_embed_model: str = Field(
+        "text-embedding-004",
+        description="Default Gemini embedding model",
+    )
+    mistral_embed_model: str = Field(
+        "mistral-embed",
+        description="Default Mistral embedding model",
     )
 
     # Capability toggles
@@ -351,6 +368,12 @@ class Settings(BaseSettings):
     )
     key_rotation_interval_days: int = Field(
         30, description="Интервал ротации DEK (дни)"
+    )
+
+    # ── Unified Dispatcher ──
+    use_unified_dispatcher: bool = Field(
+        False,
+        description="Use unified dispatcher for free-text routing (opt-in, default off)",
     )
 
     # ── Message classifier ──
@@ -618,6 +641,57 @@ class Settings(BaseSettings):
         description="Минимальное количество провалов для запуска auto-evolution навыка",
     )
 
+    # ── MemOS reward-weighted self-evolving memory loop (all ON by default) ──
+    reward_loop_enabled: bool = Field(
+        True, description="Master switch for MemOS reward loop"
+    )
+    reward_gamma: float = Field(0.95, description="Backprop discount factor γ")
+    reward_alpha_base: float = Field(
+        0.3, description="Base learning rate α for backprop"
+    )
+    reward_min_episodes: int = Field(
+        5, description="Min episodes for L2 policy induction"
+    )
+    reward_llm_rubric_enabled: bool = Field(
+        True,
+        description="Use LLM rubric for reward (heuristic fallback always available)",
+    )
+    world_model_enabled: bool = Field(
+        True, description="Enable L3 world-model abstraction"
+    )
+    decision_repair_failure_threshold: int = Field(
+        3, description="Fails to trigger decision-repair"
+    )
+    decision_repair_step_window: int = Field(
+        5, description="Step window for failure counting"
+    )
+
+    @field_validator("reward_gamma", mode="after")
+    @classmethod
+    def _validate_gamma(cls, v: float) -> float:
+        if not 0.0 <= v < 1.0:
+            raise ValueError(f"reward_gamma must be in [0, 1), got {v}")
+        return v
+
+    @field_validator("reward_alpha_base", mode="after")
+    @classmethod
+    def _validate_alpha_base(cls, v: float) -> float:
+        if not 0.0 < v <= 1.0:
+            raise ValueError(f"reward_alpha_base must be in (0, 1], got {v}")
+        return v
+
+    @field_validator(
+        "reward_min_episodes",
+        "decision_repair_failure_threshold",
+        "decision_repair_step_window",
+        mode="after",
+    )
+    @classmethod
+    def _validate_positive_int(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"must be positive, got {v}")
+        return v
+
     # Pre-gate pattern filtering
     pre_gate_extended: bool = Field(
         True, description="Enable extended pre-gate pattern matching (100+ patterns)"
@@ -747,6 +821,26 @@ class Settings(BaseSettings):
             "smart (default)=только high/critical + всегда active hardline blocklist; "
             "off=отключить подтверждение (hardline blocklist ВСЁ РАВНО активен)."
         ),
+    )
+
+    # ── Docker Sandbox (Phase 1.2) ──
+    sandbox_enabled: bool = Field(False, description="Enable Docker sandbox isolation")
+    sandbox_image: str = Field(
+        "python:3.13-slim", description="Docker image for sandbox"
+    )
+    sandbox_timeout: int = Field(
+        30, description="Max execution time in sandbox (seconds)"
+    )
+    sandbox_memory_limit: str = Field("256m", description="Memory limit per sandbox")
+    sandbox_cpu_limit: float = Field(0.5, description="CPU limit per sandbox")
+    sandbox_network_disabled: bool = Field(
+        True, description="Disable network in sandbox"
+    )
+    sandbox_workspace_access: Literal["none", "ro", "rw"] = Field(
+        "none", description="Workspace mount mode"
+    )
+    sandbox_scope: Literal["session", "agent"] = Field(
+        "session", description="Container reuse scope"
     )
 
     _data_dir_path: Path | None = PrivateAttr(default=None)

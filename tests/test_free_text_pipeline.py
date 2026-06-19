@@ -462,7 +462,11 @@ class TestExecuteInstant:
         mock_owner.alias = "Тест"
 
         mock_recall = MagicMock()
-        mock_recall.facts = ["факт1"]  # noqa: RUF001
+        mock_fact = MagicMock()
+        mock_fact.fact = "факт1"  # noqa: RUF001
+        mock_fact.reason = "test"
+        mock_fact.confidence = 0.5
+        mock_recall.facts = [mock_fact]
 
         with (
             patch(

@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import difflib
 import logging
-from pathlib import Path
 from typing import Any
 
-from src.config import settings
+from src.core.actions.mcp_tools import _safe_resolve
 from src.core.actions.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -106,11 +105,13 @@ async def _do_files(path1: str, path2: str) -> dict[str, Any]:
     if not path1 or not path2:
         return {"error": "Both path1 and path2 are required for action='files'"}
 
-    data_dir: Path = settings.data_dir
+    file1 = _safe_resolve(path1)
+    file2 = _safe_resolve(path2)
 
-    file1 = _resolve_path(data_dir, path1)
-    file2 = _resolve_path(data_dir, path2)
-
+    if file1 is None:
+        return {"error": f"Path {path1!r} is outside allowed directories or denied"}
+    if file2 is None:
+        return {"error": f"Path {path2!r} is outside allowed directories or denied"}
     if not file1.exists():
         return {"error": f"File not found: {path1} (resolved: {file1})"}
     if not file2.exists():
@@ -137,13 +138,4 @@ async def _do_files(path1: str, path2: str) -> dict[str, Any]:
     }
 
 
-def _resolve_path(data_dir: Path, user_path: str) -> Path:
-    """Resolve a user-supplied relative path inside data_dir.
-
-    Raises ValueError if the path attempts directory traversal.
-    """
-    resolved = (data_dir / user_path).resolve()
-    # Ensure the resolved path stays within data_dir
-    if not str(resolved).startswith(str(data_dir.resolve())):
-        raise ValueError(f"Path {user_path!r} escapes the data directory")
-    return resolved
+# _resolve_path removed — use mcp_tools._safe_resolve instead.

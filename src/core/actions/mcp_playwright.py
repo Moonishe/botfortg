@@ -219,6 +219,13 @@ class _BrowserManager:
         self._last_used = time.monotonic()
         self._cancel_idle_timer()
         self._idle_task = asyncio.create_task(self._idle_loop())
+        # Track the idle task so it is cancelled on shutdown
+        try:
+            from src.core.infra.task_manager import track_ff
+
+            track_ff(self._idle_task)
+        except ImportError:
+            pass  # module may not be loaded yet during early init
 
     def _cancel_idle_timer(self) -> None:
         if self._idle_task is not None and not self._idle_task.done():
@@ -281,7 +288,12 @@ def _atexit_cleanup() -> None:
     try:
         loop = asyncio.get_running_loop()
         if loop.is_running():
-            loop.create_task(_browser_manager.close())
+            try:
+                from src.core.infra.task_manager import track_ff
+
+                track_ff(loop.create_task(_browser_manager.close()))
+            except ImportError:
+                loop.create_task(_browser_manager.close())
     except RuntimeError:
         pass  # No running loop — browser will be killed on process exit
 

@@ -249,24 +249,23 @@ class BackgroundTaskManager:
             if t.task is not None and not t.task.done():
                 t.task.cancel()
 
-        gather = asyncio.gather(
-            *(
-                t.task
-                for t in self._tasks.values()
-                if t.task is not None and not t.task.done()
-            ),
-            return_exceptions=True,
-        )
+        pending_tasks = [
+            t.task
+            for t in self._tasks.values()
+            if t.task is not None and not t.task.done()
+        ]
+        if not pending_tasks:
+            for t in self._tasks.values():
+                t.status = TaskStatus.STOPPED
+            return
+
+        gather = asyncio.gather(*pending_tasks, return_exceptions=True)
         try:
             await asyncio.wait_for(gather, timeout=timeout)
         except TimeoutError:
             logger.warning(
                 "Timed out waiting for %d background tasks to stop after %.1fs",
-                sum(
-                    1
-                    for t in self._tasks.values()
-                    if t.task is not None and not t.task.done()
-                ),
+                len(pending_tasks),
                 timeout,
             )
 
@@ -422,6 +421,15 @@ task_manager = BackgroundTaskManager()
 # (trajectory recording, fact saving, inbox processing) are in-flight.
 
 _ff_tasks: set[asyncio.Task] = set()
+_ff_lock: asyncio.Lock | None = None
+
+
+def _get_ff_lock() -> asyncio.Lock:
+    """Lazy-init the fire-and-forget lock (safe to call outside event loop)."""
+    global _ff_lock
+    if _ff_lock is None:
+        _ff_lock = asyncio.Lock()
+    return _ff_lock
 
 
 def track_ff(task: asyncio.Task) -> asyncio.Task:
@@ -434,11 +442,16 @@ def track_ff(task: asyncio.Task) -> asyncio.Task:
 
         track_ff(asyncio.create_task(some_coroutine()))
     """
-    # Если задача уже завершена — не добавляем в _ff_tasks:
-    # add_done_callback вызовется немедленно, но discard на пустом
-    # множестве — no-op, и задача осталась бы висеть в tracking set.
+    # If the task is already done, skip — the done callback would fire
+    # immediately on an empty set (no-op), and we'd never remove it.
     if task.done():
         return task
+    # If no event loop is running yet (e.g. during module import),
+    # add without lock for bootstrapping.  At runtime the lock is used.
+    import contextlib
+
+    with contextlib.suppress(RuntimeError):
+        asyncio.get_running_loop()  # no-op check
     _ff_tasks.add(task)
     task.add_done_callback(_ff_tasks.discard)
     return task

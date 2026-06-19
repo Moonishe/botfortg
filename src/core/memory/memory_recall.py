@@ -22,7 +22,6 @@ from src.llm.base import TaskType
 from src.core.infra.task_manager import track_ff
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
 from src.llm.router import build_provider
-from src.core.memory.hybrid_search import reciprocal_rank_fusion
 from src.core.memory.temporal_layers import compute_retention
 
 logger = logging.getLogger(__name__)
@@ -47,7 +46,7 @@ _recall_cache: ManagedCache[str, RecallResult] = cache_manager.register(
 # invalidation needed.  Old entries expire via the normal TTL path.
 #
 # bump_recall_version() MUST be called from every memory mutation point:
-#   add_memory(), delete_memory(), _exec_update_memory()  (see repo/handlers).
+#   save_memory_single(), delete_memory_service(), _exec_update_memory()  (see memory_service).
 #
 # ⚠️  DESIGN NOTE — In-memory only, resets on restart:
 #   _rec_version lives in a plain dict, NOT persisted to SQLite/Redis/etc.
@@ -317,7 +316,11 @@ async def _bump_use_counts(fact_ids: list[int]) -> None:
             )
             await session.commit()
     except Exception:
-        logger.debug("_bump_use_counts failed (non-critical)", exc_info=True)
+        logger.warning(
+            "_bump_use_counts failed (%d ids) — use counts may drift",
+            len(new_ids),
+            exc_info=True,
+        )
 
 
 async def recall(
@@ -642,104 +645,58 @@ async def recall(
         if include_semantic:
             query_text = query or ""
             try:
-                from src.core.actions.vector_store import get_vector_store
-                from src.db.repo import search_memories_fts_with_scores
+                from src.core.memory.hybrid_search import search_memories_hybrid
 
-                provider = await build_provider(
-                    session, owner, task_type=TaskType.SEARCH
+                # Лимит поиска зависит от режима: light → 0 (не вызывается),
+                # normal → 5, deep → 10
+                qdrant_limit = {"light": 0, "normal": 5, "deep": 10}.get(mode, 10)
+
+                if not qdrant_limit:
+                    raise ValueError("qdrant_limit=0, skipping hybrid search")
+
+                # Issue 4 dedup: use shared search_memories_hybrid for FTS5+vector+RRF
+                # Pass graph_results for proper three-way RRF (not score addition)
+                fused = await search_memories_hybrid(
+                    session,
+                    owner,
+                    query_text,
+                    limit=qdrant_limit,
+                    threshold=semantic_threshold,
+                    contact_id=contact_id,
+                    graph_results=graph_results,
                 )
-                embedding: list[float] = []
-                if provider:
-                    embedding = await provider.embed(query_text[:300])
 
-                    # Лимит поиска зависит от режима: light → 0 (не вызывается),
-                    # normal → 5, deep → 10
-                    qdrant_limit = {
-                        "light": 0,
-                        "normal": 5,
-                        "deep": 10,
-                    }.get(mode, 10)
+                # Build embedding lookup from Qdrant results for MMR rerank
+                embedding_map: dict[int, list[float]] = {}
+                try:
+                    from src.core.actions.vector_store import get_vector_store
 
-                    # Параллельный запуск: векторный + ключевой поиск
-                    vector_task = (await get_vector_store()).search_similar_memories(
-                        user_id=owner.id,
-                        embedding=embedding,
-                        threshold=semantic_threshold,
-                        limit=qdrant_limit,
-                        contact_id=contact_id,
-                        with_vectors=True,
+                    provider = await build_provider(
+                        session, owner, task_type=TaskType.SEARCH
                     )
-                    keyword_task = search_memories_fts_with_scores(
-                        session,
-                        owner,
-                        query_text,
-                        contact_id=contact_id,
-                        limit=qdrant_limit,
-                    )
-
-                    # return_exceptions=True: if Qdrant or FTS5 raises, we
-                    # degrade to keyword-only / vector-only instead of
-                    # crashing the whole recall. The surrounding try/except
-                    # only catches (ImportError, ValueError, ConnectionError,
-                    # OSError) — a RuntimeError from qdrant-client or a
-                    # generic Exception would otherwise propagate and lose
-                    # the query entirely.
-                    _vector_res, _keyword_res = await asyncio.gather(
-                        vector_task,
-                        keyword_task,
-                        return_exceptions=True,
-                    )
-
-                    # Degrade gracefully when one branch fails: log the error
-                    # and treat that branch as empty hits.
-                    if isinstance(_vector_res, BaseException):
-                        logger.warning(
-                            "vector recall branch failed: %r; "
-                            "falling back to keyword-only",
-                            _vector_res,
+                    embedding: list[float] = []
+                    if provider:
+                        embedding = await provider.embed(query_text[:300])
+                    if embedding:
+                        vs = await get_vector_store()
+                        raw = await vs.search_similar_memories(
+                            user_id=owner.id,
+                            embedding=embedding,
+                            threshold=semantic_threshold,
+                            limit=qdrant_limit,
+                            contact_id=contact_id,
+                            with_vectors=True,
                         )
-                        vector_hits_raw = []
-                    else:
-                        vector_hits_raw = _vector_res
-
-                    if isinstance(_keyword_res, BaseException):
-                        logger.warning(
-                            "keyword recall branch failed: %r; "
-                            "falling back to vector-only",
-                            _keyword_res,
-                        )
-                        keyword_hits_raw = []
-                    else:
-                        keyword_hits_raw = _keyword_res
-
-                    # Преобразуем в (memory_id, score) для RRF
-                    vector_hits: list[tuple[int, float]] = [
-                        (h["memory_id"], h["score"])
-                        for h in vector_hits_raw
-                        if h.get("memory_id") is not None
-                    ]
-                    keyword_hits: list[tuple[int, float]] = keyword_hits_raw
-
-                    # Reciprocal Rank Fusion (vector + keyword + optional graph)
-                    fused = reciprocal_rank_fusion(
-                        vector_results=vector_hits,
-                        keyword_results=keyword_hits,
-                        graph_results=graph_results,
+                        for hit in raw:
+                            mid = hit.get("memory_id")
+                            emb = hit.get("embedding")
+                            if mid is not None and emb is not None:
+                                embedding_map[mid] = emb
+                except Exception:
+                    logger.debug(
+                        "Embedding map build failed (MMR may skip)", exc_info=True
                     )
-
-                    # Build embedding lookup from Qdrant results (+ BFS graph facts)
-                    # PERF-013: build complete index O(N) once, then O(1) lookups
-                    embedding_map: dict[int, list[float]] = {}
-                    for hit in vector_hits_raw:
-                        mid = hit.get("memory_id")
-                        emb = hit.get("embedding")
-                        if mid is not None and emb is not None:
-                            embedding_map[mid] = emb
-                    if graph_results:
-                        for bfs_id, _ in graph_results:
-                            if bfs_id not in embedding_map:
-                                continue  # no embedding available for this bfs_id
-
+                if graph_results:
                     # Apply Ebbinghaus retention weighting
                     if fused:
                         fused_with_retention = []

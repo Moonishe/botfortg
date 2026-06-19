@@ -8,7 +8,9 @@
     → pre-check (хватает ли ключевых слов?)
     → FactBatchBuffer.add()   // fire-and-forget
        ├─ batch enabled  → добавить в буфер, flush если полный / таймаут
-       └─ batch disabled → сразу _save_single()
+
+
+        └─ batch disabled → сразу auto_save_single()
 """
 
 from __future__ import annotations
@@ -17,7 +19,6 @@ import asyncio
 import json as _json
 import logging
 import re
-import sys as _sys
 import time
 from typing import Any
 
@@ -26,12 +27,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.config import settings
 from src.core.infra.task_manager import track_ff
+from src.core.memory.memory_service import save_memories_batch
 from src.llm.base import ChatMessage, TaskType
+
 
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════════════
 # Батчевый промпт
+
 # ══════════════════════════════════════════════════════════════════════════
 
 _BATCH_AUTO_SAVE_PROMPT = """You are a fact extractor. You will receive {N} user-assistant message pairs.
@@ -55,8 +59,8 @@ def _build_batch_prompt(messages: list[dict[str, Any]]) -> str:
     """Собрать батчевый промпт из накопленных сообщений."""
     msg_blocks: list[str] = []
     for i, m in enumerate(messages, 1):
-        user_text = m["user_text"][:500].replace("{", "{{").replace("}", "}}")
-        assistant_text = m["response_text"][:300].replace("{", "{{").replace("}", "}}")
+        user_text = (m["user_text"] or "")[:500].replace("{", "{{").replace("}", "}}")
+        assistant_text = (m["response_text"] or "")[:300].replace("{", "{{").replace("}", "}}")
         msg_blocks.append(
             f"[{i}] User message: {user_text}\n[{i}] Assistant reply: {assistant_text}"
         )
@@ -88,28 +92,34 @@ _AUTO_SAVE_PROMPT = (
 )
 
 
-async def _save_single(
+async def auto_save_single(
     telegram_id: int,
     user_text: str,
     response_text: str,
     provider: Any,
-) -> None:
-    """LLM-вызов + сохранение фактов для одного сообщения (режим без батчинга)."""
+) -> tuple[int, list[dict[str, str]]]:
+    """LLM-вызов + сохранение фактов для одного сообщения (режим без батчинга).
+
+    Returns ``(stored_count, facts)`` so callers can reuse the parsed facts for
+    caching / entity extraction.
+    """
     try:
         prompt = _AUTO_SAVE_PROMPT.format(
-            user_text=user_text[:500].replace("{", "{{").replace("}", "}}"),
-            assistant_text=response_text[:300].replace("{", "{{").replace("}", "}}"),
+            user_text=(user_text or "")[:500].replace("{", "{{").replace("}", "}}"),
+            assistant_text=(response_text or "")[:300].replace("{", "{{").replace("}", "}}"),
         )
         raw_json = await provider.chat(
             [ChatMessage(role="user", content=prompt)], task_type=TaskType.DEFAULT
         )
         facts = _parse_single_facts(raw_json)
         if facts:
-            await _save_facts_to_db(telegram_id, facts)
+            stored = await _save_facts_to_db(telegram_id, facts)
+            return stored, facts
     except asyncio.CancelledError:
         raise
     except (RequestError, HTTPStatusError, SQLAlchemyError, _json.JSONDecodeError):
         logger.debug("Auto-save facts skipped (single mode)", exc_info=True)
+    return 0, []
 
 
 def _parse_single_facts(raw_json: str) -> list[dict[str, str]]:
@@ -118,7 +128,9 @@ def _parse_single_facts(raw_json: str) -> list[dict[str, str]]:
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-z]*\s*|\s*```$", "", cleaned).strip()
     facts_data = _json.loads(cleaned)
-    facts_list: list[dict[str, str]] = facts_data.get("facts", [])
+    facts_list = facts_data.get("facts", [])
+    if not isinstance(facts_list, list):
+        return []
     return [
         f
         for f in facts_list
@@ -139,6 +151,8 @@ def _parse_batch_facts(raw_json: str) -> list[tuple[int, list[dict[str, str]]]]:
         if idx is None:
             continue
         facts = r.get("facts", [])
+        if not isinstance(facts, list):
+            continue
         valid_facts = [
             f
             for f in facts
@@ -149,115 +163,19 @@ def _parse_batch_facts(raw_json: str) -> list[tuple[int, list[dict[str, str]]]]:
     return parsed
 
 
-def _score_extraction_clarity(fact_text: str) -> tuple[float, float]:
-    """Оценивает качество извлечения факта: насколько это прямое утверждение.
-
-    Прямые утверждения («Мне 30 лет», «Я работаю в X») → высокое качество.
-    Намёки/неуверенные («наверное, я люблю кофе») → низкое качество.
-
-    Returns:
-        (extraction_quality, confidence) — оба 0.0–1.0.
-    """
-    text_lower = fact_text.lower()
-    quality = 0.5  # базовое качество
-
-    # Признаки прямого утверждения (уверенные формулировки)
-    direct_markers = (
-        "работает в",
-        "работаю в",
-        "живёт в",
-        "живу в",
-        "зовут",
-        "года",
-        "лет",
-        "день рождения",
-        "работает",
-        "работаю",
-        "учится",
-        "учусь",
-        "любит",
-        "люблю",
-        "не любит",
-        "не люблю",
-        "хочет",
-        "хочу",
-    )
-    # Признаки неуверенности / намёка
-    uncertain_markers = (
-        "наверное",
-        "возможно",
-        "может быть",
-        "кажется",
-        "вроде",
-        "скорее всего",
-        "думаю",
-        "по-моему",
-        "не уверен",
-        "не знаю",
-    )
-
-    direct_count = sum(1 for m in direct_markers if m in text_lower)
-    uncertain_count = sum(1 for m in uncertain_markers if m in text_lower)
-
-    if direct_count > 0:
-        quality += 0.2 * min(direct_count, 2)
-    if uncertain_count > 0:
-        quality -= 0.15 * min(uncertain_count, 2)
-
-    # Длина факта: короткие (3–6 слов) чаще прямые утверждения
-    word_count = len(fact_text.split())
-    if 3 <= word_count <= 8:
-        quality += 0.1
-
-    # Clamp
-    quality = max(0.2, min(1.0, quality))
-    # Консервативно: confidence чуть ниже extraction_quality для auto-фактов
-    confidence = max(0.3, quality - 0.1)
-    return round(quality, 2), round(confidence, 2)
-
-
 async def _save_facts_to_db(
     telegram_id: int,
     facts: list[dict[str, str]],
 ) -> int:
     """Сохранить факты в БД. Возвращает количество сохранённых."""
-    from src.db.repo import add_memory, get_or_create_user
-    from src.db.session import get_session
-
-    stored = 0
-    async with get_session() as session:
-        owner = await get_or_create_user(session, telegram_id)
-        for f in facts:
-            fact_text = f.get("fact", "").strip()
-            if not fact_text or len(fact_text) < 5:
-                continue
-            sentiment = f.get("sentiment", "neutral")
-            if sentiment not in ("positive", "negative", "neutral"):
-                sentiment = "neutral"
-            # Meta-Memory: оцениваем качество извлечения
-            extraction_quality, initial_confidence = _score_extraction_clarity(
-                fact_text
-            )
-            # source_quality для auto-извлечения = 0.4 (ниже чем chat/user)
-            await add_memory(
-                session,
-                owner,
-                fact=fact_text,
-                contact_id=None,
-                sentiment=sentiment,
-                source="auto",
-                confidence=initial_confidence,
-                source_quality=0.4,
-                extraction_quality=extraction_quality,
-            )
-            stored += 1
+    stored = await save_memories_batch(telegram_id, facts, source="auto")
     if stored:
         logger.info(
-            "Auto-saved %d facts for user %d: %s",
+            "Auto-saved %d facts for user %d",
             stored,
             telegram_id,
-            "; ".join(f["fact"][:50] for f in facts),
         )
+        logger.debug("Auto-saved %d facts count for user %d", len(facts), telegram_id)
     return stored
 
 
@@ -305,7 +223,7 @@ class FactBatchBuffer:
         Если батчинг выключен — делает одиночный LLM-вызов здесь же.
         """
         if not self._enabled:
-            await _save_single(telegram_id, user_text, response_text, provider)
+            await auto_save_single(telegram_id, user_text, response_text, provider)
             return
 
         async with self._lock:
@@ -333,13 +251,17 @@ class FactBatchBuffer:
                         # новый flush запустится после завершения текущего
                         return
                 batch = list(self._buffer)
-                self._buffer.clear()
                 # Mark flushing before creating the task so concurrent add()
                 # calls see the flag while still holding the lock.
                 self._is_flushing = True
-                self._flush_task = asyncio.create_task(
+                # Создаём задачу ДО очистки буфера: если create_task упадёт,
+                # данные останутся в буфере и не будут потеряны (как в _timeout_flush).
+                task = asyncio.create_task(
                     self._flush_batch(batch), name="auto-save-flush-batch"
                 )
+                track_ff(task)
+                self._flush_task = task
+                self._buffer.clear()
                 self._created_at = None
             else:
                 # Запустить/перезапустить таймер — сброс после паузы
@@ -349,21 +271,33 @@ class FactBatchBuffer:
                     return
                 if self._flush_task and not self._flush_task.done():
                     self._flush_task.cancel()
-                self._flush_task = asyncio.create_task(
-                    self._timeout_flush(), name="auto-save-flush-timeout"
+                self._flush_task = track_ff(
+                    asyncio.create_task(
+                        self._timeout_flush(), name="auto-save-flush-timeout"
+                    )
                 )
 
     async def flush_now(self) -> None:
         """Принудительный сброс буфера (для graceful shutdown)."""
-        self._is_flushing = True
+        async with self._lock:
+            self._is_flushing = True
+            if not self._buffer:
+                self._is_flushing = False
+                return
+            batch = list(self._buffer)
+            self._buffer.clear()
+            old_flush_task = self._flush_task
+            if old_flush_task and not old_flush_task.done():
+                old_flush_task.cancel()
+                # Await the cancelled task so it cannot write to a closing DB
+                # session after we've already flushed.  Shield prevents our
+                # own cancellation from interfering with the cleanup await.
+                import contextlib
+
+                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(old_flush_task), timeout=5.0)
+            self._flush_task = None
         try:
-            async with self._lock:
-                if not self._buffer:
-                    return
-                batch = list(self._buffer)
-                self._buffer.clear()
-                if self._flush_task and not self._flush_task.done():
-                    self._flush_task.cancel()
             await self._flush_batch(batch)
         finally:
             self._is_flushing = False
@@ -442,8 +376,8 @@ class FactBatchBuffer:
                     break
                 except asyncio.CancelledError:
                     raise
-                except (RequestError, HTTPStatusError):
-                    last_error = _sys.exc_info()[1]
+                except (RequestError, HTTPStatusError) as exc:
+                    last_error = exc
                     if attempt < 2:
                         logger.debug(
                             "Batch flush attempt %d/3 failed (retry in 5s): %s",
@@ -484,12 +418,34 @@ class FactBatchBuffer:
                 for idx, facts in parsed:
                     facts_by_index[idx] = facts
 
-                total_facts = 0
+                # Group facts by user to avoid N+1 DB sessions per message.
+                facts_by_user: dict[int, list[dict[str, str]]] = {}
                 for i, msg in enumerate(batch, 1):
                     facts = facts_by_index.get(i, [])
                     if facts:
-                        stored = await _save_facts_to_db(msg["telegram_id"], facts)
+                        facts_by_user.setdefault(msg["telegram_id"], []).extend(facts)
+
+                total_facts = 0
+                for telegram_id, facts in facts_by_user.items():
+                    try:
+                        stored = await _save_facts_to_db(telegram_id, facts)
                         total_facts += stored
+                    except (
+                        RequestError,
+                        HTTPStatusError,
+                        SQLAlchemyError,
+                        _json.JSONDecodeError,
+                    ):
+                        logger.debug(
+                            "Auto-save skipped for user %d in batch",
+                            telegram_id,
+                            exc_info=True,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error saving facts for user %d in batch",
+                            telegram_id,
+                        )
 
                 logger.debug(
                     "Batch auto-save: %d messages → %d facts saved",
@@ -499,9 +455,8 @@ class FactBatchBuffer:
 
             except asyncio.CancelledError:
                 logger.warning(
-                    "Batch flush cancelled with %d facts — данные могут быть утеряны, msg_ids=%s",
+                    "Batch flush cancelled with %d facts — data may be lost",
                     len(batch),
-                    [m.get("telegram_id") for m in batch],
                 )
                 raise
             except (
@@ -527,8 +482,10 @@ class FactBatchBuffer:
                 if self._buffer and (
                     self._flush_task is None or self._flush_task.done()
                 ):
-                    self._flush_task = asyncio.create_task(
-                        self._timeout_flush(), name="auto-save-flush-post-flush"
+                    self._flush_task = track_ff(
+                        asyncio.create_task(
+                            self._timeout_flush(), name="auto-save-flush-post-flush"
+                        )
                     )
 
 

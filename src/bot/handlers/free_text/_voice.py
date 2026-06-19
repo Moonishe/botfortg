@@ -110,8 +110,17 @@ async def _voice_worker() -> None:
 
     Если внутренний цикл неожиданно прерывается (неперехваченная ошибка),
     автоматически перезапускает worker после паузы в 5 секунд.
+
+    Consecutive failure counter: if the inner job loop fails N times in a
+    row without successfully processing a single job, the worker restarts
+    itself to recover from a potentially poisoned state (e.g. all providers
+    down, corrupted queue entries).
     """
+    _MAX_CONSECUTIVE_FAILURES = 10
+
     while True:
+        # Track consecutive job failures to detect a poisoned worker.
+        consecutive_failures = 0
         try:
             while True:
                 got_job = False
@@ -300,10 +309,14 @@ async def _voice_worker() -> None:
                     finally:
                         _cleanup_voice_file(voice_path)
 
+                    # Job succeeded — reset the consecutive failure counter
+                    consecutive_failures = 0
+
                 except asyncio.CancelledError:
                     raise  # propagate to outer handler for clean shutdown
                 except Exception:
                     logger.exception("Voice worker error")
+                    consecutive_failures += 1
                     try:
                         from src.core.infra.hooks import hooks
 
@@ -316,6 +329,13 @@ async def _voice_worker() -> None:
                         raise
                     except Exception:
                         logger.debug("Voice worker hooks.emit failed", exc_info=True)
+                    # If too many consecutive job failures, force a worker restart
+                    if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                        logger.critical(
+                            "Voice worker: %d consecutive job failures — restarting",
+                            consecutive_failures,
+                        )
+                        break  # exit inner loop to trigger outer restart
                 finally:
                     if got_job:
                         _voice_queue.task_done()

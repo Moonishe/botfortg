@@ -2,8 +2,9 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class LoginStates(StatesGroup):
-    api_id = State()
-    api_hash = State()
+    # api_id / api_hash states removed — dead code after credentials refactor.
+    # Credentials are now read from settings directly via cmd_login.
+    # See src/bot/handlers/login.py line 132-133 for migration notes.
     phone = State()
     code = State()
     password_2fa = State()
@@ -16,13 +17,13 @@ class SettingsStates(StatesGroup):
     waiting_cloudflare_key = State()
     waiting_digest_time = State()
     waiting_news_time = State()
-    waiting_lead_hours = State()
+    # waiting_lead_hours removed — dead code, no handler references.
     waiting_timezone = State()
     waiting_auto_reply_text = State()
     waiting_sync_interval = State()
     waiting_quiet_hours_start = State()
     waiting_quiet_hours_end = State()
-    waiting_import_keys = State()
+    # waiting_import_keys removed — dead code, no handler references.
     waiting_custom_instructions = State()
     waiting_alias = State()
     waiting_deepseek_key = State()
@@ -49,7 +50,7 @@ class DraftStates(StatesGroup):
 
 
 class OnboardingStates(StatesGroup):
-    waiting_start = State()
+    # waiting_start removed — dead code, no handler references.
     waiting_login = State()
     waiting_provider_choice = State()  # новый: выбор провайдера инлайн-клавиатурой
     waiting_llm_key = State()

@@ -7,9 +7,11 @@ from collections import defaultdict
 from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from src.core.infra.notifier import notifier
+from src.core.infra.task_manager import track_ff
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import ensure_utc
 from src.db.models import Notification
 from src.db.session import SessionLocal
@@ -60,6 +62,18 @@ class NotificationQueue:
 
         Возвращает notification_id (0 для немедленно отправленных).
         """
+        # Normalize and validate priority
+        priority = int(priority)
+        priority = max(
+            Notification.PRIORITY_CRITICAL,
+            min(Notification.PRIORITY_LOW, priority),
+        )
+        topic = (topic or "general").strip()
+        text = (text or "").strip()
+        if not text:
+            logger.warning("Ignoring empty notification text for topic %s", topic)
+            return 0
+
         # Уведомления с inline-клавиатурами — немедленная отправка
         if reply_markup is not None:
             await notifier.notify(text, reply_markup=reply_markup)
@@ -89,98 +103,99 @@ class NotificationQueue:
         Группировка: все уведомления одной topic за последние window_seconds.
         Возвращает количество обработанных.
         """
-        async with SessionLocal() as session:
-            # SQLite не поддерживает SELECT ... FOR UPDATE.
-            # Вместо этого: атомарно резервируем pending-уведомления
-            # через UPDATE с уникальным batch_id, затем SELECT зарезервированных.
-            # asyncio.Lock (_notification_queue_guard) обеспечивает сериализацию
-            # на уровне приложения (single-instance deployment).
-            batch_id = uuid.uuid4().hex[:12]
+        async with _notification_queue_guard:
+            async with SessionLocal() as session:
+                # SQLite не поддерживает SELECT ... FOR UPDATE.
+                # Вместо этого: атомарно резервируем pending-уведомления
+                # через UPDATE с уникальным batch_id, затем SELECT зарезервированных.
+                # asyncio.Lock (_notification_queue_guard) обеспечивает сериализацию
+                # на уровне приложения (single-instance deployment).
+                batch_id = uuid.uuid4().hex[:12]
 
-            # Шаг 1: атомарно пометить все pending-уведомления текущим batch_id
-            await session.execute(
-                update(Notification)
-                .where(Notification.flushed_at.is_(None))
-                .values(batch_id=batch_id)
-            )
-
-            # Шаг 2: выбрать только зарезервированные в этом тике
-            result = await session.execute(
-                select(Notification)
-                .where(
-                    Notification.flushed_at.is_(None),
-                    Notification.batch_id == batch_id,
-                )
-                .order_by(
-                    Notification.topic, Notification.priority, Notification.created_at
-                )
-            )
-            pending = list(result.scalars().all())
-
-            if not pending:
-                return 0
-
-            # Разделяем: свежие (в окне) — группируем, старые — отправляем по одному
-            window_start = datetime.now(UTC) - timedelta(seconds=self._window_seconds)
-            fresh: list[Notification] = []
-            stale: list[Notification] = []
-            for n in pending:
-                created = ensure_utc(n.created_at)
-                if created is not None and created >= window_start:
-                    fresh.append(n)
-                else:
-                    stale.append(n)
-
-            # Группировка свежих по (topic, priority_bucket)
-            groups: dict[str, list[Notification]] = defaultdict(list)
-            for n in fresh:
-                if n.priority <= Notification.PRIORITY_HIGH:
-                    bucket = "high"
-                elif n.priority == Notification.PRIORITY_MEDIUM:
-                    bucket = "medium"
-                else:
-                    bucket = "low"
-                key = f"{n.topic}:{bucket}"
-                groups[key].append(n)
-
-            # Старые — каждое в своей группе для немедленной отправки
-            for n in stale:
-                key = f"{n.topic}:stale_{n.id}"
-                groups[key] = [n]
-
-            total_flushed = 0
-
-            for key, group in groups.items():
-                topic = key.split(":")[0]
-                batch = group[: self._max_batch_size]
-                text = self._format_batch(topic, batch)
-
-                try:
-                    await notifier.notify(text)
-                    total_flushed += len(batch)
-                except Exception:
-                    logger.exception("Failed to send batch for topic %s", topic)
-                    continue
-
-                # Помечаем отправленные как flushed.
-                # batch_id уже установлен атомарным UPDATE выше — здесь только flushed_at.
-                ids = [n.id for n in batch]
+                # Шаг 1: атомарно пометить все pending-уведомления текущим batch_id
                 await session.execute(
                     update(Notification)
-                    .where(Notification.id.in_(ids))
-                    .values(
-                        flushed_at=datetime.now(UTC),
+                    .where(Notification.flushed_at.is_(None))
+                    .values(batch_id=batch_id)
+                )
+                await session.commit()
+
+                # Шаг 2: выбрать только зарезервированные в этом тике
+                result = await session.execute(
+                    select(Notification)
+                    .where(
+                        Notification.flushed_at.is_(None),
+                        Notification.batch_id == batch_id,
+                    )
+                    .order_by(
+                        Notification.topic,
+                        Notification.priority,
+                        Notification.created_at,
                     )
                 )
+                pending = list(result.scalars().all())
 
-                # Остаток (>max_batch_size) — оставляем на следующий flush.
-                # batch_id останется от этого тика, но flushed_at=NULL —
-                # в следующем тике атомарный UPDATE перезапишет batch_id.
+                if not pending:
+                    return 0
 
-            await session.commit()
-            return total_flushed
+                # Разделяем: свежие (в окне) — группируем, старые — отправляем по одному
+                window_start = datetime.now(UTC) - timedelta(
+                    seconds=self._window_seconds
+                )
+                fresh: list[Notification] = []
+                stale: list[Notification] = []
+                for n in pending:
+                    created = ensure_utc(n.created_at)
+                    if created is not None and created >= window_start:
+                        fresh.append(n)
+                    else:
+                        stale.append(n)
 
-    def _format_batch(self, topic: str, notifications: list[Notification]) -> str:
+                # Группировка свежих по (topic, priority_bucket)
+                groups: dict[str, list[Notification]] = defaultdict(list)
+                for n in fresh:
+                    if n.priority == Notification.PRIORITY_HIGH:
+                        bucket = "high"
+                    elif n.priority == Notification.PRIORITY_MEDIUM:
+                        bucket = "medium"
+                    else:
+                        bucket = "low"
+                    key = f"{n.topic}:{bucket}"
+                    groups[key].append(n)
+
+                # Старые — каждое в своей группе для немедленной отправки
+                for n in stale:
+                    key = f"{n.topic}:stale_{n.id}"
+                    groups[key] = [n]
+
+                total_flushed = 0
+
+                for key, group in groups.items():
+                    topic = key.split(":", 1)[0]
+                    batch = group[: self._max_batch_size]
+                    text = self._format_batch(batch)
+
+                    try:
+                        await notifier.notify(text)
+                        total_flushed += len(batch)
+                    except Exception:
+                        logger.exception("Failed to send batch for topic %s", topic)
+                        continue
+
+                    # Помечаем отправленные как flushed.
+                    ids = [n.id for n in batch]
+                    await session.execute(
+                        update(Notification)
+                        .where(Notification.id.in_(ids))
+                        .values(
+                            flushed_at=datetime.now(UTC),
+                        )
+                    )
+                    await session.commit()
+
+                return total_flushed
+
+    def _format_batch(self, notifications: list[Notification]) -> str:
         """Форматирует сгруппированные уведомления в одно сообщение."""
         count = len(notifications)
 
@@ -198,12 +213,6 @@ class NotificationQueue:
             Notification.PRIORITY_HIGH: "🟠",
             Notification.PRIORITY_MEDIUM: "🟡",
             Notification.PRIORITY_LOW: "🟢",
-        }
-        _priority_label = {
-            Notification.PRIORITY_CRITICAL: "Критическое",
-            Notification.PRIORITY_HIGH: "Важное",
-            Notification.PRIORITY_MEDIUM: "Обычное",
-            Notification.PRIORITY_LOW: "Инфо",
         }
 
         _topic_ru: dict[str, str] = {
@@ -226,10 +235,13 @@ class NotificationQueue:
             "ошибка": "❌ Ошибка",
             "обновление": "🔄 Обновление",
             "дайджест": "📰 Дайджест",
+            "новости": "📰 Новости",
+            "напоминания": "⏰ Напоминания",
+            "задачи": "📋 Задачи",
+            "навыки": "🛠 Навыки",
+            "контакты": "👥 Контакты",
+            "Общее": "📋 Общее",
         }
-
-        # Определяем доминирующий приоритет для заголовка
-        _dominant = min(by_priority.keys())
 
         # Собираем разные темы внутри группы
         topic_set: set[str] = {n.category or n.topic for n in notifications}
@@ -248,17 +260,17 @@ class NotificationQueue:
         for prio in sorted(by_priority):
             items = by_priority[prio]
             emoji = priority_emoji.get(prio, "⚪")
-            sub_topic = _topic_ru.get(
-                items[0].category or items[0].topic, items[0].category or items[0].topic
-            )
+            sub_topic = items[0].category or items[0].topic or "general"
+            sub_topic = _topic_ru.get(sub_topic, sub_topic)
             # Применяем эмодзи-оформление к русскому названию темы
             sub_topic = _topic_display.get(sub_topic, sub_topic)
             lines.append(f"{emoji} <b>{sub_topic}</b> ({len(items)})")
             for item in items:
-                # Обрезаем длинный текст
-                short = item.text[:200]
+                # Обрезаем длинный текст и экранируем HTML
+                raw = item.text[:200]
                 if len(item.text) > 200:
-                    short += "…"
+                    raw += "…"
+                short = sanitize_html(raw)
                 lines.append(f"• {short}")
             lines.append("")
 
@@ -268,27 +280,27 @@ class NotificationQueue:
         """Бесконечный цикл: flush() + периодическая очистка."""
         _cleanup_counter = 0
         while True:
-            if _notification_queue_guard.locked():
-                await asyncio.sleep(self._flush_interval)
-                continue
-            async with _notification_queue_guard:
-                try:
-                    flushed = await self.flush()
-                    if flushed > 0:
-                        logger.info("Flushed %d notifications", flushed)
-                except Exception:
-                    logger.exception("NotificationQueue flush error")
+            try:
+                flushed = await self.flush()
+                if flushed > 0:
+                    logger.info("Flushed %d notifications", flushed)
+            except asyncio.CancelledError:
+                raise  # must propagate for clean shutdown
+            except Exception:
+                logger.exception("NotificationQueue flush error")
 
-                # Очистка просроченных — раз в час (60 итераций при интервале 60с)
-                _cleanup_counter += 1
-                if _cleanup_counter >= 60:
-                    _cleanup_counter = 0
-                    try:
-                        cleaned = await self.cleanup_expired()
-                        if cleaned > 0:
-                            logger.info("Cleaned %d expired notifications", cleaned)
-                    except Exception:
-                        logger.exception("NotificationQueue cleanup error")
+            # Очистка просроченных — раз в час (60 итераций при интервале 60с)
+            _cleanup_counter += 1
+            if _cleanup_counter >= 60:
+                _cleanup_counter = 0
+                try:
+                    cleaned = await self.cleanup_expired()
+                    if cleaned > 0:
+                        logger.info("Cleaned %d expired notifications", cleaned)
+                except asyncio.CancelledError:
+                    raise  # must propagate for clean shutdown
+                except Exception:
+                    logger.exception("NotificationQueue cleanup error")
 
             await asyncio.sleep(self._flush_interval)
 
@@ -298,6 +310,7 @@ class NotificationQueue:
             logger.warning("NotificationQueue already running")
             return
         self._loop_task = asyncio.create_task(self.flush_loop())
+        track_ff(self._loop_task)
         logger.info("NotificationQueue started (flush every %ds)", self._flush_interval)
 
     async def stop(self) -> None:
@@ -311,19 +324,16 @@ class NotificationQueue:
             self._loop_task = None
 
     async def cleanup_expired(self) -> int:
-        """Удаляет уведомления старше TTL (включая отправленные). Возвращает количество удалённых."""
+        """Удаляет уведомления старше TTL. Возвращает количество удалённых."""
         cutoff = datetime.now(UTC) - timedelta(hours=self._ttl_hours)
         async with SessionLocal() as session:
             result = await session.execute(
-                select(Notification).where(
+                delete(Notification).where(
                     Notification.created_at < cutoff,
                 )
             )
-            expired = list(result.scalars().all())
-            for n in expired:
-                await session.delete(n)
             await session.commit()
-            return len(expired)
+            return result.rowcount
 
 
 # Глобальный синглтон (заменяет прямой вызов notifier.notify)

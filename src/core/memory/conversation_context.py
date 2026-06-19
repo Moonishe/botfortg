@@ -42,39 +42,46 @@ _user_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 _ctx_cleanup_ts: float = 0.0
 
 
-def _cleanup_stale_contexts() -> None:
+async def _cleanup_stale_contexts() -> None:
     """Удаляет контексты, где created_at старше _STALE_CTX_TTL, и связанные блокировки."""
-    now = time()
-    stale = [
-        uid
-        for uid, ctx in list(_STORE.items())
-        if (now - ctx.created_at) > _STALE_CTX_TTL
-    ]
-    for uid in stale:
-        del _STORE[uid]
-        _user_locks.pop(uid, None)  # предотвращает неограниченный рост _user_locks
+    async with _ctx_lock:
+        now = time()
+        stale = [
+            uid
+            for uid, ctx in list(_STORE.items())
+            if (now - ctx.created_at) > _STALE_CTX_TTL
+        ]
+        for uid in stale:
+            del _STORE[uid]
+            # ponytail: keep the per-user lock to avoid a race where a
+            # concurrent _get/add_turn drops the lock mapping. _user_locks
+            # grows slowly (one entry per user) and is bounded by the user base.
 
 
 async def _get(user_id: int) -> _Ctx:
     async with _user_locks[user_id]:
-        _throttled_cleanup_contexts()
+        await _throttled_cleanup_contexts()
         ctx = _STORE.get(user_id)
-        if ctx is None:
-            ctx = _Ctx()
-            _STORE[user_id] = ctx
-            # Try to load recent summaries from DB on first access
-            compressed = await load_recent_summaries(user_id)
-            if compressed:
-                ctx.compressed = "[Предыдущий диалог]\n" + compressed
-        return ctx
+    # Release _user_locks before DB I/O; re-acquire only if we need to insert.
+    if ctx is None:
+        ctx = _Ctx()
+        compressed = await load_recent_summaries(user_id)
+        if compressed:
+            ctx.compressed = "[Предыдущий диалог]\n" + compressed
+        async with _user_locks[user_id]:
+            if user_id not in _STORE:
+                _STORE[user_id] = ctx
+            else:
+                ctx = _STORE[user_id]
+    return ctx
 
 
-def _throttled_cleanup_contexts() -> None:
+async def _throttled_cleanup_contexts() -> None:
     global _ctx_cleanup_ts
     now = time()
     if now - _ctx_cleanup_ts > 60.0:
         _ctx_cleanup_ts = now
-        _cleanup_stale_contexts()
+        await _cleanup_stale_contexts()
 
 
 def _quick_summarize(
@@ -107,8 +114,10 @@ async def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None
             old_turns = turns_list[:-10]  # все, кроме последних 10
             ctx.turns = deque(turns_list[-10:], maxlen=_DEQUE_SAFETY_CAP)
             ctx.compressed = f"[Предыдущий диалог]: {_quick_summarize(old_turns)}"
-            # Persist compressed summary to DB (fire-and-forget)
-            asyncio.ensure_future(_save_summary_to_db(user_id, ctx))
+            # Persist compressed summary to DB (fire-and-forget, tracked for shutdown)
+            from src.core.infra.task_manager import track_ff
+
+            track_ff(asyncio.create_task(_save_summary_to_db(user_id, ctx)))
 
 
 async def set_last_peer(user_id: int, peer_id: int, peer_name: str | None) -> None:
@@ -352,7 +361,10 @@ async def _llm_compress_history(history_text: str, user_id: int) -> str:
     _MAX_HISTORY_FOR_COMPRESSION = 8000
     if len(history_text) > _MAX_HISTORY_FOR_COMPRESSION:
         history_text = history_text[:_MAX_HISTORY_FOR_COMPRESSION]
-        _log.debug("Truncated history to %d chars for compression", _MAX_HISTORY_FOR_COMPRESSION)
+        _log.debug(
+            "Truncated history to %d chars for compression",
+            _MAX_HISTORY_FOR_COMPRESSION,
+        )
 
     try:
         from src.llm.provider_manager import build_provider
@@ -388,10 +400,12 @@ async def _llm_compress_history(history_text: str, user_id: int) -> str:
             f"{history_text}\n"
             "─── КОНЕЦ ИСТОРИИ ДИАЛОГА ───"
         )
-        response = await provider.chat([
-            ChatMessage(role="system", content=system_instruction),
-            ChatMessage(role="user", content=user_message),
-        ])
+        response = await provider.chat(
+            [
+                ChatMessage(role="system", content=system_instruction),
+                ChatMessage(role="user", content=user_message),
+            ]
+        )
         compressed = response.strip()
         if not compressed:
             return history_text[:4000]
@@ -401,3 +415,69 @@ async def _llm_compress_history(history_text: str, user_id: int) -> str:
             "History compression failed — falling back to truncation", exc_info=True
         )
         return history_text[:4000]
+
+
+# ── Snapshot support (Issue 2: public API for SnapshotEngine) ──────
+
+
+async def capture_state():
+    """Public snapshot of _STORE (JSON-serializable)."""
+    async with _ctx_lock:
+        result = {}
+        for tg_id, ctx in _STORE.items():
+            result[str(tg_id)] = {
+                "turns": [[t[0], t[1], t[2]] for t in ctx.turns],
+                "compressed": ctx.compressed,
+                "last_peer_id": ctx.last_peer_id,
+                "last_peer_name": ctx.last_peer_name,
+                "last_peer_at": ctx.last_peer_at,
+                "last_purpose": ctx.last_purpose,
+                "transcription_meta": ctx.transcription_meta,
+                "created_at": ctx.created_at,
+            }
+        return result
+
+
+async def restore_state(data):
+    """Restore _STORE from a snapshot dict."""
+    if not data:
+        return
+    async with _ctx_lock:
+        for tg_id_str, ctx_data in data.items():
+            try:
+                tg_id = int(tg_id_str)
+                ctx = _Ctx()
+                if "turns" in ctx_data:
+                    turns_raw = ctx_data["turns"]
+                    ctx.turns = deque(maxlen=_DEQUE_SAFETY_CAP)
+                    for turn in turns_raw:
+                        try:
+                            if isinstance(turn, list) and len(turn) >= 3:
+                                ctx.turns.append(
+                                    (float(turn[0]), str(turn[1]), str(turn[2]))
+                                )
+                        except (TypeError, ValueError):
+                            # Skip malformed turn — don't lose entire user context.
+                            continue
+                for key in (
+                    "compressed",
+                    "last_peer_id",
+                    "last_peer_name",
+                    "last_purpose",
+                    "transcription_meta",
+                ):
+                    if key in ctx_data:
+                        setattr(ctx, key, ctx_data[key])
+                if "last_peer_at" in ctx_data:
+                    ctx.last_peer_at = float(ctx_data["last_peer_at"])
+                if "created_at" in ctx_data:
+                    ctx.created_at = float(ctx_data["created_at"])
+                _STORE[tg_id] = ctx
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Failed to restore conversation context for tg_id=%s",
+                    tg_id_str,
+                    exc_info=True,
+                )

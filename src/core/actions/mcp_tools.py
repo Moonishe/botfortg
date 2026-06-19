@@ -68,7 +68,10 @@ def _safe_resolve(raw: str) -> Path | None:
     #   - realpath разрешает symlink'и до конечной цели
     #   - split("..") проверка удалена — обходилась через data/..foo
     raw_path = str(PROJECT_ROOT / normalised)
-    resolved_str = os.path.realpath(raw_path)
+    try:
+        resolved_str = os.path.realpath(raw_path)
+    except OSError:
+        return None  # symlink loop, permission error, etc.
 
     # Проверка: реальный путь должен быть внутри _ALLOWED_ROOTS
     for root in _ALLOWED_ROOTS:
@@ -240,7 +243,9 @@ async def _fs_list(dir_path: str) -> dict:
     resolved = _safe_resolve(dir_path)
     if resolved is None:
         return {
-            "error": f"Path {dir_path!r} is outside allowed directories or contains '..'"
+            "error": (
+                f"Path {dir_path!r} is outside allowed directories or contains '..'"
+            )
         }
     if not resolved.is_dir():
         return {"error": f"Path {dir_path!r} is not a directory"}
@@ -290,7 +295,9 @@ async def _fs_read(file_path: str) -> dict:
     resolved = _safe_resolve(file_path)
     if resolved is None:
         return {
-            "error": f"Path {file_path!r} is outside allowed directories or contains '..'"
+            "error": (
+                f"Path {file_path!r} is outside allowed directories or contains '..'"
+            )
         }
     if not resolved.is_file():
         return {"error": f"Path {file_path!r} is not a file"}
@@ -317,32 +324,41 @@ async def _fs_search(dir_path: str, pattern: str) -> dict:
     resolved = _safe_resolve(dir_path)
     if resolved is None:
         return {
-            "error": f"Path {dir_path!r} is outside allowed directories or contains '..'"
+            "error": (
+                f"Path {dir_path!r} is outside allowed directories or contains '..'"
+            )
         }
     if not resolved.is_dir():
         return {"error": f"Path {dir_path!r} is not a directory"}
 
-    limit = 50
+    if not pattern:
+        return {"error": "Empty regex pattern is not allowed"}
+
+    _MATCH_LIMIT = 50
+    _MAX_FILES_SCANNED = 5000  # ponytail: cap to prevent DoS on huge dirs
     loop = asyncio.get_running_loop()
 
     def _search() -> list[dict] | dict:
         matches: list[dict] = []
+        scanned = 0
         try:
-            compiled = re.compile(pattern, re.IGNORECASE, timeout=5)
-        except (re.error, OverflowError, RuntimeError):
+            compiled = re.compile(pattern, re.IGNORECASE)
+        except (re.error, OverflowError, RuntimeError, TimeoutError):
             return {"error": "Invalid regex pattern"}
         for root_str, _dirs, files in os.walk(str(resolved)):
-            if len(matches) >= limit:
+            if len(matches) >= _MATCH_LIMIT or scanned >= _MAX_FILES_SCANNED:
                 break
             root = Path(root_str)
             for fname in files:
-                if len(matches) >= limit:
+                if len(matches) >= _MATCH_LIMIT or scanned >= _MAX_FILES_SCANNED:
                     break
                 fp = root / fname
                 if not _is_text_file(fp):
+                    scanned += 1
                     continue
                 try:
                     text = fp.read_text(encoding="utf-8", errors="replace")
+                    scanned += 1
                     for lineno, line in enumerate(text.splitlines(), 1):
                         if compiled.search(line):
                             matches.append(
@@ -352,13 +368,25 @@ async def _fs_search(dir_path: str, pattern: str) -> dict:
                                     "text": line.strip()[:200],
                                 }
                             )
-                            if len(matches) >= limit:
+                            if len(matches) >= _MATCH_LIMIT:
                                 break
                 except Exception:
+                    scanned += 1
                     continue
         return matches
 
-    matches = await loop.run_in_executor(None, _search)
+    # ponytail: 10s timeout prevents ReDoS — catastrophic backtracking on
+    # malicious regex can hang the executor thread. run_in_executor isolates
+    # the event loop, but without timeout the thread consumes CPU indefinitely.
+    try:
+        matches = await asyncio.wait_for(
+            loop.run_in_executor(None, _search), timeout=10.0
+        )
+    except TimeoutError:
+        return {
+            "ok": False,
+            "error": "Search timed out (10s) — pattern may be too complex",
+        }
     return {
         "ok": True,
         "path": str(resolved),

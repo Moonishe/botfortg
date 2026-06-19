@@ -19,7 +19,7 @@ from aiogram.exceptions import AiogramError
 
 from src.config import settings
 from src.bot.filters import OwnerOnly
-from src.bot.states import LoginStates, OnboardingStates
+from src.bot.states import LoginStates, MemoryCorrectionStates, OnboardingStates
 from src.db.repo import (
     delete_telegram_session,
     get_or_create_user,
@@ -80,6 +80,14 @@ async def cmd_cancel(
         return
 
     await userbot_manager.cancel_pending(message.from_user.id)
+    # Cancel the background TTL cleanup task if user was in a pending
+    # memory correction — otherwise it may fire later and clear a *new*
+    # correction's state.
+    if current == MemoryCorrectionStates.waiting_new_text.state:
+        _data = await state.get_data()
+        _t = _data.get("_ttl_cleanup_task")
+        if _t is not None and not _t.done():
+            _t.cancel()
     await state.clear()
     await message.answer("Отменено.")
 

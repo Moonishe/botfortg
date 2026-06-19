@@ -15,10 +15,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from pathlib import Path
 from typing import Any
 
-from src.config import settings
+from src.core.actions.mcp_tools import _safe_resolve
 from src.core.actions.tool_registry import ToolActionSpec, tool
 
 logger = logging.getLogger(__name__)
@@ -67,7 +66,9 @@ _SUPPORTED_ALGORITHMS = frozenset({"md5", "sha1", "sha256", "sha512"})
     },
     params={
         "action": "str — 'file', 'string' or 'verify'",
-        "path": "str — relative path inside data/ to the file (required for file/verify)",
+        "path": (
+            "str — relative path inside data/ to the file (required for file/verify)"
+        ),
         "text": "str — text to hash (required for string)",
         "algorithm": "str — one of: md5, sha1, sha256, sha512 (default sha256)",
         "expected": "str — expected hex digest (required for verify)",
@@ -122,8 +123,9 @@ async def _hash_file(path: str, algorithm: str) -> dict[str, Any]:
     if not path:
         return {"error": "path parameter is required for action='file'"}
 
-    data_dir: Path = settings.data_dir
-    file_path = _resolve_path(data_dir, path)
+    file_path = _safe_resolve(path)
+    if file_path is None:
+        return {"error": f"Path {path!r} is outside allowed directories or denied"}
 
     if not file_path.exists():
         return {"error": f"File not found: {path} (resolved: {file_path})"}
@@ -169,8 +171,9 @@ async def _verify_file(path: str, expected: str, algorithm: str) -> dict[str, An
     if not expected:
         return {"error": "expected parameter is required for action='verify'"}
 
-    data_dir: Path = settings.data_dir
-    file_path = _resolve_path(data_dir, path)
+    file_path = _safe_resolve(path)
+    if file_path is None:
+        return {"error": f"Path {path!r} is outside allowed directories or denied"}
 
     if not file_path.exists():
         return {"error": f"File not found: {path} (resolved: {file_path})"}
@@ -195,12 +198,4 @@ async def _verify_file(path: str, expected: str, algorithm: str) -> dict[str, An
     }
 
 
-def _resolve_path(data_dir: Path, user_path: str) -> Path:
-    """Resolve a user-supplied relative path inside data_dir.
-
-    Raises ValueError if the path attempts directory traversal.
-    """
-    resolved = (data_dir / user_path).resolve()
-    if not str(resolved).startswith(str(data_dir.resolve())):
-        raise ValueError(f"Path {user_path!r} escapes the data directory")
-    return resolved
+# _resolve_path removed — use mcp_tools._safe_resolve instead.

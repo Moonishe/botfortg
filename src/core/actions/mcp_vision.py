@@ -6,12 +6,13 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.config import settings
 from src.core.actions.tool_registry import tool
 from src.core.infra.key_guard import safe_str
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_BASE = Path("data").resolve()
+ALLOWED_BASE: Path = settings.data_dir.resolve()
 
 _MIME_MAP = {
     ".jpg": "image/jpeg",
@@ -135,9 +136,21 @@ async def analyze_image(
     if not path.exists():
         return {"error": f"Файл не найден: {file_path}"}
 
-    # Path traversal protection
-    resolved = path.resolve()
-    if not (str(resolved) + os.sep).startswith(str(ALLOWED_BASE) + os.sep):
+    # Path traversal protection — block symlinks BEFORE resolving to final target.
+    # os.path.realpath follows symlinks, so checking resolved.is_symlink() is
+    # dead code — the real target is never a symlink.
+    try:
+        resolved_str = os.path.realpath(str(path))
+    except OSError:
+        return {"error": "Доступ к файлу запрещён (ошибка разрешения пути)"}
+    # Block symlinks on the ORIGINAL path (before realpath follows them).
+    if path.is_symlink():
+        return {"error": "Доступ к файлу запрещён"}
+    resolved = Path(resolved_str)
+    # Verify containment within ALLOWED_BASE
+    try:
+        resolved.relative_to(ALLOWED_BASE)
+    except ValueError:
         return {"error": "Доступ к файлу запрещён"}
 
     try:
@@ -146,9 +159,9 @@ async def analyze_image(
         from src.db.session import get_session
         from src.crypto import decrypt
 
-        # Читаем изображение (non-blocking)
-        image_data = await asyncio.to_thread(path.read_bytes)
-        mime = _MIME_MAP.get(path.suffix.lower(), "image/jpeg")
+        # Читаем изображение из уже проверенного resolved-пути (TOCTOU-safe)
+        image_data = await asyncio.to_thread(resolved.read_bytes)
+        mime = _MIME_MAP.get(resolved.suffix.lower(), "image/jpeg")
 
         # Получаем пользователя
         user = kwargs.get("user")
