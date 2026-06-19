@@ -215,6 +215,38 @@ def _is_command_allowed(
     # 3. Check against allowed patterns (prefix match).
     for pattern in effective_allowlist:
         if len(tokens) >= len(pattern) and tokens[: len(pattern)] == list(pattern):
+            # 3a. Deny-list: block cat/type on sensitive files even with allowlist match
+            if tokens[0] in ("cat", "type") and len(tokens) > 1:
+                # Check all arguments after the command to catch flags like `cat -n .env`
+                _denied_exact = frozenset(
+                    {
+                        ".env",
+                        "config.py",
+                        "settings.py",
+                    }
+                )
+                _denied_substrings = (
+                    "secret",
+                    "token",
+                    "credential",
+                    "password",
+                    "id_rsa",
+                    "id_ed25519",
+                    "session_string",
+                    "bot_token",
+                )
+                _denied_paths = (".ssh/", ".env.")
+                for _idx, _arg in enumerate(t.lower() for t in tokens[1:]):
+                    _basename = _arg.split("/")[-1].split("\\")[-1]
+                    if (
+                        _basename in _denied_exact
+                        or any(d in _basename for d in _denied_substrings)
+                        or any(d in _arg for d in _denied_paths)
+                    ):
+                        return (
+                            False,
+                            f"Access denied: {tokens[_idx + 1]!r} is a sensitive file",
+                        )
             return True, ""
 
     allowed_bases = sorted({p[0] for p in effective_allowlist})

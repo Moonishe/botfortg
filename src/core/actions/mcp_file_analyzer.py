@@ -308,12 +308,11 @@ def _analyze_csv(resolved: Path) -> dict[str, Any]:
         reader = csv.DictReader(io.StringIO(text))
         columns = reader.fieldnames or []
         rows: list[dict[str, str]] = []
-        for i, row in enumerate(reader):
-            if i >= 5:
-                break
-            rows.append(row)
-        all_rows = list(csv.DictReader(io.StringIO(text)))
-        total_rows = len(all_rows)
+        total_rows = 0
+        for row in reader:
+            total_rows += 1
+            if len(rows) < 5:
+                rows.append(row)
     except csv.Error as exc:
         return {"error": f"Malformed CSV: {exc}"}
 

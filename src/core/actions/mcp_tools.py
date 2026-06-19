@@ -304,13 +304,26 @@ async def _fs_read(file_path: str) -> dict:
     if not _is_text_file(resolved):
         return {"error": f"File {file_path!r} is not a text file (binary skipped)"}
 
+    # DoS guard: refuse to read files > 10MB
+    _MAX_READ_BYTES = 10 * 1024 * 1024
+    try:
+        file_size = resolved.stat().st_size
+    except OSError:
+        return {"error": f"Cannot stat {file_path!r}"}
+    if file_size > _MAX_READ_BYTES:
+        return {"error": f"File too large ({file_size} bytes, max {_MAX_READ_BYTES})"}
+
     loop = asyncio.get_running_loop()
 
     def _read() -> tuple[str, int]:
         text = resolved.read_text(encoding="utf-8", errors="replace")
         return text[:2000], len(text)
 
-    content, total_len = await loop.run_in_executor(None, _read)
+    try:
+        content, total_len = await loop.run_in_executor(None, _read)
+    except (OSError, MemoryError) as exc:
+        return {"error": f"Cannot read file: {exc}"}
+
     return {
         "ok": True,
         "path": str(resolved),

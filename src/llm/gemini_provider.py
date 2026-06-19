@@ -151,7 +151,13 @@ class GeminiProvider(BaseLLMProvider):
         thread.start()
 
         while True:
-            item = await asyncio.to_thread(token_queue.get)
+            # 60s timeout per token — prevents indefinite hang on stalled connection
+            try:
+                item = await asyncio.wait_for(
+                    asyncio.to_thread(token_queue.get, timeout=60), timeout=65
+                )
+            except sync_queue.Empty:
+                raise TimeoutError("Gemini stream token queue timed out") from None
             if item is None:
                 break
             if isinstance(item, Exception):

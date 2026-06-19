@@ -46,6 +46,9 @@ class AnthropicProvider(BaseLLMProvider):
         super().__init__(api_key=api_key, model=model, embed_model=embed_model)
 
     async def validate_key(self) -> bool:
+        import anthropic
+        import httpx
+
         try:
             await self._client.messages.create(
                 model="claude-3-5-haiku-20241022",
@@ -53,7 +56,18 @@ class AnthropicProvider(BaseLLMProvider):
                 messages=[{"role": "user", "content": "hi"}],
             )
             return True
+        except anthropic.AuthenticationError:
+            return False
+        except anthropic.PermissionDeniedError:
+            return False
+        except (
+            httpx.TimeoutException,
+            httpx.ConnectError,
+            anthropic.APIConnectionError,
+        ):
+            raise  # transient — don't mark key as invalid
         except Exception:
+            logger.debug("Anthropic validate_key unexpected error", exc_info=True)
             return False
 
     async def chat(

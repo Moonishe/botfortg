@@ -833,6 +833,9 @@ async def process(
                         }
                 except (RequestError, HTTPStatusError):
                     pass  # fall through к обычному admit_ignorance
+                except RuntimeError:
+                    logger.warning("RuntimeError in web_search fallback", exc_info=True)
+                    pass  # fall through к обычному admit_ignorance
 
             # B1: если user сказал «не гугли» — fall through к обычному admit_ignorance
             # B2: если web_search вернул ошибку/пусто — тоже fall through
@@ -890,6 +893,9 @@ async def process(
                     "trace": trace,
                 }
             except (RequestError, HTTPStatusError):
+                pass  # fallback к обычному admit_ignorance
+            except RuntimeError:
+                logger.warning("RuntimeError in plan_day", exc_info=True)
                 pass  # fallback к обычному admit_ignorance
 
         # ── Final response? ──

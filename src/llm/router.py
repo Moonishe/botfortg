@@ -293,7 +293,8 @@ class MultiKeyProvider:
                         if retry < MAX_RETRIES_PER_KEY - 1:
                             delay = RETRY_BASE_DELAY * (2**retry)
                             logger.warning(
-                        "LLM %s key %s attempt %d/%d failed, retrying in %.1fs: %s",
+                                "LLM %s key %s attempt %d/%d "
+                                "failed, retrying in %.1fs: %s",
                                 self.provider_name,
                                 _mask_key(key),
                                 retry + 1,
@@ -324,7 +325,7 @@ class MultiKeyProvider:
                                 )
                         # Adaptive Provider Selection: запись метрик успеха
                         # (try/except: потеря result при ошибке метрики дороже,
-    # чем сама метрика)
+                        # чем сама метрика)
                         latency = asyncio.get_running_loop().time() - start_time
                         try:
                             await _record_provider_success(self.provider_name, latency)
@@ -379,7 +380,7 @@ class MultiKeyProvider:
                             async with get_session() as fresh_s:
                                 error_msg = (
                                     f"{type(exc).__name__}: "
-                            f"{safe_str(exc).split(chr(10))[0]}"
+                                    f"{safe_str(exc).split(chr(10))[0]}"
                                 )[:256]
                                 await mark_key_failure(
                                     fresh_s,
@@ -630,7 +631,7 @@ class MultiKeyProvider:
                                     async with get_session() as fresh_s:
                                         error_msg = (
                                             f"{type(e).__name__}: "
-                                        f"{safe_str(e).split(chr(10))[0]}"
+                                            f"{safe_str(e).split(chr(10))[0]}"
                                         )[:256]
                                         await mark_key_failure(
                                             fresh_s,
@@ -1000,6 +1001,7 @@ class ExhaustedProvider:
         task_type: str = TaskType.DEFAULT,
     ) -> AsyncGenerator[str]:
         raise ExhaustedError(self._reason)
+        yield  # type: ignore[unreachable]
 
     async def embed(self, text: str) -> list[float]:
         raise ExhaustedError("Cannot embed: all keys exhausted")
