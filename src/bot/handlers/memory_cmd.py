@@ -16,6 +16,7 @@ from aiogram.types import (
 from aiogram.filters.command import CommandObject
 
 from src.bot.filters import OwnerOnly
+from src.bot.handlers.memory_correction import clear_correction_state_if_pending
 from src.bot.states import MemoryCorrectionStates
 from src.config import settings
 from src.bot.contact_resolver import resolve_contact_fast
@@ -25,7 +26,7 @@ from src.core.memory.memory_fuel import (
     format_fuel_line,
     get_fuel_stats,
 )
-from src.db.models import Episode, Memory, MemoryLink
+from src.db.models import Episode, Memory
 from src.core.memory.stats import get_memory_stats
 from src.db.repo import (
     get_commitments_by_source_memory_ids,
@@ -33,6 +34,7 @@ from src.db.repo import (
     get_or_create_user,
     list_memories,
     list_memory_candidates,
+    list_memory_links,
 )
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
@@ -276,7 +278,7 @@ async def _cmd_memory_correct(
         original_fact=original,
         set_at_ts=time.monotonic(),
     )
-    await schedule_correction_ttl_cleanup(state)
+    await schedule_correction_ttl_cleanup(state, message)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -327,22 +329,15 @@ async def _cmd_memory_graph_export(message: Message) -> None:
             for m in all_mems
         ]
         # Edges: all links for user
-        edges_result = await session.execute(
-            select(
-                MemoryLink.source_id,
-                MemoryLink.target_id,
-                MemoryLink.weight,
-                MemoryLink.relation_type,
-            ).where(MemoryLink.user_id == owner.id)
-        )
+        links = await list_memory_links(session, owner, limit=500)
         edges = [
             {
-                "source": int(r.source_id),
-                "target": int(r.target_id),
-                "weight": float(r.weight),
-                "relation_type": r.relation_type,
+                "source": link["source_id"],
+                "target": link["target_id"],
+                "weight": link["weight"],
+                "relation_type": link["relation_type"],
             }
-            for r in edges_result.all()
+            for link in links
         ]
     payload = {"nodes": nodes, "edges": edges}
     text = json.dumps(payload, ensure_ascii=False)[:3900]
@@ -687,14 +682,9 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = callback.from_user.id
 
     if action == "cancel":
-        # Clear pending correction FSM state if the user was in it.
-        current = await state.get_state()
-        if current == MemoryCorrectionStates.waiting_new_text.state:
-            _data = await state.get_data()
-            _t = _data.get("_ttl_cleanup_task")
-            if _t is not None and not _t.done():
-                _t.cancel()
-            await state.clear()
+        await clear_correction_state_if_pending(
+            state, callback.from_user.id, callback.message.chat.id
+        )
         await callback.message.edit_text("❌ Отменено.")
         await callback.answer()
         return
@@ -742,14 +732,9 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer(
                 "Факт деактивирован" if deleted else "Не удалось деактивировать"
             )
-            # Clear pending correction FSM state if the user was in it.
-            current = await state.get_state()
-            if current == MemoryCorrectionStates.waiting_new_text.state:
-                _data = await state.get_data()
-                _t = _data.get("_ttl_cleanup_task")
-                if _t is not None and not _t.done():
-                    _t.cancel()
-                await state.clear()
+            await clear_correction_state_if_pending(
+                state, callback.from_user.id, callback.message.chat.id
+            )
 
         elif action == "permanent":
             from src.core.memory.memory_admin import update_memory_text
@@ -771,14 +756,9 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
                 f"♾ Сделано постоянным: <i>{fact_text}</i>"
             )
             await callback.answer("Факт сохранён навсегда")
-            # Clear pending correction FSM state if the user was in it.
-            current = await state.get_state()
-            if current == MemoryCorrectionStates.waiting_new_text.state:
-                _data = await state.get_data()
-                _t = _data.get("_ttl_cleanup_task")
-                if _t is not None and not _t.done():
-                    _t.cancel()
-                await state.clear()
+            await clear_correction_state_if_pending(
+                state, callback.from_user.id, callback.message.chat.id
+            )
 
         else:
             await callback.answer("Неизвестное действие", show_alert=True)

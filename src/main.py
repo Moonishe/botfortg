@@ -9,8 +9,8 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
 
+from src.bot import start_voice_worker, stop_voice_worker
 from src.bot.app import run_bot, run_bot_webhook
-from src.bot.handlers.free_text_legacy import start_voice_worker, stop_voice_worker
 from src.core.infra.app_context import get_app_context
 from src.core.memory.memory_queue import start_worker, stop_worker
 from src.core.infra.task_manager import task_manager, stop_ff_tasks, track_ff

@@ -1,12 +1,15 @@
 """Свободный текст (и голос) → агент → действие. Регистрируется последним в bot/app.py,
 чтобы команды и FSM перехватывали свои события раньше."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import random
 import re
 import time
 from datetime import datetime, UTC
+from typing import TYPE_CHECKING
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -26,8 +29,10 @@ from src.db.repo import (
     get_or_create_user,
 )
 from src.db.session import get_session
-from sqlalchemy.ext.asyncio import AsyncSession
 from src.llm.base import TaskType
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
 

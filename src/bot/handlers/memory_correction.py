@@ -41,26 +41,68 @@ router.message.filter(OwnerOnly())
 # TTL for pending correction (300 seconds, matches legacy behavior).
 CORRECTION_TTL_SECONDS = 300
 
+# Module-level task storage for pending correction TTL cleanups.
+# Storing asyncio.Task in FSM data breaks JSON-based storages (e.g. RedisStorage),
+# so we keep the task object at the module level keyed by (user_id, chat_id).
+_ttl_tasks: dict[tuple[int, int], asyncio.Task] = {}
 
-async def schedule_correction_ttl_cleanup(state: FSMContext) -> None:
+
+def _ttl_key(message: Message) -> tuple[int, int]:
+    """Return the canonical key for the TTL task dict."""
+    user_id = message.from_user.id if message.from_user else 0
+    chat_id = message.chat.id if message.chat else 0
+    return (user_id, chat_id)
+
+
+def cancel_correction_ttl_cleanup(user_id: int, chat_id: int) -> None:
+    """Cancel any pending TTL cleanup task for the given user/chat.
+
+    Called from external cancel paths (``cb_memreval``, ``cmd_cancel``)
+    that don't have access to the Message object needed for ``_ttl_key``.
+    """
+    task = _ttl_tasks.pop((user_id, chat_id), None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+async def clear_correction_state_if_pending(
+    state: FSMContext, user_id: int, chat_id: int
+) -> bool:
+    """Cancel the TTL task and clear the FSM state if a correction is pending.
+
+    Returns ``True`` if the state was cleared, ``False`` otherwise.
+    """
+    current = await state.get_state()
+    if current != MemoryCorrectionStates.waiting_new_text.state:
+        return False
+    cancel_correction_ttl_cleanup(user_id, chat_id)
+    await state.clear()
+    return True
+
+
+async def schedule_correction_ttl_cleanup(state: FSMContext, message: Message) -> None:
     """Schedule a background task that clears the FSM state after TTL.
 
     Called by ``memory_cmd`` after setting ``waiting_new_text`` state.
     The task is tracked via ``track_ff`` for graceful shutdown.
 
-    The task is stored in FSM data under ``_ttl_cleanup_task`` so that
-    ``handle_pending_correction`` can cancel it if the user submits a
-    correction before the TTL fires.
+    The task is stored in a module-level dict keyed by ``(user_id, chat_id)``
+    so that ``handle_pending_correction`` can cancel it if the user submits a
+    correction before the TTL fires. This avoids putting non-JSON-serialisable
+    asyncio.Task objects into FSM storage (required for RedisStorage).
     """
+    key = _ttl_key(message)
 
-    # Cancel any previous TTL cleanup task for this state to avoid orphaned
+    # Cancel any previous TTL cleanup task for this key to avoid orphaned
     # tasks when the user invokes /memory --correct multiple times.
-    data = await state.get_data()
-    old_task = data.get("_ttl_cleanup_task")
+    # Pop old task so its finally block (which checks identity via
+    # current_task()) won't remove the replacement task we store below.
+    old_task = _ttl_tasks.pop(key, None)
     if old_task is not None and not old_task.done():
         old_task.cancel()
 
     async def _cleanup() -> None:
+        my_task = asyncio.current_task()
         try:
             await asyncio.sleep(CORRECTION_TTL_SECONDS)
             current = await state.get_state()
@@ -71,30 +113,34 @@ async def schedule_correction_ttl_cleanup(state: FSMContext) -> None:
             # call, by handle_pending_correction receiving a message, or by
             # cb_memreval/cmd_cancel clearing the state.  Do nothing.
             pass
+        finally:
+            # Only clean up if we are still the task associated with this key —
+            # otherwise we'd remove a replacement task created by a later call.
+            if _ttl_tasks.get(key) is my_task:
+                _ttl_tasks.pop(key, None)
 
     task = asyncio.create_task(_cleanup())
     track_ff(task)
-    # Store the task in FSM data so it can be cancelled on early correction.
-    # Note: works with MemoryStorage; RedisStorage would need JSON-serialisable keys.
-    # ponytail: FSM inline task storage — upgrade path is a module-level dict.
-    await state.update_data(_ttl_cleanup_task=task)
+    _ttl_tasks[key] = task
 
 
 @router.message(MemoryCorrectionStates.waiting_new_text)
 async def handle_pending_correction(message: Message, state: FSMContext) -> None:
     """Обрабатывает текст, если у пользователя есть pending /memory --correct."""
+    if message.from_user is None:
+        return  # channel posts / anonymous — no user context
     user_id = message.from_user.id
+
+    # Cancel the background TTL cleanup task (if still running) —
+    # user has submitted a correction before the TTL fired.
+    task = _ttl_tasks.pop(_ttl_key(message), None)
+    if task is not None and not task.done():
+        task.cancel()
 
     # Lazy TTL check — FSM has no built-in TTL, so we check set_at_ts
     # stored by the writer (cmd_memory --correct) on each message.
     data = await state.get_data()
     set_at_ts = data.get("set_at_ts", 0)
-
-    # Cancel the background TTL cleanup task (if still running) —
-    # user has submitted a correction before the TTL fired.
-    cleanup_task = data.get("_ttl_cleanup_task")
-    if cleanup_task is not None and not cleanup_task.done():
-        cleanup_task.cancel()
 
     if time.monotonic() - set_at_ts > CORRECTION_TTL_SECONDS:
         await state.clear()

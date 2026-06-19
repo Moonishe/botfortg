@@ -10,6 +10,7 @@ import asyncio
 import logging
 import sys
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 
@@ -49,18 +50,20 @@ _recall_cache: ManagedCache[str, RecallResult] = cache_manager.register(
 #   save_memory_single(), delete_memory_service(), _exec_update_memory()  (see memory_service).
 #
 # ⚠️  DESIGN NOTE — In-memory only, resets on restart:
-#   _rec_version lives in a plain dict, NOT persisted to SQLite/Redis/etc.
+#   _rec_versions lives in an OrderedDict, NOT persisted to SQLite/Redis/etc.
 #   On service restart ALL version counters drop to 0, which means the
 #   existing cache (ManagedCache, also in-memory) is wiped anyway — so the
 #   version reset is harmless.  After restart, recall fills via cold misses
 #   and bump_recall_version() starts re-incrementing from 0.
 #
-#   Trade-off: ultra-cheap reads (lock-free sync dict lookup in CPython)
+#   Trade-off: ultra-cheap reads (lock-free sync OrderedDict lookup in CPython)
 #   vs ~0 cost on restart (cache is empty).  If recall cache ever gains a
 #   persistent backend (e.g. Redis), the version counter MUST be persisted
 #   alongside it.
 # ─────────────────────────────────────────────────────────────────────────────
-_rec_version: dict[int, int] = {}
+MAX_MMR_INPUT = 100
+MAX_REC_VERSION_USERS = 10_000
+_rec_versions: OrderedDict[int, int] = OrderedDict()
 _rec_version_lock: asyncio.Lock | None = None
 
 
@@ -73,9 +76,9 @@ def _get_version_lock() -> asyncio.Lock:
 
 
 def get_recall_version(telegram_id: int) -> int:
-    """Read the current version for *telegram_id* (sync, lock-free — dict reads
-    are atomic in CPython and the value is only ever incremented)."""
-    return _rec_version.get(telegram_id, 0)
+    """Read the current version for *telegram_id* (sync, lock-free — OrderedDict
+    reads are atomic in CPython and the value is only ever incremented)."""
+    return _rec_versions.get(telegram_id, 0)
 
 
 async def bump_recall_version(telegram_id: int) -> None:
@@ -85,12 +88,16 @@ async def bump_recall_version(telegram_id: int) -> None:
     subscribes на MEMORY_MUTATED в prefetch_recall и pattern_cache.
 
     Safe to call from any async context; uses its own asyncio.Lock to protect
-    the dict write.  Non-blocking: a missed bump is far worse than a deadlock,
-    so any exception is swallowed and logged at DEBUG level.
+    the OrderedDict write.  Bounded LRU eviction keeps memory constant.
+    Non-blocking: a missed bump is far worse than a deadlock, so any exception
+    is swallowed and logged at DEBUG level.
     """
     try:
         async with _get_version_lock():
-            _rec_version[telegram_id] = _rec_version.get(telegram_id, 0) + 1
+            _rec_versions[telegram_id] = _rec_versions.get(telegram_id, 0) + 1
+            _rec_versions.move_to_end(telegram_id)
+            while len(_rec_versions) > MAX_REC_VERSION_USERS:
+                _rec_versions.popitem(last=False)
         # Emit event — subscribers (prefetch_recall, pattern_cache) handle invalidation
         from src.core.events.event_bus import event_bus, MEMORY_MUTATED
 
@@ -173,53 +180,93 @@ def _mmr_rerank(
         - "embedding" (list[float], optional): fact embedding vector
 
     Uses cosine similarity when embeddings are available, Jaccard as fallback.
+    Input is capped to ``MAX_MMR_INPUT`` to keep the O(n²) similarity matrix
+    bounded; the remaining candidates are dropped (they were already low-score).
     """
     if not facts:
         return facts
 
     if top_k is None:
         top_k = len(facts)
+    elif top_k <= 0:
+        return facts[:0]  # empty list, same type
 
+    # Cap input to avoid unbounded O(n²) similarity matrix.
     sorted_facts = sorted(facts, key=lambda x: x.get("score", 0), reverse=True)
+    if len(sorted_facts) > MAX_MMR_INPUT:
+        sorted_facts = sorted_facts[:MAX_MMR_INPUT]
+
     selected = [sorted_facts[0]]
     candidates = sorted_facts[1:]
+    candidate_indices = list(range(1, len(sorted_facts)))
 
     # Check if we have embeddings for cosine similarity
-    has_embeddings = any(f.get("embedding") for f in sorted_facts)
+    has_embeddings = (
+        all(f.get("embedding") for f in sorted_facts) and query_embedding is not None
+    )
 
-    while candidates and len(selected) < top_k:
-        best_idx = -1
-        best_score = -float("inf")
+    if has_embeddings:
+        embeddings = [f["embedding"] for f in sorted_facts]
+        sim_matrix = _cosine_similarity_matrix(embeddings)
+        # max_sim[i] = max similarity between fact i and any selected fact.
+        max_sim = [0.0] * len(sorted_facts)
 
-        for i, cand in enumerate(candidates):
-            relevance = cand.get("score", 0)
+        while candidates and len(selected) < top_k:
+            best_idx = -1
+            best_score = -float("inf")
 
-            max_sim = 0.0
-            for sel in selected:
-                if has_embeddings and cand.get("embedding") and sel.get("embedding"):
-                    sim = _cosine_similarity_vectors(
-                        cand["embedding"], sel["embedding"]
-                    )
-                else:
-                    sim = _jaccard_similarity(cand["fact"], sel["fact"])
-                if sim > max_sim:
-                    max_sim = sim
+            for i, cand in enumerate(candidates):
+                relevance = cand.get("score", 0)
+                mmr_score = (
+                    lambda_param * relevance
+                    - (1 - lambda_param) * max_sim[candidate_indices[i]]
+                )
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = i
 
-            mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+            if best_idx < 0:
+                break
 
-            if mmr_score > best_score:
-                best_score = mmr_score
-                best_idx = i
-
-        if best_idx >= 0:
             selected.append(candidates.pop(best_idx))
-        else:
-            break
+            selected_global_idx = candidate_indices.pop(best_idx)
+
+            # Update max_sim for remaining candidates using the newly selected fact.
+            for _i, global_idx in enumerate(candidate_indices):
+                sim = sim_matrix[global_idx][selected_global_idx]
+                if sim > max_sim[global_idx]:
+                    max_sim[global_idx] = sim
+    else:
+        # Fallback path: no embeddings — use Jaccard (still O(k * n * selected)).
+        while candidates and len(selected) < top_k:
+            best_idx = -1
+            best_score = -float("inf")
+
+            for i, cand in enumerate(candidates):
+                relevance = cand.get("score", 0)
+
+                max_sim = 0.0
+                for sel in selected:
+                    sim = _jaccard_similarity(cand["fact"], sel["fact"])
+                    if sim > max_sim:
+                        max_sim = sim
+
+                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = i
+
+            if best_idx >= 0:
+                selected.append(candidates.pop(best_idx))
+            else:
+                break
 
     return selected
 
 
-from src.core.memory.similarity import cosine_similarity as _cosine_similarity_vectors
+from src.core.memory.similarity import (
+    cosine_similarity_matrix as _cosine_similarity_matrix,
+)
 
 
 @dataclass
