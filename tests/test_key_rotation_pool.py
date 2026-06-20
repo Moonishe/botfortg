@@ -14,6 +14,10 @@ class TestKeyRotationPool:
         mgr = KeyRotationManager(kek)
         max_deks = mgr._MAX_CACHED_DEKS
 
+        # Seed an initial DEK so _rotate_unlocked has an active key.
+        mgr._deks[0] = Fernet.generate_key()
+        mgr._active_key_id = 0
+
         # Simulate 15 rotations (needs _lock acquired for _rotate_unlocked)
         import asyncio
 

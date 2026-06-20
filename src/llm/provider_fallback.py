@@ -16,15 +16,16 @@ from src.llm.tool_calling.models import ChatResponse, ToolDefinition
 if TYPE_CHECKING:
     from src.llm.router import MultiKeyProvider
 
-logger = logging.getLogger(__name__)
-
 # Sentinel re-exported from router to keep the same semantic.
 from src.llm.router import (
     ExhaustedError,
     _UNSET,
     _is_retryable_llm_error,
-    _score_provider,
 )
+from src.llm.provider_manager import _score_provider
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ProviderFallback:
@@ -281,9 +282,25 @@ class ProviderFallback:
 
     async def close(self) -> None:
         """Close all child provider instances."""
+        _cancelled = False
         for p in self.providers:
             if hasattr(p, "close"):
-                await p.close()
+                try:
+                    await p.close()
+                except asyncio.CancelledError:
+                    # Shield: finish closing remaining providers even if
+                    # cancelled. Re-raise after all are closed.
+                    if (task := asyncio.current_task()) is not None:
+                        task.uncancel()
+                    _cancelled = True
+                except Exception:
+                    logger.debug(
+                        "Non-critical error closing provider %s",
+                        getattr(p, "name", p),
+                        exc_info=True,
+                    )
+        if _cancelled:
+            raise asyncio.CancelledError()
 
     async def list_models(self) -> list[str]:
         """Возвращает только включённые (enabled) модели из всех primary-провайдеров."""
@@ -296,8 +313,6 @@ class ProviderFallback:
                 logger.debug("list_models failed for %s", provider.name, exc_info=True)
                 continue
         return sorted(all_models)
-
-
 
     async def __aenter__(self):
         return self

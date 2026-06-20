@@ -32,10 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     from src.llm.provider_fallback import ProviderFallback
 
+from src.core.infra.key_guard import safe_str
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
 from src.crypto import decrypt_async
 from src.db.models import User
-from src.db.repo import get_active_keys, get_api_keys
+from src.db.repo import get_active_keys, get_api_keys, mark_key_failure, mark_key_used
 from src.llm.base import TaskType
 
 # ── Импорты классов провайдеров (нужны для _provider_class_for) ─────
@@ -239,6 +240,118 @@ def _score_provider(name: str, now: float) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Key-level helpers — shared by router.py (MultiKeyProvider)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def _check_key_circuit_breaker(cache_key: tuple[str, str]) -> bool:
+    """Returns True if the key is ready to use (CLOSED/HALF_OPEN) or
+    successfully transitioned OPEN→HALF_OPEN.
+
+    Returns False if the key is in OPEN state with active cooldown
+    and ``try_half_open`` fails — caller should skip this key.
+    """
+    if _CIRCUIT_BREAKERS_LOCK is not None:
+        async with _CIRCUIT_BREAKERS_LOCK:
+            cb = _CIRCUIT_BREAKERS.get(cache_key)
+    else:
+        cb = None
+    if cb is None:
+        return True
+    now = asyncio.get_running_loop().time()
+    if cb.is_ready(now):
+        return True
+    return cb.try_half_open(now)
+
+
+def _make_cache_key(
+    provider_name: str, slot_ids: list[int], idx: int, key: str
+) -> tuple[str, str]:
+    """Build the cache key used by circuit breaker and DB tracking."""
+    if slot_ids and idx < len(slot_ids):
+        return (provider_name, str(slot_ids[idx]))
+    return (provider_name, key)
+
+
+async def _record_key_success(
+    provider_name: str,
+    cache_key: tuple[str, str],
+    slot_ids: list[int],
+    idx: int,
+    start_time: float,
+) -> None:
+    """Record circuit breaker success, DB ``mark_key_used``, and provider metrics."""
+    # Circuit breaker: record success
+    if _CIRCUIT_BREAKERS_LOCK is not None:
+        async with _CIRCUIT_BREAKERS_LOCK:
+            cb = _CIRCUIT_BREAKERS.get(cache_key)
+            if cb:
+                cb.record_success()
+                if cb.state == _CircuitState.CLOSED:
+                    _CIRCUIT_BREAKERS.pop(cache_key, None)
+    # DB: mark key as used (fresh session)
+    if slot_ids and idx < len(slot_ids):
+        try:
+            async with get_session() as fresh_s:
+                await mark_key_used(fresh_s, slot_ids[idx])
+        except SQLAlchemyError:
+            logger.exception(
+                "Failed to mark key slot %d as used",
+                slot_ids[idx],
+            )
+    # Adaptive Provider Selection: record success metrics
+    latency = asyncio.get_running_loop().time() - start_time
+    try:
+        await _record_provider_success(provider_name, latency)
+    except Exception:
+        logger.exception(
+            "Failed to record provider success metric for %s",
+            provider_name,
+        )
+
+
+async def _record_key_failure(
+    provider_name: str,
+    cache_key: tuple[str, str],
+    slot_ids: list[int],
+    idx: int,
+    exc: Exception,
+) -> None:
+    """Record circuit breaker failure and DB ``mark_key_failure``."""
+    # Circuit breaker: record failure
+    if _CIRCUIT_BREAKERS_LOCK is not None:
+        async with _CIRCUIT_BREAKERS_LOCK:
+            if cache_key not in _CIRCUIT_BREAKERS:
+                _trim_circuit_breakers_if_needed()
+                _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
+            _CIRCUIT_BREAKERS[cache_key].record_failure(
+                asyncio.get_running_loop().time()
+            )
+            _cb = _CIRCUIT_BREAKERS[cache_key]
+            _cb_cooldown = int(_cb.cooldown_seconds)
+    else:
+        _cb_cooldown = int(KEY_COOLDOWN_SECONDS)
+    # DB: mark key slot as failed (fresh session)
+    if slot_ids and idx < len(slot_ids):
+        try:
+            async with get_session() as fresh_s:
+                error_msg = (
+                    f"{type(exc).__name__}: {safe_str(exc).split(chr(10))[0]}"
+                )[:256]
+                await mark_key_failure(
+                    fresh_s,
+                    slot_ids[idx],
+                    error_msg,
+                    cooldown_sec=_cb_cooldown,
+                )
+        except SQLAlchemyError:
+            logger.exception(
+                "Failed to mark key slot %d as failed",
+                slot_ids[idx],
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Порядок провайдеров для fallback-цепочки
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -421,8 +534,9 @@ async def ensure_locks_initialized() -> None:
 def _trim_circuit_breakers_if_needed() -> None:
     """Cap in-memory breaker cache to prevent unbounded growth.
 
-    Called by router.py before inserting a new breaker. Removes the oldest
-    CLOSED entries first; preserves OPEN/HALF_OPEN entries.
+    Called by _record_key_failure (in this module) before inserting a new
+    breaker. Removes the oldest CLOSED entries first; preserves
+    OPEN/HALF_OPEN entries.
     """
     excess = len(_CIRCUIT_BREAKERS) - _CIRCUIT_BREAKERS_MAX_SIZE
     if excess <= 0:
@@ -584,7 +698,7 @@ async def _restore_cooldowns(slot_ids: list[int]) -> None:
         logger.exception("Failed to restore cooldowns from DB")
 
 
-# Lazy import for get_session used by _restore_cooldowns
+# Lazy import for get_session used by cooldown/metrics helpers
 from src.db.session import get_session
 
 # ═══════════════════════════════════════════════════════════════════════

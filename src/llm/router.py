@@ -1,34 +1,29 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, Callable
-from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.infra.telemetry import start_span
 from src.core.infra.key_guard import safe_str
-from src.db.repo import mark_key_failure, mark_key_used
-from src.db.session import get_session
 from src.llm.base import ChatMessage, TaskType
 from src.llm.tool_calling.models import ChatResponse, ToolDefinition
 
 # ── Импорты из выделенного provider_manager ────────────────────────────
 from src.llm.provider_manager import (
-    _CircuitState,
-    _KeyCircuitBreaker,
+    _check_key_circuit_breaker,
+    _CircuitState,  # pyright: ignore[reportUnusedImport] — re-export for tests
+    _KeyCircuitBreaker,  # pyright: ignore[reportUnusedImport] — re-export for tests
+    _make_cache_key,
     _PURPOSE_SEMAPHORES,  # pyright: ignore[reportUnusedImport] — re-export for memory_admin_cmds
     _provider_class_for,  # pyright: ignore[reportUnusedImport] — re-export for keys_cmd + free_text_exec
-    _record_provider_success,
+    _record_key_failure,
+    _record_key_success,
+    _record_provider_success,  # pyright: ignore[reportUnusedImport] — re-export for tests
     _record_provider_failure,
-    _score_provider,
-    KEY_COOLDOWN_SECONDS,
     MAX_RETRIES_PER_KEY,
     RETRY_BASE_DELAY,
-    _CIRCUIT_BREAKERS,
-    _CIRCUIT_BREAKERS_LOCK,
-    _trim_circuit_breakers_if_needed,
     acquire_purpose_slot,
     build_provider,  # pyright: ignore[reportUnusedImport] — re-export for 64 existing consumers
     cleanup_circuit_breakers,  # pyright: ignore[reportUnusedImport] — re-export for main.py cleanup loop
@@ -137,7 +132,7 @@ def _is_retryable_llm_error(exc: Exception) -> bool:
         return True
     # NOTE: body намеренно не включено — полный ответ LLM может содержать
     # чувствительные данные пользователя (PII, секреты, содержимое диалога).
-    text = f"{type(exc).__name__} {exc}".lower()
+    text = f"{type(exc).__name__} {safe_str(exc)}".lower()
     return any(marker in text for marker in RETRYABLE_MARKERS)
 
 
@@ -169,7 +164,8 @@ class MultiKeyProvider:
         endpoints: list[str | None] | None = None,
         models: list[str | None] | list[list[str]] | None = None,
         embed_model: str | None = None,
-        session_provider: Callable[[], tuple[AsyncSession, object]] | None = None,
+        session_provider: Callable[[], tuple[AsyncSession | None, object]]
+        | None = None,
         purpose: str = "main",
         **kwargs: object,
     ) -> None:
@@ -220,7 +216,7 @@ class MultiKeyProvider:
             provider_kwargs["model"] = self._model
         elif self._models and idx < len(self._models):
             per_slot = self._models[idx]
-            if per_slot:
+            if per_slot and per_slot[0]:
                 provider_kwargs["model"] = per_slot[0]
         if self._embed_model:
             provider_kwargs["embed_model"] = self._embed_model
@@ -260,37 +256,20 @@ class MultiKeyProvider:
 
         skipped = 0
         for attempt in range(len(self._keys)):
-            now = asyncio.get_running_loop().time()
             idx = (start_idx + attempt) % len(self._keys)
             key = self._keys[idx]
-            cache_key = (
-                (self.provider_name, str(self._slot_ids[idx]))
-                if self._slot_ids and idx < len(self._slot_ids)
-                else (self.provider_name, key)
-            )
-            # Refresh timestamp for circuit breaker checks on every key attempt.
-            now = asyncio.get_running_loop().time()
-            if _CIRCUIT_BREAKERS_LOCK is not None:
-                async with _CIRCUIT_BREAKERS_LOCK:
-                    cb = _CIRCUIT_BREAKERS.get(cache_key)
-            else:
-                cb = None
-            if cb is not None and not cb.is_ready(now):
-                # OPEN state (cooldown not yet expired) → skip the key.
-                # When the cooldown expires, try_half_open() transitions
-                # OPEN→HALF_OPEN and is_ready() returns True — the caller
-                # proceeds to probe the key.
-                # HALF_OPEN keys are always ready (is_ready=True), so they
-                # bypass this block entirely.
-                if not cb.try_half_open(now):
-                    skipped += 1
-                    continue
+            cache_key = _make_cache_key(self.provider_name, self._slot_ids, idx, key)
+            if not await _check_key_circuit_breaker(cache_key):
+                skipped += 1
+                continue
             # Create provider instance — handle creation failure separately
             try:
                 provider_kwargs = self._build_provider_kwargs(idx, model_override)
                 provider = self._provider_class(key, **provider_kwargs)
                 async with self._providers_lock:
                     self._providers.append(provider)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 last_error = exc
                 continue
@@ -321,34 +300,13 @@ class MultiKeyProvider:
                         else:
                             raise
                     else:
-                        if _CIRCUIT_BREAKERS_LOCK is not None:
-                            async with _CIRCUIT_BREAKERS_LOCK:
-                                cb = _CIRCUIT_BREAKERS.get(cache_key)
-                                if cb:
-                                    cb.record_success()
-                                    if cb.state == _CircuitState.CLOSED:
-                                        _CIRCUIT_BREAKERS.pop(cache_key, None)
-                        # DB: отметить успешное использование (fresh session)
-                        if self._slot_ids:
-                            try:
-                                async with get_session() as fresh_s:
-                                    await mark_key_used(fresh_s, self._slot_ids[idx])
-                            except SQLAlchemyError:
-                                logger.exception(
-                                    "Failed to mark key slot %d as used",
-                                    self._slot_ids[idx],
-                                )
-                        # Adaptive Provider Selection: запись метрик успеха
-                        # (try/except: потеря result при ошибке метрики дороже,
-                        # чем сама метрика)
-                        latency = asyncio.get_running_loop().time() - start_time
-                        try:
-                            await _record_provider_success(self.provider_name, latency)
-                        except Exception:
-                            logger.exception(
-                                "Failed to record provider success metric for %s",
-                                self.provider_name,
-                            )
+                        await _record_key_success(
+                            self.provider_name,
+                            cache_key,
+                            self._slot_ids,
+                            idx,
+                            start_time,
+                        )
                         # _reserve_start_idx already advanced the round-robin index;
                         # no separate advance needed — avoids double-increment race.
                         return result
@@ -363,27 +321,14 @@ class MultiKeyProvider:
                     category = classify_llm_error(exc)
                     if not should_retry(category):
                         logger.info(
-                            "LLM error category %r is not retryable — aborting key",
+                            "LLM error category %r is not retryable — propagate",
                             category,
                         )
                         raise
                     logger.debug("LLM error category=%r — retrying", category)
-                    if _CIRCUIT_BREAKERS_LOCK is not None:
-                        async with _CIRCUIT_BREAKERS_LOCK:
-                            if cache_key not in _CIRCUIT_BREAKERS:
-                                _trim_circuit_breakers_if_needed()
-                                _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
-                            _CIRCUIT_BREAKERS[cache_key].record_failure(
-                                asyncio.get_running_loop().time()
-                            )
-                            # Persist actual exponential backoff to DB.
-                            # Use the *capped* cooldown property (max 1h) —
-                            # consistent with the circuit breaker's own
-                            # ready_at() which also caps at 3600s.
-                            _cb = _CIRCUIT_BREAKERS[cache_key]
-                            _cb_cooldown = int(_cb.cooldown_seconds)
-                    else:
-                        _cb_cooldown = int(KEY_COOLDOWN_SECONDS)
+                    await _record_key_failure(
+                        self.provider_name, cache_key, self._slot_ids, idx, exc
+                    )
                     last_error = exc
                     logger.warning(
                         "LLM %s key %s temporarily failed, rotating: %s",
@@ -391,25 +336,6 @@ class MultiKeyProvider:
                         _mask_key(key),
                         safe_str(exc)[:200],
                     )
-                    # DB: отметить падение слота (fresh session)
-                    if self._slot_ids:
-                        try:
-                            async with get_session() as fresh_s:
-                                error_msg = (
-                                    f"{type(exc).__name__}: "
-                                    f"{safe_str(exc).split(chr(10))[0]}"
-                                )[:256]
-                                await mark_key_failure(
-                                    fresh_s,
-                                    self._slot_ids[idx],
-                                    error_msg,
-                                    cooldown_sec=_cb_cooldown,
-                                )
-                        except SQLAlchemyError:
-                            logger.exception(
-                                "Failed to mark key slot %d as failed",
-                                self._slot_ids[idx],
-                            )
                     continue
                 raise
             # ponytail: provider lifecycle left to caller; per-attempt close removed
@@ -535,24 +461,11 @@ class MultiKeyProvider:
                 for attempt in range(len(self._keys)):
                     idx = (start_idx + attempt) % len(self._keys)
                     key = self._keys[idx]
-                    cache_key = (
-                        (self.provider_name, str(self._slot_ids[idx]))
-                        if self._slot_ids and idx < len(self._slot_ids)
-                        else (self.provider_name, key)
+                    cache_key = _make_cache_key(
+                        self.provider_name, self._slot_ids, idx, key
                     )
-                    # Circuit breaker check — skip keys in cooldown
-                    if _CIRCUIT_BREAKERS_LOCK is not None:
-                        async with _CIRCUIT_BREAKERS_LOCK:
-                            cb = _CIRCUIT_BREAKERS.get(cache_key)
-                    else:
-                        cb = None
-                    if cb is not None:
-                        now = asyncio.get_running_loop().time()
-                        if not cb.is_ready(now) and not cb.try_half_open(now):
-                            # CLOSED/HALF_OPEN ready → skip.
-                            # OPEN cooldown expired → try_half_open → skip.
-                            # Only OPEN with active cooldown → skip entirely.
-                            continue
+                    if not await _check_key_circuit_breaker(cache_key):
+                        continue
                     try:
                         provider_kwargs = self._build_provider_kwargs(
                             idx, model_override
@@ -569,33 +482,13 @@ class MultiKeyProvider:
                                 total_text += token
                                 yield token
                         # Stream completed successfully — record metrics
-                        # Circuit breaker: record success
-                        if _CIRCUIT_BREAKERS_LOCK is not None:
-                            async with _CIRCUIT_BREAKERS_LOCK:
-                                cb = _CIRCUIT_BREAKERS.get(cache_key)
-                                if cb:
-                                    cb.record_success()
-                                    if cb.state == _CircuitState.CLOSED:
-                                        _CIRCUIT_BREAKERS.pop(cache_key, None)
-                        # DB: mark key as used (fresh session)
-                        if self._slot_ids:
-                            try:
-                                async with get_session() as fresh_s:
-                                    await mark_key_used(fresh_s, self._slot_ids[idx])
-                            except SQLAlchemyError:
-                                logger.exception(
-                                    "Failed to mark key slot %d as used",
-                                    self._slot_ids[idx],
-                                )
-                        # Adaptive Provider Selection: record success metrics
-                        latency = asyncio.get_running_loop().time() - start_time
-                        try:
-                            await _record_provider_success(self.provider_name, latency)
-                        except Exception:
-                            logger.exception(
-                                "Failed to record provider success metric for %s",
-                                self.provider_name,
-                            )
+                        await _record_key_success(
+                            self.provider_name,
+                            cache_key,
+                            self._slot_ids,
+                            idx,
+                            start_time,
+                        )
                         # _reserve_start_idx already advanced the round-robin index;
                         # no separate advance needed — avoids double-increment race.
                         # ── Account Usage Tracking ──
@@ -622,46 +515,15 @@ class MultiKeyProvider:
                         continue
                     except Exception as e:
                         if _is_retryable_llm_error(e):
-                            # Circuit breaker: record failure
-                            if _CIRCUIT_BREAKERS_LOCK is not None:
-                                async with _CIRCUIT_BREAKERS_LOCK:
-                                    if cache_key not in _CIRCUIT_BREAKERS:
-                                        _trim_circuit_breakers_if_needed()
-                                        _CIRCUIT_BREAKERS[cache_key] = (
-                                            _KeyCircuitBreaker()
-                                        )
-                                    _CIRCUIT_BREAKERS[cache_key].record_failure(
-                                        asyncio.get_running_loop().time()
-                                    )
-                                    _cb = _CIRCUIT_BREAKERS[cache_key]
-                                    _cb_cooldown = int(_cb.cooldown_seconds)
-                            else:
-                                _cb_cooldown = int(KEY_COOLDOWN_SECONDS)
+                            await _record_key_failure(
+                                self.provider_name, cache_key, self._slot_ids, idx, e
+                            )
                             last_error = e
                             logger.warning(
                                 "Stream key %s failed: %s",
                                 _mask_key(key),
                                 safe_str(e)[:200],
                             )
-                            # DB: mark key slot as failed
-                            if self._slot_ids:
-                                try:
-                                    async with get_session() as fresh_s:
-                                        error_msg = (
-                                            f"{type(e).__name__}: "
-                                            f"{safe_str(e).split(chr(10))[0]}"
-                                        )[:256]
-                                        await mark_key_failure(
-                                            fresh_s,
-                                            self._slot_ids[idx],
-                                            error_msg,
-                                            cooldown_sec=_cb_cooldown,
-                                        )
-                                except SQLAlchemyError:
-                                    logger.exception(
-                                        "Failed to mark key slot %d as failed",
-                                        self._slot_ids[idx],
-                                    )
                             continue
                         raise
                     # ponytail: per-attempt close removed — lifecycle left to caller
@@ -768,11 +630,20 @@ class MultiKeyProvider:
         async with self._providers_lock:
             providers = self._providers
             self._providers = []
+        _cancelled = False
         for p in providers:
             try:
                 await p.close()
+            except asyncio.CancelledError:
+                # Shield: finish closing remaining providers even if this
+                # task is being cancelled. Re-raise after all providers are closed.
+                if (task := asyncio.current_task()) is not None:
+                    task.uncancel()
+                _cancelled = True
             except Exception:
                 logger.debug("Non-critical error closing provider", exc_info=True)
+        if _cancelled:
+            raise asyncio.CancelledError()
 
     async def __aenter__(self):
         return self
@@ -803,6 +674,8 @@ class MultiKeyProvider:
                 )
         # Проверяем старые single-model слоты (slot.model без LlmKeySlotModel)
         for model_list in self._models:
+            if not isinstance(model_list, list):
+                continue
             for m in model_list:
                 if m:
                     enabled.add(m)
@@ -815,6 +688,8 @@ class MultiKeyProvider:
         try:
             try:
                 return await provider.list_models()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.warning(
                     "list_models() failed for key %s, returning empty",
