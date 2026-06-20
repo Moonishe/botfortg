@@ -6,12 +6,19 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import inspect
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.db.models._auth import UserSettings
 from src.db.models._base import User
 from src.db.repo import get_or_create_user as _repo_get_or_create_user
 from src.db.session import get_session
+
+# Whitelist of mutable UserSettings columns exposed to update_user_settings.
+# user_id is excluded because it is the immutable owner key.
+_USER_SETTINGS_COLUMNS = {
+    c.name for c in inspect(UserSettings).mapper.columns if c.name != "user_id"
+}
 
 logger = logging.getLogger(__name__)
 
@@ -74,16 +81,16 @@ async def update_user_settings(telegram_id: int, **kwargs: object) -> bool:
                 return False
             changed = False
             for key, value in kwargs.items():
-                if hasattr(user.settings, key):
-                    setattr(user.settings, key, value)
-                    changed = True
-                else:
+                if key not in _USER_SETTINGS_COLUMNS:
                     logger.warning(
                         "update_user_settings: unknown key %s for telegram_id=%d — "
-                        "not a UserSettings attribute, mass assignment ignored",
+                        "not a UserSettings column, mass assignment ignored",
                         key,
                         telegram_id,
                     )
+                    continue
+                setattr(user.settings, key, value)
+                changed = True
             # get_session делает commit при выходе из async with
             return changed
     except SQLAlchemyError:
@@ -115,28 +122,5 @@ def _user_to_dict(user: User) -> dict[str, Any]:
 
 
 def _settings_to_dict(settings: UserSettings) -> dict[str, Any]:
-    """Выбрать ключевые поля UserSettings в dict."""
-    fields = (
-        "llm_provider",
-        "timezone",
-        "digest_time",
-        "digest_enabled",
-        "auto_reply_enabled",
-        "auto_reply_mode",
-        "auto_reply_text",
-        "auto_reply_cooldown_min",
-        "use_heavy_model",
-        "news_enabled",
-        "news_window_hours",
-        "news_digest_time",
-        "reminders_enabled",
-        "auto_sync_enabled",
-        "auto_sync_interval_sec",
-        "monitored_folders",
-        "monitor_only_selected_folders",
-    )
-    result: dict[str, Any] = {}
-    for f in fields:
-        if hasattr(settings, f):
-            result[f] = getattr(settings, f)
-    return result
+    """Выбрать все UserSettings-колонки в dict, кроме user_id."""
+    return {col: getattr(settings, col) for col in _USER_SETTINGS_COLUMNS}

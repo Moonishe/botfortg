@@ -16,7 +16,11 @@ pytestmark = pytest.mark.usefixtures("_db_init")
 
 @pytest.fixture(autouse=True)
 async def _ensure_contact_profile_constraint():
-    """Ensure the unique constraint exists (production migration adds it)."""
+    """Ensure the unique constraint exists (production migration adds it).
+
+    Uses raw DDL because this is a temporary test-only index that must not
+    attach to Base.metadata and leak into other tests' create_all/drop_all.
+    """
     async with get_session() as session:
         await session.execute(
             text(
@@ -27,6 +31,11 @@ async def _ensure_contact_profile_constraint():
         )
         await session.commit()
     yield
+    async with get_session() as session:
+        await session.execute(
+            text("DROP INDEX IF EXISTS uq_contact_profile_user_contact")
+        )
+        await session.commit()
 
 
 @pytest.mark.asyncio

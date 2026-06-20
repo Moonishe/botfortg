@@ -30,7 +30,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
-    from src.llm.router import ProviderFallback
+    from src.llm.provider_fallback import ProviderFallback
 
 from src.core.infra.timeutil import ensure_utc as _ensure_utc
 from src.crypto import decrypt_async
@@ -865,7 +865,8 @@ async def build_provider(
     """
     # Lazy imports for MultiKeyProvider / ProviderFallback
     # (avoid circular import: provider_manager ↔ router)
-    from src.llm.router import MultiKeyProvider, ProviderFallback
+    from src.llm.provider_fallback import ProviderFallback
+    from src.llm.router import MultiKeyProvider
 
     # Проверка кэша
     from src.core.context_cache import get as cache_get

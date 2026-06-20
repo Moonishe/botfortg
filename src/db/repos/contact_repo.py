@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
@@ -258,122 +259,57 @@ async def upsert_contact_profile(
     contact_id: int,
     **kwargs: object,
 ) -> ContactProfile:
-    """Создаёт или обновляет профиль контакта.
+    """Создать или обновить профиль контакта.
 
     Переданные ``**kwargs`` применяются только если значение не None.
-    Пустые kwargs создают запись со значениями по умолчанию (closeness=0.5 и т.д.).
+    Пустые kwargs создают запись со значениями по умолчанию.
 
-    Race-safety: SELECT + INSERT with savepoint, then re-fetch on conflict.
-    Two savepoint-guarded INSERT attempts with re-fetch between them.
-    If both attempts fail, raises RuntimeError rather than risking caller data.
-    The DB unique constraint (production migration: uq_contact_profile_user_contact)
-    prevents duplicates at the schema level.
+    Race-safe: используется INSERT ... ON CONFLICT DO UPDATE
+    по паре (user_id, contact_id), поэтому не требует savepoint/rollback.
     """
-    from sqlalchemy.exc import IntegrityError
+    user_id = user.id
+    valid_cols = {c.name for c in ContactProfile.__table__.columns}
+    now = datetime.now(UTC)
 
-    filtered = {k: v for k, v in kwargs.items() if v is not None}
-
-    # ── Attempt 1: SELECT → INSERT (or UPDATE) ──
-    result = await session.execute(
-        select(ContactProfile).where(
-            ContactProfile.user_id == user.id,
-            ContactProfile.contact_id == contact_id,
-        )
-    )
-    profile = result.scalar_one_or_none()
-
-    if profile is not None:
-        for k, v in filtered.items():
-            setattr(profile, k, v)
-        await session.flush()
-        return profile
-
-    # ── Attempt 1: INSERT with savepoint ──
-    try:
-        async with session.begin_nested():
-            profile = ContactProfile(user_id=user.id, contact_id=contact_id, **filtered)
-            session.add(profile)
-            await session.flush()
-        # Success — savepoint committed automatically
-        return profile
-    except IntegrityError:
-        # savepoint auto-rolled back; session still usable for re-fetch
-        pass
-
-    # ── Attempt 2: re-fetch after race ──
-    result2 = await session.execute(
-        select(ContactProfile).where(
-            ContactProfile.user_id == user.id,
-            ContactProfile.contact_id == contact_id,
-        )
-    )
-    profile = result2.scalar_one_or_none()
-
-    if profile is not None:
-        for k, v in filtered.items():
-            setattr(profile, k, v)
-        await session.flush()
-        return profile
-
-    # ── Attempt 2: retry INSERT with savepoint after re-fetch ──
-    # SQLite snapshot isolation means a concurrent winner may be invisible
-    # even after the first savepoint rollback. A second re-fetch might
-    # still miss it. Only session.rollback() resets the WAL snapshot,
-    # but it invalidates all ORM objects in the session — callers MUST
-    # not hold pending writes or reference detached objects after this call.
-    user_id_val = user.id
-    try:
-        async with session.begin_nested():
-            profile = ContactProfile(
-                user_id=user_id_val, contact_id=contact_id, **filtered
+    values: dict[str, object] = {
+        "user_id": user_id,
+        "contact_id": contact_id,
+        "updated_at": now,
+    }
+    set_: dict[str, object] = {"updated_at": now}
+    for key, value in kwargs.items():
+        if value is None:
+            continue
+        if key not in valid_cols or key in (
+            "user_id",
+            "contact_id",
+            "id",
+            "created_at",
+        ):
+            logger.warning(
+                "upsert_contact_profile: ignoring invalid key %s for user_id=%d, "
+                "contact_id=%d",
+                key,
+                user_id,
+                contact_id,
             )
-            session.add(profile)
-            await session.flush()
-        return profile
-    except IntegrityError:
-        pass
+            continue
+        values[key] = value
+        set_[key] = value
 
-    # Final re-fetch — winner's row may still be invisible due to snapshot
-    result3 = await session.execute(
-        select(ContactProfile).where(
-            ContactProfile.user_id == user_id_val,
-            ContactProfile.contact_id == contact_id,
+    stmt = (
+        insert(ContactProfile)
+        .values(values)
+        .on_conflict_do_update(
+            index_elements=["user_id", "contact_id"],
+            set_=set_,
         )
+        .returning(ContactProfile)
     )
-    profile = result3.scalar_one_or_none()
-    if profile is not None:
-        for k, v in filtered.items():
-            setattr(profile, k, v)
-        await session.flush()
-        return profile
-
-    # ── Last resort: reset WAL snapshot via rollback ──
-    # ⚠️  session.rollback() discards ALL pending changes and detaches
-    # every ORM object. Callers must not have uncommitted writes in this
-    # session. In practice this path is only hit under extreme concurrency
-    # (3+ simultaneous upserts for the same row) and callers open a fresh
-    # session just before calling this function.
-    if session.dirty or session.new:
-        logger.warning(
-            "upsert_contact_profile: session has pending writes before rollback — "
-            "dirty=%s, new=%s. These changes will be discarded.",
-            len(session.dirty),
-            len(session.new),
-        )
-    await session.rollback()
-    try:
-        profile = ContactProfile(user_id=user_id_val, contact_id=contact_id, **filtered)
-        session.add(profile)
-        await session.flush()
-        return profile
-    except IntegrityError:
-        # Another concurrent insert won between rollback and our flush.
-        raise RuntimeError(
-            f"ContactProfile insert failed for user_id={user_id_val}, "
-            f"contact_id={contact_id} "
-            f"after 2 savepoint + 1 rollback attempt — "
-            f"extreme concurrent write conflict"
-        ) from None
+    result = await session.execute(stmt)
+    profile = result.scalar_one()
+    await session.refresh(profile)
+    return profile
 
 
 async def get_contact_profile(

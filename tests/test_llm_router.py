@@ -7,7 +7,8 @@ import asyncio
 import pytest
 
 from src.llm.base import ChatMessage
-from src.llm.router import ExhaustedError, MultiKeyProvider, ProviderFallback
+from src.llm.provider_fallback import ProviderFallback
+from src.llm.router import ExhaustedError, MultiKeyProvider
 
 
 class CapacityError(Exception):
@@ -474,10 +475,8 @@ async def test_score_provider_unknown_returns_one():
 @pytest.mark.asyncio
 async def test_adaptive_sorting_failing_provider_last():
     """Провайдер с историей отказов пробуется последним."""
-    from src.llm.router import (
-        MultiKeyProvider,
-        ProviderFallback,
-    )
+    from src.llm.provider_fallback import ProviderFallback
+    from src.llm.router import MultiKeyProvider
     from src.llm.provider_manager import (
         _PROVIDER_METRICS,
         _record_provider_failure,
@@ -512,10 +511,8 @@ async def test_adaptive_sorting_failing_provider_last():
 @pytest.mark.asyncio
 async def test_adaptive_sorting_all_providers_succeed_first():
     """При одинаковых score порядок сохраняется (stable sort)."""
-    from src.llm.router import (
-        MultiKeyProvider,
-        ProviderFallback,
-    )
+    from src.llm.provider_fallback import ProviderFallback
+    from src.llm.router import MultiKeyProvider
     from src.llm.provider_manager import (
         _PROVIDER_METRICS,
     )
@@ -540,10 +537,8 @@ async def test_adaptive_sorting_all_providers_succeed_first():
 @pytest.mark.asyncio
 async def test_adaptive_sorting_embed_unchanged():
     """embed/embed_batch НЕ сортируются — остаются на primary."""
-    from src.llm.router import (
-        MultiKeyProvider,
-        ProviderFallback,
-    )
+    from src.llm.provider_fallback import ProviderFallback
+    from src.llm.router import MultiKeyProvider
     from src.llm.provider_manager import (
         _PROVIDER_METRICS,
         _record_provider_failure,
