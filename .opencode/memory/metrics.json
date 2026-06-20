@@ -12,8 +12,8 @@
                    "avg_per_session":  7.11
                },
     "pipeline":  {
-                     "d5r5_cycles_total":  50,
-                     "avg_iterations_per_task":  0.43,
+                     "d5r5_cycles_total":  53,
+                     "avg_iterations_per_task":  0.41,
                      "max_iterations_hit":  0,
                      "goal_judge_ok":  5,
                      "goal_judge_impossible":  1,
@@ -71,5 +71,5 @@
                                           "audit_date":  "2026-06-19",
                                           "audit_type":  "deep research full project scan with 20 parallel agents"
                                       },
-    "updated_at":  "2026-06-21T10:45:00+00:00"
+    "updated_at":  "2026-06-21T11:30:00+00:00"
 }

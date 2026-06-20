@@ -1,5 +1,5 @@
 # Session Checkpoint
-**Written:** 2026-06-21T10:50:00Z | **Session:** b7c8d9e0-f1a2-3456-7890-bcdef1234567 | **Branch:** snapshot-pre-max
+**Written:** 2026-06-21T11:30:00Z | **Session:** b7c8d9e0-f1a2-3456-7890-bcdef1234567 | **Branch:** snapshot-pre-max
 
 ---
 
@@ -17,11 +17,14 @@
 - [x] `tests/test_provider_fallback.py` — async context manager closes providers — **completed**
 
 **In progress:**
-- [ ] Update `.opencode/memory/metrics.json` — partial
-- [ ] Update `.opencode/memory/checkpoint.md` — in progress
-- [ ] Max Mode refactor: extract common retry helper from `router.py`/`provider_manager.py` — **pending**
-- [ ] Final D5→R5 on new tests + refactor — **pending**
 - [ ] Merge `snapshot-pre-max` into `main` — **deferred** (per user)
+
+**Completed this session:**
+- [x] Max Mode refactor: extracted key-level helpers `_check_key_circuit_breaker`, `_make_cache_key`, `_record_key_success`, `_record_key_failure` into `provider_manager.py` (~210 lines removed from `router.py`)
+- [x] Final D5→R5 on refactor + new tests — **3 cycles, 0 blockers**
+- [x] Full test suite: 3125 passed, 15 skipped, 3 warnings (pre-existing)
+- [x] Commit `b319771` on `snapshot-pre-max` with all changes
+- [x] Update `.opencode/memory/metrics.json` and `checkpoint.md`
 
 ---
 
@@ -70,16 +73,21 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 
 **Full suite after rebase:** 3119 passed, 15 skipped, 2 warnings.
 
+**Refactor + D5/R5:**
+- Extracted key-level retry helpers into `provider_manager.py`, reducing duplication between `chat()` and `chat_stream()`.
+- Added `asyncio.current_task().uncancel()` in `MultiKeyProvider.close()` and `ProviderFallback.close()` to continue closing remaining providers after cancellation.
+- Full suite after refactor: 3125 passed, 15 skipped, 3 warnings (pre-existing thread-exception warning).
+
 ---
 
 ## §6: Risk Register
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| Merge to main still pending | medium | Deferred per user; will do after Max Mode refactor + D5/R5 |
-| `provider_fallback.py` is new; any missed import | medium | Smoke imports pass; full suite green |
-| Manual rebase may have introduced subtle behavior changes | medium | Full suite green; D5/R5 still required for new tests/refactor |
-| Max Mode refactor could destabilize retry logic | high | D5→R5 + tests before merge |
+| Merge to main still pending | medium | Deferred per user; D5/R5 and tests are green |
+| `provider_fallback.py` is new; any missed import | low | Smoke imports pass; full suite green |
+| Manual rebase may have introduced subtle behavior changes | low | Full suite green; D5/R5 completed with 0 blockers |
+| Max Mode refactor could destabilize retry logic | low | D5→R5 completed; 3125 tests passed |
 
 ---
 
@@ -87,18 +95,17 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 
 - Main agent — active
 - Rebase conflict resolution — completed manually
+- Max Mode refactor — committed
+- D5/R5 — completed (3 cycles, 0 blockers)
 - No subagents currently running
-- D5/R5 pending for Max Mode refactor
 
 ---
 
 ## §8: Next Steps
 
-1. Finish `.opencode/memory/metrics.json` and `checkpoint.md` updates.
-2. Run Max Mode refactor for `router.py`/`provider_manager.py` duplication.
-3. Run D5→R5 on refactor + new tests.
-4. Run full test suite.
-5. Merge `snapshot-pre-max` into `main` (deferred until user confirms).
+1. Merge `snapshot-pre-max` into `main` (deferred until user confirms).
+2. Address M14 CodeGraph stale migration entries (requires MCP restart/rebuild).
+3. Run dream-agent and distill-agent (overdue).
 
 ---
 
@@ -120,7 +127,7 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 
 ## §11: Final Notes
 
-- Branch `snapshot-pre-max` is clean and rebased onto `main` (`a5c2a1d`).
-- 2 new test files added; 1 test fix.
-- No commits yet after rebase; changes are in working tree.
+- Branch `snapshot-pre-max` is clean, rebased onto `main` (`a5c2a1d`), and has commit `b319771` with the Max Mode refactor + D5/R5 fixes.
+- 2 new test files added; 1 test fix; 3 source files refactored.
+- Merge to `main` deferred per user.
 
