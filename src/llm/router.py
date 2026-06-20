@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -191,6 +192,8 @@ class MultiKeyProvider:
         self._idx = 0
         self._idx_lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(len(self._keys))
+        self._providers: list[Any] = []
+        self._providers_lock = asyncio.Lock()
         self._current_purpose = purpose
         self._model: str | None = None  # global override; None = use per-slot model
         self._default_heavy: bool = False  # overridden by use_heavy_model setting
@@ -219,7 +222,6 @@ class MultiKeyProvider:
         """
         start_time = asyncio.get_running_loop().time()
         last_error: Exception | None = None
-        now = start_time
 
         # ── Iteration Budget — prevent runaway LLM calls ──
         if not _skip_budget:
@@ -237,6 +239,7 @@ class MultiKeyProvider:
 
         skipped = 0
         for attempt in range(len(self._keys)):
+            now = asyncio.get_running_loop().time()
             idx = (start_idx + attempt) % len(self._keys)
             key = self._keys[idx]
             cache_key = (
@@ -283,6 +286,8 @@ class MultiKeyProvider:
                 if self._embed_model:
                     provider_kwargs["embed_model"] = self._embed_model
                 provider = self._provider_class(key, **provider_kwargs)
+                async with self._providers_lock:
+                    self._providers.append(provider)
             except Exception as exc:
                 last_error = exc
                 continue
@@ -365,7 +370,9 @@ class MultiKeyProvider:
                             if cache_key not in _CIRCUIT_BREAKERS:
                                 _trim_circuit_breakers_if_needed()
                                 _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
-                            _CIRCUIT_BREAKERS[cache_key].record_failure(now)
+                            _CIRCUIT_BREAKERS[cache_key].record_failure(
+                                asyncio.get_running_loop().time()
+                            )
                             # Persist actual exponential backoff to DB.
                             # Use the *capped* cooldown property (max 1h) —
                             # consistent with the circuit breaker's own
@@ -402,13 +409,8 @@ class MultiKeyProvider:
                             )
                     continue
                 raise
-            finally:
-                try:
-                    await provider.close()
-                except Exception:
-                    logger.debug(
-                        "Non-critical error", exc_info=True
-                    )  # close failures should never mask the actual result
+            # ponytail: provider lifecycle left to caller; per-attempt close removed
+            # to avoid repeated close/recreate overhead during key rotation.
         if last_error:
             try:
                 await _record_provider_failure(self.provider_name)
@@ -566,9 +568,10 @@ class MultiKeyProvider:
                             provider_kwargs["model"] = per_slot[0]
                     if self._embed_model:
                         provider_kwargs["embed_model"] = self._embed_model
-                    provider = None
                     try:
                         provider = self._provider_class(key, **provider_kwargs)
+                        async with self._providers_lock:
+                            self._providers.append(provider)
                         total_text = ""
                         # 180s overall timeout; httpx 60s socket-level timeout per read
                         async with asyncio.timeout(180):
@@ -622,6 +625,12 @@ class MultiKeyProvider:
                             )
                         return
                     except (AttributeError, NotImplementedError):
+                        logger.debug(
+                            "Provider %s does not support streaming for key %s",
+                            self.provider_name,
+                            _mask_key(key),
+                            exc_info=True,
+                        )
                         continue
                     except Exception as e:
                         if _is_retryable_llm_error(e):
@@ -667,13 +676,7 @@ class MultiKeyProvider:
                                     )
                             continue
                         raise
-                    finally:
-                        try:
-                            await provider.close()
-                        except Exception:
-                            logger.debug(
-                                "Non-critical error", exc_info=True
-                            )  # close failures should never mask the actual result
+                    # ponytail: per-attempt close removed — lifecycle left to caller
                 # All streaming attempts failed — record failure and fallback
                 if last_error:
                     try:
@@ -768,7 +771,20 @@ class MultiKeyProvider:
             return False
 
     async def close(self) -> None:
-        """MultiKeyProvider is a factory — instances are closed in _try_with_retry."""
+        """Close all raw providers created during key rotation.
+
+        Per-attempt close() was removed from retry loops to avoid repeated
+        open/close overhead. Created instances are tracked here and closed
+        when the MultiKeyProvider is disposed.
+        """
+        async with self._providers_lock:
+            providers = self._providers
+            self._providers = []
+        for p in providers:
+            try:
+                await p.close()
+            except Exception:
+                logger.debug("Non-critical error closing provider", exc_info=True)
 
     async def list_models(self) -> list[str]:
         """Возвращает включённые (enabled) модели для всех ключей провайдера.

@@ -46,10 +46,10 @@ async def mcp_self_info(action: str = "status") -> dict[str, Any]:
         checks = {}
         try:
             from src.db.session import get_session
-            from sqlalchemy import text as sql_text
+            from sqlalchemy import select as sql_select
 
             async with get_session() as session:
-                await session.execute(sql_text("SELECT 1"))
+                await session.execute(sql_select(1))
             checks["database"] = "ok"
         except Exception as e:
             checks["database"] = f"error: {e}"

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from sqlalchemy import text
+import logging
 
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from sqlalchemy import select
 
 from src.bot.filters import OwnerOnly
-import logging
 
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ async def cmd_health(message: Message) -> None:
         from src.db.session import get_session
 
         async with get_session() as session:
-            await session.execute(text("SELECT 1"))
+            await session.execute(select(1))
         lines.append("\n🗄️ БД: 🟢 OK")
     except Exception as e:
         lines.append(f"\n🗄️ БД: 🔴 ошибка ({e.__class__.__name__})")

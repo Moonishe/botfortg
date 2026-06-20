@@ -44,7 +44,8 @@ class KeyRotationManager:
         if not kek or len(kek) != 44:
             raise ValueError(
                 "KEK должен быть ровно 44 символа (32-байтовый ключ в urlsafe-base64). "
-                "Сгенерируйте: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+                "Сгенерируйте: python -c 'from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())'"
             )
         self._kek_bytes: bytes = kek
         self._kek_fernet: Fernet = Fernet(kek)
@@ -56,6 +57,11 @@ class KeyRotationManager:
         self._active_key_id: int | None = None
         # Защита от конкурентной ротации (только один rotate за раз)
         self._lock = asyncio.Lock()
+        # Максимальное число DEK'ов в in-memory кэше.
+        # При превышении — LRU-эвикция: удаляется самый старый (минимальный key_id),
+        # кроме активного. get_dek() возвращает только из кэша; при cache miss
+        # вызывайте load_from_db() для перезагрузки из БД.
+        self._MAX_CACHED_DEKS: int = 10
 
     @property
     def active_dek(self) -> bytes:
@@ -119,6 +125,17 @@ class KeyRotationManager:
         """Генерирует новый DEK — случайный Fernet-совместимый ключ."""
         return Fernet.generate_key()
 
+    def _evict_lru(self, protect_key_id: int | None, log_prefix: str) -> None:
+        """LRU eviction: remove oldest non-protected keys until within cap."""
+        if len(self._deks) <= self._MAX_CACHED_DEKS:
+            return
+        evict_candidates = sorted(k for k in self._deks if k != protect_key_id)
+        for old_id in evict_candidates:
+            self._deks.pop(old_id, None)
+            logger.debug("%s DEK key_id=%s", log_prefix, old_id)
+            if len(self._deks) <= self._MAX_CACHED_DEKS:
+                break
+
     def _encrypt_dek(self, dek: bytes) -> str:
         """Шифрует DEK с помощью KEK для хранения в БД.
 
@@ -164,6 +181,9 @@ class KeyRotationManager:
         # Сохраняем новый DEK в in-memory кэш
         self._deks[new_key_id] = new_dek
         self._active_key_id = new_key_id
+
+        # LRU eviction: если кэш переполнен — удаляем самый старый неактивный ключ
+        self._evict_lru(new_key_id, "LRU eviction (cache overflow)")
 
         logger.info(
             "Ротация DEK: старый key_id=%s, новый key_id=%s",
@@ -213,7 +233,7 @@ class KeyRotationManager:
         async with self._lock:
             return await self._rotate_unlocked(re_encrypt_callback=re_encrypt_callback)
 
-    async def rotate_and_persist(  # pyright: ignore[reportRedeclaration]
+    async def rotate_and_persist(
         self,
         session: AsyncSession,
         re_encrypt_callback: Callable[[bytes, bytes], Awaitable[Any]] | None = None,
@@ -325,6 +345,11 @@ class KeyRotationManager:
                 "Активный DEK не найден в БД — использую последний key_id=%s",
                 self._active_key_id,
             )
+
+        # Enforce pool cap: evict oldest non-active keys if DB had more
+        # keys than _MAX_CACHED_DEKS (otherwise the cap is only enforced
+        # on rotation, leaving the pool oversized after initial load).
+        self._evict_lru(self._active_key_id, "DB-load LRU eviction (pool overflow)")
 
         logger.info(
             "Загружено DEK'ов из БД: %d, активный: %s",
