@@ -61,21 +61,41 @@ class KeyRotationManager:
     def active_dek(self) -> bytes:
         """Текущий активный DEK для шифрования новых данных.
 
-        Если DEK ещё не загружен (БД не инициализирована) — возвращает KEK
-        как fallback для обратной совместимости с данными, зашифрованными
-        напрямую KEK до внедрения ротации.
+        Ни при каких обстоятельствах не возвращает KEK — KEK должен
+        использоваться только для шифрования/расшифровки DEK'ов, но не данных.
+
+        Raises:
+            RuntimeError: если DEK не загружен (БД не инициализирована,
+                не вызван load_from_db() или create_initial_dek()).
 
         Returns:
-            32-байтовый ключ (urlsafe-base64 encoded) — либо DEK, либо KEK.
+            32-байтовый ключ (urlsafe-base64 encoded) — активный DEK.
         """
         if self._active_key_id is not None and self._active_key_id in self._deks:
             return self._deks[self._active_key_id]
 
-        # Fallback: если БД ещё не инициализирована — возвращаем KEK как DEK
-        # (обратная совместимость с существующими данными)
+        raise RuntimeError(
+            "active_dek: DEK не загружен. Вызовите load_from_db() или "
+            "create_initial_dek() перед использованием active_dek. "
+            "KEK не должен использоваться для шифрования данных — "
+            "только для шифрования/расшифровки DEK'ов."
+        )
+
+    @property
+    def dek_for_decryption(self) -> bytes:
+        """DEK для расшифровки (с KEK-fallback для обратной совместимости).
+
+        Используется ТОЛЬКО для расшифровки legacy-данных, которые
+        были зашифрованы напрямую KEK до внедрения DEK-ротации.
+
+        Returns:
+            DEK если загружен, иначе KEK (только для расшифровки).
+        """
+        if self._active_key_id is not None and self._active_key_id in self._deks:
+            return self._deks[self._active_key_id]
         logger.warning(
-            "active_dek: DEK не найден в кэше — возвращаю KEK как fallback "
-            "(данные, зашифрованные KEK, будут расшифрованы корректно)"
+            "dek_for_decryption: DEK не загружен — возвращаю KEK как fallback "
+            "(только для расшифровки legacy-данных)"
         )
         return self._kek_bytes
 
@@ -137,9 +157,9 @@ class KeyRotationManager:
 
         new_dek = self._generate_dek()
         new_key_id = (old_key_id if old_key_id is not None else 0) + 1
-        # NOTE: key_id вычисляется in-memory на основе предыдущего.
-        # При конкурентной ротации возможно дублирование key_id,
-        # которое разрешается на уровне БД (ограничение уникальности).
+        # NOTE: key_id вычисляется in-memory; при конкурентной ротации
+        # между инстансами коллизия разрешается в save_to_db() через
+        # IntegrityError → автоинкремент SQLite.
 
         # Сохраняем новый DEK в in-memory кэш
         self._deks[new_key_id] = new_dek
@@ -224,7 +244,7 @@ class KeyRotationManager:
                 self._active_key_id = old_key_id
                 raise RuntimeError(f"New DEK key_id={new_key_id} missing after rotate")
             try:
-                await self.persist_rotation(
+                actual_key_id = await self.persist_rotation(
                     session,
                     new_key_id,
                     self._encrypt_dek(new_dek),
@@ -238,7 +258,18 @@ class KeyRotationManager:
                     "DEK rotation persist failed — in-memory state rolled back"
                 )
                 raise
-            return new_key_id
+
+            # Если автоинкремент изменил key_id — синхронизируем in-memory кэш
+            if actual_key_id != new_key_id:
+                self._deks.pop(new_key_id, None)
+                self._deks[actual_key_id] = new_dek
+                self._active_key_id = actual_key_id
+                logger.info(
+                    "key_id скорректирован автоинкрементом: %s → %s",
+                    new_key_id,
+                    actual_key_id,
+                )
+            return actual_key_id
 
     async def load_from_db(self, session: AsyncSession) -> None:
         """Загружает существующие DEK'и из БД в in-memory кэш.
@@ -324,11 +355,21 @@ class KeyRotationManager:
             self._deks[key_id] = new_dek
             self._active_key_id = key_id
 
-            await self.save_to_db(
+            actual_key_id = await self.save_to_db(
                 session, key_id, self._encrypt_dek(new_dek), is_active=True
             )
-            logger.info("Начальный DEK создан (key_id=%s)", key_id)
-            return key_id
+            # Если автоинкремент скорректировал key_id — синхронизируем кэш
+            if actual_key_id != key_id:
+                self._deks.pop(key_id, None)
+                self._deks[actual_key_id] = new_dek
+                self._active_key_id = actual_key_id
+                logger.info(
+                    "Начальный DEK: key_id скорректирован: %s → %s",
+                    key_id,
+                    actual_key_id,
+                )
+            logger.info("Начальный DEK создан (key_id=%s)", actual_key_id)
+            return actual_key_id
 
     async def save_to_db(
         self,
@@ -336,20 +377,32 @@ class KeyRotationManager:
         key_id: int,
         encrypted_dek: str,
         is_active: bool = False,
-    ) -> None:
+    ) -> int:
         """Сохраняет DEK (зашифрованный KEK) в БД.
+
+        Если key_id уже занят (race condition), использует автоинкремент
+        SQLite для генерации нового ID и обновляет in-memory кэш.
+
+        **Важно:** метод должен вызываться внутри активной транзакции —
+        использует SAVEPOINT (session.begin_nested()) для изоляции отката
+        при коллизии key_id.
 
         Args:
             session: SQLAlchemy AsyncSession.
-            key_id: идентификатор ключа.
+            key_id: желаемый идентификатор ключа (может быть переопределён
+                автоинкрементом при коллизии).
             encrypted_dek: Fernet-токен (DEK, зашифрованный KEK).
             is_active: является ли этот ключ активным.
+
+        Returns:
+            Фактический key_id, присвоенный записи (может отличаться
+            от переданного при коллизии).
         """
         from src.db.models._encryption import EncryptionKey
+        from sqlalchemy import select
+        from sqlalchemy.exc import IntegrityError
 
         # Проверяем, существует ли уже запись
-        from sqlalchemy import select
-
         existing = await session.execute(
             select(EncryptionKey).where(EncryptionKey.key_id == key_id)
         )
@@ -361,17 +414,54 @@ class KeyRotationManager:
             row.encrypted_dek = encrypted_dek
             row.is_active = is_active
             row.rotated_at = now
-        else:
+            await session.flush()
+            logger.debug("DEK key_id=%s обновлён в БД (active=%s)", key_id, is_active)
+            return key_id
+
+        # Пробуем вставить с заданным key_id
+        try:
+            async with session.begin_nested():  # SAVEPOINT — изолирует откат
+                new_row = EncryptionKey(
+                    key_id=key_id,
+                    encrypted_dek=encrypted_dek,
+                    is_active=is_active,
+                    created_at=now,
+                )
+                session.add(new_row)
+                await session.flush()
+            actual_key_id = key_id
+        except IntegrityError:
+            # Коллизия key_id (race condition между инстансами) —
+            # используем автоинкремент SQLite (SAVEPOINT откачен)
+            logger.warning(
+                "Коллизия key_id=%s при сохранении DEK — использую автоинкремент",
+                key_id,
+            )
             new_row = EncryptionKey(
-                key_id=key_id,
                 encrypted_dek=encrypted_dek,
                 is_active=is_active,
                 created_at=now,
             )
             session.add(new_row)
+            await session.flush()
+            actual_key_id = new_row.key_id
+            # Обновляем in-memory кэш: удаляем старый key_id, добавляем новый
+            self._deks.pop(key_id, None)
+            self._deks[actual_key_id] = self._decrypt_dek(encrypted_dek)
+            if is_active:
+                self._active_key_id = actual_key_id
+            logger.info(
+                "DEK key_id=%s сохранён через автоинкремент (active=%s, "
+                "запрошенный key_id=%s)",
+                actual_key_id,
+                is_active,
+                key_id,
+            )
 
-        await session.flush()
-        logger.debug("DEK key_id=%s сохранён в БД (active=%s)", key_id, is_active)
+        logger.debug(
+            "DEK key_id=%s сохранён в БД (active=%s)", actual_key_id, is_active
+        )
+        return actual_key_id
 
     async def persist_rotation(
         self,
@@ -379,14 +469,18 @@ class KeyRotationManager:
         new_key_id: int,
         new_encrypted_dek: str,
         old_key_id: int | None = None,
-    ) -> None:
+    ) -> int:
         """Сохраняет результат ротации в БД: деактивирует старый, сохраняет новый.
 
         Args:
             session: SQLAlchemy AsyncSession.
-            new_key_id: ID нового ключа.
+            new_key_id: ожидаемый ID нового ключа.
             new_encrypted_dek: новый DEK, зашифрованный KEK.
             old_key_id: ID старого ключа (для деактивации).
+
+        Returns:
+            Фактический key_id нового ключа (может отличаться от new_key_id
+            при автоинкрементном разрешении коллизии).
         """
         from sqlalchemy import update
 
@@ -400,9 +494,12 @@ class KeyRotationManager:
                 .values(is_active=False)
             )
 
-        # Сохраняем новый активный ключ
-        await self.save_to_db(session, new_key_id, new_encrypted_dek, is_active=True)
+        # Сохраняем новый активный ключ (возвращает фактический key_id)
+        actual_key_id = await self.save_to_db(
+            session, new_key_id, new_encrypted_dek, is_active=True
+        )
         await session.commit()
+        return actual_key_id
 
 
 # ── Глобальный singleton ──────────────────────────────────────────────

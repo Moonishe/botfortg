@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import contextlib
 import re
 import time
 from typing import Any
@@ -60,7 +61,9 @@ def _build_batch_prompt(messages: list[dict[str, Any]]) -> str:
     msg_blocks: list[str] = []
     for i, m in enumerate(messages, 1):
         user_text = (m["user_text"] or "")[:500].replace("{", "{{").replace("}", "}}")
-        assistant_text = (m["response_text"] or "")[:300].replace("{", "{{").replace("}", "}}")
+        assistant_text = (
+            (m["response_text"] or "")[:300].replace("{", "{{").replace("}", "}}")
+        )
         msg_blocks.append(
             f"[{i}] User message: {user_text}\n[{i}] Assistant reply: {assistant_text}"
         )
@@ -106,7 +109,9 @@ async def auto_save_single(
     try:
         prompt = _AUTO_SAVE_PROMPT.format(
             user_text=(user_text or "")[:500].replace("{", "{{").replace("}", "}}"),
-            assistant_text=(response_text or "")[:300].replace("{", "{{").replace("}", "}}"),
+            assistant_text=(response_text or "")[:300]
+            .replace("{", "{{")
+            .replace("}", "}}"),
         )
         raw_json = await provider.chat(
             [ChatMessage(role="user", content=prompt)], task_type=TaskType.DEFAULT
@@ -287,20 +292,19 @@ class FactBatchBuffer:
             batch = list(self._buffer)
             self._buffer.clear()
             old_flush_task = self._flush_task
-            if old_flush_task and not old_flush_task.done():
-                old_flush_task.cancel()
-                # Await the cancelled task so it cannot write to a closing DB
-                # session after we've already flushed.  Shield prevents our
-                # own cancellation from interfering with the cleanup await.
-                import contextlib
-
-                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
-                    await asyncio.wait_for(asyncio.shield(old_flush_task), timeout=5.0)
             self._flush_task = None
+        if old_flush_task and not old_flush_task.done():
+            old_flush_task.cancel()
+            # Await the cancelled task so it cannot write to a closing DB
+            # session after we've already flushed.  Shield prevents our
+            # own cancellation from interfering with the cleanup await.
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(old_flush_task), timeout=5.0)
         try:
             await self._flush_batch(batch)
         finally:
-            self._is_flushing = False
+            async with self._lock:
+                self._is_flushing = False
 
     @property
     def enabled(self) -> bool:

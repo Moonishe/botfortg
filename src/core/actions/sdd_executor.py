@@ -89,14 +89,6 @@ _ALLOWED_NODES: set[type[ast.AST]] = {
     ast.And,
     ast.Or,
     ast.Not,
-    # Augmented assignment operators
-    ast.Add,
-    ast.Sub,
-    ast.Mult,
-    ast.Div,
-    ast.Mod,
-    ast.Pow,
-    ast.FloorDiv,
 }
 
 # Names that are strictly forbidden in submitted code (both as Name and as
@@ -219,11 +211,24 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
             "error": "Code contains unsafe operations (blacklisted names)",
         }
 
-    # 2. Sanitize kwargs — never pass DB/callbacks to sandbox
+    # 2. Sanitize kwargs — never pass DB/callbacks to sandbox.
+    # Only JSON-serializable values survive (prevents code injection via repr).
+    def _is_json_serializable(v: Any) -> bool:
+        try:
+            json.dumps(v)
+        except (TypeError, ValueError):
+            return False
+        # Guard: json.dumps(float('inf')) → 'Infinity' which is NOT valid JSON
+        # and json.loads will reject it.  Reject inf/-inf/nan explicitly.
+        if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+            return False
+        return True
+
     _safe_kwargs: dict[str, Any] = {
         k: v
         for k, v in kwargs.items()
         if k not in ("session", "user", "provider", "userbot_manager", "owner", "bot")
+        and _is_json_serializable(v)
     }
 
     # 3. Execute in isolated subprocess (with timeout)
@@ -235,12 +240,13 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
     # Serialize code via marshal+base64 — subprocess script reads and executes.
     # Keeps AST validation in main process, only code execution in subprocess.
     code_bytes = marshal.dumps(compile(tree, "<sdd>", "exec"))
+    safe_kwargs_json = json.dumps(_safe_kwargs)
     script = (
         "import marshal, base64, json, sys, io\n"
         "code = marshal.loads(base64.b64decode("
-        + repr(base64.b64encode(code_bytes).decode())
+        + json.dumps(base64.b64encode(code_bytes).decode())
         + "))\n"
-        "safe_kwargs = " + repr(_safe_kwargs) + "\n"
+        "safe_kwargs = json.loads(" + json.dumps(safe_kwargs_json) + ")\n"
         "safe_builtins = {k: getattr(__builtins__, k) for k in ['print','len','range','int','str','float','bool','list','dict','set','tuple','zip','enumerate','sorted','min','max','sum','any','all','isinstance']}\n"
         "safe_builtins.update({'True': True, 'False': False, 'None': None})\n"
         "namespace = {'__builtins__': safe_builtins, 'kwargs': safe_kwargs, **safe_kwargs}\n"
@@ -266,21 +272,23 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
                 ["python", "-c", script],
                 timeout=5,
             )
+            sandbox_stdout = sandbox_result.get("stdout", "")
+            try:
+                return json.loads(sandbox_stdout)
+            except json.JSONDecodeError:
+                return {
+                    "error": f"execution failed: {sandbox_result.get('stderr', '')[:500]}",
+                    "output": "",
+                    "result": None,
+                }
         except RuntimeError as exc:
             return {
                 "error": f"sandbox error: {exc}",
                 "output": "",
                 "result": None,
             }
-        sandbox_stdout = sandbox_result.get("stdout", "")
-        try:
-            return json.loads(sandbox_stdout)
-        except json.JSONDecodeError:
-            return {
-                "error": f"execution failed: {sandbox_result.get('stderr', '')[:500]}",
-                "output": "",
-                "result": None,
-            }
+        finally:
+            await manager.cleanup()
 
     try:
         proc = await asyncio.to_thread(
@@ -327,7 +335,6 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
     output_schema={
         "type": "object",
         "properties": {
-            "ok": {"type": "boolean"},
             "result": {"description": "Value of _result variable from executed code"},
             "output": {"type": "string", "description": "Captured print() output"},
             "error": {
@@ -335,7 +342,7 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
                 "description": "Execution error or sandbox rejection",
             },
         },
-        "required": ["ok"],
+        "required": [],
     },
 )
 async def _execute_code_tool(code: str, **kwargs: Any) -> dict[str, Any]:

@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -84,6 +85,16 @@ def _secret() -> bytes:
                 key = secrets.token_hex(32)
                 key_path.parent.mkdir(parents=True, exist_ok=True)
                 key_path.write_text(key, encoding="utf-8")
+                try:
+                    os.chmod(key_path, 0o600)
+                except OSError as e:
+                    logger.warning(
+                        "Не удалось установить права 0o600 на %s: %s "
+                        "(на Windows chmod ограничен — убедитесь, что "
+                        "файл защищён средствами ОС)",
+                        key_path,
+                        e,
+                    )
                 logger.warning(
                     "APPROVAL_HMAC_KEY not set in .env; auto-generated persistent key "
                     "saved to %s. Set APPROVAL_HMAC_KEY explicitly for multi-instance "
@@ -122,6 +133,12 @@ def _legacy_secret() -> bytes | None:
         key = settings.encryption_key
         if not key:
             return None
+        logger.warning(
+            "⚠ APPROVAL_HMAC_KEY не задан — approval HMAC использует "
+            "encryption_key (legacy). Это нарушает сегрегацию ключей. "
+            "Рекомендуется задать APPROVAL_HMAC_KEY в .env для разделения "
+            "криптографических доменов."
+        )
         _LEGACY_SECRET_CACHE = hmac.new(
             b"approval-hmac-v1", key.encode("utf-8"), hashlib.sha256
         ).digest()

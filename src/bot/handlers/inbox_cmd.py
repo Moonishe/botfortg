@@ -10,12 +10,14 @@
 import logging
 from datetime import datetime, UTC
 
+from typing import Any
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.contacts.health_score import get_contact_health
+from src.core.contacts.health_score import get_contacts_health_batch
 from src.core.contacts.reply_radar import collect_reply_radar
 from src.core.actions.conflict_predictor import detect_silence_triggers
 from src.core.infra.formatting import bold, code, italic
@@ -114,14 +116,19 @@ async def cmd_inbox(message: Message) -> None:
         except Exception:
             contacts = []
 
-        low_health: list[tuple] = []
-        for contact in contacts[:20]:  # проверяем первые 20 контактов
+        # ponytail: batch health check — single DB round-trip for 20 contacts
+        low_health: list[tuple[Any, dict[str, Any]]] = []
+        contact_slice = contacts[:20]
+        if contact_slice:
+            peer_ids = [c.peer_id for c in contact_slice]
             try:
-                health = await get_contact_health(telegram_id, contact.peer_id)
-                if health["score"] < 50:
-                    low_health.append((contact, health))
+                health_map = await get_contacts_health_batch(telegram_id, peer_ids)
+                for contact in contact_slice:
+                    health = health_map.get(contact.peer_id)
+                    if health and health["score"] < 50:
+                        low_health.append((contact, health))
             except Exception:
-                continue
+                logger.debug("batch health check failed", exc_info=True)
 
         low_health.sort(key=lambda x: x[1]["score"])
 

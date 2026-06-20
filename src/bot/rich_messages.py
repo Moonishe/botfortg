@@ -50,6 +50,10 @@ async def send_rich_message(
     Returns:
         ``Message`` при успехе, ``None`` если метод не поддерживается.
     """
+    if not isinstance(markdown, str):
+        logger.warning("send_rich_message called with non-string markdown")
+        return None
+
     # ── Size guard: Telegram hard limit 32 768 ──
     if len(markdown) > RICH_MESSAGE_MAX:
         logger.warning(
@@ -82,7 +86,24 @@ async def send_rich_message(
             # 200 OK — успех
             if resp.status == 200 and body.get("ok"):
                 result = body.get("result", {})
-                return Message(**result)  # type: ignore[arg-type]
+                # Defensive: Telegram API should always return a full Message
+                # object here, but a malformed response (empty dict) would crash
+                # pydantic's Message(**{}) with ValidationError.
+                if not isinstance(result, dict) or not result:
+                    logger.warning(
+                        "sendRichMessage returned empty/malformed result (chat_id=%s)",
+                        chat_id,
+                    )
+                    return None
+                try:
+                    return Message(**result)  # type: ignore[arg-type]
+                except Exception:
+                    logger.warning(
+                        "sendRichMessage result failed Message constructor (chat_id=%s)",
+                        chat_id,
+                        exc_info=True,
+                    )
+                    return None
 
             # 400/404/405 — метод не поддерживается данным сервером
             if resp.status in (400, 404, 405):
@@ -95,14 +116,17 @@ async def send_rich_message(
 
             # Прочие ошибки — логируем и возвращаем None
             logger.warning(
-                "sendRichMessage failed (status=%d): %r",
+                "sendRichMessage failed (status=%d, chat_id=%s): %r",
                 resp.status,
+                chat_id,
                 body.get("description", body),
             )
             return None
 
     except Exception:
-        logger.debug("sendRichMessage network error", exc_info=True)
+        logger.debug(
+            "sendRichMessage network error (chat_id=%s)", chat_id, exc_info=True
+        )
         return None
 
 
@@ -136,12 +160,19 @@ def to_rich_markdown(text: str) -> str:
         text,
         flags=re.DOTALL,
     )
-    text = re.sub(r"<b>(.*?)</b>", r"**\1**", text, flags=re.DOTALL)
-    text = re.sub(r"<i>(.*?)</i>", r"_\1_", text, flags=re.DOTALL)
-    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.DOTALL)
-    text = re.sub(r"<pre>(.*?)</pre>", r"```\n\1\n```", text, flags=re.DOTALL)
-    text = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"||\1||", text, flags=re.DOTALL)
-    text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.DOTALL)
+    text = re.sub(r"<b>(.*?)</b>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<i>(.*?)</i>", r"_\1_", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(
+        r"<pre>(.*?)</pre>", r"```\n\1\n```", text, flags=re.IGNORECASE | re.DOTALL
+    )
+    text = re.sub(
+        r"<tg-spoiler>(.*?)</tg-spoiler>",
+        r"||\1||",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.IGNORECASE | re.DOTALL)
     # <u> — нет GFM-аналога, оставляем как есть
 
     # <br> → перенос строки (ДО blockquote, чтобы разрывы строк
@@ -162,7 +193,12 @@ def to_rich_markdown(text: str) -> str:
 
     # Удаляем оставшиеся неподдерживаемые HTML-теги (только тег, контент остаётся).
     # Явно исключаем <u> (нет GFM-аналога), <details> и <summary> (valid GFM HTML).
-    text = re.sub(r"</?(?!(?:u|details|summary)>)[a-zA-Z][^>]*>", "", text)
+    text = re.sub(
+        r"</?(?!(?:u|details|summary)\b)[a-zA-Z][^>]*>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
 
     # Раскодируем HTML-сущности
     text = text.replace("&amp;", "&")
@@ -192,6 +228,9 @@ def is_rich_applicable(text: str) -> bool:
     Returns:
         ``True`` если Rich Message предпочтительнее, иначе ``False``.
     """
+    if not isinstance(text, str):
+        return False
+
     if len(text) > RICH_MESSAGE_LIMIT:
         return True
 

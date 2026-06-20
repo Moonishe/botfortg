@@ -11,10 +11,8 @@ Verifies:
 from __future__ import annotations
 
 import os
-import sys
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
@@ -337,7 +335,7 @@ class TestExecuteInstant:
             patch("src.bot.handlers.free_text._core.track_ff"),
             patch("src.core.infra.task_manager.track_ff"),
             patch(
-                "src.bot.handlers.free_text._core.asyncio.ensure_future",
+                "src.bot.handlers.free_text._core.asyncio.create_task",
                 side_effect=self._make_fake_task,
             ),
         ):
@@ -408,7 +406,7 @@ class TestExecuteInstant:
             patch("src.bot.handlers.free_text._core.track_ff"),
             patch("src.core.infra.task_manager.track_ff"),
             patch(
-                "src.bot.handlers.free_text._core.asyncio.ensure_future",
+                "src.bot.handlers.free_text._core.asyncio.create_task",
                 side_effect=self._make_fake_task,
             ),
         ):
@@ -509,7 +507,7 @@ class TestExecuteInstant:
             patch("src.bot.handlers.free_text._core.track_ff"),
             patch("src.core.infra.task_manager.track_ff"),
             patch(
-                "src.bot.handlers.free_text._core.asyncio.ensure_future",
+                "src.bot.handlers.free_text._core.asyncio.create_task",
                 side_effect=self._make_fake_task,
             ),
             patch(

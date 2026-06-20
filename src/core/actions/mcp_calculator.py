@@ -334,18 +334,74 @@ def _safe_eval(expr: str) -> Any:
                     f"Allowed constants: {', '.join(sorted(_ALLOWED_NAMES))}"
                 )
 
-    # ── 3. Evaluate in restricted namespace ─────────────────────────────
+    # ── 3. Evaluate via safe AST walker (no eval/exec) ───────────────────
     namespace: dict[str, Any] = {
-        "__builtins__": {},
         **_MATH_CONSTANTS,
         **_MATH_FUNCS,
     }
 
     try:
-        compiled = compile(tree, "<string>", "eval")
-        # NOTE: eval() выполняется в основном процессе с AST-валидацией.
-        # __builtins__={}, namespace — только математические функции и константы.
-        # Приемлемо для single-user admin-бота.
-        return eval(compiled, namespace)
+        result = _walk_ast(tree, namespace)
     except Exception as exc:
         raise ValueError(f"Evaluation error: {exc}") from exc
+
+    # Guard: reject inf/nan results — they would produce invalid JSON downstream.
+    if isinstance(result, float):
+        if result != result:  # NaN
+            raise ValueError("Result is NaN (not a number)")
+        if result in (float("inf"), float("-inf")):
+            raise ValueError(f"Result is {result} (overflow)")
+    return result
+
+
+def _walk_ast(node: ast.AST, namespace: dict[str, Any]) -> Any:
+    """Безопасный AST-walker — рекурсивно вычисляет дерево без eval().
+
+    Поддерживает только узлы из _SAFE_NODE_TYPES.
+    Не использует compile()/eval()/exec() — только прямые вычисления в Python.
+    """
+    if isinstance(node, ast.Expression):
+        return _walk_ast(node.body, namespace)
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id not in namespace:
+            raise ValueError(f"Name '{node.id}' is not defined")
+        return namespace[node.id]
+    if isinstance(node, ast.UnaryOp):
+        operand = _walk_ast(node.operand, namespace)
+        if isinstance(node.op, ast.USub):
+            return -operand
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        raise ValueError(f"Unknown unary operator: {type(node.op).__name__}")
+    if isinstance(node, ast.BinOp):
+        left = _walk_ast(node.left, namespace)
+        right = _walk_ast(node.right, namespace)
+        op_type = type(node.op)
+        if op_type is ast.Add:
+            return left + right
+        if op_type is ast.Sub:
+            return left - right
+        if op_type is ast.Mult:
+            return left * right
+        if op_type is ast.Div:
+            return left / right
+        if op_type is ast.FloorDiv:
+            return left // right
+        if op_type is ast.Mod:
+            return left % right
+        if op_type is ast.Pow:
+            return _safe_pow(left, right)
+        raise ValueError(f"Unknown binary operator: {op_type.__name__}")
+    if isinstance(node, ast.Call):
+        func_name = node.func.id  # type: ignore[attr-defined]
+        func = namespace.get(func_name)
+        if func is None:
+            raise ValueError(f"Function '{func_name}' is not defined")
+        args = [_walk_ast(a, namespace) for a in node.args]
+        return func(*args)
+    # ponytail: Load/Store/Del — pass-through, они безвредны в AST-дереве
+    if isinstance(node, (ast.Load, ast.Store, ast.Del)):
+        return None
+    raise ValueError(f"Unsupported AST node in walker: {type(node).__name__}")

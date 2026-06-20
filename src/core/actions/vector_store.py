@@ -39,7 +39,7 @@ class VectorStore:
         qdrant_url = os.environ.get("QDRANT_URL", "").strip()
         if qdrant_url:
             # Server mode — подключение к отдельному Qdrant инстансу
-            self._client = QdrantClient(url=qdrant_url)
+            self._client = QdrantClient(url=qdrant_url, timeout=60)
             logger.info("Qdrant server mode: %s", qdrant_url)
         else:
             # Embedded mode — локальное хранилище в data/qdrant

@@ -31,7 +31,7 @@ _PHONE_RE = re.compile(
     flags=re.ASCII,
 )
 _SECRET_RE = re.compile(
-    r"\b(?:api[_\-]?key|apikey|token|secret|password|pwd)\s*[=:]\s*[^\s\'\"]{8,}\b",
+    r"\b(api[_\-]?key|apikey|token|secret|password|pwd)\s*[=:]\s*[^\s\'\"]{8,}\b",
     flags=re.IGNORECASE,
 )
 _TOKEN_RE = re.compile(

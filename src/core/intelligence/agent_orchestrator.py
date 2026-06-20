@@ -103,7 +103,7 @@ class AgentHealth:
         self._failures.pop(agent_name, None)
         self._cooldown_until.pop(agent_name, None)
 
-    def mark_failure(
+    async def mark_failure(
         self, agent_name: str, max_retries: int, cooldown_seconds: float
     ) -> bool:
         """Регистрирует неудачу. Возвращает True если агент ушёл в кулдаун."""
@@ -111,7 +111,7 @@ class AgentHealth:
         self._failures[agent_name] = count
         if count >= max_retries:
             self._cooldown_until[agent_name] = time.monotonic() + cooldown_seconds
-            self._save()
+            await self._save()
             logger.warning(
                 "Agent %s failed %d times — cooldown for %.0fs",
                 agent_name,
@@ -122,11 +122,19 @@ class AgentHealth:
         return False
 
     def _load(self) -> None:
-        """Восстанавливает неистекшие кулдауны из JSON-файла."""
+        """Восстанавливает неистекшие кулдауны из JSON-файла.
+
+        ponytail: sync file I/O in constructor — blocks event loop for
+        ~1ms on a tiny JSON file. Upgrade path: async factory method
+        AgentHealth.create() if startup latency becomes measurable.
+        """
         try:
             with open(HEALTH_FILE, encoding="utf-8") as f:
                 data = __import__("json").load(f)
-        except (FileNotFoundError, OSError, ValueError):
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            logger.warning("Failed to load agent health file", exc_info=exc)
             return
         now_wall = time.time()
         for agent_name, cooldown_wall in data.get("cooldowns", {}).items():
@@ -134,7 +142,7 @@ class AgentHealth:
                 remaining = cooldown_wall - now_wall
                 self._cooldown_until[agent_name] = time.monotonic() + remaining
 
-    def _save(self) -> None:
+    async def _save(self) -> None:
         """Сохраняет кулдауны в JSON-файл (wall-clock таймстемпы)."""
         now = time.time()
         now_mono = time.monotonic()
@@ -142,12 +150,16 @@ class AgentHealth:
         for agent_name, cooldown_mono in self._cooldown_until.items():
             if cooldown_mono > now_mono:
                 cooldowns[agent_name] = now + (cooldown_mono - now_mono)
-        try:
-            os.makedirs(os.path.dirname(HEALTH_FILE), exist_ok=True)
-            with open(HEALTH_FILE, "w", encoding="utf-8") as f:
-                __import__("json").dump({"cooldowns": cooldowns}, f)
-        except OSError:
-            pass
+
+        def _sync_save() -> None:
+            try:
+                os.makedirs(os.path.dirname(HEALTH_FILE), exist_ok=True)
+                with open(HEALTH_FILE, "w", encoding="utf-8") as f:
+                    __import__("json").dump({"cooldowns": cooldowns}, f)
+            except OSError as exc:
+                logger.warning("Failed to save agent health file", exc_info=exc)
+
+        await asyncio.to_thread(_sync_save)
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         """Снимок состояния для отладки / health-check эндпоинта."""
@@ -381,6 +393,8 @@ class AgentOrchestrator:
         if not known_agents:
             return []
 
+        if max_concurrent < 1:
+            max_concurrent = 1
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def _run_one(agent_name: str) -> dict[str, Any]:
@@ -515,7 +529,7 @@ class AgentOrchestrator:
                 self._cache.set(agent_name, query, result, spec.cache_ttl, owner_id)
         else:
             self._stats["failures"] += 1
-            in_cooldown = self._health.mark_failure(
+            in_cooldown = await self._health.mark_failure(
                 agent_name, spec.max_retries, spec.cooldown_seconds
             )
             if in_cooldown:

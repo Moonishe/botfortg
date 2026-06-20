@@ -2,13 +2,9 @@
 Tests for _extract_slug_hint() in src.core.infra.formatting.
 """
 
-import os
-import sys
-
 import pytest
 
 # Ensure project root is on sys.path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.core.infra.formatting import _extract_slug_hint
 
@@ -53,9 +49,7 @@ SLUG_TEST_CASES = [
     ("url", "expected", "_description"),
     SLUG_TEST_CASES,
 )
-def test_extract_slug_hint_cases(
-    url: str, expected: str, _description: str
-) -> None:
+def test_extract_slug_hint_cases(url: str, expected: str, _description: str) -> None:
     assert _extract_slug_hint(url) == expected
 
 

@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, UTC
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.config import settings
+from src.core.infra.timeutil import now_utc
 from src.db.models._session import SessionContext
 from src.db.repos.session_repo import get_or_create_user
 from src.db.session import get_session
@@ -28,10 +28,6 @@ _SUMMARY_PROMPT = (
     "Диалог:\n{messages}\n\n"
     "Саммари (1-2 предложения):"
 )
-
-
-def _now_utc() -> datetime:
-    return datetime.now(UTC)
 
 
 async def save_session_context(
@@ -67,7 +63,7 @@ async def save_session_context(
                 ctx = SessionContext(user_id=db_user_id)
                 session.add(ctx)
 
-            now = _now_utc()
+            now = now_utc()
             ctx.last_active_at = now
 
             # ── Сохраняем последние сообщения (JSON) ──
@@ -136,7 +132,7 @@ async def load_session_context(
                 return None
 
             # ── Проверка срока давности ──
-            age = _now_utc() - ctx.last_active_at
+            age = now_utc() - ctx.last_active_at
             if age.total_seconds() > max_age * 3600:
                 logger.debug(
                     "Session context for user %d expired (age=%.1fh, max=%dh)",

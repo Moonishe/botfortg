@@ -1,7 +1,11 @@
 """Records conversation turns into AgentSession / AgentSessionMessage for replay.
 
 Usage:
-    from src.core.memory.session_recorder import record_turn, close_session, get_session_history
+    from src.core.memory.session_recorder import (
+        record_turn,
+        close_session,
+        get_session_history,
+    )
 
     # Record a user or assistant turn (non-blocking, safe to wrap in try/except)
     await record_turn(session, telegram_id, "user", "Hello!")
@@ -274,4 +278,4 @@ async def restore_state(data):
                     datetime.fromisoformat(d["last_active"]),
                 )
             except Exception:
-                pass
+                logger.exception("Failed to restore session for %s", tg_str)

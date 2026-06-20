@@ -19,7 +19,6 @@ Verifies:
 from __future__ import annotations
 
 import os
-import sys
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -27,7 +26,6 @@ import pytest
 import pytest_asyncio
 
 # ── Environment setup BEFORE importing src modules ──────────────────
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["ENCRYPTION_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 os.environ["BOT_TOKEN"] = "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"

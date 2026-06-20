@@ -75,12 +75,12 @@ class UnifiedDispatcher:
         # ── PRE-HOOKS (run once) ──
         # 1. Plugin hooks
         track_ff(
-            asyncio.ensure_future(
+            asyncio.create_task(
                 hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
             )
         )
         # 2. Log user message
-        track_ff(asyncio.ensure_future(log_user_message(owner_telegram_id, raw)))
+        track_ff(asyncio.create_task(log_user_message(owner_telegram_id, raw)))
         # 3. Pre-gate check (greetings, farewells)
         gate_resp = check_pre_gate(raw)
         if gate_resp:
@@ -220,7 +220,7 @@ class UnifiedDispatcher:
         # Session log
         if not result.skip_session_log and result.response_text:
             track_ff(
-                asyncio.ensure_future(
+                asyncio.create_task(
                     log_assistant_response(message.from_user.id, result.response_text)
                 )
             )
@@ -232,7 +232,7 @@ class UnifiedDispatcher:
         # Plugin hooks
         if result.route_mode.startswith("maestro"):
             track_ff(
-                asyncio.ensure_future(
+                asyncio.create_task(
                     hooks.emit(
                         "on_message_post_maestro",
                         user_id=owner_telegram_id,

@@ -50,6 +50,55 @@ _PROTECTED_ENV_KEYS = frozenset(
     }
 )
 
+# Keys always blocked — dangerous system variables and path overrides.
+_BLOCKED_SET_KEYS = frozenset(
+    {
+        # ── system root ───────────────────────────────────────────────
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "TEMP",
+        "TMP",
+        "HOME",
+        "USERPROFILE",
+        "USER",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMFILES",
+        "PROGRAMDATA",
+        "OS",
+        "PROCESSOR_ARCHITECTURE",
+        "NUMBER_OF_PROCESSORS",
+        # ── library paths ─────────────────────────────────────────────
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        # ── Python env ────────────────────────────────────────────────
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "CONDA_PREFIX",
+        "VIRTUAL_ENV",
+        "PIP_REQUIRE_VIRTUALENV",
+        # ── TLS ───────────────────────────────────────────────────────
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        # ── SSH / Git ─────────────────────────────────────────────────
+        "GIT_CONFIG",
+        "GIT_SSH",
+        "SSH_AUTH_SOCK",
+        # ── display ───────────────────────────────────────────────────
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+    }
+)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # Tool: mcp_env
@@ -217,8 +266,12 @@ def _set_env(key: str, value: str) -> dict[str, Any]:
     """Set a session-local environment variable.
 
     This is NOT persisted — it only affects the current process.
+    System/PATH/OS variables are blocked to prevent unexpected behaviour.
+    Protected keys (BOT_TOKEN, ENCRYPTION_KEY, etc.) are never overwritable.
     """
-    if key.upper() in _PROTECTED_ENV_KEYS:
+    upper_key = key.upper()
+
+    if upper_key in _PROTECTED_ENV_KEYS:
         logger.warning("Refused to set protected env var %s", key)
         return {
             "ok": False,
@@ -226,8 +279,18 @@ def _set_env(key: str, value: str) -> dict[str, Any]:
                 f"Environment variable {key!r} is protected and cannot be overwritten"
             ),
         }
+
+    if upper_key in _BLOCKED_SET_KEYS:
+        logger.warning("Refused to set system env var %s (blocked)", key)
+        return {
+            "ok": False,
+            "error": (
+                f"Environment variable {key!r} is a system variable and cannot be modified"
+            ),
+        }
+
     # NOTE: os.environ modifications affect the current process.
-    # Acceptable for single-user admin bot.
+    # Acceptable for single-user admin bot with blocking above.
     os.environ[key] = value
     logger.info("Environment variable %s set (session-local)", key)
     return {

@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import event, text
-from sqlalchemy.exc import InvalidRequestError, OperationalError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import PROJECT_ROOT, settings
@@ -217,15 +217,7 @@ async def _migrate_related_memory_to_links(conn) -> None:
         # gone (e.g. they were dropped by a later schema migration).  Both
         # cases are safe to ignore — we never want this routine to crash
         # ``init_db()`` and prevent the application from starting.
-        msg = str(e).lower()
-        if (
-            "duplicate column name" in msg
-            or "already exists" in msg
-            or "no such column" in msg  # legacy column was dropped
-            or "no such table" in msg  # legacy table was dropped
-            or "operationalerror" in msg
-            or isinstance(e, OperationalError)
-        ):
+        if isinstance(e, (OperationalError, IntegrityError)):
             logger.debug(
                 "Migration for related_memory_id → memory_links: skipped (%s)",
                 e.__class__.__name__,
@@ -407,7 +399,10 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             yield session
             await session.commit()
         except Exception:
-            await session.rollback()
+            try:
+                await session.rollback()
+            except Exception:
+                logger.debug("Rollback failed in get_session cleanup", exc_info=True)
             raise
         finally:
             _outer_session.reset(token)

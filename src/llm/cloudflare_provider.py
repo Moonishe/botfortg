@@ -88,6 +88,7 @@ class CloudflareProvider(
         stream = await self._client.chat.completions.create(
             model=model, messages=fmt, stream=True
         )
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        async with stream:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content

@@ -14,6 +14,8 @@ from src.db.models import (
     LlmKeySlotModel,
     User,
 )
+from cryptography.fernet import InvalidToken
+
 from src.crypto import decrypt_async, encrypt_async
 
 logger = logging.getLogger(__name__)
@@ -46,7 +48,13 @@ async def upsert_api_key(session: AsyncSession, user, provider: str, key: str) -
         for s in existing_slots:
             try:
                 existing_keys.add(await decrypt_async(s.key_enc))
-            except Exception:
+            except (InvalidToken, ValueError) as e:
+                logger.warning(
+                    "Не удалось расшифровать ключ слота id=%s при проверке "
+                    "дубликатов: %s — слот пропущен",
+                    s.id,
+                    e,
+                )
                 continue
 
         for i, single_key in enumerate(parts):
@@ -117,7 +125,13 @@ async def add_key_slot(
                 existing_key = await decrypt_async(existing.key_enc)
                 if existing_key == key:
                     return existing, False
-            except Exception:
+            except (InvalidToken, ValueError) as e:
+                logger.warning(
+                    "Не удалось расшифровать ключ слота id=%s при проверке "
+                    "дубликатов в add_key_slot: %s — слот пропущен",
+                    existing.id,
+                    e,
+                )
                 continue
 
         slot = LlmKeySlot(
@@ -188,9 +202,7 @@ async def mark_key_failure(
         slot.failure_count = (slot.failure_count or 0) + 1
         slot.last_error = error_msg[:256]
         slot.last_error_at = datetime.now(UTC)
-        slot.cooldown_until = datetime.now(UTC) + timedelta(
-            seconds=cooldown_sec
-        )
+        slot.cooldown_until = datetime.now(UTC) + timedelta(seconds=cooldown_sec)
         await session.flush()
 
 

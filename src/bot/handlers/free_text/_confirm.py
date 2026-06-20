@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -22,6 +23,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.filters import OwnerOnly
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.task_manager import track_ff
+from src.core.security.approval import _ApprovalVerb
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Stores tool calls awaiting user confirmation (from maestro tool loop / guardrails).
 # Format: {uid_str: {"telegram_id": int, "kind": "tool|intent", "tool": str,
 #                    "tool_params": dict, "ts": float}}
-_pending_confirmations: dict[str, dict] = {}
+_pending_confirmations: dict[str, dict[str, Any]] = {}
 _pending_confirmations_lock = asyncio.Lock()
 
 # Per-user confirm-tool lock — prevents double-execution race
@@ -138,7 +140,7 @@ def _confirm_tool_keyboard(
     return kb.as_markup()
 
 
-def _redact_confirmation_params(params: dict) -> dict:
+def _redact_confirmation_params(params: dict[str, Any]) -> dict[str, Any]:
     redacted = {}
     sensitive = (
         "key",
@@ -165,12 +167,12 @@ def _redact_confirmation_params(params: dict) -> dict:
 async def _store_confirmation(
     telegram_id: int,
     kind: str,
-    params: dict,
+    params: dict[str, Any],
     *,
     human_summary: str = "",
     risk: str,
-    verb,  # ponytail: Literal["tool","intent"]; untyped to pass through to _ApprovalVerb
-    metadata=None,
+    verb: _ApprovalVerb,
+    metadata: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Shared confirmation storage for tool and intent confirmations.
 
@@ -291,7 +293,7 @@ async def _store_intent_confirmation(
 
 async def _pop_memory_confirmation(
     action_key: str, telegram_id: int, signature: str
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Pop and verify an in-memory confirmation entry."""
     from src.core.security import approval
 
@@ -321,15 +323,12 @@ async def _pop_memory_confirmation(
 
 
 async def _pop_tool_confirmation(
-    action_key: str, telegram_id: int, signature: str, *, legacy: bool = False
-) -> dict | None:
+    action_key: str, telegram_id: int, signature: str
+) -> dict[str, Any] | None:
     """Extract and remove a confirmation. Returns None if missing/invalid.
 
-    When ``legacy=True``, HMAC signature verification is skipped (old callbacks
-    that pre-date the Hybrid Approval Kernel don't carry signatures). Legacy is
-    only supported for the DB route; memory-route confirmations always require
-    HMAC, otherwise anyone with the action_key could consume another user's
-    pending confirmation.
+    Always requires HMAC signature verification. Legacy (unsigned) callbacks
+    are no longer supported — removed as HMAC bypass risk.
     """
     from src.db.session import get_session
 
@@ -337,13 +336,6 @@ async def _pop_tool_confirmation(
     async with _pending_confirmations_lock:
         _cleanup_stale_pending()
         if action_key in _pending_confirmations:
-            # Memory route: legacy callbacks are unsupported (no signature = no security).
-            if legacy:
-                logger.warning(
-                    "_pop_tool_confirmation: legacy memory callback rejected for action_key=%s",
-                    action_key,
-                )
-                return None
             pending = _pending_confirmations.pop(action_key, None)
             if pending is None:
                 return None
@@ -401,9 +393,7 @@ async def _pop_tool_confirmation(
                             await session.delete(action)
                             await session.flush()
                             return None
-                        if not legacy and not verify_pending_action_hmac(
-                            action, signature
-                        ):
+                        if not verify_pending_action_hmac(action, signature):
                             logger.warning(
                                 "_pop_tool_confirmation: HMAC mismatch action_id=%s",
                                 action_key,
@@ -449,9 +439,7 @@ confirm_router.callback_query.filter(OwnerOnly())
 
 
 @confirm_router.callback_query(
-    F.data.startswith("tool:confirm:")
-    | F.data.startswith("ap:tool:")
-    | F.data.startswith("ap:intent:")
+    F.data.startswith("ap:tool:") | F.data.startswith("ap:intent:")
 )
 async def _cb_tool_confirm(
     callback: CallbackQuery,
@@ -460,29 +448,19 @@ async def _cb_tool_confirm(
 ) -> None:
     """Callback: пользователь подтвердил выполнение инструмента.
 
-    Week 2: accepts unified ``ap:tool:{action_key}:{signature}`` and legacy
-    ``tool:confirm:{uid}`` callbacks.
+    Only unified ``ap:tool:{action_key}:{signature}`` callbacks accepted.
+    Legacy ``tool:confirm:`` is removed (HMAC bypass risk).
     """
     from src.core.security import approval
 
     data = callback.data or ""
-    legacy = data.startswith("tool:confirm:")
-    action_key = ""
-    signature = ""
+    parsed = approval.parse_callback(data)
+    if parsed is None:
+        await callback.answer("⏳ Действие устарело", show_alert=True)
+        return
+    _, action_key, signature = parsed
 
-    if not legacy:
-        parsed = approval.parse_callback(data)
-        if parsed is None:
-            await callback.answer("⏳ Действие устарело", show_alert=True)
-            return
-        _, action_key, signature = parsed
-    else:
-        action_key = data.split(":", 2)[2]
-        signature = ""
-
-    pending = await _pop_tool_confirmation(
-        action_key, callback.from_user.id, signature, legacy=legacy
-    )
+    pending = await _pop_tool_confirmation(action_key, callback.from_user.id, signature)
     if pending is None:
         await callback.answer("⏳ Действие устарело или уже выполнено", show_alert=True)
         return

@@ -1042,11 +1042,8 @@ async def execute_instant(
 
         # Log user message to session (fire-and-forget)
         from src.core.scheduling.session_logger import log_user_message
-        from src.core.infra.task_manager import track_ff
 
-        track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
-
-    from src.core.infra.task_manager import track_ff
+        track_ff(asyncio.create_task(log_user_message(message.from_user.id, raw)))
 
     # ── S2-T5: RouteCache hit — быстрый путь без recall/DB ───────────
     _route_cache_hit = (
@@ -1078,7 +1075,7 @@ async def execute_instant(
             from src.core.scheduling.session_logger import log_assistant_response
 
             track_ff(
-                asyncio.ensure_future(
+                asyncio.create_task(
                     log_assistant_response(message.from_user.id, response)
                 )
             )
@@ -1116,7 +1113,7 @@ async def execute_instant(
             from src.core.scheduling.session_logger import log_assistant_response
 
             track_ff(
-                asyncio.ensure_future(
+                asyncio.create_task(
                     log_assistant_response(message.from_user.id, response)
                 )
             )
@@ -1207,9 +1204,7 @@ async def execute_instant(
         from src.core.scheduling.session_logger import log_assistant_response
 
         track_ff(
-            asyncio.ensure_future(
-                log_assistant_response(message.from_user.id, response)
-            )
+            asyncio.create_task(log_assistant_response(message.from_user.id, response))
         )
     return True
 
@@ -1376,7 +1371,7 @@ async def execute_maestro(
         # Log user message to session (fire-and-forget)
         from src.core.scheduling.session_logger import log_user_message
 
-        track_ff(asyncio.ensure_future(log_user_message(message.from_user.id, raw)))
+        track_ff(asyncio.create_task(log_user_message(message.from_user.id, raw)))
 
         # ✨ Pre-LLM gate: handle greetings/farewells without LLM
         # check_pre_gate уже вызван в Stage -2 классификатора (free_text.py:757).
@@ -1403,7 +1398,7 @@ async def execute_maestro(
             from src.core.scheduling.session_logger import log_assistant_response
 
             track_ff(
-                asyncio.ensure_future(
+                asyncio.create_task(
                     log_assistant_response(message.from_user.id, response)
                 )
             )
@@ -1449,7 +1444,7 @@ async def execute_maestro(
             from src.core.scheduling.session_logger import log_assistant_response
 
             track_ff(
-                asyncio.ensure_future(
+                asyncio.create_task(
                     log_assistant_response(message.from_user.id, response_text)
                 )
             )
@@ -1574,7 +1569,7 @@ async def execute_maestro(
                 from src.core.scheduling.session_logger import log_assistant_response
 
                 track_ff(
-                    asyncio.ensure_future(
+                    asyncio.create_task(
                         log_assistant_response(message.from_user.id, confirm_msg)
                     )
                 )
@@ -1799,7 +1794,7 @@ async def execute_maestro(
                 from src.core.scheduling.session_logger import log_assistant_response
 
                 track_ff(
-                    asyncio.ensure_future(
+                    asyncio.create_task(
                         log_assistant_response(message.from_user.id, response_text)
                     )
                 )
@@ -2042,7 +2037,7 @@ async def execute_maestro(
                 from src.core.scheduling.session_logger import log_assistant_response
 
                 track_ff(
-                    asyncio.ensure_future(
+                    asyncio.create_task(
                         log_assistant_response(message.from_user.id, response_text)
                     )
                 )

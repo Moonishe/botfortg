@@ -91,9 +91,9 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
             logger.debug("Message search inline: %s", e)
         return results
 
-    memory_results_future = asyncio.ensure_future(_search_memory(query))
-    context_results_future = asyncio.ensure_future(_search_context(query))
-    message_results_future = asyncio.ensure_future(
+    memory_results_future = asyncio.create_task(_search_memory(query))
+    context_results_future = asyncio.create_task(_search_context(query))
+    message_results_future = asyncio.create_task(
         _search_messages(query, inline_query.from_user.id)
     )
 

@@ -42,7 +42,7 @@ async def upsert_contact(
             peer_id=peer_id,
             peer_kind=peer_kind,
             is_bot=is_bot,
-            is_archived=bool(is_archived) if is_archived is not None else False,
+            is_archived=bool(is_archived),
             display_name=display_name,
             username=username,
             phone=phone,
@@ -277,8 +277,9 @@ async def upsert_contact_profile(
             )
             profile = result.scalar_one_or_none()
             if profile is None:
-                # Race loser + concurrent insert also failed — retry fresh
-                # Wrap in savepoint so a second IntegrityError doesn't blow up the caller's txn.
+                # Race loser + concurrent insert also failed — retry fresh.
+                # Wrap in savepoint so a second IntegrityError does not
+                # abort the caller's transaction.
                 try:
                     async with session.begin_nested():
                         profile = ContactProfile(
@@ -302,11 +303,34 @@ async def upsert_contact_profile(
                                 setattr(profile, k, v)
                     else:
                         # Triple-race edge case — both retries failed.
-                        # Last resort: direct insert without contention context.
-                        profile = ContactProfile(
-                            user_id=user.id, contact_id=contact_id, **filtered
-                        )
-                        session.add(profile)
+                        # Last resort: direct insert inside a savepoint so a
+                        # concurrent insert does not abort the caller's txn.
+                        try:
+                            async with session.begin_nested():
+                                profile = ContactProfile(
+                                    user_id=user.id, contact_id=contact_id, **filtered
+                                )
+                                session.add(profile)
+                                await session.flush()
+                        except IntegrityError:
+                            result = await session.execute(
+                                select(ContactProfile).where(
+                                    ContactProfile.user_id == user.id,
+                                    ContactProfile.contact_id == contact_id,
+                                )
+                            )
+                            profile = result.scalar_one_or_none()
+                            if profile is not None:
+                                for k, v in kwargs.items():
+                                    if v is not None:
+                                        setattr(profile, k, v)
+                            else:
+                                # Edge case: integrity error but no row visible.
+                                # Add to the outer session; final flush will handle it.
+                                profile = ContactProfile(
+                                    user_id=user.id, contact_id=contact_id, **filtered
+                                )
+                                session.add(profile)
             else:
                 for k, v in kwargs.items():
                     if v is not None:

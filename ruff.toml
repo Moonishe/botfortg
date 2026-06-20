@@ -63,6 +63,8 @@ select = [
 "src/bot/handlers/free_text_pipeline.py" = ["RUF006"]  # fire-and-forget session logging
 "src/main.py" = ["RUF006", "S110", "SIM105"]
 "tests/*.py" = ["S101"]
+"tests/test_p0p1_fixes.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_mcp_code_exec.py" = ["RUF001", "RUF002", "RUF003"]
 
 # exec()/eval() — легитимно: выполняются после строгой AST-валидации
 # (whitelist узлов) и в изолированном namespace, без доступа к файловой системе.

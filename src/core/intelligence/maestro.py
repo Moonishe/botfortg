@@ -158,6 +158,11 @@ async def _execute_one_tool(
                 except _FATAL_EXCEPTIONS:
                     raise
                 except Exception:
+                    logger.warning(
+                        "DB/ORM error executing tool '%s'",
+                        tool_name,
+                        exc_info=True,
+                    )
                     tool_result = {"error": f"DB/ORM error for tool '{tool_name}'"}
         finally:
             # Clean up closed session references after async with exits.
@@ -244,6 +249,10 @@ async def process(
     # Override provider model if maestro_model is configured.
     # Use a lock because the same provider instance may be shared across
     # concurrent process() calls.
+    # ponytail: model override persists on shared provider instance.
+    # Static in practice (maestro_model comes from settings, set once),
+    # so no restore needed. If dynamic model switching is required,
+    # add try/finally around process() body to restore _original_model.
     maestro_model = getattr(settings, "maestro_model", None)
     if maestro_model:
         async with _MAESTRO_MODEL_LOCK:
@@ -832,10 +841,11 @@ async def process(
                             "trace": trace,
                         }
                 except (RequestError, HTTPStatusError):
-                    pass  # fall through к обычному admit_ignorance
+                    logger.debug("web_search fallback HTTP error", exc_info=True)
+                    # fall through к обычному admit_ignorance
                 except RuntimeError:
                     logger.warning("RuntimeError in web_search fallback", exc_info=True)
-                    pass  # fall through к обычному admit_ignorance
+                    # fall through к обычному admit_ignorance
 
             # B1: если user сказал «не гугли» — fall through к обычному admit_ignorance
             # B2: если web_search вернул ошибку/пусто — тоже fall through
@@ -852,7 +862,9 @@ async def process(
 
                     await save_pending(owner_id, user_text[:500], "")
                 except SQLAlchemyError:
-                    pass
+                    logger.debug(
+                        "save_pending failed in admit_ignorance", exc_info=True
+                    )
             return {
                 "understood": "признаю незнание",
                 "plan": [],
@@ -893,10 +905,29 @@ async def process(
                     "trace": trace,
                 }
             except (RequestError, HTTPStatusError):
-                pass  # fallback к обычному admit_ignorance
+                logger.debug("plan_day HTTP error", exc_info=True)
+                return {
+                    "understood": "план дня недоступен",
+                    "plan": [],
+                    "agents_to_call": [],
+                    "final_response": "Не могу составить план дня — проблемы с API. "
+                    "Попробуй позже — или спроси что-то другое.",
+                    "needs_clarification": None,
+                    "used_skills": _used_skills_meta,
+                    "trace": trace,
+                }
             except RuntimeError:
                 logger.warning("RuntimeError in plan_day", exc_info=True)
-                pass  # fallback к обычному admit_ignorance
+                return {
+                    "understood": "ошибка плана дня",
+                    "plan": [],
+                    "agents_to_call": [],
+                    "final_response": "Во время планирования дня что-то пошло не так. "
+                    "Попробуй ещё раз попозже.",
+                    "needs_clarification": None,
+                    "used_skills": _used_skills_meta,
+                    "trace": trace,
+                }
 
         # ── Final response? ──
         if isinstance(parsed, dict) and "final_response" in parsed:
@@ -931,7 +962,7 @@ async def process(
                 raise
             except Exception:  # NOTE: verify_claims/apply_guard используют LLM-вызовы
                 # и сложную AI-логику. Best-effort: ошибка не должна ломать ответ.
-                pass  # best-effort
+                logger.debug("Hallucination guard failed", exc_info=True)
 
             return {
                 "understood": parsed.get("understood", raw),
@@ -992,6 +1023,11 @@ def _estimate_plan_suggestion(user_text: str) -> tuple[float, bool]:
     except _FATAL_EXCEPTIONS:
         raise
     except Exception:
+        logger.debug(
+            "Failed to estimate plan suggestion for: %.80s",
+            user_text,
+            exc_info=True,
+        )
         return 0.0, False
 
 

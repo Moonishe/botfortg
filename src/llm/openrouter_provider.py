@@ -89,9 +89,10 @@ class OpenRouterProvider(OpenAICompatToolMixin, OpenAICompatBaseMixin, BaseLLMPr
                 "X-Title": "TelegramHelper",
             },
         )
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        async with stream:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
 
     async def embed(self, text: str) -> list[float]:
         # NOTE: Not all providers support embedding. Router handles this via try/except.

@@ -136,16 +136,14 @@ async def analyze_image(
     if not path.exists():
         return {"error": f"Файл не найден: {file_path}"}
 
-    # Path traversal protection — block symlinks BEFORE resolving to final target.
-    # os.path.realpath follows symlinks, so checking resolved.is_symlink() is
-    # dead code — the real target is never a symlink.
+    # Path traversal protection — resolve and validate BEFORE any read.
+    # Block symlinks on the original path (before realpath follows them).
+    if path.is_symlink():
+        return {"error": "Доступ к файлу запрещён"}
     try:
         resolved_str = os.path.realpath(str(path))
     except OSError:
         return {"error": "Доступ к файлу запрещён (ошибка разрешения пути)"}
-    # Block symlinks on the ORIGINAL path (before realpath follows them).
-    if path.is_symlink():
-        return {"error": "Доступ к файлу запрещён"}
     resolved = Path(resolved_str)
     # Verify containment within ALLOWED_BASE
     try:
@@ -153,14 +151,24 @@ async def analyze_image(
     except ValueError:
         return {"error": "Доступ к файлу запрещён"}
 
+    # ── Re-verify just before reading (TOCTOU mitigation) ───────────────
+    def _safe_read() -> bytes:
+        """Read file with final path verification to close TOCTOU window."""
+        _recheck = Path(os.path.realpath(str(resolved)))
+        try:
+            _recheck.relative_to(ALLOWED_BASE)
+        except ValueError:
+            raise PermissionError("Access denied — path changed since validation")
+        return _recheck.read_bytes()
+
     try:
         from src.llm.provider_catalog import get_provider
         from src.db.repo import get_or_create_user, list_key_slots
         from src.db.session import get_session
         from src.crypto import decrypt
 
-        # Читаем изображение из уже проверенного resolved-пути (TOCTOU-safe)
-        image_data = await asyncio.to_thread(resolved.read_bytes)
+        # Read image with re-verification (closes TOCTOU window)
+        image_data = await asyncio.to_thread(_safe_read)
         mime = _MIME_MAP.get(resolved.suffix.lower(), "image/jpeg")
 
         # Получаем пользователя

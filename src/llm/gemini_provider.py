@@ -14,8 +14,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-GEMINI_CHAT_LIGHT = "gemini-3-flash"
-GEMINI_CHAT_HEAVY = "gemini-3.1-pro"
+GEMINI_CHAT_LIGHT = "gemini-2.0-flash"
+GEMINI_CHAT_HEAVY = "gemini-2.5-pro"
 
 _GEMINI_REQUEST_TIMEOUT = 90.0  # секунд — таймаут синхронного вызова Gemini API
 
@@ -27,6 +27,21 @@ def _to_gemini_contents(messages: list[ChatMessage]) -> tuple[str | None, list[d
     for m in messages:
         if m.role == "system":
             system_chunks.append(m.content)
+        elif m.role == "tool":
+            # Gemini SDK requires tool results as functionResponse parts.
+            contents.append(
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "functionResponse": {
+                                "name": m.name or "unknown",
+                                "response": {"output": m.content},
+                            }
+                        }
+                    ],
+                }
+            )
         else:
             role = "model" if m.role == "assistant" else "user"
             contents.append({"role": role, "parts": [{"text": m.content}]})
@@ -167,13 +182,16 @@ class GeminiProvider(BaseLLMProvider):
     async def embed(self, text: str) -> list[float]:
         from src.core.actions.embedding_cache import aget, aset
 
-        cached = await aget(text, self._embed_model)
+        embed_model = self._embed_model
+        if embed_model is None:
+            raise ValueError("GeminiProvider embed_model is not configured")
+        cached = await aget(text, embed_model)
         if cached is not None:
             return cached
 
         def _call() -> list[float]:
             resp = self._client.models.embed_content(
-                model=self._embed_model,
+                model=embed_model,
                 contents=text,
             )
             return list(resp.embeddings[0].values)
@@ -181,7 +199,7 @@ class GeminiProvider(BaseLLMProvider):
         result = await asyncio.wait_for(
             asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
         )
-        await aset(text, result, self._embed_model)
+        await aset(text, result, embed_model)
         return result
 
     async def list_models(self) -> list[str]:
@@ -199,13 +217,16 @@ class GeminiProvider(BaseLLMProvider):
 
         if not texts:
             return []
+        embed_model = self._embed_model
+        if embed_model is None:
+            raise ValueError("GeminiProvider embed_model is not configured")
 
         # Проверяем кэш — собираем только некэшированные тексты
         results: list[list[float] | None] = [None] * len(texts)
         uncached_texts: list[str] = []
         uncached_indices: list[int] = []
         for i, t in enumerate(texts):
-            cached = await aget(t, self._embed_model)
+            cached = await aget(t, embed_model)
             if cached is not None:
                 results[i] = cached
             else:
@@ -221,7 +242,7 @@ class GeminiProvider(BaseLLMProvider):
 
                 def _call(chunk: list[str] = chunk) -> list[list[float]]:
                     resp = self._client.models.embed_content(
-                        model=self._embed_model,
+                        model=embed_model,
                         contents=chunk,
                     )
                     return [list(e.values) for e in resp.embeddings]
@@ -233,7 +254,7 @@ class GeminiProvider(BaseLLMProvider):
                 )
 
             for idx, emb in zip(uncached_indices, api_results, strict=True):
-                await aset(texts[idx], emb, self._embed_model)
+                await aset(texts[idx], emb, embed_model)
                 results[idx] = emb
 
         return results  # type: ignore[return-value]

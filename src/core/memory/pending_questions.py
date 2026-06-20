@@ -157,4 +157,4 @@ async def restore_state(data):
             try:
                 _pending[int(tg_str)] = qs
             except Exception:
-                pass
+                logger.exception("Failed to restore pending questions for %s", tg_str)

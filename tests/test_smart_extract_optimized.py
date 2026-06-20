@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,10 +28,6 @@ import pytest
 os.environ["BOT_TOKEN"] = "12345678:abcdefghijklmnopqrstuvwxyz12345"
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-
-sys.path.insert(0, str(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from src.core.memory.smart_extractor import (
     ExtractPriority,
     ExtractDecision,

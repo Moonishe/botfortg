@@ -33,9 +33,13 @@ def _compute_action_signature(action: PendingAction) -> str:
     from src.core.security import approval
 
     payload = json.loads(action.payload)
-    expires_at = (
-        action.expires_at.replace(tzinfo=UTC).timestamp() if action.expires_at else None
-    )
+    if action.expires_at is None:
+        expires_at = None
+    else:
+        dt = action.expires_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        expires_at = dt.timestamp()
     return approval.compute_hmac(
         action_key=str(action.id),
         user_id=action.user_id,
@@ -272,7 +276,7 @@ async def cleanup_expired_actions(session: AsyncSession) -> int:
             PendingAction.expires_at < cutoff,
         )
     )
-    count = result.rowcount
+    count = result.rowcount or 0
     if count:
         logger.info("cleanup_expired_actions: удалено %d просроченных", count)
     return count

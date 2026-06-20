@@ -15,16 +15,12 @@ Tests the logic spec:
 from __future__ import annotations
 
 import os
-import sys
 from datetime import datetime, timedelta, UTC
 
 import pytest
 from sqlalchemy import text
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 # Environment must be set before importing src modules
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ.setdefault("BOT_TOKEN", "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")

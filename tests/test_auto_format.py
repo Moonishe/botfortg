@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
@@ -15,31 +11,23 @@ from src.core.infra.formatting import auto_format, auto_format_urls
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-_passed = 0
-_failed = 0
 
+def check(test_name: str, actual: str, expected_predicate, desc: str = "") -> None:
+    """Check actual result against expected_predicate (string or callable).
 
-def check(test_name: str, actual: str, expected_predicate, desc: str = "") -> bool:
-    """Check actual result against expected_predicate (string or callable)."""
-    global _passed, _failed
+    Raises AssertionError on mismatch so pytest reports real failures.
+    """
     if callable(expected_predicate):
         ok = expected_predicate(actual)
         expected_repr = "<predicate>"
     else:
         ok = actual == expected_predicate
         expected_repr = repr(expected_predicate)
-    if ok:
-        _passed += 1
-        status = "PASS"
-    else:
-        _failed += 1
-        status = "FAIL"
-    extra = f"  ({desc})" if desc else ""
-    print(f"[{status}] {test_name}{extra}")
     if not ok:
-        print(f"       expected: {expected_repr}")
-        print(f"       actual:   {repr(actual)}")
-    return ok
+        extra = f" ({desc})" if desc else ""
+        raise AssertionError(
+            f"{test_name}{extra}: expected {expected_repr}, got {actual!r}"
+        )
 
 
 # ── auto_format() tests ──────────────────────────────────────────────────
@@ -121,9 +109,7 @@ def test_auto_format_url_with_command():
     url_path_wrapped = (
         "<code>/example</code>" in result or "<code>/page</code>" in result
     )
-    if url_path_wrapped:
-        print("       BUG: URL path corrupted by command regex!")
-        print(f"       actual: {repr(result)}")
+    assert not url_path_wrapped, f"URL path corrupted by command regex: {result!r}"
 
 
 def test_auto_format_already_formatted():
@@ -391,9 +377,9 @@ def test_closing_a_tag_not_corrupted():
         lambda r: "<code>/path</code>" not in r,
     )
     # If there's corruption, report the actual output
-    if "<code>/a</code>" in result or "<code>/path</code>" in result:
-        print("       BUG: URL tag corrupted by command regex!")
-        print(f"       actual: {repr(result)}")
+    assert "<code>/a</code>" not in result and "<code>/path</code>" not in result, (
+        f"URL tag corrupted by command regex: {result!r}"
+    )
 
 
 def test_shortener_with_command():
@@ -409,61 +395,6 @@ def test_shortener_with_command():
         lambda r: "<code>/help</code>" in r,
     )
     # Check for </a> corruption
-    if "<code>/a</code>" in result:
-        print("       BUG: </a> corrupted in shortener+command test!")
-        print(f"       actual: {repr(result)}")
-
-
-# ── Summary ──────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import traceback
-
-    tests = [
-        # auto_format basic commands
-        test_auto_format_simple_command,
-        test_auto_format_help_command,
-        test_auto_format_two_commands,
-        test_auto_format_url_standalone,
-        test_auto_format_url_with_command,
-        test_auto_format_already_formatted,
-        test_auto_format_tme_shortener,
-        test_auto_format_youtube_shortener,
-        test_auto_format_bitly_shortener,
-        # auto_format_urls standalone
-        test_auto_format_urls_parentheses,
-        test_auto_format_urls_parentheses_no_left_paren,
-        test_auto_format_urls_followed_by_angle,
-        test_auto_format_urls_multiple_unique_labels,
-        test_auto_format_urls_same_url_twice,
-        test_auto_format_urls_already_formatted,
-        test_auto_format_urls_no_url,
-        test_auto_format_urls_with_ampersand,
-        test_auto_format_urls_after_comma,
-        # command regex edge cases
-        test_command_regex_api_url_no_match,
-        test_command_regex_fraction_no_match,
-        test_command_regex_alone,
-        test_command_regex_single_char,
-        test_command_regex_underscore_command,
-        # coexistence
-        test_url_then_command_coexist,
-        test_command_then_url_coexist,
-        test_url_command_same_line,
-        # integrity (CRITICAL)
-        test_closing_a_tag_not_corrupted,
-        test_shortener_with_command,
-    ]
-
-    for t in tests:
-        try:
-            t()
-        except Exception:
-            _failed += 1
-            print(f"[FAIL] {t.__name__}  (EXCEPTION)")
-            traceback.print_exc()
-
-    total = _passed + _failed
-    print(f"\n{'=' * 60}")
-    print(f"RESULTS: {_passed}/{total} passed, {_failed}/{total} failed")
-    print(f"{'=' * 60}")
+    assert "<code>/a</code>" not in result, (
+        f"</a> corrupted in shortener+command test: {result!r}"
+    )

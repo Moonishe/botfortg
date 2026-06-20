@@ -25,9 +25,8 @@ async def get_agent_cache(session: AsyncSession, cache_key: str) -> str | None:
         try:
             age = (now - row.created_at).total_seconds()
         except TypeError:
-
             age = (now - row.created_at.replace(tzinfo=UTC)).total_seconds()
-        if age < row.ttl_seconds:
+        if row.ttl_seconds is None or row.ttl_seconds <= 0 or age < row.ttl_seconds:
             return row.result_json
         await session.delete(row)
         await session.flush()

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shlex
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from src.config import settings
@@ -47,7 +49,32 @@ _SSH_KNOWN_HOSTS: str | None = getattr(settings, "ssh_known_hosts", None)
 if _SSH_KNOWN_HOSTS is None:
     _SSH_KNOWN_HOSTS = "~/.ssh/known_hosts"
 
-# ── Command allowlists ─────────────────────────────────────────────────────
+# ── Path containment guard for cat/type ────────────────────────────────────
+
+_DATA_DIR = settings.data_dir.resolve()
+
+
+def _is_path_within_data_dir(arg: str) -> bool:
+    """Check that *arg* resolves to a path inside ``data_dir``.
+
+    Rejects ``..`` traversal, absolute paths, and paths that resolve
+    outside the allowed data directory.
+    """
+    # Reject raw ".." components early
+    if ".." in Path(arg).parts:
+        return False
+
+    # Используем os.path.realpath для consistency с mcp_tools.py:
+    # корректно обрабатывает .. на Windows и не путает data/..foo с ".."
+    resolved_str = os.path.realpath(str(settings.data_dir / arg))
+    path = Path(resolved_str)
+    try:
+        path.relative_to(_DATA_DIR)
+    except ValueError:
+        return False
+
+    return True
+
 
 # Allowed command patterns as token tuples (checked with startswith).
 # Only commands matching these patterns (by first N tokens) are permitted.
@@ -215,9 +242,9 @@ def _is_command_allowed(
     # 3. Check against allowed patterns (prefix match).
     for pattern in effective_allowlist:
         if len(tokens) >= len(pattern) and tokens[: len(pattern)] == list(pattern):
-            # 3a. Deny-list: block cat/type on sensitive files even with allowlist match
+            # 3a. Deny-list + path containment: block cat/type on sensitive files
+            #     or paths that escape data_dir via ../ or absolute paths.
             if tokens[0] in ("cat", "type") and len(tokens) > 1:
-                # Check all arguments after the command to catch flags like `cat -n .env`
                 _denied_exact = frozenset(
                     {
                         ".env",
@@ -237,6 +264,16 @@ def _is_command_allowed(
                 )
                 _denied_paths = (".ssh/", ".env.")
                 for _idx, _arg in enumerate(t.lower() for t in tokens[1:]):
+                    # Skip flag-like arguments (cat -n, type -?)
+                    _original_arg = tokens[_idx + 1]
+                    if _original_arg.startswith("-"):
+                        continue
+                    # Path containment: reject ../ traversal and paths outside data_dir
+                    if not _is_path_within_data_dir(_original_arg):
+                        return (
+                            False,
+                            f"Access denied: {_original_arg!r} resolves outside data/ directory",
+                        )
                     _basename = _arg.split("/")[-1].split("\\")[-1]
                     if (
                         _basename in _denied_exact

@@ -88,13 +88,21 @@ async def extract_and_save_commitments(
         "Выдели обязательства."
     )
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=COMMITMENTS_SYSTEM),
-            ChatMessage(role="user", content=user_prompt),
-        ],
-        heavy=False,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=COMMITMENTS_SYSTEM),
+                ChatMessage(role="user", content=user_prompt),
+            ],
+            heavy=False,
+        )
+    except Exception:
+        logger.exception(
+            "Commitment extraction LLM call failed for contact=%s peer_id=%d",
+            contact_name,
+            contact_peer_id,
+        )
+        return []
     items = _parse_json_array(raw)
     if not items:
         return []
@@ -132,7 +140,8 @@ async def extract_and_save_commitments(
                 source="commitment",
                 memory_type="task",
                 contact_id=contact_peer_id,
-                confidence=0.5)
+                confidence=0.5,
+            )
 
             saved.append(item)
     return saved

@@ -56,17 +56,27 @@ def _safe_resolve(raw: str) -> Path | None:
     Safety rules:
     1. The original *raw* must not contain ``..`` as a path component
        (directory traversal is explicitly forbidden).
-    2. The resolved path must be under ``_ALLOWED_ROOTS`` (``data_dir`` only).
+    2. The original *raw* must not be an absolute path (Unix ``/`` or
+       Windows drive letter) — only relative paths are allowed.
+    3. The resolved path must be under ``_ALLOWED_ROOTS`` (``data_dir`` only).
        Unlike previous behaviour, ``PROJECT_ROOT`` itself is **not** an
        allowed root — filesystem tools may **only** read from ``data/``.
     """
-    # Нормализуем сепараторы для единообразной обработки
+    # Normalise separators for consistent processing
     normalised = raw.replace("/", os.sep).replace("\\", os.sep)
 
-    # Используем os.path.realpath вместо Path.resolve():
-    #   - realpath корректно обрабатывает data/..foo (не путает с «..»)
-    #   - realpath разрешает symlink'и до конечной цели
-    #   - split("..") проверка удалена — обходилась через data/..foo
+    # Early rejection: absolute paths (Unix '/' or Windows 'C:\')
+    if os.path.isabs(normalised):
+        return None
+
+    # Early rejection: '..' path component traversal
+    parts = normalised.split(os.sep)
+    if ".." in parts:
+        return None
+
+    # Use os.path.realpath instead of Path.resolve():
+    #   - realpath correctly handles data/..foo (doesn't confuse with "..")
+    #   - realpath resolves symlinks to the final target
     raw_path = str(PROJECT_ROOT / normalised)
     try:
         resolved_str = os.path.realpath(raw_path)

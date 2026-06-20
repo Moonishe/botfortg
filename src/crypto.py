@@ -1,10 +1,13 @@
+import asyncio
+import threading
+
 from cryptography.fernet import Fernet, InvalidToken
 
 from src.config import settings
-import asyncio
 
 
 _fernet: Fernet | None = None
+_fernet_lock = threading.Lock()
 
 
 def _get_fernet() -> Fernet:
@@ -15,7 +18,9 @@ def _get_fernet() -> Fernet:
             raise ValueError("Invalid ENCRYPTION_KEY: must be 44-char urlsafe-base64")
         # NOTE: Password/key bytes remain in memory until garbage collected.
         # For sensitive deployments, use SecureString or zero the buffer after use.
-        _fernet = Fernet(key.encode())
+        with _fernet_lock:
+            if _fernet is None:
+                _fernet = Fernet(key.encode())
     return _fernet
 
 

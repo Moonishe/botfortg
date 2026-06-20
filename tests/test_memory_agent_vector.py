@@ -2,12 +2,10 @@
 
 import asyncio
 import os
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["ENCRYPTION_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 os.environ.setdefault("BOT_TOKEN", "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
@@ -39,10 +37,9 @@ async def setup_db():
 async def _seed_facts(session, owner, facts: list[str]):
     """Insert facts and return owner."""
     for fact in facts:
-        await save_memory_single(session, owner, fact=fact,
-            source="chat",
-            confidence=0.5,
-            memory_type=None)
+        await save_memory_single(
+            session, owner, fact=fact, source="chat", confidence=0.5, memory_type=None
+        )
 
 
 # ---------------------------------------------------------------------------

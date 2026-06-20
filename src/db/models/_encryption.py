@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, UTC
 
-from sqlalchemy import Boolean, DateTime, Integer, Text
+from sqlalchemy import Boolean, DateTime, Index, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.models._base import Base
@@ -18,6 +18,9 @@ class EncryptionKey(Base):
     """DEK, зашифрованный KEK и сохранённый в БД.
 
     Таблица: encryption_keys
+
+    Partial unique index ``ix_encryption_keys_active`` гарантирует,
+    что только одна запись может иметь ``is_active=1``.
     """
 
     __tablename__ = "encryption_keys"
@@ -42,4 +45,15 @@ class EncryptionKey(Base):
         DateTime(timezone=True),
         nullable=True,
         comment="UTC timestamp последней ротации (для неактивных — когда заменён)",
+    )
+
+    __table_args__ = (
+        # Partial unique index: только одна активная запись одновременно.
+        # Требуется Alembic миграция для существующих БД.
+        Index(
+            "ix_encryption_keys_active",
+            is_active,
+            unique=True,
+            sqlite_where=is_active == 1,
+        ),
     )

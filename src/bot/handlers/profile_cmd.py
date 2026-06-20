@@ -247,7 +247,9 @@ async def cmd_profile(
                 return
             if len(candidates) > 1 and candidates[0].score < 90:
                 names = "\n".join(f"• {c.label()} · {c.score}%" for c in candidates[:5])
-                await message.answer(f"Нашёл несколько кандидатов. Уточни:\n{names}")
+                await message.answer(
+                    f"Нашёл несколько кандидатов. Уточни:\n{sanitize_html(names)}"
+                )
                 return
             peer_id = candidates[0].peer_id
 

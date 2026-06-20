@@ -5,12 +5,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-import sys
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Добавляем корень проекта в path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")

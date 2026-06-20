@@ -12,6 +12,7 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.memory.memory_fuel import format_fuel_line, get_fuel_stats
 from src.core.memory.memory_neighbors import format_neighbors, get_neighbors
 from src.db.repo import (
@@ -64,7 +65,7 @@ async def cmd_threads(message: Message, command: CommandObject | None = None) ->
                     ", ".join(f.title for f in folders) if folders else "нет папок"
                 )
                 await message.answer(
-                    f"❌ Папка «{folder_name}» не найдена.\nДоступные: {available}"
+                    f"❌ Папка «{sanitize_html(folder_name)}» не найдена.\nДоступные: {sanitize_html(available)}"
                 )
                 return
 

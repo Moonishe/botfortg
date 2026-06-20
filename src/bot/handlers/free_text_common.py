@@ -16,6 +16,7 @@ from src.bot.reply_dedup import dedup
 from src.config import settings
 from src.core.actions.trajectory import record_trajectory
 from src.core.contacts.smart_reply import get_reaction
+from src.core.security import approval
 from src.core.infra.formatting import auto_format
 from src.core.infra.settings_cache import _settings_cache, invalidate_settings_cache  # noqa: F401  # pyright: ignore[reportUnusedImport] — re-export for late imports
 from src.core.infra.task_manager import track_ff
@@ -255,8 +256,6 @@ def _coerce_setting_value(spec: str, raw):
 
 def _confirm_keyboard(action_id: int, hmac_signature: str | None = None):
     """Клавиатура подтверждения отправки с unified HMAC-подписью в callback_data."""
-    from src.core.security import approval
-
     sig = hmac_signature or ""
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -309,10 +308,16 @@ def _candidates_keyboard_send(candidates):
         kb.row(
             InlineKeyboardButton(
                 text=f"🔍 Ещё {hidden} контактов — уточните имя",
-                callback_data="send:cancel:0",  # cancel just dismisses
+                callback_data=approval.format_cancel_callback(
+                    "send", "0"
+                ),  # cancel just dismisses
             )
         )
-    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="send:cancel:0"))
+    kb.row(
+        InlineKeyboardButton(
+            text="❌ Отмена", callback_data=approval.format_cancel_callback("send", "0")
+        )
+    )
     return kb.as_markup()
 
 

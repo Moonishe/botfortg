@@ -11,6 +11,7 @@ from src.core.infra.key_guard import safe_str
 from src.db.repo import mark_key_failure, mark_key_used
 from src.db.session import get_session
 from src.llm.base import ChatMessage, TaskType
+from src.llm.tool_calling.models import ChatResponse, ToolDefinition
 
 # ── Импорты из выделенного provider_manager ────────────────────────────
 from src.llm.provider_manager import (
@@ -206,6 +207,7 @@ class MultiKeyProvider:
         operation,
         *args: object,
         model_override: str | None = None,
+        _skip_budget: bool = False,
         **kwargs: object,
     ):
         """Пробует операцию со всеми ключами по очереди.
@@ -220,12 +222,15 @@ class MultiKeyProvider:
         now = start_time
 
         # ── Iteration Budget — prevent runaway LLM calls ──
-        from src.core.intelligence.iteration_budget import IterationBudget
+        if not _skip_budget:
+            from src.core.intelligence.iteration_budget import IterationBudget
 
-        if not hasattr(self, "_llm_budget"):
-            self._llm_budget = IterationBudget()
-        if not self._llm_budget.record_llm_call():
-            raise RuntimeError("LLM call budget exhausted — too many calls in window")
+            if not hasattr(self, "_llm_budget"):
+                self._llm_budget = IterationBudget()
+            if not self._llm_budget.record_llm_call():
+                raise RuntimeError(
+                    "LLM call budget exhausted — too many calls in window"
+                )
 
         # Round-robin: reserve a unique start index for concurrent calls.
         start_idx = await self._reserve_start_idx()
@@ -239,6 +244,8 @@ class MultiKeyProvider:
                 if self._slot_ids and idx < len(self._slot_ids)
                 else (self.provider_name, key)
             )
+            # Refresh timestamp for circuit breaker checks on every key attempt.
+            now = asyncio.get_running_loop().time()
             if _CIRCUIT_BREAKERS_LOCK is not None:
                 async with _CIRCUIT_BREAKERS_LOCK:
                     cb = _CIRCUIT_BREAKERS.get(cache_key)
@@ -454,7 +461,12 @@ class MultiKeyProvider:
             self._semaphore.release()
 
     async def _retry_inner(
-        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
+        self,
+        messages,
+        *,
+        heavy=_UNSET,
+        task_type: str = TaskType.DEFAULT,
+        _skip_budget: bool = False,
     ) -> str:
         """Core retry logic WITHOUT semaphore acquisition.
 
@@ -468,6 +480,7 @@ class MultiKeyProvider:
         result = await self._try_with_retry(
             lambda p: p.chat(messages, heavy=effective_heavy),
             model_override=model_override,
+            _skip_budget=_skip_budget,
         )
         await _track_llm_usage(
             self.provider_name,
@@ -496,6 +509,14 @@ class MultiKeyProvider:
     ) -> AsyncGenerator[str]:
         """Stream chat output token by token with key rotation.
         Falls back to regular chat() if no provider supports streaming."""
+        # ── Iteration Budget check for streaming calls ──
+        from src.core.intelligence.iteration_budget import IterationBudget
+
+        if not hasattr(self, "_llm_budget"):
+            self._llm_budget = IterationBudget()
+        if not self._llm_budget.record_llm_call():
+            raise RuntimeError("LLM call budget exhausted — too many calls in window")
+
         # Resolve heavy: explicit True/False wins; if not passed, use _default_heavy
         effective_heavy = self._default_heavy if heavy is _UNSET else heavy
         model_override = self._resolve_model_for_task(task_type)
@@ -663,8 +684,42 @@ class MultiKeyProvider:
                             self.provider_name,
                         )
                 yield await self._retry_inner(
-                    messages, heavy=effective_heavy, task_type=task_type
+                    messages,
+                    heavy=effective_heavy,
+                    task_type=task_type,
+                    _skip_budget=True,
                 )
+            finally:
+                self._semaphore.release()
+        finally:
+            release_purpose_slot(sem)
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition] | None = None,
+        *,
+        task_type: str = TaskType.DEFAULT,
+    ) -> ChatResponse:
+        """Chat with tool definitions and key rotation."""
+        sem = await acquire_purpose_slot(self._current_purpose)
+        try:
+            await self._semaphore.acquire()
+            try:
+                model_override = self._resolve_model_for_task(task_type)
+                resp = await self._try_with_retry(
+                    lambda p: p.chat_with_tools(
+                        messages, tools=tools, task_type=task_type
+                    ),
+                    model_override=model_override,
+                )
+                await _track_llm_usage(
+                    self.provider_name,
+                    model_override or self._model,
+                    messages,
+                    resp.text,
+                )
+                return resp
             finally:
                 self._semaphore.release()
         finally:
@@ -693,6 +748,15 @@ class MultiKeyProvider:
                 self._semaphore.release()
         finally:
             release_purpose_slot(sem)
+
+    def reset_llm_budget(self) -> None:
+        """Reset the LLM iteration budget for a new user request window.
+
+        Called by ProviderFallback at the start of each user-facing request
+        to prevent budget exhaustion across requests.
+        """
+        if hasattr(self, "_llm_budget"):
+            self._llm_budget.reset()
 
     async def validate_key(self) -> bool:
         # NOTE: валидирует доступ к ключу, а не наличие конкретной модели.
@@ -778,8 +842,11 @@ class ProviderFallback:
 
     @_model.setter
     def _model(self, value: str | None) -> None:
-        for p in self.providers:
-            p._model = value
+        # ponytail: model override is a primary-provider directive only.
+        # Fallback providers use their own default models to avoid
+        # sending e.g. "gpt-4o-mini" to Anthropic/Gemini.
+        if self.providers:
+            self.providers[0]._model = value
 
     @property
     def _default_heavy(self) -> bool:
@@ -811,6 +878,9 @@ class ProviderFallback:
             key=lambda p: _score_provider(p.provider_name, now),
             reverse=True,
         )
+        # ── Reset LLM call budget for new user request ──
+        for p in self.providers:
+            p.reset_llm_budget()
         # Map None → _UNSET for MultiKeyProvider
         # (preserves "use _default_heavy" semantic)
         mkp_heavy = _UNSET if heavy is None else heavy
@@ -826,9 +896,9 @@ class ProviderFallback:
                         messages, heavy=mkp_heavy, task_type=task_type
                     )
             except Exception as exc:
-                if not isinstance(exc, ExhaustedError) and not _is_retryable_llm_error(
-                    exc
-                ):
+                if not isinstance(
+                    exc, (ExhaustedError, AttributeError, NotImplementedError)
+                ) and not _is_retryable_llm_error(exc):
                     raise
                 last_error = exc
                 logger.warning(
@@ -852,6 +922,9 @@ class ProviderFallback:
             key=lambda p: _score_provider(p.provider_name, now),
             reverse=True,
         )
+        # ── Reset LLM call budget for new user request ──
+        for p in self.providers:
+            p.reset_llm_budget()
         # Map None → _UNSET for MultiKeyProvider
         # (preserves "use _default_heavy" semantic)
         mkp_heavy = _UNSET if heavy is None else heavy
@@ -876,6 +949,48 @@ class ProviderFallback:
                 )
         # All streaming failed — fallback to regular chat
         yield await self.chat(messages, heavy=heavy, task_type=task_type)
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition] | None = None,
+        *,
+        task_type: str = TaskType.DEFAULT,
+    ) -> ChatResponse:
+        """Tool chat with adaptive provider fallback."""
+        last_error: Exception | None = None
+        now = asyncio.get_running_loop().time()
+        sorted_providers = sorted(
+            self.providers,
+            key=lambda p: _score_provider(p.provider_name, now),
+            reverse=True,
+        )
+        # ── Reset LLM call budget for new user request ──
+        for p in self.providers:
+            p.reset_llm_budget()
+        for provider in sorted_providers:
+            try:
+                with start_span(
+                    "llm.chat_with_tools",
+                    provider=provider.provider_name,
+                    task_type=task_type,
+                    msg_count=len(messages),
+                ):
+                    return await provider.chat_with_tools(
+                        messages, tools=tools, task_type=task_type
+                    )
+            except Exception as exc:
+                if not isinstance(
+                    exc, (ExhaustedError, AttributeError, NotImplementedError)
+                ) and not _is_retryable_llm_error(exc):
+                    raise
+                last_error = exc
+                logger.warning(
+                    "LLM provider %s chat_with_tools failed, trying next: %s",
+                    provider.name,
+                    safe_str(exc)[:200],
+                )
+        raise last_error or RuntimeError("All LLM providers failed")
 
     async def embed(self, text: str) -> list[float]:
         """Embed с fallback по цепочке провайдеров.

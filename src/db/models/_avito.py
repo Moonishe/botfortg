@@ -116,4 +116,4 @@ class AvitoWatch(Base):
 
     # Relationship
     listing: Mapped[AvitoListing] = relationship(back_populates="watches")
-    user: Mapped[User] = relationship()
+    user: Mapped[User] = relationship(foreign_keys=[user_id])

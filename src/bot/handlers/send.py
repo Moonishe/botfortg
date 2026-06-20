@@ -4,6 +4,8 @@ import logging
 import re
 import time
 
+from typing import Any
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -93,7 +95,7 @@ PARSE_SYSTEM = (
 )
 
 
-def _parse_json(text: str) -> dict:
+def _parse_json(text: str) -> dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
@@ -102,7 +104,8 @@ def _parse_json(text: str) -> dict:
         text = text.strip()
     try:
         return json.loads(text)
-    except Exception:
+    except json.JSONDecodeError:
+        logger.debug("Failed to parse JSON", exc_info=True)
         return {}
 
 
@@ -118,7 +121,11 @@ def _candidates_keyboard(candidates: list[ContactCandidate], message_text: str):
                 callback_data=f"send:pick:{c.peer_id}",
             )
         )
-    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="send:cancel:0"))
+    kb.row(
+        InlineKeyboardButton(
+            text="❌ Отмена", callback_data=approval.format_cancel_callback("send", "0")
+        )
+    )
     return kb.as_markup()
 
 
@@ -323,21 +330,15 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(
-    F.data.startswith("send:cancel:") | F.data.startswith("ap:cancel:send:")
-)
+@router.callback_query(F.data.startswith("ap:cancel:send:"))
 async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    """Cancel a pending send action. Accepts legacy send:cancel: and new ap:cancel:send:."""
+    """Cancel a pending send action. Only unified ap:cancel:send: accepted (HMAC-verified)."""
     data = callback.data or ""
     action_id = 0
     try:
-        if data.startswith("ap:cancel:send:"):
-            parsed = approval.parse_cancel_callback(data)
-            if parsed:
-                action_id = int(parsed[1])
-        else:
-            parts = data.split(":")
-            action_id = int(parts[2]) if len(parts) > 2 else 0
+        parsed = approval.parse_cancel_callback(data)
+        if parsed:
+            action_id = int(parsed[1])
     except (ValueError, IndexError):
         action_id = 0
 
@@ -391,7 +392,12 @@ async def step_edit(message: Message, state: FSMContext) -> None:
         await message.answer("Пустой текст. Повтори или /cancel.")
         return
     data = await state.get_data()
-    action_id = data.get("action_id")
+    action_id_raw = data.get("action_id")
+    if not isinstance(action_id_raw, int):
+        await state.clear()
+        await message.answer("Сессия отправки потеряна. Запусти /send заново.")
+        return
+    action_id: int = action_id_raw
     async with get_session() as session:
         user = await get_or_create_user(session, message.from_user.id)
         action = await get_pending_action(session, action_id, user)
@@ -546,7 +552,14 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
                     return
 
                 try:
-                    entity = await client.get_entity(peer_id)
+                    entity_raw = await client.get_entity(peer_id)
+                    # get_entity may return List[Entity] for ambiguous usernames
+                    if isinstance(entity_raw, list):
+                        if not entity_raw:
+                            raise ValueError("no entity found")
+                        entity = entity_raw[0]
+                    else:
+                        entity = entity_raw
                     await client.send_message(entity, text)
                 except Exception as e:
                     logger.warning("send_message failed: %s", e)
@@ -577,6 +590,20 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
                         action_id,
                         exc_info=True,
                     )
+
+                text_for_display = str(text or "")
+                snippet = text_for_display[:60]
+                if len(text_for_display) > 60:
+                    snippet += "…"
+
+                after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
+
+                await safe_callback_edit(
+                    callback,
+                    sanitize_html(f"✅ Отправлено «{label}»: {snippet}"),
+                    reply_markup=after_kb,
+                )
+                await callback.answer("Отправлено")
     except TimeoutError:
         # The lock was held for too long — likely a crashed/dead coroutine
         # from a prior callback. Replace the stuck lock so future attempts
@@ -592,21 +619,6 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         await callback.answer(
             "❌ Система занята, попробуй через минуту.", show_alert=True
         )
-        return
-
-    text_for_display = str(text or "")
-    snippet = text_for_display[:60]
-    if len(text_for_display) > 60:
-        snippet += "…"
-
-    after_kb = smart_post_action_keyboard("send", {"peer_id": str(peer_id)})
-
-    await safe_callback_edit(
-        callback,
-        sanitize_html(f"✅ Отправлено «{label}»: {snippet}"),
-        reply_markup=after_kb,
-    )
-    await callback.answer("Отправлено")
 
 
 @router.callback_query(F.data.startswith("send:again:"))

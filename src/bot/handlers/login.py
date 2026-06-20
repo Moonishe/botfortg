@@ -19,6 +19,7 @@ from aiogram.exceptions import AiogramError
 
 from src.config import settings
 from src.bot.filters import OwnerOnly
+from src.core.infra.text_sanitizer import sanitize_html
 from src.bot.handlers.memory_correction import clear_correction_state_if_pending
 from src.bot.states import LoginStates, OnboardingStates
 from src.db.repo import (
@@ -331,7 +332,7 @@ async def _finalize_login(
     session_string = None
     del session_string
 
-    userbot_manager.register_client(tg_id, pending.client)
+    await userbot_manager.register_client(tg_id, pending.client)
     await state.clear()
 
     # Если пользователь в процессе онбординга — переводим на следующий шаг
@@ -341,7 +342,7 @@ async def _finalize_login(
         return  # онбординг продолжится сам
 
     await message.answer(
-        f"✅ Аккаунт <b>{label}</b> подключён. Сессия сохранена в зашифрованном виде.\n\n"
+        f"✅ Аккаунт <b>{sanitize_html(label)}</b> подключён. Сессия сохранена в зашифрованном виде.\n\n"
         "Дальше — /settings, чтобы выбрать LLM и настроить авто-ответ."
     )
     await message.answer(

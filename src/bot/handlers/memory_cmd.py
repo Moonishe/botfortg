@@ -398,7 +398,7 @@ async def _cmd_memory_impact(
             return
         candidates = await resolve_contact_fast(client, owner, contact_name)
         if not candidates:
-            await message.answer(f"Контакт «{contact_name}» не найден.")
+            await message.answer(f"Контакт «{sanitize_html(contact_name)}» не найден.")
             return
         from src.db.repos.memory_repo import contact_impact
 

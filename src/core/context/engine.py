@@ -47,13 +47,18 @@ class ContextEngine:
 
         chunks: list[ContextChunk] = []
         for provider, result in zip(self._providers, results):
-            if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
                 logger.debug(
                     "Context provider '%s' failed: %s",
                     provider.name,
                     result,
                 )
                 continue
+            if isinstance(result, BaseException):
+                # SystemExit/KeyboardInterrupt must not be swallowed here.
+                raise result
             chunks.extend(result)
         return chunks
 

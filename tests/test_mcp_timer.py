@@ -157,4 +157,4 @@ def test_import_does_not_access_database() -> None:
     """
     importlib.reload(mcp_timer)
     # If we got here without errors, the import is side-effect-free.
-    assert True
+    assert mcp_timer._db_loaded is False, "import should not trigger DB load"

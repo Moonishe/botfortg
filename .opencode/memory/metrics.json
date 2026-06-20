@@ -1,47 +1,75 @@
-{
-  "_description": "Quality metrics across all sessions. Updated at session end.",
-  "sessions": {
-    "total": 14,
-    "completed": 14,
-    "escalated": 0,
-    "completion_rate": 1.0
-  },
-  "tasks": {
-    "total": 104,
-    "completed": 104,
-    "avg_per_session": 7.43
-  },
-  "pipeline": {
-    "d5r5_cycles_total": 47,
-    "avg_iterations_per_task": 0.45,
-    "max_iterations_hit": 0,
-    "goal_judge_ok": 14,
-    "goal_judge_impossible": 0
-  },
-  "dream_distill": {
-    "dream_runs": 0,
-    "dream_findings_total": 0,
-    "distill_runs": 0,
-    "skills_created": 0
-  },
-  "max_mode": {
-    "runs": 6,
-    "candidates_avg_score": 0.82,
-    "winner_was_best": 1,
-    "max_mode_2_finds_total": 74,
-    "max_mode_2_unique_after_dedup": 52,
-    "max_mode_2_verified_top9": 9
-  },
-  "audit_findings": {
-    "total": 74,
-    "unique_after_dedup": 52,
-    "verified": 9,
-    "critical": 11,
-    "high": 19,
-    "medium": 14,
-    "low_or_info": 8,
-    "audit_date": "2026-06-16",
-    "audit_type": "read-only full project scan"
-  },
-  "updated_at": "2026-06-19T20:10:00Z"
+﻿{
+    "_description":  "Quality metrics across all sessions. Updated at session end.",
+    "sessions":  {
+                     "total":  17,
+                     "completed":  17,
+                     "escalated":  0,
+                     "completion_rate":  1.0
+                 },
+    "tasks":  {
+                  "total":  124,
+                  "completed":  124,
+                  "avg_per_session":  7.25
+              },
+    "pipeline":  {
+                     "d5r5_cycles_total":  50,
+                     "avg_iterations_per_task":  0.43,
+                     "max_iterations_hit":  0,
+                     "goal_judge_ok":  5,
+                     "goal_judge_impossible":  1,
+                     "deepresearch_sessions":  1,
+                     "deepresearch_agents_total":  20,
+                     "deepresearch_critical_findings":  3,
+                     "deepresearch_high_findings":  8,
+                     "deepresearch_false_positives_refuted":  8
+                 },
+    "dream_distill":  {
+                          "dream_runs":  0,
+                          "dream_findings_total":  0,
+                          "distill_runs":  0,
+                          "skills_created":  0
+                      },
+    "max_mode":  {
+                     "runs":  7,
+                     "candidates_avg_score":  0.82,
+                     "winner_was_best":  1,
+                     "max_mode_2_finds_total":  74,
+                     "max_mode_2_unique_after_dedup":  52,
+                     "max_mode_2_verified_top9":  9,
+                     "deepresearch_judge_runs":  5,
+                     "deepresearch_judge_consensus_top5":  5
+                 },
+    "audit_findings":  {
+                           "total":  74,
+                           "unique_after_dedup":  52,
+                           "verified":  9,
+                           "critical":  11,
+                           "high":  19,
+                           "medium":  14,
+                           "low_or_info":  8,
+                           "audit_date":  "2026-06-16",
+                           "audit_type":  "read-only full project scan"
+                       },
+    "deepresearch_audit_2026_06_19":  {
+                                          "agents_total":  20,
+                                          "waves":  4,
+                                          "critical_found":  3,
+                                          "high_found":  8,
+                                          "medium_found":  8,
+                                          "low_found":  5,
+                                          "false_positives_refuted":  8,
+                                          "evidences_per_finding_avg":  3.0,
+                                          "false_positive_refutation_rate":  0.11,
+                                          "consensus_top5_fixes":  [
+                                                                       "sandbox __traceback__ escape (mcp_code_exec.py)",
+                                                                       "homoglyph PI bypass (web_sanitizer.py, prompt_injection_scanner.py)",
+                                                                       "sdd_executor repr() injection (sdd_executor.py)",
+                                                                       "Legacy HMAC bypass (_confirm.py, send.py)",
+                                                                       "flush_now race + router stale now (auto_save_batch.py, router.py)"
+                                                                   ],
+                                          "estimated_sprint1_effort_hours":  7.0,
+                                          "audit_date":  "2026-06-19",
+                                          "audit_type":  "deep research full project scan with 20 parallel agents"
+                                      },
+    "updated_at":  "2026-06-20T13:32:21.7601165+07:00"
 }

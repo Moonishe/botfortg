@@ -14,6 +14,7 @@ import html
 import base64
 import codecs
 import re
+import unicodedata
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -68,20 +69,27 @@ _PATTERNS: dict[str, list[str]] = {
     ],
 }
 
-# Cyrillic -> Latin transliteration for homoglyph detection
+# Cyrillic + Greek -> Latin transliteration for homoglyph detection
 _CYR_TO_LAT: dict[str, str] = {
+    # Cyrillic
     "\u0430": "a",
     "\u0435": "e",
     "\u043e": "o",
     "\u0440": "p",
     "\u0441": "c",
+    "\u0432": "b",
     "\u0443": "y",
     "\u0445": "x",
     "\u0456": "i",
     "\u0455": "s",
     "\u0458": "j",
     "\u04bb": "h",
+    "\u043a": "k",  # CYRILLIC SMALL LETTER KA
+    "\u043c": "m",
+    "\u043d": "n",
+    "\u0442": "t",  # CYRILLIC SMALL LETTER TE
     "\u049b": "k",
+    "\u0406": "I",
     "\u0410": "A",
     "\u0412": "B",
     "\u0415": "E",
@@ -94,7 +102,49 @@ _CYR_TO_LAT: dict[str, str] = {
     "\u0422": "T",
     "\u0423": "Y",
     "\u0425": "X",
+    "\u0405": "S",
+    "\u0408": "J",
+    "\u04ba": "H",
+    "\u049a": "K",
+    # Greek lowercase
+    "\u03bf": "o",  # ο omicron
+    "\u03bd": "v",  # ν nu
+    "\u03b5": "e",  # ε epsilon
+    "\u03b1": "a",  # α alpha
+    "\u03c1": "p",  # ρ rho
+    "\u03c4": "t",  # τ tau
+    "\u03ba": "k",  # κ kappa
+    "\u03c7": "x",  # χ chi
+    "\u03c5": "u",  # υ upsilon — visually mimics Latin 'u'
+    "\u03b6": "z",  # ζ zeta
+    "\u03b7": "n",  # η eta
+    "\u03b9": "i",  # ι iota
+    # Greek uppercase
+    "\u039f": "O",  # Ο omicron
+    "\u039d": "N",  # Ν nu
+    "\u0395": "E",  # Ε epsilon
+    "\u0391": "A",  # Α alpha
+    "\u03a1": "P",  # Ρ rho
+    "\u03a4": "T",  # Τ tau
+    "\u039a": "K",  # Κ kappa
+    "\u03a7": "X",  # Χ chi
+    "\u03a5": "Y",  # Υ upsilon — visually mimics Latin 'Y'
+    "\u039c": "M",  # Μ mu
+    "\u0397": "H",  # Η eta
+    "\u0392": "B",  # Β beta
+    "\u0399": "I",  # Ι iota
+    "\u0396": "Z",  # Ζ zeta
 }
+
+
+# Module-level homoglyph translation table (single-pass str.translate)
+_HOMOGLYPH_TRANS = str.maketrans(_CYR_TO_LAT)
+
+
+def _normalize_homoglyphs(text: str) -> str:
+    """Apply Cyrillic/Greek → Latin transliteration for homoglyph detection."""
+    return text.translate(_HOMOGLYPH_TRANS)
+
 
 _INJECTION_AFTER_NORMALIZE = [
     r"ignore\s+(all\s+)?(previous|prior)\s+instructions",
@@ -112,7 +162,10 @@ _LEET_MAP: dict[str, str] = {
     "3": "e",
     "4": "a",
     "5": "s",
+    "6": "g",
     "7": "t",
+    "8": "b",
+    "+": "t",
     "@": "a",
     "$": "s",
 }
@@ -253,14 +306,25 @@ def _try_decode_base64(content: str) -> str | None:
     return " ".join(decoded_parts) if decoded_parts else None
 
 
-def _check_homoglyphs(content: str) -> str | None:
+def _check_homoglyphs(
+    content: str,
+    check_suspicion: bool = True,
+    normalized: str | None = None,
+) -> str | None:
     """Check for Cyrillic/Latin homoglyph substitution in injection keywords."""
-    normalized = content
-    for cyr, lat in _CYR_TO_LAT.items():
-        normalized = normalized.replace(cyr, lat)
+    if normalized is None:
+        normalized = _normalize_homoglyphs(content)
+    if normalized == content:
+        return None
     for pattern in _INJECTION_AFTER_NORMALIZE:
         if re.search(pattern, normalized, re.IGNORECASE):
             return f"homoglyph substitution detected: {pattern}"
+    if _ROLE_INJECTION.search(normalized):
+        return "homoglyph role injection detected"
+    if check_suspicion:
+        suspicion = _check_suspicion_score(normalized)
+        if suspicion:
+            return f"homoglyph suspicion: {suspicion}"
     return None
 
 
@@ -413,6 +477,27 @@ def _scan_decoded_recursive(
                 ),
             )
 
+        # Homoglyph normalization on decoded output (e.g., base64(Cyrillic injection))
+        homo_norm = _normalize_homoglyphs(decoded)
+        if homo_norm != decoded:
+            homo_result = _check_homoglyphs(
+                decoded, check_suspicion=True, normalized=homo_norm
+            )
+            if homo_result:
+                prefix = f"{source}+{decoder_name}" if source else decoder_name
+                return ScanResult(
+                    blocked=True,
+                    category=f"layered_{prefix}_homoglyph"
+                    if depth > 0
+                    else f"{decoder_name}_homoglyph",
+                    match=homo_result,
+                    file=filename,
+                    message=(
+                        f"[BLOCKED] {filename}: {prefix}-encoded homoglyph injection"
+                        f" ({homo_result})"
+                    ),
+                )
+
         # Leetspeak normalization on decoded output
         leet_norm = _normalize_leet(decoded)
         if leet_norm != decoded:
@@ -460,6 +545,10 @@ def scan_content(content: str, filename: str = "") -> ScanResult:
     if not content or not content.strip():
         return ScanResult(blocked=False)
 
+    # Layer 0: Strip zero-width/invisible characters and normalize math alphanumerics
+    content = re.sub(r"[\u200b-\u200f\ufeff\u2060-\u2064]", "", content)
+    content = unicodedata.normalize("NFKC", content)
+
     # Layer 1: Direct pattern match
     result = _match_patterns(content)
     if result:
@@ -476,14 +565,27 @@ def scan_content(content: str, filename: str = "") -> ScanResult:
         )
         return result
 
-    # Layer 2: Homoglyph check (mixed Cyrillic/Latin)
-    sample = content[:200]
-    has_cyrillic = any(
-        "\u0400" <= c <= "\u04ff" or "\u0500" <= c <= "\u052f" for c in sample
-    )
-    has_latin = any(c.isascii() and c.isalpha() for c in sample)
-    if has_cyrillic and has_latin:
-        homoglyph_result = _check_homoglyphs(content)
+    # Layer 2: Homoglyph check (Cyrillic/Greek/Latin)
+    # Scan FULL content — a 200-char sample allows padding bypass:
+    # attacker puts 200+ chars of clean Latin text, then homoglyph injection.
+    # Scan the entire string so `has_latin` is accurate even when non-Latin
+    # characters appear first.
+    has_cyrillic = False
+    has_greek = False
+    has_latin = False
+    for c in content:
+        cp = ord(c)
+        if 0x0400 <= cp <= 0x04FF or 0x0500 <= cp <= 0x052F:
+            has_cyrillic = True
+        elif 0x0370 <= cp <= 0x03FF:
+            has_greek = True
+        if not has_latin and c.isascii() and c.isalpha():
+            has_latin = True
+    has_non_latin_script = has_cyrillic or has_greek
+    if has_non_latin_script:
+        # Run keyword/role checks always; apply suspicion only when Latin is
+        # also present to avoid false positives on legitimate non-Latin text.
+        homoglyph_result = _check_homoglyphs(content, check_suspicion=has_latin)
         if homoglyph_result:
             logger.warning("Homoglyph injection in %s: %s", filename, homoglyph_result)
             return ScanResult(

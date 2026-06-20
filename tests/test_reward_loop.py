@@ -250,23 +250,13 @@ async def test_reward_loop_integration():
     # Patch get_session + init_db to use our isolated engine
     from contextlib import asynccontextmanager
     import src.db.session as db_session_mod
-
-    original_get_session = db_session_mod.get_session
-    original_engine = db_session_mod.engine
+    import src.core.learning.reward_loop as rl_mod
+    from unittest.mock import patch
 
     @asynccontextmanager
     async def _test_get_session():
         async with TestSession() as s:
             yield s
-
-    db_session_mod.get_session = _test_get_session
-    db_session_mod.engine = test_engine
-
-    # Also patch reward_loop's imported get_session
-    import src.core.learning.reward_loop as rl_mod
-
-    original_rl_get_session = rl_mod.get_session
-    rl_mod.get_session = _test_get_session
 
     from src.db.models._learning import Trajectory, Skill
     from src.db.models import User, Base
@@ -283,48 +273,51 @@ async def test_reward_loop_integration():
     try:
         settings.reward_min_episodes = 1
 
-        # Create schema in isolated in-memory DB
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        # Patch module-level session references in a context so they are
+        # restored automatically even if the test fails.
+        with (
+            patch.object(db_session_mod, "get_session", _test_get_session),
+            patch.object(db_session_mod, "engine", test_engine),
+            patch.object(rl_mod, "get_session", _test_get_session),
+        ):
+            # Create schema in isolated in-memory DB
+            async with test_engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
 
-        # Create a test user (FK constraint requires it)
-        async with TestSession() as session:
-            session.add(User(id=TEST_UID, telegram_id=TEST_UID))
-            await session.flush()
+            # Create a test user (FK constraint requires it)
+            async with TestSession() as session:
+                session.add(User(id=TEST_UID, telegram_id=TEST_UID))
+                await session.flush()
 
-            for i in range(3):
-                t = Trajectory(
-                    user_id=TEST_UID,
-                    request_text=f"test request {i}",
-                    response_text="test response",
-                    success=True,
-                    reward_value=0.8,
-                    value_estimate=0.5,
-                    step_index=i,
-                    route_mode="default",
-                )
-                session.add(t)
-            await session.commit()
+                for i in range(3):
+                    t = Trajectory(
+                        user_id=TEST_UID,
+                        request_text=f"test request {i}",
+                        response_text="test response",
+                        success=True,
+                        reward_value=0.8,
+                        value_estimate=0.5,
+                        step_index=i,
+                        route_mode="default",
+                    )
+                    session.add(t)
+                await session.commit()
 
-        # backprop — verify no crash
-        updated = await backprop_values(TEST_UID, window=10)
-        assert isinstance(updated, int)
+            # backprop — verify no crash
+            updated = await backprop_values(TEST_UID, window=10)
+            assert isinstance(updated, int)
 
-        # induce — verify no crash
-        induced = await induce_policies(TEST_UID)
-        assert isinstance(induced, int)
+            # induce — verify no crash
+            induced = await induce_policies(TEST_UID)
+            assert isinstance(induced, int)
 
-        # crystallize — functional verification
-        result = await crystallize_policies(TEST_UID)
-        assert isinstance(result, dict)
-        assert "crystallized" in result
-        assert "rejected" in result
+            # crystallize — functional verification
+            result = await crystallize_policies(TEST_UID)
+            assert isinstance(result, dict)
+            assert "crystallized" in result
+            assert "rejected" in result
     finally:
         settings.reward_min_episodes = original_min
-        # Restore originals
-        db_session_mod.get_session = original_get_session
-        db_session_mod.engine = original_engine
-        rl_mod.get_session = original_rl_get_session
         try:
             await test_engine.dispose()
         except Exception:

@@ -36,6 +36,21 @@ _SANDBOX_BLACKLIST = frozenset(
         "__reduce__",
         "__reduce_ex__",
         "__sizeof__",
+        "__traceback__",
+        "tb_frame",
+        "tb_lineno",
+        "tb_next",
+        "f_back",
+        "f_builtins",
+        "f_code",
+        "f_globals",
+        "f_lasti",
+        "f_lineno",
+        "f_locals",
+        "f_trace",
+        "cr_code",
+        "cr_frame",
+        "cr_globals",
         "exec",
         "eval",
         "compile",
@@ -49,6 +64,7 @@ _SANDBOX_BLACKLIST = frozenset(
         "getattr",
         "setattr",
         "delattr",
+        "hasattr",
         "type",
         "object",
         "gc",
@@ -56,6 +72,53 @@ _SANDBOX_BLACKLIST = frozenset(
         "isinstance",
     }
 )
+
+# Запрещённые модули и builtins
+_DISALLOWED_IMPORTS = {
+    "os",
+    "subprocess",
+    "sys",
+    "shutil",
+    "socket",
+    "requests",
+    "httpx",
+    "urllib",
+    "http",
+    "ftplib",
+    "telnetlib",
+    "smtplib",
+    "imaplib",
+    "pathlib",
+    "glob",
+    "fnmatch",
+    "importlib",
+    "__import__",
+    "open",
+    "exec",
+    "eval",
+    "compile",
+    "execfile",
+    "ctypes",
+    "multiprocessing",
+    "threading",
+    "signal",
+    "io",
+    "pickle",
+    "marshal",
+    "code",
+    "codeop",
+    "inspect",
+    "traceback",
+    "pdb",
+    "runpy",
+    "fcntl",
+    "posix",
+    "nt",
+    "_thread",
+    "pty",
+    "atexit",
+    "faulthandler",
+}
 
 
 def _check_sandbox_safety(code: str) -> str | None:
@@ -107,53 +170,6 @@ def _check_sandbox_safety(code: str) -> str | None:
     return None
 
 
-# Запрещённые модули и builtins
-_DISALLOWED_IMPORTS = {
-    "os",
-    "subprocess",
-    "sys",
-    "shutil",
-    "socket",
-    "requests",
-    "httpx",
-    "urllib",
-    "http",
-    "ftplib",
-    "telnetlib",
-    "smtplib",
-    "imaplib",
-    "pathlib",
-    "glob",
-    "fnmatch",
-    "importlib",
-    "__import__",
-    "open",
-    "exec",
-    "eval",
-    "compile",
-    "execfile",
-    "ctypes",
-    "multiprocessing",
-    "threading",
-    "signal",
-    "io",
-    "pickle",
-    "marshal",
-    "code",
-    "codeop",
-    "inspect",
-    "traceback",
-    "pdb",
-    "runpy",
-    "fcntl",
-    "posix",
-    "nt",
-    "_thread",
-    "pty",
-    "atexit",
-    "faulthandler",
-}
-
 # Места для подстановки: __DISALLOWED__ — repr(tuple) запрещённого (tuple —
 # иммутабелен, чтобы пользовательский код не мог очистить блок-лист через
 # builtins.__import__.__defaults__[0].clear()),
@@ -161,6 +177,9 @@ _DISALLOWED_IMPORTS = {
 _WRAPPER_TEMPLATE = """\
 import builtins
 import sys
+
+# Capture original type BEFORE any builtins are modified/nullified
+_type = type
 
 # ── RLIMITs: ограничение ресурсов подпроцесса (только Linux/macOS) ──
 # Ограничиваем CPU, память и запрещаем fork для предотвращения DoS.
@@ -183,21 +202,23 @@ _SAFE_BUILTINS = {
     for name in {
         "abs", "all", "any", "bin", "bool", "bytes", "chr", "complex",
         "dict", "divmod", "enumerate", "filter", "float", "format", "frozenset",
-        "hex", "int", "isinstance", "issubclass", "iter", "len", "list",
+        "hex", "int", "iter", "len", "list",
         "map", "max", "min", "oct", "ord", "pow", "print", "range",
         "repr", "reversed", "round", "set", "slice", "sorted", "str",
-        "sum", "tuple", "type", "zip", "True", "False", "None", "Exception",
+        "sum", "tuple", "zip", "True", "False", "None", "Exception",
         "ValueError", "TypeError", "KeyError", "IndexError", "StopIteration",
         "ZeroDivisionError", "math", "json", "datetime", "collections",
         "itertools", "functools", "random", "statistics", "re", "hashlib",
         "base64", "textwrap", "string", "decimal", "fractions", "numbers",
-        "csv", "io", "dataclasses",
+        "csv", "dataclasses",
     } if hasattr(builtins, name)
 }
 
 for name in _SAFE_BUILTINS:
     setattr(builtins, name, _SAFE_BUILTINS[name])
 
+# Nullify dangerous builtins that could enable sandbox escape
+# (defense-in-depth — also blocked at AST level by _SANDBOX_BLACKLIST)
 _DISALLOWED = __DISALLOWED__
 for name in _DISALLOWED:
     if name in dir(builtins) and name not in _SAFE_BUILTINS:
@@ -232,7 +253,7 @@ except MemoryError:
 except TimeoutError:
     print("Error: TimeoutError: превышен лимит CPU (5 сек)", file=_stderr)
 except Exception as e:
-    print(f"Error: {type(e).__name__}: {e}", file=_stderr)
+    print(f"Error: {_type(e).__name__}: {e}", file=_stderr)
 """
 
 
@@ -246,23 +267,26 @@ async def _run_code_in_sandbox(wrapper: str, timeout: int) -> dict[str, Any]:
             ["python", "-c", wrapper],
             timeout=timeout,
         )
+        stdout = (result["stdout"] or "").strip()
+        stderr = (result["stderr"] or "").strip()
+
+        if result["returncode"] != 0 or stderr:
+            return {
+                "ok": False,
+                "output": stdout[:2000] if stdout else "",
+                "error": stderr[:1000]
+                if stderr
+                else f"Exit code {result['returncode']}",
+            }
+
+        return {
+            "ok": True,
+            "output": stdout[:2000],
+        }
     except RuntimeError as exc:
         return {"error": safe_str(exc)[:300]}
-
-    stdout = (result["stdout"] or "").strip()
-    stderr = (result["stderr"] or "").strip()
-
-    if result["returncode"] != 0 or stderr:
-        return {
-            "ok": False,
-            "output": stdout[:2000] if stdout else "",
-            "error": stderr[:1000] if stderr else f"Exit code {result['returncode']}",
-        }
-
-    return {
-        "ok": True,
-        "output": stdout[:2000],
-    }
+    finally:
+        await manager.cleanup()
 
 
 @tool(

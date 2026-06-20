@@ -84,6 +84,13 @@ _SEEN_MESSAGES: OrderedDict[tuple[int, int], None] = OrderedDict()
 _SEEN_MESSAGES_MAX = 1000
 _SEEN_MESSAGES_LOCK = asyncio.Lock()
 
+# ===== DEDUP for edits: separate from messages — a message can be new once
+# but edited many times. Telethon replays MessageEdited events on reconnect,
+# so edits need their own dedup to prevent re-processing the same edit event.
+_SEEN_EDITS: OrderedDict[tuple[int, int], None] = OrderedDict()
+_SEEN_EDITS_MAX = 1000
+_SEEN_EDITS_LOCK = asyncio.Lock()
+
 
 async def _is_message_duplicate(msg_id: int, peer_id: int) -> bool:
     """Check if (msg_id, peer_id) was already processed recently."""
@@ -104,6 +111,29 @@ async def _mark_message_processed(msg_id: int, peer_id: int) -> None:
             remove_count = len(_SEEN_MESSAGES) // 2
             for _ in range(remove_count):
                 _SEEN_MESSAGES.popitem(last=False)
+
+
+async def _is_edit_duplicate(msg_id: int, peer_id: int) -> bool:
+    """Check if edit (msg_id, peer_id) was already processed recently.
+
+    Separate dedup from _is_message_duplicate: a message can be new once but
+    edited many times with different content. Replayed MessageEdited events
+    (same content) should be skipped, not genuine subsequent edits.
+    """
+    async with _SEEN_EDITS_LOCK:
+        return (msg_id, peer_id) in _SEEN_EDITS
+
+
+async def _mark_edit_processed(msg_id: int, peer_id: int) -> None:
+    """Mark edit (msg_id, peer_id) as processed in edit dedup set."""
+    async with _SEEN_EDITS_LOCK:
+        key = (msg_id, peer_id)
+        _SEEN_EDITS.pop(key, None)
+        _SEEN_EDITS[key] = None
+        if len(_SEEN_EDITS) > _SEEN_EDITS_MAX:
+            remove_count = len(_SEEN_EDITS) // 2
+            for _ in range(remove_count):
+                _SEEN_EDITS.popitem(last=False)
 
 
 async def _is_watched_peer_cached(peer_id: int) -> bool | None:
@@ -531,8 +561,15 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             if not peer_id:
                 return
 
-            # Update message text in DB
+            # ===== DEDUP: skip replayed events after Telethon reconnect =====
+            if await _is_edit_duplicate(msg.id, peer_id):
+                return
+
+            kind = _classify(msg)
             edited_text = msg.text or msg.message or None
+            sender_name = await _sender_label(msg)
+
+            # Update message text in DB
             if edited_text:
                 try:
                     async with get_session() as _ed_session:
@@ -543,15 +580,19 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                             peer_id=peer_id,
                             message_id=msg.id,
                             sender_id=msg.sender_id,
-                            sender_name="",
+                            sender_name=sender_name,
                             is_outgoing=bool(msg.out),
                             date=msg.date.replace(tzinfo=None) if msg.date else None,
-                            kind="text",
+                            kind=kind,
                             text=edited_text,
                             transcript=None,
                             media_path=None,
                             extracted_text=None,
                         )
+                    # Mark as processed AFTER successful DB insert —
+                    # if upsert fails, Telethon replay will retry this edit
+                    # instead of losing it permanently.
+                    await _mark_edit_processed(msg.id, peer_id)
                 except Exception:
                     logger.debug("Failed to update edited message text", exc_info=True)
 

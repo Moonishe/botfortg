@@ -16,6 +16,7 @@ from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
 from src.bot.contact_resolver import resolve_contact_fast
+from src.core.infra.text_sanitizer import sanitize_html
 from src.core.services.chat_actions import ask_chat_action
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -92,7 +93,7 @@ async def ask_cmd(
         return
 
     # Статус
-    status_msg = await message.answer(f"🔍 Ищу чат «{name}»…")
+    status_msg = await message.answer(f"🔍 Ищу чат «{sanitize_html(name)}»…")
 
     # Решаем имя → peer_id через fuzzy matching
     try:
@@ -106,7 +107,7 @@ async def ask_cmd(
 
     if not candidates:
         await status_msg.edit_text(
-            f"❌ Чат «{name}» не найден.\n"
+            f"❌ Чат «{sanitize_html(name)}» не найден.\n"
             "Проверь имя или попробуй синхронизировать контакты: /sync"
         )
         return

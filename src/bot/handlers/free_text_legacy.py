@@ -8,7 +8,6 @@ import logging
 import random
 import re
 import time
-from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
@@ -100,12 +99,6 @@ def _extract_correction_pattern(original: str, edited: str) -> tuple[str, str] |
 
 
 # ── Session Context helpers (P2) ──────────────────────────────────────
-
-
-def _now_utc() -> datetime:
-    """Текущее UTC-время (для вычисления gap между сообщениями)."""
-
-    return datetime.now(UTC)
 
 
 async def _do_prefetch_contact(
@@ -420,7 +413,7 @@ async def _maybe_schedule_nl_goal(
 
         await proactive_scheduler.register(goal)
         desc = goal.description[:200]
-        await message.answer(f"✅ Задача запланирована: {desc}")
+        await message.answer(f"✅ Задача запланирована: {sanitize_html(desc)}")
         logger.info("NL scheduled goal %r for user %d", goal.id, owner_telegram_id)
         return True
     except Exception:

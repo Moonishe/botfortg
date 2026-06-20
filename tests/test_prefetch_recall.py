@@ -22,8 +22,6 @@ os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 # Валидный тестовый токен: 12 цифр : 35 символов (входит в диапазон 30-50)
 os.environ["BOT_TOKEN"] = "123456789012:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-
 from src.config import settings
 from src.core.memory.memory_recall import RecallResult, RecalledFact
 

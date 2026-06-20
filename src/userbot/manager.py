@@ -61,6 +61,7 @@ _MANAGER_SINGLETON: "UserbotManager | None" = None
 @dataclass
 class UserbotManager:
     _clients: dict[int, TelegramClient] = field(default_factory=dict)
+    _clients_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _pending: dict[int, PendingLogin] = field(default_factory=dict)
     _retry_tasks: set[asyncio.Task] = field(default_factory=set)
     _restore_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -105,7 +106,8 @@ class UserbotManager:
                 try:
                     await client.connect()
                     if await client.is_user_authorized():
-                        self._clients[user.telegram_id] = client
+                        async with self._clients_lock:
+                            self._clients[user.telegram_id] = client
                         from src.userbot.auto_reply import attach_auto_reply
                         from src.userbot.dialog_events import (
                             attach_dialog_event_handlers,
@@ -139,10 +141,11 @@ class UserbotManager:
                         e.seconds,
                         user.telegram_id,
                     )
-                    await asyncio.sleep(min(e.seconds, 300))
+                    await asyncio.sleep(max(0.0, min(e.seconds, 300)))
                     await client.connect()
                     if await client.is_user_authorized():
-                        self._clients[user.telegram_id] = client
+                        async with self._clients_lock:
+                            self._clients[user.telegram_id] = client
                         from src.userbot.auto_reply import attach_auto_reply
                         from src.userbot.dialog_events import (
                             attach_dialog_event_handlers,
@@ -167,13 +170,23 @@ class UserbotManager:
                         "Failed to restore client for user %s", user.telegram_id
                     )
                     if client.is_connected():
-                        await client.disconnect()
+                        try:
+                            await client.disconnect()
+                        except (RPCError, ConnectionError, OSError):
+                            logger.debug(
+                                "restore_all: disconnect after failure also failed for %s",
+                                user.telegram_id,
+                                exc_info=True,
+                            )
 
     def get_client(self, telegram_id: int) -> TelegramClient | None:
+        # read-only dict.get() is atomic under CPython GIL;
+        # caller is responsible for not using a disconnected client.
         return self._clients.get(telegram_id)
 
-    def register_client(self, telegram_id: int, client: TelegramClient) -> None:
-        self._clients[telegram_id] = client
+    async def register_client(self, telegram_id: int, client: TelegramClient) -> None:
+        async with self._clients_lock:
+            self._clients[telegram_id] = client
         from src.userbot.auto_reply import attach_auto_reply
         from src.userbot.dialog_events import attach_dialog_event_handlers
         from src.userbot.mirror import attach_mirror
@@ -183,18 +196,18 @@ class UserbotManager:
         attach_mirror(client, telegram_id)
 
     async def remove_client(self, telegram_id: int) -> None:
-        client = self._clients.get(telegram_id)
+        async with self._clients_lock:
+            client = self._clients.pop(telegram_id, None)
         if client is not None:
             try:
                 await client.log_out()
-            except RPCError:
+            except (RPCError, ConnectionError, OSError):
                 logger.exception("log_out failed")
             try:
                 await client.disconnect()
-            except RPCError:
+            except (RPCError, ConnectionError, OSError):
                 logger.exception("userbot disconnect failed")
             finally:
-                self._clients.pop(telegram_id, None)
                 # Очистка attached-множеств — предотвращает утечку id(client)
                 _cid = id(client)
                 try:
@@ -247,39 +260,48 @@ class UserbotManager:
         return self._pending.pop(telegram_id, None)
 
     async def shutdown(self) -> None:
-        """Shutdown: cancel retry tasks, disconnect clients and pending logins."""
+        """Shutdown: cancel retry tasks, disconnect clients and pending logins.
+
+        Holds the restore lock for the entire duration so that no concurrent
+        restore_all() can add clients while we are disconnecting them.
+        """
         logger.info("Shutting down UserbotManager")
 
-        # 1. Cancel all pending FloodWait retry tasks
-        for task in self._retry_tasks:
-            task.cancel()
-        if self._retry_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*self._retry_tasks, return_exceptions=True),
-                    timeout=30.0,
-                )
-            except TimeoutError:
-                logger.warning(
-                    "Timeout waiting for retry tasks to finish during shutdown"
-                )
-        self._retry_tasks.clear()
+        async with self._restore_lock:
+            # 1. Cancel all pending FloodWait retry tasks
+            for task in self._retry_tasks:
+                task.cancel()
+            if self._retry_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*self._retry_tasks, return_exceptions=True),
+                        timeout=30.0,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Timeout waiting for retry tasks to finish during shutdown"
+                    )
+            self._retry_tasks.clear()
 
-        # 2. Disconnect all active clients
-        for tg_id, client in list(self._clients.items()):
-            try:
-                await client.disconnect()
-            except (RPCError, ConnectionError, OSError):
-                logger.exception("Error disconnecting client %s", tg_id)
-        self._clients.clear()
+            # 2. Disconnect all active clients
+            async with self._clients_lock:
+                clients_snapshot = list(self._clients.items())
+            for tg_id, client in clients_snapshot:
+                try:
+                    await client.disconnect()
+                except (RPCError, ConnectionError, OSError):
+                    logger.exception("Error disconnecting client %s", tg_id)
+            async with self._clients_lock:
+                self._clients.clear()
 
-        # 3. Cancel all pending logins
-        for tg_id, pending in list(self._pending.items()):
-            try:
-                await pending.client.disconnect()
-            except (RPCError, ConnectionError, OSError):
-                logger.exception("Error disconnecting pending client %s", tg_id)
-        self._pending.clear()
+            # 3. Cancel all pending logins
+            for tg_id, pending in list(self._pending.items()):
+                try:
+                    await pending.client.disconnect()
+                except (RPCError, ConnectionError, OSError):
+                    logger.exception("Error disconnecting pending client %s", tg_id)
+            self._pending.clear()
+            self._restored = False
 
         logger.info("UserbotManager shutdown complete")
 
@@ -302,7 +324,7 @@ class UserbotManager:
                         tg_id,
                         now - pending.created_at,
                     )
-                except RPCError:
+                except (RPCError, ConnectionError, OSError):
                     logger.exception(
                         "Failed to disconnect stale pending client %d", tg_id
                     )
@@ -311,7 +333,10 @@ class UserbotManager:
         """Periodically check connected + authorized for all userbot clients."""
         while True:
             await asyncio.sleep(300)  # every 5 minutes
-            for tg_id, client in list(self._clients.items()):
+            # Snapshot under lock to prevent dict mutation during iteration.
+            async with self._clients_lock:
+                snapshot = list(self._clients.items())
+            for tg_id, client in snapshot:
                 try:
                     if not client.is_connected():
                         logger.warning(
@@ -333,7 +358,11 @@ class UserbotManager:
                                 tg_id,
                                 exc_info=True,
                             )
-                        self._clients.pop(tg_id, None)
+                        # Atomic re-check: only remove if still the same client
+                        # (another coroutine may have replaced/removed it).
+                        async with self._clients_lock:
+                            if self._clients.get(tg_id) is client:
+                                self._clients.pop(tg_id, None)
                 except asyncio.CancelledError:
                     raise  # propagate for clean shutdown
                 except (RPCError, ConnectionError, OSError):
@@ -351,7 +380,9 @@ class UserbotManager:
                             tg_id,
                             exc_info=True,
                         )
-                    self._clients.pop(tg_id, None)
+                    async with self._clients_lock:
+                        if self._clients.get(tg_id) is client:
+                            self._clients.pop(tg_id, None)
                 except Exception:
                     logger.debug(
                         "Health check for tg_id=%d failed (non-critical)",

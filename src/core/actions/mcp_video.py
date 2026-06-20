@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import subprocess
+import time as _time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,12 +32,20 @@ logger = logging.getLogger(__name__)
 
 _FRAME_DIR = "video_frames"  # sub-directory inside data_dir for extracted frames
 
+# Regex for validating time parameter passed to ffmpeg -ss:
+# Accepts either decimal seconds (e.g. "12.5") or HH:MM:SS[.millis] format.
+_TIME_RE = re.compile(r"^(?:\d+(?:\.\d+)?|[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.\d+)?)$")
+
 
 # ── Helper: check ffmpeg availability ────────────────────────────────────
 
 
 def _check_ffmpeg() -> str | None:
-    """Return ``None`` if ffprobe and ffmpeg are available, or an error string."""
+    """Return ``None`` if ffprobe and ffmpeg are available, or an error string.
+
+    This is a synchronous function — callers MUST wrap in ``asyncio.to_thread()``
+    or ``loop.run_in_executor()`` to avoid blocking the event loop.
+    """
     for cmd in ("ffprobe", "ffmpeg"):
         try:
             subprocess.run(
@@ -47,6 +57,30 @@ def _check_ffmpeg() -> str | None:
         except (FileNotFoundError, subprocess.CalledProcessError, TimeoutError):
             return "ffmpeg not installed or not in PATH"
     return None
+
+
+# Module-level cache to avoid repeated subprocess calls on every invocation.
+# Tuple of (result, timestamp) or None. TTL: 60 seconds by default.
+# Plain dict/None is safe here — asyncio is single-threaded for user code.
+_FFMPEG_CHECK_CACHE: tuple[str | None, float] | None = None
+
+
+async def _cached_check_ffmpeg(ttl: float = 60.0) -> str | None:
+    """Return cached ffmpeg availability check, refreshing if TTL expired.
+
+    Wraps the synchronous ``_check_ffmpeg()`` in ``asyncio.to_thread()``
+    and caches the result at module level to avoid spawning a thread +
+    2 subprocesses on every ``mcp_video`` call.
+    """
+    global _FFMPEG_CHECK_CACHE
+    now = _time.monotonic()
+    if _FFMPEG_CHECK_CACHE is not None:
+        result, timestamp = _FFMPEG_CHECK_CACHE
+        if now - timestamp < ttl:
+            return result
+    result = await asyncio.to_thread(_check_ffmpeg)
+    _FFMPEG_CHECK_CACHE = (result, now)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -83,8 +117,8 @@ async def mcp_video(
 ) -> dict[str, Any]:
     """Video analysis tool via ffprobe/ffmpeg."""
     try:
-        # Validate ffmpeg/ffprobe are available
-        ffmpeg_err = _check_ffmpeg()
+        # Validate ffmpeg/ffprobe are available (offloaded — sync subprocess)
+        ffmpeg_err = await _cached_check_ffmpeg()
         if ffmpeg_err:
             return {"error": ffmpeg_err}
 
@@ -97,6 +131,16 @@ async def mcp_video(
 
         if not path or not path.strip():
             return {"error": "path parameter is required"}
+
+        # Validate time parameter for frame extraction
+        if action == "frame" and not _TIME_RE.match(time):
+            return {
+                "error": (
+                    f"Invalid time format {time!r}. "
+                    "Expected decimal seconds (e.g. '12.5') or "
+                    "HH:MM:SS[.millis] (e.g. '00:00:05.500')"
+                )
+            }
 
         resolved = _safe_resolve(path.strip())
         if resolved is None:

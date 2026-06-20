@@ -37,9 +37,14 @@ class AnthropicProvider(BaseLLMProvider):
         embed_model: str | None = None,
     ) -> None:
         import anthropic
+        import httpx
 
         base_url = _validate_base_url(base_url)
-        kwargs: dict = {"api_key": api_key, "max_retries": 2}
+        kwargs: dict = {
+            "api_key": api_key,
+            "max_retries": 2,
+            "timeout": httpx.Timeout(60.0, connect=10.0),
+        }
         if base_url:
             kwargs["base_url"] = base_url
         self._client: anthropic.AsyncAnthropic = anthropic.AsyncAnthropic(**kwargs)
@@ -88,7 +93,7 @@ class AnthropicProvider(BaseLLMProvider):
             kwargs["system"] = system
         resp = await self._client.messages.create(**kwargs)
         # Anthropic returns content as list of blocks
-        for block in resp.content:
+        for block in resp.content or []:
             if hasattr(block, "text"):
                 return block.text
         return ""
@@ -141,20 +146,34 @@ class AnthropicProvider(BaseLLMProvider):
         system_parts: list[str] = []
         anthropic_msgs: list[dict] = []
 
-        for msg in messages:
+        idx = 0
+        while idx < len(messages):
+            msg = messages[idx]
             role = msg.role
             if role == "system":
                 system_parts.append(msg.content)
+                idx += 1
+            elif role == "tool":
+                # Group consecutive tool results into one Anthropic user message.
+                tool_blocks: list[dict] = []
+                while idx < len(messages) and messages[idx].role == "tool":
+                    tool_msg = messages[idx]
+                    tool_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_msg.tool_call_id or "unknown",
+                            "content": tool_msg.content,
+                        }
+                    )
+                    idx += 1
+                anthropic_msgs.append({"role": "user", "content": tool_blocks})
             elif role in ("user", "assistant"):
                 anthropic_msgs.append({"role": role, "content": msg.content})
-            elif role == "tool":
-                # Tool results → wrap as user message
-                anthropic_msgs.append(
-                    {"role": "user", "content": f"[Tool result]: {msg.content}"}
-                )
+                idx += 1
             else:
-                # Unknown role → treat as user
+                # Unknown role -> treat as user
                 anthropic_msgs.append({"role": "user", "content": msg.content})
+                idx += 1
 
         system = "\n\n".join(system_parts) if system_parts else None
         return system, anthropic_msgs

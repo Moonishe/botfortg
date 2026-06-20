@@ -2,13 +2,10 @@
 
 import asyncio
 import os
-import sys
 
 import pytest
 
 # Ensure project root is in path and DB is in-memory BEFORE any src imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["ENCRYPTION_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 os.environ["BOT_TOKEN"] = "1234567890:TEST_TOKEN_HERE_abcdefghijklmnopqrstuvwx"
 os.environ["OWNER_TELEGRAM_ID"] = "123456789"

@@ -72,11 +72,19 @@ class MCPOAuthClient:
 
     def __init__(self) -> None:
         TOKENS_DIR.mkdir(parents=True, exist_ok=True)
-        self._http = httpx.AsyncClient(timeout=30.0)
+        self._http: httpx.AsyncClient | None = None
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        """Lazily create or return the shared HTTP client."""
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(timeout=30.0)
+        return self._http
 
     async def close(self) -> None:
         """Close the underlying HTTP client session."""
-        await self._http.aclose()
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -178,10 +186,11 @@ class MCPOAuthClient:
         ``openid-configuration`` (some servers expose OAuth metadata there).
         """
         base = server_url.rstrip("/")
+        client = await self._ensure_client()
 
         # Primary: OAuth Resource Server metadata (RFC 8414-style)
         try:
-            resp = await self._http.get(
+            resp = await client.get(
                 f"{base}/.well-known/oauth-protected-resource",
             )
             if resp.status_code == 200:
@@ -191,7 +200,7 @@ class MCPOAuthClient:
 
         # Fallback: OpenID Connect discovery
         try:
-            resp = await self._http.get(
+            resp = await client.get(
                 f"{base}/.well-known/openid-configuration",
             )
             if resp.status_code == 200:
@@ -228,7 +237,8 @@ class MCPOAuthClient:
             return name
 
         try:
-            resp = await self._http.post(
+            client = await self._ensure_client()
+            resp = await client.post(
                 reg_url,
                 json={
                     "client_name": f"TelegramHelper-{name}",
@@ -379,7 +389,8 @@ class MCPOAuthClient:
             return {"error": "no token_endpoint in metadata"}
 
         try:
-            resp = await self._http.post(
+            client = await self._ensure_client()
+            resp = await client.post(
                 token_endpoint,
                 data={
                     "grant_type": "authorization_code",
@@ -416,7 +427,8 @@ class MCPOAuthClient:
             return None
 
         try:
-            resp = await self._http.post(
+            client = await self._ensure_client()
+            resp = await client.post(
                 token_endpoint,
                 data={
                     "grant_type": "refresh_token",

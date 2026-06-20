@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 async def _ensure_table() -> None:
     """Создаёт таблицу encryption_keys, если её ещё нет."""
-    from src.config import PROJECT_ROOT
     from src.db.session import engine
 
     async with engine.begin() as conn:
@@ -99,9 +98,11 @@ async def _rotate_keys() -> None:
             mgr._deks[key_id] = new_dek
             mgr._active_key_id = key_id
             encrypted_dek = mgr._encrypt_dek(new_dek)
-            await mgr.save_to_db(session, key_id, encrypted_dek, is_active=True)
+            actual_key_id = await mgr.save_to_db(
+                session, key_id, encrypted_dek, is_active=True
+            )
             await session.commit()
-            print(f"Создан начальный DEK (key_id={key_id})")
+            print(f"Создан начальный DEK (key_id={actual_key_id})")
             print(
                 "Ротация не требуется — это первый ключ. "
                 "Данные уже зашифрованы KEK, перешифрование не нужно."

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import os
-import sys
 import time
-from pathlib import Path
 
 # ── Ensure valid test environment before importing src ─────────────────
 # conftest sets BOT_TOKEN="test:token" which fails the validator.
@@ -13,9 +11,6 @@ from pathlib import Path
 os.environ["BOT_TOKEN"] = "12345678:abcdefghijklmnopqrstuvwxyz12345"
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 

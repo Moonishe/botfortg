@@ -13,12 +13,12 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, UTC
 
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.core.infra.timeutil import now_utc
 from src.db.models._memory import Episode, EpisodeContact
 from src.db.models import Memory
 from src.db.repo import get_or_create_user
@@ -27,10 +27,6 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 
 # ── Вспомогательные ──────────────────────────────────────────────────────
-
-
-def _now_utc() -> datetime:
-    return datetime.now(UTC)
 
 
 def _extract_emotional_valence(text: str) -> float | None:
@@ -176,12 +172,13 @@ async def create_episode(
             logger.debug("Episode LLM summary failed, using raw", exc_info=True)
 
     try:
+        now = now_utc()
         async with get_session() as session:
             owner = await get_or_create_user(session, user_id)
             episode = Episode(
                 user_id=owner.id,
-                started_at=_now_utc(),
-                ended_at=_now_utc(),
+                started_at=now,
+                ended_at=now,
                 summary=summary,
                 raw_sample=raw_sample,
                 emotional_valence=valence,
@@ -332,7 +329,7 @@ async def reflect_on_episodes(user_id: int) -> list[dict]:
     try:
         async with get_session() as session:
             # Берём эпизоды без summary (сырые) за последние 7 дней
-            cutoff = _now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+            cutoff = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
             from datetime import timedelta
 
             cutoff = cutoff - timedelta(days=7)

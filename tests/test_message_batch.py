@@ -24,7 +24,7 @@ _TEST_TG_ID = 987654321
 
 
 @pytest.fixture(autouse=True)
-async def _recreate_tables():
+async def _recreate_tables(_db_init):
     """Recreate all tables before each test for a clean in-memory DB."""
     from sqlalchemy import text
     from src.db.session import (
@@ -153,5 +153,3 @@ async def test_fetch_latest_messages_per_contact() -> None:
         assert len(result[202]) == 2
         # Edge: empty input -> empty dict
         assert await fetch_latest_messages_per_contact(session, user, [], limit=3) == {}
-
-

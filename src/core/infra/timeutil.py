@@ -1,7 +1,7 @@
 """Часовой пояс пользователя. В БД храним naive UTC, при показе и сравнении
 с расписаниями (digest_time, news_digest_time) переводим в TZ владельца.
 
-# NOTE: DST transitions (spring-forward/fall-back) can cause ±1 hour ambiguity.
+# NOTE: DST transitions (spring-forward/fall-back) can cause +/-1 hour ambiguity.
 # All timestamps use UTC internally; local conversions are for display only.
 """
 
@@ -69,7 +69,7 @@ def fmt_local(
     dt: datetime | None, tz_name: str | None, *, fmt: str = "%Y-%m-%d %H:%M"
 ) -> str:
     if dt is None:
-        return "—"
+        return chr(8212)  # em dash
     local = utc_to_local(dt, tz_name)
     return local.strftime(fmt)
 
@@ -85,6 +85,11 @@ def ensure_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt
+
+
+def now_utc() -> datetime:
+    """Current UTC datetime — shared helper for batch dedup and session timestamps."""
+    return datetime.now(UTC)
 
 
 def tz_short(tz_name: str | None) -> str:

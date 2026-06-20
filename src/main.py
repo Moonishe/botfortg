@@ -160,6 +160,8 @@ async def main() -> None:
     # Ensure InaccessibleMessage monkeypatch is applied before any handler runs
     import src.bot.callback_utils  # noqa: F401 — side effect: patches InaccessibleMessage
 
+    _ = src.bot.callback_utils  # pyright: ignore[reportUnusedImport]
+
     # --- Обработчики сигналов для graceful shutdown ---
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
@@ -192,7 +194,6 @@ async def main() -> None:
     _snapshot_task: asyncio.Task | None = None
     _pending_cleanup_task: asyncio.Task | None = None
     _health_check_task: asyncio.Task | None = None
-    _dek_rotation_task: asyncio.Task | None = None
     _prefetch_task: asyncio.Task | None = None
 
     await init_db()
@@ -448,7 +449,7 @@ async def main() -> None:
                 logger.debug("working_memory cleanup failed", exc_info=True)
 
     _cleanup_task = track_ff(asyncio.create_task(_cleanup_global_state()))
-    _update_check_task = asyncio.create_task(check_and_notify_update())
+    _update_check_task = track_ff(asyncio.create_task(check_and_notify_update()))
 
     from src.core.actions.vector_store import get_vector_store
 
@@ -484,34 +485,23 @@ async def main() -> None:
     )
 
     # --- Background: userbot health check (every 5 minutes) ---
-    _health_check_task = asyncio.create_task(userbot_manager.health_check_loop())
+    _health_check_task = track_ff(
+        asyncio.create_task(userbot_manager.health_check_loop())
+    )
 
-    # --- Key Rotation: инициализация KEK/DEK менеджера ---
-    _dek_rotation_task: asyncio.Task | None = None
+    # --- Key Rotation: инициализация KEK/DEK менеджера + регистрация rotation_task ---
     if settings.key_rotation_enabled:
         try:
             from src.core.crypto.key_rotation import init_rotation_manager
 
             _kek = settings.encryption_key.encode()
-            _mgr = init_rotation_manager(_kek)
-            from src.db.session import get_session
-
+            init_rotation_manager(_kek)
             logger.info("KeyRotationManager инициализирован (KEK/DEK)")
 
-            # Auto-rotate DEK every 30 days (background)
-            async def _auto_rotate_dek() -> None:
-                while True:
-                    await asyncio.sleep(86400 * 30)
-                    try:
-                        async with get_session() as _rot_sess:
-                            await _mgr.load_from_db(_rot_sess)
-                            await _mgr.rotate()
-                            await _rot_sess.commit()
-                            logger.info("DEK rotation completed successfully")
-                    except Exception:
-                        logger.exception("DEK auto-rotation failed")
+            # rotation_task автоматически регистрируется через @task_manager.task()
+            import src.core.crypto.rotation_task  # noqa: F401 — side-effect: decorator registration
 
-            _dek_rotation_task = asyncio.create_task(_auto_rotate_dek())
+            _ = src.core.crypto.rotation_task  # pyright: ignore[reportUnusedImport]
         except Exception:
             logger.exception("Ошибка инициализации KeyRotationManager")
 
@@ -670,8 +660,6 @@ async def main() -> None:
             ]
             if _t is not None
         ]
-        if _dek_rotation_task:
-            _shutdown_tasks.append((_dek_rotation_task, "dek_rotation"))
         for _t, _name in _shutdown_tasks:
             _t.cancel()
             try:
