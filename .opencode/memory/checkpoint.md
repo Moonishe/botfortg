@@ -17,7 +17,11 @@
 - [x] `tests/test_provider_fallback.py` — async context manager closes providers — **completed**
 
 **In progress:**
-- [ ] Merge `snapshot-pre-max` into `main` — **deferred** (per user)
+- [x] Merge `snapshot-pre-max` into `main` — **completed 2026-06-21**
+  - Fast-forward merge: `main` now at `d97561b`
+  - Tag: `v2.0-max-mode-20260621`
+  - Full test suite: all tests passed (3125+)
+  - Returned to `snapshot-pre-max` for future work
 
 **Completed this session:**
 - [x] Max Mode refactor: extracted key-level helpers `_check_key_circuit_breaker`, `_make_cache_key`, `_record_key_success`, `_record_key_failure` into `provider_manager.py` (~210 lines removed from `router.py`)
@@ -84,7 +88,7 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| Merge to main still pending | medium | Deferred per user; D5/R5 and tests are green |
+| Merge to main | low | Completed via fast-forward; tag `v2.0-max-mode-20260621` |
 | `provider_fallback.py` is new; any missed import | low | Smoke imports pass; full suite green |
 | Manual rebase may have introduced subtle behavior changes | low | Full suite green; D5/R5 completed with 0 blockers |
 | Max Mode refactor could destabilize retry logic | low | D5→R5 completed; 3125 tests passed |
@@ -97,13 +101,14 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 - Rebase conflict resolution — completed manually
 - Max Mode refactor — committed
 - D5/R5 — completed (3 cycles, 0 blockers)
+- **Merge to main — completed** (fast-forward, tag v2.0-max-mode-20260621)
 - No subagents currently running
 
 ---
 
 ## §8: Next Steps
 
-1. Merge `snapshot-pre-max` into `main` (deferred until user confirms).
+1. ~~Merge `snapshot-pre-max` into `main`~~ — **done** (fast-forward, tag `v2.0-max-mode-20260621`).
 2. Address M14 CodeGraph stale migration entries (requires MCP restart/rebuild).
 3. Run dream-agent and distill-agent (overdue).
 
@@ -128,6 +133,8 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 ## §11: Final Notes
 
 - Branch `snapshot-pre-max` is clean, rebased onto `main` (`a5c2a1d`), and has commit `b319771` with the Max Mode refactor + D5/R5 fixes.
+- **Merge to `main` completed** 2026-06-21: fast-forward to `d97561b`. Tag `v2.0-max-mode-20260621` created.
 - 2 new test files added; 1 test fix; 3 source files refactored.
-- Merge to `main` deferred per user.
+- Full test suite green; all smoke tests passed; no merge conflicts; no LSP errors (only environment-level reportMissingImports).
+- Working branch returned to `snapshot-pre-max` for future work.
 
