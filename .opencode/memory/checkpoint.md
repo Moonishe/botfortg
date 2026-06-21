@@ -1,5 +1,5 @@
 # Session Checkpoint
-**Written:** 2026-06-21T12:00:00Z | **Session:** bffd4918-6508-428a-a68e-454db4eab4f1 | **Branch:** snapshot-pre-max
+**Written:** 2026-06-21T13:00:00Z | **Session:** bffd4918-6508-428a-a68e-454db4eab4f1 | **Branch:** snapshot-pre-max
 
 ---
 
@@ -18,8 +18,10 @@
 
 **In progress:**
 - [x] Merge `snapshot-pre-max` into `main` — **completed 2026-06-21**
-  - Fast-forward merge: `main` now at `d97561b`
-  - Tag: `v2.0-max-mode-20260621`
+  - Fast-forward merge: `main` now at `8008d72`
+  - Tag: `v2.0-max-mode-20260621` (moved to `8008d72`)
+  - Post-merge Max Mode D5→R5: **1 cycle, 0 blockers**
+  - Post-merge fix: `ProviderFallback.primary` guard against empty providers (`8008d72`)
   - Full test suite: all tests passed (3125+)
   - Returned to `snapshot-pre-max` for future work
 
@@ -82,16 +84,22 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 - Added `asyncio.current_task().uncancel()` in `MultiKeyProvider.close()` and `ProviderFallback.close()` to continue closing remaining providers after cancellation.
 - Full suite after refactor: 3125 passed, 15 skipped, 3 warnings (pre-existing thread-exception warning).
 
+**Post-merge Max Mode D5/R5:**
+- Found and fixed: `ProviderFallback.primary` could raise `IndexError` on empty providers. Guard added to return `None`.
+- Found (not fixed, pre-existing): cached LLM `ProviderFallback` instances are not explicitly closed during `main.py` shutdown. Tracked as deferred risk.
+- `main` fast-forwarded to include the fix; tag moved to `8008d72`.
+
 ---
 
 ## §6: Risk Register
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| Merge to main | low | Completed via fast-forward; tag `v2.0-max-mode-20260621` |
+| Merge to main | low | Completed via fast-forward; tag `v2.0-max-mode-20260621` on `8008d72` |
 | `provider_fallback.py` is new; any missed import | low | Smoke imports pass; full suite green |
 | Manual rebase may have introduced subtle behavior changes | low | Full suite green; D5/R5 completed with 0 blockers |
 | Max Mode refactor could destabilize retry logic | low | D5→R5 completed; 3125 tests passed |
+| Cached LLM providers not closed on shutdown | medium | Pre-existing; add `flush_provider_cache()` in future sprint |
 
 ---
 
@@ -100,17 +108,18 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 - Main agent — active
 - Rebase conflict resolution — completed manually
 - Max Mode refactor — committed
-- D5/R5 — completed (3 cycles, 0 blockers)
-- **Merge to main — completed** (fast-forward, tag v2.0-max-mode-20260621)
+- D5/R5 — completed (3 cycles pre-merge, 1 cycle post-merge, 0 blockers)
+- **Merge to main — completed** (fast-forward to `8008d72`, tag `v2.0-max-mode-20260621`)
 - No subagents currently running
 
 ---
 
 ## §8: Next Steps
 
-1. ~~Merge `snapshot-pre-max` into `main`~~ — **done** (fast-forward, tag `v2.0-max-mode-20260621`).
-2. Address M14 CodeGraph stale migration entries (requires MCP restart/rebuild).
-3. Run dream-agent and distill-agent (overdue).
+1. ~~Merge `snapshot-pre-max` into `main`~~ — **done** (fast-forward to `8008d72`, tag `v2.0-max-mode-20260621`).
+2. Add `flush_provider_cache()` shutdown cleanup (deferred pre-existing risk).
+3. Address M14 CodeGraph stale migration entries (requires MCP restart/rebuild).
+4. Run dream-agent and distill-agent (overdue).
 
 ---
 
@@ -132,9 +141,10 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 
 ## §11: Final Notes
 
-- Branch `snapshot-pre-max` is clean, rebased onto `main` (`a5c2a1d`), and has commit `b319771` with the Max Mode refactor + D5/R5 fixes.
-- **Merge to `main` completed** 2026-06-21: fast-forward to `d97561b`. Tag `v2.0-max-mode-20260621` created.
+- Branch `snapshot-pre-max` is clean, rebased onto `main`, and has the Max Mode refactor + D5/R5 fixes + post-merge guard fix.
+- **Merge to `main` completed** 2026-06-21: fast-forward to `8008d72`. Tag `v2.0-max-mode-20260621` points to `8008d72`.
+- Post-merge Max Mode D5→R5 found and fixed `ProviderFallback.primary` guard; cached LLM provider shutdown cleanup remains deferred.
 - 2 new test files added; 1 test fix; 3 source files refactored.
-- Full test suite green; all smoke tests passed; no merge conflicts; no LSP errors (only environment-level reportMissingImports).
+- Full test suite green; all smoke tests passed; no merge conflicts.
 - Working branch returned to `snapshot-pre-max` for future work.
 
