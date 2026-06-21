@@ -43,8 +43,8 @@ class ProviderFallback:
         return " → ".join(p.name for p in self.providers)
 
     @property
-    def primary(self) -> MultiKeyProvider:
-        return self.providers[0]
+    def primary(self) -> MultiKeyProvider | None:
+        return self.providers[0] if self.providers else None
 
     @property
     def _model(self) -> str | None:
