@@ -815,6 +815,19 @@ async def _close_resource(
         logger.debug("%s closed", name)
     except TimeoutError:
         logger.warning("%s close timed out", name)
+    except asyncio.CancelledError:
+        # CancelledError is BaseException (not Exception) since Python 3.9.
+        # Must be caught explicitly — otherwise it aborts the shutdown sequence
+        # before remaining resources are closed.
+        #
+        # CRITICAL: task.uncancel() is REQUIRED here. Without it, the task
+        # remains in cancelled state, and every subsequent _close_resource()
+        # call will IMMEDIATELY hit CancelledError at its first await,
+        # skipping ALL remaining resource closures. This pattern matches
+        # ProviderFallback.close() and flush_provider_cache().
+        if (task := asyncio.current_task()) is not None:
+            task.uncancel()
+        logger.warning("%s close cancelled (uncancelled to continue shutdown)", name)
     except Exception:
         logger.debug("%s close failed (non-critical)", name, exc_info=True)
 
@@ -840,6 +853,7 @@ async def _close_shared_resources() -> None:
     from src.core.memory.context_files import close_qdrant
     from src.bot.handlers.avito_cmd import close_avito_cache_db
     from src.db.session import engine
+    from src.llm.provider_manager import flush_provider_cache
 
     await _close_resource("embedding_cache", _ec_close, timeout=5.0)
     await _close_resource("mcp_timer tasks", cancel_all_timers, timeout=3.0)
@@ -853,6 +867,9 @@ async def _close_shared_resources() -> None:
     await _close_resource(
         "qdrant client", lambda: asyncio.to_thread(close_qdrant), timeout=5.0
     )
+    # LLM provider close may involve multiple HTTP session teardowns; give it
+    # extra time to avoid leaking sockets during graceful shutdown.
+    await _close_resource("LLM provider cache", flush_provider_cache, timeout=10.0)
     await _close_resource("main SQLAlchemy engine", engine.dispose, timeout=5.0)
 
 

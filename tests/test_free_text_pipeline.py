@@ -10,6 +10,7 @@ Verifies:
 
 from __future__ import annotations
 
+import inspect
 import os
 from unittest.mock import patch
 
@@ -282,6 +283,8 @@ class TestExecuteInstant:
         """Wrap coroutine in a mock that quacks like asyncio.Task for track_ff."""
         from unittest.mock import MagicMock
 
+        if inspect.iscoroutine(coro):
+            coro.close()
         t = MagicMock()
         t.done.return_value = True
         return t

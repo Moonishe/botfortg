@@ -74,3 +74,23 @@ async def invalidate(prefix: str = "") -> None:
             logger.debug(
                 "Cache invalidated: prefix=%s (%d keys)", prefix, len(keys_to_del)
             )
+
+
+async def extract(prefix: str) -> list[Any]:
+    """Атомарно удалить и вернуть все значения по ключам с заданным prefix.
+
+    Используется для graceful shutdown: получить закэшированные объекты,
+    закрыть их, а затем инвалидировать кэш.
+    """
+    async with _cache_lock:
+        keys_to_del = [k for k in _cache if k.startswith(prefix)]
+        values: list[Any] = []
+        for k in keys_to_del:
+            entry = _cache.pop(k, None)
+            if entry is not None:
+                values.append(entry[1])
+        if keys_to_del:
+            logger.debug(
+                "Cache extracted: prefix=%s (%d keys)", prefix, len(keys_to_del)
+            )
+    return values

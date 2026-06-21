@@ -1165,3 +1165,39 @@ async def build_provider(
             )
     await cache_put(cache_key, result, ttl=300)
     return result
+
+
+async def flush_provider_cache() -> None:
+    """Закрыть все закэшированные LLM-провайдеры и очистить кэш.
+
+    Вызывается из shutdown-цепочки в main.py.
+    """
+    from src.core.context_cache import extract as cache_extract
+    from src.llm.provider_fallback import ProviderFallback
+
+    cached_values = await cache_extract("provider:")
+    closed = 0
+    _cancelled = False
+    for value in cached_values:
+        if isinstance(value, ProviderFallback):
+            try:
+                await value.close()
+                closed += 1
+            except asyncio.CancelledError:
+                # Shield: finish closing remaining providers even if
+                # the shutdown task is being cancelled.
+                # ProviderFallback.close() itself already uses this pattern
+                # for its children — the re-raised CancelledError from
+                # a fully-closed fallback must not abort the outer loop
+                # before all other fallback instances are also closed.
+                if (task := asyncio.current_task()) is not None:
+                    task.uncancel()
+                _cancelled = True
+            except Exception:
+                logger.exception(
+                    "Failed to close cached ProviderFallback during shutdown"
+                )
+    if closed:
+        logger.info("Closed %d cached LLM provider(s) during shutdown", closed)
+    if _cancelled:
+        raise asyncio.CancelledError()

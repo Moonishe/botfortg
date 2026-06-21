@@ -32,6 +32,13 @@
 - [x] Commit `b319771` on `snapshot-pre-max` with all changes
 - [x] Update `.opencode/memory/metrics.json` and `checkpoint.md`
 
+**Immediate cleanup (completed in this session):**
+- [x] Fix 15 skipped classifier tests — add `pyahocorasick>=2.0,<3.0` to `requirements.txt`
+- [x] Fix 3 pre-existing `RuntimeWarning` coroutine warnings — close mocked coroutines in `tests/test_free_text_pipeline.py`
+- [x] Fix cached LLM provider shutdown cleanup — add `flush_provider_cache()` and wire it into `main.py` shutdown
+- [x] D5 (5 debuggers) + R5 (5 reviewers) on the cleanup — 1 cycle, 0 blockers
+- [x] Full test suite: 3140 passed, 0 skipped, 0 warnings
+
 ---
 
 ## §2: Goal Anchor
@@ -86,8 +93,16 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 
 **Post-merge Max Mode D5/R5:**
 - Found and fixed: `ProviderFallback.primary` could raise `IndexError` on empty providers. Guard added to return `None`.
-- Found (not fixed, pre-existing): cached LLM `ProviderFallback` instances are not explicitly closed during `main.py` shutdown. Tracked as deferred risk.
 - `main` fast-forwarded to include the fix; tag moved to `8008d72`.
+
+**Cleanup D5/R5 (this session):**
+- Added `pyahocorasick>=2.0,<3.0` dependency to remove 15 skipped classifier tests.
+- Fixed `tests/test_free_text_pipeline.py::_make_fake_task` to close mocked coroutine objects, eliminating 3 `RuntimeWarning` warnings.
+- Implemented `flush_provider_cache()` in `provider_manager.py` with `CancelledError` shield pattern (task.uncancel + continue loop + re-raise).
+- Added `context_cache.extract(prefix)` for atomic cache extraction during shutdown.
+- Wired `flush_provider_cache` into `main.py::_close_shared_resources()` before `engine.dispose()`.
+- Fixed `_close_resource()` to catch `asyncio.CancelledError` and `task.uncancel()`, preventing cascade failure of remaining resource closures.
+- Full suite after cleanup: 3140 passed, 0 skipped, 0 warnings.
 
 ---
 
@@ -99,7 +114,7 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 | `provider_fallback.py` is new; any missed import | low | Smoke imports pass; full suite green |
 | Manual rebase may have introduced subtle behavior changes | low | Full suite green; D5/R5 completed with 0 blockers |
 | Max Mode refactor could destabilize retry logic | low | D5→R5 completed; 3125 tests passed |
-| Cached LLM providers not closed on shutdown | medium | Pre-existing; add `flush_provider_cache()` in future sprint |
+| Cached LLM providers not closed on shutdown | resolved | Fixed: `flush_provider_cache()` wired into `main.py` shutdown |
 
 ---
 
@@ -110,6 +125,7 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 - Max Mode refactor — committed
 - D5/R5 — completed (3 cycles pre-merge, 1 cycle post-merge, 0 blockers)
 - **Merge to main — completed** (fast-forward to `8008d72`, tag `v2.0-max-mode-20260621`)
+- Cleanup D5/R5 — completed (1 cycle, 0 blockers)
 - No subagents currently running
 
 ---
@@ -117,7 +133,7 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 ## §8: Next Steps
 
 1. ~~Merge `snapshot-pre-max` into `main`~~ — **done** (fast-forward to `8008d72`, tag `v2.0-max-mode-20260621`).
-2. Add `flush_provider_cache()` shutdown cleanup (deferred pre-existing risk).
+2. ~~Add `flush_provider_cache()` shutdown cleanup~~ — **done**.
 3. Address M14 CodeGraph stale migration entries (requires MCP restart/rebuild).
 4. Run dream-agent and distill-agent (overdue).
 
@@ -128,6 +144,8 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 - Rebase conflict resolution for a moved class requires reconstructing the new file from the main version while preserving the snapshot's refactor.
 - `MagicMock` is unreliable for `hasattr` checks; use real objects or `__dict__` inspection for guard assertions.
 - `KeyRotationManager._rotate_unlocked` assumes an active DEK exists; tests must seed it.
+- Mocking `asyncio.create_task` with a MagicMock factory must close the original coroutine object to avoid `RuntimeWarning: coroutine was never awaited`.
+- `_close_resource()` must catch `asyncio.CancelledError` and call `task.uncancel()` to prevent the remaining shutdown closures from being skipped.
 
 ---
 
@@ -145,6 +163,7 @@ Remaining pre-existing debt: retry logic is duplicated between `MultiKeyProvider
 - **Merge to `main` completed** 2026-06-21: fast-forward to `8008d72`. Tag `v2.0-max-mode-20260621` points to `8008d72`.
 - Post-merge Max Mode D5→R5 found and fixed `ProviderFallback.primary` guard; cached LLM provider shutdown cleanup remains deferred.
 - 2 new test files added; 1 test fix; 3 source files refactored.
-- Full test suite green; all smoke tests passed; no merge conflicts.
+- Full test suite: **3140 passed, 0 skipped, 0 warnings**.
+- Cleanup changes: 5 files, 79 insertions; all pass ruff check for new code.
 - Working branch returned to `snapshot-pre-max` for future work.
 
