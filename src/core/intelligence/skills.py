@@ -82,8 +82,10 @@ async def list_relevant_skills(
     telegram_id: int,
     user_text: str,
     route_mode: str | None = None,
-    limit: int = 5,
+    limit: int = 3,
 ) -> list[Skill]:
+    # ponytail: limit=3 progressive disclosure — fewer skills in prompt = less noise.
+    # Upgrade: dynamic limit based on context length if token budget matters.
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         skills = await list_skills(
@@ -104,7 +106,9 @@ async def list_relevant_skills(
             ranked.append((score + bayesian_skill_score(skill), skill))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [skill for _, skill in ranked[:limit]]
+    # Progressive disclosure: only skills with score > 0.5 (filters noise)
+    # ponytail: threshold 0.5 — low bar, tune if too aggressive.
+    return [skill for score, skill in ranked if score >= 0.5][:limit]
 
 
 def format_skill_index(skills: list[Skill]) -> str:
@@ -143,7 +147,7 @@ async def build_skill_index(
     telegram_id: int,
     user_text: str,
     route_mode: str | None = None,
-    limit: int = 5,
+    limit: int = 3,
 ) -> tuple[str, list[dict]]:
     from src.core.context_cache import get as cache_get
 

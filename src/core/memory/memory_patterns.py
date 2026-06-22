@@ -233,6 +233,84 @@ def format_insights(
     return "\n".join(lines), keyboards
 
 
+async def mint_l2_rules(insights: list[dict], owner_id: int) -> list[str]:
+    """LLM-mint: превращает статистические инсайты в человеко-читаемые L2-правила.
+
+    ponytail: one LLM call per patterns_loop run, upgrade to batched if patterns grow.
+    """
+    if not insights:
+        return []
+
+    from src.llm.provider_manager import build_provider
+    from src.llm.base import ChatMessage
+
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_id)
+            provider = await build_provider(
+                session, owner, purpose="background", task_type="summarize"
+            )
+
+        if provider is None:
+            logger.debug("mint_l2_rules: no provider available")
+            return []
+
+        # Serialize insights for LLM
+        insight_text = "\n".join(
+            f"- {ins['title']}: {ins['detail']}" for ins in insights[:5]
+        )
+
+        from src.agents._json_utils import extract_json_from_llm_response
+        from src.core.security.prompt_guard import scrub_internal_tags
+
+        prompt = (
+            "Ты — аналитик паттернов общения. Преврати эти статистические инсайты "
+            "в 1-3 кратких человеко-читаемых правила поведения.\n\n"
+            f"Инсайты:\n{insight_text}\n\n"
+            'Верни JSON: {"rules": ["правило1", "правило2", ...]}\n'
+            'Пример: {"rules": ["Пользователь общается с X каждую среду — '
+            'предлагать напоминание", "Отношения с Y ухудшаются — быть мягче"]}'
+        )
+
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content="Ты — аналитик паттернов."),
+                ChatMessage(role="user", content=prompt),
+            ],
+            heavy=False,
+            max_tokens=500,
+        )
+        text = scrub_internal_tags(raw)
+        parsed = extract_json_from_llm_response(text, default={})
+        rules = parsed.get("rules", []) if isinstance(parsed, dict) else []
+
+        if not rules:
+            logger.debug("mint_l2_rules: LLM returned no rules")
+            return []
+
+        # Save rules as memory facts for persistence
+        from src.core.memory.memory_service import save_memory_single
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_id)
+            for rule in rules[:3]:
+                await save_memory_single(
+                    session,
+                    owner,
+                    fact=rule,
+                    memory_type="l2_policy",
+                    confidence=0.7,
+                    source="auto",
+                )
+
+        logger.info("mint_l2_rules: generated %d rules", len(rules))
+        return rules
+
+    except Exception:
+        logger.exception("mint_l2_rules: failed")
+        return []
+
+
 async def patterns_loop(owner_id: int) -> None:
     """Фоновый цикл: раз в 24 часа в 10:00 по часовому поясу владельца."""
     last_run_date: object = None
@@ -249,6 +327,18 @@ async def patterns_loop(owner_id: int) -> None:
                 if now.hour == 10 and last_run_date != today:
                     last_run_date = today
                     insights = await detect_patterns(owner_id)
+                    # LLM-mint: generate human-readable L2 rules from statistical insights
+                    if insights:
+                        rules = await mint_l2_rules(insights, owner_id)
+                        if rules:
+                            insights.append(
+                                {
+                                    "type": "l2_policy",
+                                    "title": "📋 Сформированы правила поведения",
+                                    "detail": "\n".join(f"• {r}" for r in rules),
+                                    "action": "Правила учтены в памяти",
+                                }
+                            )
                     text, keyboards = format_insights(insights)
                     if not insights:
                         await notification_queue.enqueue(
