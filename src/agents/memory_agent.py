@@ -51,8 +51,11 @@ async def recall(
     )
 
     try:
+        from src.llm.retry import retry_async
+
         raw = await asyncio.wait_for(
-            provider.chat(
+            retry_async(
+                provider.chat,
                 [
                     ChatMessage(role="system", content=RECALL_SYSTEM),
                     ChatMessage(role="user", content=user_msg),

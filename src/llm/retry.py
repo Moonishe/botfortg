@@ -8,8 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections.abc import Awaitable, Callable, TypeVar
-from typing import Any
+from typing import Any, TypeVar
 
 from src.config import settings
 

@@ -141,6 +141,18 @@ class CronScheduler:
         if not prompt:
             return json.dumps({"text": "Пустой prompt для llm_prompt-задачи"})
 
+        # Scan cron prompt for injection — same guard as all other LLM paths.
+        from src.core.security.prompt_injection_scanner import scan_content
+
+        scan_result = scan_content(prompt, "cron_prompt")
+        if scan_result.blocked:
+            logger.warning(
+                "Cron prompt blocked by content scanner for user %d", user_id
+            )
+            return json.dumps(
+                {"text": "Cron prompt заблокирован: обнаружена попытка инъекции"}
+            )
+
         try:
             from src.db.session import get_session
             from src.db.repos.session_repo import get_or_create_user

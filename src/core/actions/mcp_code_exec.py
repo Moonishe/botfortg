@@ -373,6 +373,17 @@ async def code_exec(
     if settings.sandbox_enabled:
         return await _run_code_in_sandbox(wrapper, timeout)
 
+    # ponytail: no RLIMIT on Windows — AST blacklist + asyncio timeout are the only guards.
+    # Upgrade: enforce sandbox_enabled=True in production via config validator.
+    import sys as _sys
+
+    if _sys.platform == "win32":
+        logger.warning(
+            "code_exec: running without Docker sandbox on Windows — "
+            "RLIMITs unavailable, relying on AST blacklist + asyncio timeout only. "
+            "Set sandbox_enabled=True with Docker Desktop for full isolation."
+        )
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "python",
