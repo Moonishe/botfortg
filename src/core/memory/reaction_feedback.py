@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from src.core.humanizer.humanizer import humanize_response as _humanize_response
@@ -164,6 +165,74 @@ async def process_reaction(reaction_data: dict[str, Any]) -> None:
 async def process_reaction_feedback(reaction_data: dict[str, Any]) -> None:
     """Публичный alias для process_reaction (совместимость со spec)."""
     await process_reaction(reaction_data)
+
+
+# ── A7: NL memory feedback — text replies as corrections/supplements ──────
+# ponytail: regex patterns for 3 NL feedback types, upgrade to LLM classification if accuracy <80%.
+
+_NL_SUPPLEMENT_RE = re.compile(
+    r"(?i)(?:ещё|ещ[её]|кстати|а\s+ ещё|дополнительно|точнее)"
+    r".{0,60}"
+)
+_NL_REPLACE_RE = re.compile(
+    r"(?i)(?:забудь|забудьте|игнорируй|нет\s*,\s*не\s+так|неправильно|неверно)"
+    r".{0,60}"
+)
+
+
+async def process_nl_feedback(
+    text: str,
+    reactor_id: int,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Detect NL memory feedback in a text reply to a bot message.
+
+    Classifies the reply as:
+    - "correcting": negates or replaces a fact (routes to detect_memory_correction)
+    - "supplementing": adds info to existing fact
+    - "replacing": full replace ("забудь это, вот правильный вариант")
+
+    Returns:
+        dict with 'action', 'keywords', 'new_text' — or None if no NL feedback detected.
+    """
+    text_clean = text.strip()
+    if len(text_clean) < 5:
+        return None
+
+    # Try existing detect_memory_correction first (handles negation patterns).
+    try:
+        from src.core.contacts.smart_reply import detect_memory_correction
+
+        correction = detect_memory_correction(text_clean)
+        if correction is not None:
+            return {
+                "action": "correcting",
+                "source": "detect_memory_correction",
+                **correction,
+            }
+    except Exception:
+        logger.debug("detect_memory_correction failed", exc_info=True)
+
+    # Supplement: "ещё ...", "кстати ...", "точнее ..."
+    if _NL_SUPPLEMENT_RE.search(text_clean):
+        keywords = re.findall(r"[а-яёa-z]{4,}", text_clean.lower())
+        return {
+            "action": "supplementing",
+            "keywords": list(set(keywords))[:5],
+            "new_text": text_clean,
+        }
+
+    # Replace: "забудь ...", "неправильно ...", "неверно ..."
+    if _NL_REPLACE_RE.search(text_clean):
+        keywords = re.findall(r"[а-яёa-z]{4,}", text_clean.lower())
+        return {
+            "action": "replacing",
+            "keywords": list(set(keywords))[:5],
+            "new_text": text_clean,
+        }
+
+    return None
 
 
 async def _find_related_memory_ids(
