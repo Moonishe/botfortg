@@ -95,7 +95,7 @@ async def cmd_health(message: Message) -> None:
 
     # ── 7. Cron jobs ────────────────────────────────────────
     try:
-        from sqlalchemy import func, select
+        from sqlalchemy import func
 
         from src.db.models import CronJob
         from src.db.session import get_session
@@ -113,13 +113,15 @@ async def cmd_health(message: Message) -> None:
 
     # ── 8. Userbot ──────────────────────────────────────────
     try:
-        from src.userbot.manager import userbot_manager
+        from src.userbot import get_userbot_manager
 
-        clients = (
-            userbot_manager._clients if hasattr(userbot_manager, "_clients") else {}
-        )
-        connected = sum(1 for c in clients.values() if c.is_connected())
-        lines.append(f"👤 Userbot: {connected}/{len(clients)} подключено")
+        mgr = get_userbot_manager()
+        if mgr is not None:
+            clients = mgr._clients if hasattr(mgr, "_clients") else {}
+            connected = sum(1 for c in clients.values() if c.is_connected())
+            lines.append(f"👤 Userbot: {connected}/{len(clients)} подключено")
+        else:
+            lines.append("👤 Userbot: не инициализирован")
     except Exception:
         logger.debug("Userbot status check failed", exc_info=True)
 

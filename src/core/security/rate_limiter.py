@@ -36,7 +36,9 @@ async def check_rate_limit(telegram_id: int) -> bool:
         # Periodic cleanup — purge entries untouched for > _STALE_TTL.
         if now - _LAST_CLEANUP > _CLEANUP_INTERVAL:
             stale_cutoff = now - _STALE_TTL
-            _buckets = {k: v for k, v in _buckets.items() if v[1] > stale_cutoff}
+            stale_keys = [k for k, v in _buckets.items() if v[1] <= stale_cutoff]
+            for k in stale_keys:
+                del _buckets[k]
             _LAST_CLEANUP = now
 
         tokens, last = _buckets.get(telegram_id, (float(limit), now))

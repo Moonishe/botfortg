@@ -1631,7 +1631,7 @@ async def execute_maestro(
                         / 1000.0
                     )
                     try:
-                        await message.answer_chat_action("typing")
+                        await message.answer_chat_action("typing")  # type: ignore[union-attr]
                     except TelegramAPIError:
                         pass
                     await asyncio.sleep(delay)
@@ -1673,7 +1673,7 @@ async def execute_maestro(
                         / 1000.0
                     )
                     try:
-                        await message.answer_chat_action("typing")
+                        await message.answer_chat_action("typing")  # type: ignore[union-attr]
                     except TelegramAPIError:
                         pass
                     await asyncio.sleep(delay)
