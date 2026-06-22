@@ -122,7 +122,7 @@ def format_nudge(nudges: list[dict]) -> str:
     try:
         from src.core.humanizer.humanizer import humanize_response
 
-        result = humanize_response(result) or result
+        result = await asyncio.to_thread(humanize_response, result) or result
     except Exception:
         logger.debug("Non-critical error", exc_info=True)
     return result

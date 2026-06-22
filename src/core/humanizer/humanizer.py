@@ -500,6 +500,29 @@ def humanize_response(
     return result
 
 
+async def humanize_response_async(
+    text: str,
+    context_hint: str | None = None,
+    style_profile: str = "",
+    user_id: int = 0,
+    tone: str = "natural",
+    user_slots: list | None = None,
+) -> str:
+    """Async wrapper for humanize_response — offloads sync regex to thread pool.
+
+    ponytail: to_thread wrapper, upgrade to native async regex if aiohttp-sized latency matters.
+    """
+    return await asyncio.to_thread(
+        humanize_response,
+        text,
+        context_hint=context_hint,
+        style_profile=style_profile,
+        user_id=user_id,
+        tone=tone,
+        user_slots=user_slots,
+    )
+
+
 def normalize_anti_ai_mode(mode: str | None, *, enabled: bool | None = None) -> str:
     """Normalize Anti-AI runtime mode.
 

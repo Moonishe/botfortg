@@ -63,6 +63,7 @@ async def record_turn(
         content: Message text (truncated to 4000 chars).
         session_type: Session type label (default "chat").
     """
+    # ponytail: single lock acquisition fixes TOCTOU — session can't change between check and update.
     async with _active_sessions_lock:
         cached = _active_sessions.get(telegram_id)
         session_id = cached[0] if cached else None
@@ -107,16 +108,15 @@ async def record_turn(
                 agent_session.started_at,
                 datetime.now(UTC),
             )
-
-    # Update last_active timestamp for the active session
-    async with _active_sessions_lock:
-        existing = _active_sessions.get(telegram_id)
-        if existing and existing[0] == session_id:
-            _active_sessions[telegram_id] = (
-                existing[0],
-                existing[1],
-                datetime.now(UTC),
-            )
+        else:
+            # Update last_active timestamp in the same critical section.
+            existing = _active_sessions.get(telegram_id)
+            if existing and existing[0] == session_id:
+                _active_sessions[telegram_id] = (
+                    existing[0],
+                    existing[1],
+                    datetime.now(UTC),
+                )
 
     # Record the message
     msg = AgentSessionMessage(

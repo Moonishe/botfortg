@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -128,7 +129,9 @@ async def process_reaction(reaction_data: dict[str, Any]) -> None:
     _followup_text = _SMART_FOLLOWUP_REACTIONS.get(reaction_emoji)
     if _followup_text is not None:
         # Применить humanizer для естественного тона
-        _followup_text = _humanize_response(_followup_text, context_hint="memory")
+        _followup_text = await asyncio.to_thread(
+            _humanize_response, _followup_text, context_hint="memory"
+        )
         try:
             from src.core.scheduling.notification_queue import notification_queue
             from src.db.models import Notification as _NotifModel

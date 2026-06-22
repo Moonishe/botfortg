@@ -134,12 +134,26 @@ _BLACKLIST: set[str] = {
 # Keys that MUST NOT be passed into the sandbox namespace via **safe_kwargs,
 # as they would override critical safety internals.
 # ponytail: frozenset, upgrade to enum if namespacing gets more complex.
-_RESERVED_NAMESPACE_KEYS: frozenset[str] = frozenset({
-    "__builtins__", "kwargs", "safe_builtins", "safe_kwargs",
-    "namespace", "output_buffer", "_sandbox_print", "code",
-    "result", "session", "user", "provider", "userbot_manager",
-    "owner", "bot",
-})
+_RESERVED_NAMESPACE_KEYS: frozenset[str] = frozenset(
+    {
+        "__builtins__",
+        "kwargs",
+        "safe_builtins",
+        "safe_kwargs",
+        "namespace",
+        "output_buffer",
+        "_sandbox_print",
+        "code",
+        "result",
+        "session",
+        "user",
+        "provider",
+        "userbot_manager",
+        "owner",
+        "bot",
+    }
+)
+
 
 def _is_safe(node: ast.AST) -> bool:
     """Recursively check that all nodes in the AST are allowed.
@@ -200,13 +214,27 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
             "error": "code parameter is required",
         }
 
-    # 1. Parse and validate AST
+    # 1. Parse and validate AST — with timeout to prevent slow-parse DoS.
+    # ponytail: to_thread + wait_for, upgrade to dedicated process if parse bombs grow.
     try:
-        tree = ast.parse(code, mode="exec")
+        tree = await asyncio.wait_for(
+            asyncio.to_thread(ast.parse, code, mode="exec"),
+            timeout=5,
+        )
+    except asyncio.TimeoutError:
+        return {"output": "", "result": None, "error": "AST parse timeout (5s)"}
     except SyntaxError as e:
         return {"output": "", "result": None, "error": f"Syntax error: {e}"}
 
-    if not _is_safe(tree):
+    try:
+        is_safe = await asyncio.wait_for(
+            asyncio.to_thread(_is_safe, tree),
+            timeout=5,
+        )
+    except asyncio.TimeoutError:
+        return {"output": "", "result": None, "error": "AST validation timeout (5s)"}
+
+    if not is_safe:
         # Pinpoint the first disallowed node for a helpful error message
         for node in ast.walk(tree):
             if type(node) not in _ALLOWED_NODES:
@@ -237,9 +265,9 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
     def _safe_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         """Filter kwargs for safe passage to sandbox namespace."""
         return {
-            k: v for k, v in kwargs.items()
-            if k not in _RESERVED_NAMESPACE_KEYS
-            and _is_json_serializable(v)
+            k: v
+            for k, v in kwargs.items()
+            if k not in _RESERVED_NAMESPACE_KEYS and _is_json_serializable(v)
         }
 
     # 3. Execute in isolated subprocess (with timeout)
@@ -257,7 +285,9 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
         "code = marshal.loads(base64.b64decode("
         + json.dumps(base64.b64encode(code_bytes).decode(), ensure_ascii=True)
         + "))\n"
-        "safe_kwargs = json.loads(" + json.dumps(safe_kwargs_json, ensure_ascii=True) + ")\n"
+        "safe_kwargs = json.loads("
+        + json.dumps(safe_kwargs_json, ensure_ascii=True)
+        + ")\n"
         "safe_builtins = {k: getattr(__builtins__, k) for k in ['print','len','range','int','str','float','bool','list','dict','set','tuple','zip','enumerate','sorted','min','max','sum','any','all','isinstance']}\n"
         "safe_builtins.update({'True': True, 'False': False, 'None': None})\n"
         "namespace = {'__builtins__': safe_builtins, 'kwargs': safe_kwargs, **safe_kwargs}\n"

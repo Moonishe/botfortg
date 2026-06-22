@@ -249,7 +249,7 @@ _SAFE_BUILTINS = {
         "sum", "tuple", "zip", "True", "False", "None", "Exception",
         "ValueError", "TypeError", "KeyError", "IndexError", "StopIteration",
         "ZeroDivisionError", "math", "json", "datetime", "collections",
-        "itertools", "functools", "random", "statistics", "re", "hashlib",
+        "itertools", "functools", "random", "statistics",
         "base64", "textwrap", "string", "decimal", "fractions", "numbers",
         "csv", "dataclasses",
     } if hasattr(builtins, name)

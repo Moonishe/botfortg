@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import logging
 from dataclasses import dataclass, field
@@ -387,7 +388,8 @@ async def ask_chat_action(
     except Exception:
         logger.debug("Non-critical error", exc_info=True)
 
-    humanized = _humanize_response(
+    humanized = await asyncio.to_thread(
+        _humanize_response,
         text,
         context_hint="analysis",
         style_profile=style_profile,
