@@ -5,3 +5,11 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-ra"
 asyncio_mode = "auto"
+filterwarnings = [
+    # Test infra noise: StaticPool + aiosqlite + multiple event loops
+    "ignore::ResourceWarning:aiosqlite",
+    "ignore::ResourceWarning:sqlalchemy",
+    "ignore::ResourceWarning:asyncio",
+    # pytest-asyncio thread cleanup on Windows
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]
