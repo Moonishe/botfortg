@@ -24,6 +24,7 @@ from src.core.infra.timeutil import get_user_tz, now_in_tz
 from src.core.memory.memory_recall import format_recall_for_prompt, recall
 from src.db.models import User
 from src.db.repo import get_contact_profile
+from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,32 @@ async def _gather_memory_context(
             memory_context = format_recall_for_prompt(result)
         except Exception:
             logger.warning("recall failed, skipping memory context")
+
+    # C2: Hierarchical context — add conversation summary for long chat history
+    try:
+        from sqlalchemy import select as sa_select
+        from sqlalchemy import desc as sa_desc
+        from src.db.models._messaging import ConversationSummary
+
+        async with get_session() as _session:
+            _sum_row = await _session.execute(
+                sa_select(ConversationSummary)
+                .where(
+                    ConversationSummary.user_id == owner_telegram_id,
+                    ConversationSummary.last_peer_id == peer_id,
+                )
+                .order_by(sa_desc(ConversationSummary.created_at))
+                .limit(1)
+            )
+            _prev_sum = _sum_row.scalar_one_or_none()
+        if _prev_sum and _prev_sum.summary_text:
+            memory_context += (
+                f"\n\n<chat_summary>\n{_prev_sum.summary_text}\n</chat_summary>"
+            )
+    except Exception:
+        logger.debug(
+            "Failed to load chat summary for hierarchical context", exc_info=True
+        )
 
     return memory_context
 

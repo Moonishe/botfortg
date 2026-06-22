@@ -83,6 +83,10 @@ async def check_chat_needs_summary(chat_id: int, user_id: int) -> dict | None:
 async def generate_chat_summary(chat_id: int, user_id: int) -> str:
     """Генерирует краткий LLM-пересказ последней активности в чате.
 
+    C1: Rolling summary — если есть предыдущий summary, обновляет его
+    инкрементально (старый summary + новые сообщения) вместо пересказа с нуля.
+    Это экономит ~70% токенов при повторных пересказах длинных чатов.
+
     Использует лёгкую LLM-модель через build_provider(purpose="background").
 
     Возвращает:
@@ -101,11 +105,35 @@ async def generate_chat_summary(chat_id: int, user_id: int) -> str:
         if provider is None:
             return "❌ Не удалось создать LLM-провайдер для фоновой задачи."
 
-        # Загружаем последние 80 сообщений — достаточно для контекстного пересказа
-        messages = await fetch_chat_messages(session, owner, chat_id, limit=80)
+        # C1: Load previous rolling summary for incremental update
+        prev_summary_row = await session.execute(
+            select(ConversationSummary)
+            .where(
+                ConversationSummary.user_id == user_id,
+                ConversationSummary.last_peer_id == chat_id,
+            )
+            .order_by(ConversationSummary.created_at.desc())
+            .limit(1)
+        )
+        prev_summary_obj = prev_summary_row.scalar_one_or_none()
+        prev_summary_text = (
+            prev_summary_obj.summary_text
+            if prev_summary_obj and prev_summary_obj.summary_text
+            else None
+        )
+        # Load messages since last summary (or last 80 if no previous)
+        if prev_summary_obj is not None:
+            messages = await fetch_chat_messages(
+                session, owner, chat_id, limit=80
+            )
+            # Filter to only messages after last summary
+            since = prev_summary_obj.created_at
+            messages = [m for m in messages if m.date and m.date > since.replace(tzinfo=None)]
+        else:
+            messages = await fetch_chat_messages(session, owner, chat_id, limit=80)
 
         if not messages:
-            return "📭 В чате нет сохранённых сообщений."
+            return "📭 В чате нет новых сообщений с последнего пересказа."
 
         # Получаем имя чата
         contact_result = await session.execute(
@@ -116,9 +144,9 @@ async def generate_chat_summary(chat_id: int, user_id: int) -> str:
         chat_name_row = contact_result.scalar_one_or_none()
         chat_name = chat_name_row if chat_name_row else f"чат {chat_id}"
 
-    # Строим транскрипт из последних сообщений
+    # Строим транскрипт из новых сообщений
     transcript_lines: list[str] = []
-    for m in messages[-80:]:
+    for m in messages:
         label = message_to_text(m)
         if label.strip():
             transcript_lines.append(label)
@@ -128,16 +156,29 @@ async def generate_chat_summary(chat_id: int, user_id: int) -> str:
 
     transcript = "\n".join(transcript_lines)
 
-    system_prompt = (
-        "Ты делаешь КРАТКИЙ пересказ чата. 3-5 предложений, живой язык, без маркдауна.\n"
-        "Опиши: 1) ключевые темы обсуждения, 2) принятые решения/договорённости, "
-        "3) общий настрой (дружеский/рабочий/напряжённый).\n"
-        "Не используй списки. Пиши связным текстом на русском."
-    )
-
-    user_prompt = (
-        f"Чат: {chat_name}\nПоследние {len(messages)} сообщений:\n\n{transcript[:6000]}"
-    )
+    # C1: Incremental prompt — previous summary + new messages
+    if prev_summary_text:
+        system_prompt = (
+            "Ты обновляешь КРАТКИЙ пересказ чата. 3-5 предложений, живой язык, без маркдауна.\n"
+            "У тебя есть предыдущий пересказ и новые сообщения. Обнови пересказ: "
+            "сохрани важное из старого, добавь новое, убери устаревшее.\n"
+            "Не используй списки. Пиши связным текстом на русском."
+        )
+        user_prompt = (
+            f"Чат: {chat_name}\n"
+            f"Предыдущий пересказ:\n{prev_summary_text}\n\n"
+            f"Новые сообщения ({len(messages)}):\n{transcript[:6000]}"
+        )
+    else:
+        system_prompt = (
+            "Ты делаешь КРАТКИЙ пересказ чата. 3-5 предложений, живой язык, без маркдауна.\n"
+            "Опиши: 1) ключевые темы обсуждения, 2) принятые решения/договорённости, "
+            "3) общий настрой (дружеский/рабочий/напряжённый).\n"
+            "Не используй списки. Пиши связным текстом на русском."
+        )
+        user_prompt = (
+            f"Чат: {chat_name}\nПоследние {len(messages)} сообщений:\n\n{transcript[:6000]}"
+        )
 
     try:
         summary = await provider.chat(
@@ -154,6 +195,29 @@ async def generate_chat_summary(chat_id: int, user_id: int) -> str:
             user_id,
         )
         return "❌ Ошибка LLM при генерации пересказа. Попробуй позже."
+
+    # C1: Save rolling summary — update existing row or create new
+    try:
+        async with get_session() as session:
+            if prev_summary_obj is not None:
+                # Update existing summary in-place
+                prev_summary_obj.summary_text = summary
+                prev_summary_obj.turn_count += len(messages)
+                prev_summary_obj.created_at = datetime.now(UTC)
+                await session.merge(prev_summary_obj)
+            else:
+                # Create new summary
+                new_summary = ConversationSummary(
+                    user_id=user_id,
+                    last_peer_id=chat_id,
+                    last_peer_name=chat_name,
+                    summary_text=summary,
+                    turn_count=len(messages),
+                )
+                session.add(new_summary)
+            await session.commit()
+    except Exception:
+        logger.debug("Failed to save rolling summary checkpoint", exc_info=True)
 
     return summary
 

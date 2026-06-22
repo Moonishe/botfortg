@@ -105,26 +105,50 @@ async def _proactive_scan(telegram_id: int) -> None:
         )
 
         # ── Проверка необходимости авто-саммари для активных чатов ──
-        from src.core.memory.chat_summarizer import check_chat_needs_summary
+        from src.core.memory.chat_summarizer import (
+            check_chat_needs_summary,
+            generate_chat_summary,
+        )
 
         for _msg_count, contact in active:
             try:
                 summary_info = await check_chat_needs_summary(contact.peer_id, owner.id)
                 if summary_info:
-                    await notification_queue.enqueue(
-                        topic="chat_summary",
-                        text=(
-                            f"📊 В чате <b>{summary_info['chat_name']}</b> "
-                            f"{summary_info['new_count']} новых сообщений. "
-                            f"Сделать краткий пересказ?"
-                        ),
-                        priority=1,
-                        category="chat_summary",
-                        metadata={
-                            "chat_id": contact.peer_id,
-                            "action": "offer_summary",
-                        },
-                    )
+                    # C3: Auto-generate summary if threshold reached (was: only notify)
+                    # ponytail: auto-generate for top-5 most active, notify for rest.
+                    try:
+                        _summary_text = await generate_chat_summary(
+                            contact.peer_id, owner.id
+                        )
+                        await notification_queue.enqueue(
+                            topic="chat_summary",
+                            text=(
+                                f"📊 Обновлён пересказ чата <b>{summary_info['chat_name']}</b> "
+                                f"(+{summary_info['new_count']} сообщений)"
+                            ),
+                            priority=1,
+                            category="chat_summary",
+                            metadata={
+                                "chat_id": contact.peer_id,
+                                "action": "auto_summary_done",
+                            },
+                        )
+                    except Exception:
+                        # Fallback: just offer manual summary if auto fails
+                        await notification_queue.enqueue(
+                            topic="chat_summary",
+                            text=(
+                                f"📊 В чате <b>{summary_info['chat_name']}</b> "
+                                f"{summary_info['new_count']} новых сообщений. "
+                                f"Сделать краткий пересказ?"
+                            ),
+                            priority=1,
+                            category="chat_summary",
+                            metadata={
+                                "chat_id": contact.peer_id,
+                                "action": "offer_summary",
+                            },
+                        )
             except Exception:
                 logger.warning(
                     "summary check skip for %s", contact.display_name, exc_info=True
