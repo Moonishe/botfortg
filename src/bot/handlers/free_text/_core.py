@@ -13,6 +13,7 @@ from src.core.security.prompt_guard import scrub_internal_tags
 import asyncio
 import json
 import logging
+import random
 import sys
 import time
 from collections.abc import Callable
@@ -1619,6 +1620,22 @@ async def execute_maestro(
                 # Символьный интервал — основная логика обновления
                 char_interval = settings.streaming_update_interval
 
+                # Response pacing — human-like задержка перед ответом.
+                # ponytail: typing indicator + sleep, upgrade to per-contact pacing if needed.
+                if settings.response_pacing_mode != "off":
+                    delay = (
+                        random.uniform(
+                            settings.response_pacing_min_ms,
+                            settings.response_pacing_max_ms,
+                        )
+                        / 1000.0
+                    )
+                    try:
+                        await message.answer_chat_action("typing")
+                    except TelegramAPIError:
+                        pass
+                    await asyncio.sleep(delay)
+
                 # Отправляем первое сообщение с курсором
                 sent_msg = await message.answer(cursor)
                 full_text = ""
@@ -1647,6 +1664,19 @@ async def execute_maestro(
                     logger.debug("Stream interrupted", exc_info=True)
             else:
                 # Non-streaming: silently accumulate text
+                if settings.response_pacing_mode != "off":
+                    delay = (
+                        random.uniform(
+                            settings.response_pacing_min_ms,
+                            settings.response_pacing_max_ms,
+                        )
+                        / 1000.0
+                    )
+                    try:
+                        await message.answer_chat_action("typing")
+                    except TelegramAPIError:
+                        pass
+                    await asyncio.sleep(delay)
                 sent_msg = await message.answer("⏳")
                 chunks: list[str] = []
                 try:

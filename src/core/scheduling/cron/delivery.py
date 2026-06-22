@@ -47,6 +47,14 @@ async def dispatch_cron_job(
         except (json.JSONDecodeError, TypeError):
             parsed_payload = {"text": payload}
 
+    # Wake-gate: skip delivery if output is empty and skip_if_empty is set.
+    # ponytail: payload flag, upgrade to hash-comparison if dedup needed.
+    if parsed_payload.get("skip_if_empty"):
+        text = parsed_payload.get("text", "")
+        if not text or not text.strip():
+            logger.info("CronDelivery: job #%d skipped (empty output)", job_id)
+            return {"success": True, "output": "Skipped: empty output"}
+
     if channel == "notification_queue":
         return await asyncio.wait_for(
             _deliver_via_notification_queue(
@@ -136,6 +144,7 @@ async def _deliver_via_telegram(
             chat_id=chat_id,
             text=text,
             parse_mode=parse_mode,
+            message_thread_id=payload.get("thread_id"),
         )
 
         return {"success": True, "output": f"Сообщение отправлено в чат {chat_id}"}

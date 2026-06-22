@@ -430,6 +430,14 @@ class Settings(BaseSettings):
     )
     streaming_cursor: str = Field(" 🦊", description="Курсор при streaming")
 
+    # ── Response Pacing — human-like задержки перед ответом ──
+    response_pacing_mode: str = Field(
+        "off",
+        description="off=instant, natural=random delay, custom=user-defined range",
+    )
+    response_pacing_min_ms: int = Field(500, description="Min pacing delay (ms)")
+    response_pacing_max_ms: int = Field(2000, description="Max pacing delay (ms)")
+
     memory_warmup_idle_timeout_sec: int = Field(
         86400, description="Таймаут простоя для сброса warmup-счётчика (24 часа)"
     )
