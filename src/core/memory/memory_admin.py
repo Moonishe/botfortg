@@ -32,7 +32,15 @@ __all__ = [
 
 # Whitelist of allowed memory types — shared across reval and manual corrections.
 ALLOWED_MEMORY_TYPES: frozenset[str] = frozenset(
-    {"contact_fact", "personal", "relationship", "preference", "task", "general"}
+    {
+        "contact_fact",
+        "personal",
+        "relationship",
+        "preference",
+        "task",
+        "general",
+        "l2_policy",
+    }
 )
 MAX_FACT_LEN = 500
 MIN_FACT_LEN = 3

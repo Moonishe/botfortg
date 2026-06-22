@@ -81,6 +81,10 @@ RUN mkdir -p /app/data \
     && chmod +x /entrypoint.sh \
     && chown -R appuser:appuser /app
 
+# Declare data as a volume — Railway/Docker will persist it across restarts.
+# Contains: SQLite DB, Qdrant, Telethon sessions, media, Chromium cache.
+VOLUME ["/app/data"]
+
 # NOTE: Chromium browser (~300MB) is installed at first run by entrypoint.sh
 # into PLAYWRIGHT_BROWSERS_PATH (mounted volume), keeping the image slim.
 
