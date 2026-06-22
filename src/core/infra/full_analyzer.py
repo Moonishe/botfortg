@@ -61,6 +61,7 @@ async def run_full_analysis(
     contact_ids: list[int] | None = None,
     progress_callback=None,
     progress_message=None,
+    include_photos: bool = False,
 ) -> AnalysisResult:
     """
     Полный анализ всех контактов из выбранных папок.
@@ -68,11 +69,12 @@ async def run_full_analysis(
     Args:
         owner_id: Telegram ID владельца
         provider: LLMProvider для извлечения фактов
-        message_limit: сколько последних сообщений анализировать на контакт
+        message_limit: сколько последних сообщений анализировать (0 = все)
         folder_names: список папок для анализа (None = все)
         contact_ids: список peer_id для анализа (если задан, folder_names игнорируется)
         progress_callback: async callable(AnalysisProgress) для UI-обновлений
         progress_message: aiogram Message для progress_tracker (per‑contact)
+        include_photos: если True, photo-сообщения помечаются [фото] в транскрипте
     """
     result = AnalysisResult()
 
@@ -159,6 +161,9 @@ async def run_full_analysis(
                     )
                 )
             try:
+                # message_limit=0 means ALL messages
+                effective_limit = message_limit if message_limit > 0 else 100000
+
                 if client:
                     from src.core.contacts.chat_service import load_chat
 
@@ -166,7 +171,7 @@ async def run_full_analysis(
                         client,
                         owner_id,
                         contact.peer_id,
-                        limit=message_limit,
+                        limit=effective_limit,
                         transcribe=False,
                         incremental=False,
                     )
@@ -179,29 +184,73 @@ async def run_full_analysis(
                             session,
                             owner_synced,
                             contact.peer_id,
-                            limit=message_limit,
+                            limit=effective_limit,
                         )
 
                 if not messages:
                     result.details.append(f"{contact_name}: нет сообщений")
                     return
 
+                # Filter photo-only messages if not include_photos
+                if not include_photos:
+                    messages = [
+                        m
+                        for m in messages
+                        if getattr(m, "kind", "text") != "photo"
+                        or getattr(m, "text", None)
+                        or getattr(m, "transcript", None)
+                        or getattr(m, "extracted_text", None)
+                    ]
+
                 result.contacts_processed += 1
                 result.messages_scanned += len(messages)
 
-                try:
-                    mem_count = await extract_and_save_memories(
-                        provider,
-                        owner_id,
-                        contact,
-                        messages,
-                    )
-                    result.memories_found += mem_count
-                    if mem_count > 0:
-                        result.details.append(f"{contact_name}: +{mem_count} фактов")
-                except Exception as e:
-                    logger.exception("Memory extraction failed for %s", contact_name)
-                    result.errors.append(f"Память {contact_name}: {e}")
+                # Chunking: split large transcripts into chunks of 50 messages
+                # to avoid token overflow. Each chunk → separate LLM call.
+                CHUNK_SIZE = 50
+                total_mem_count = 0
+                if len(messages) <= CHUNK_SIZE:
+                    try:
+                        mem_count = await extract_and_save_memories(
+                            provider,
+                            owner_id,
+                            contact,
+                            messages,
+                        )
+                        total_mem_count = mem_count
+                    except Exception as e:
+                        logger.exception(
+                            "Memory extraction failed for %s", contact_name
+                        )
+                        result.errors.append(f"Память {contact_name}: {e}")
+                else:
+                    # Process chunks in parallel within this contact
+                    chunk_tasks = []
+                    for i in range(0, len(messages), CHUNK_SIZE):
+                        chunk = messages[i : i + CHUNK_SIZE]
+                        chunk_tasks.append(
+                            extract_and_save_memories(
+                                provider, owner_id, contact, chunk
+                            )
+                        )
+                    try:
+                        chunk_results = await asyncio.gather(
+                            *chunk_tasks, return_exceptions=True
+                        )
+                        for cr in chunk_results:
+                            if isinstance(cr, int):
+                                total_mem_count += cr
+                            elif isinstance(cr, Exception):
+                                logger.warning("Chunk extraction error: %s", cr)
+                    except Exception as e:
+                        logger.exception(
+                            "Chunked extraction failed for %s", contact_name
+                        )
+                        result.errors.append(f"Память {contact_name}: {e}")
+
+                result.memories_found += total_mem_count
+                if total_mem_count > 0:
+                    result.details.append(f"{contact_name}: +{total_mem_count} фактов")
 
                 try:
                     async with get_session() as session:

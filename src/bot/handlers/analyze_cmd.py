@@ -3,9 +3,10 @@
 import logging
 from collections.abc import Sequence
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.core.infra.text_sanitizer import sanitize_html
@@ -28,24 +29,18 @@ router.callback_query.filter(OwnerOnly())
 async def _resolve_contact_names(
     contacts, names: Sequence[str], userbot_manager, telegram_id: int
 ) -> tuple[list[int], list[str]]:
-    """Пытается найти контакты по имени — точное совпадение → fuzzy через contact_resolver.
-
-    Returns:
-        (resolved_peer_ids, unresolved_names)
-    """
+    """Пытается найти контакты по имени — точное совпадение → fuzzy через contact_resolver."""
     resolved = []
     unresolved = []
     for name in names:
         nl = name.strip().lower()
         found = False
-        # 1. Точное совпадение по display_name
         for c in contacts:
             cn = (c.display_name or "").lower()
             if nl == cn or (len(nl) > 2 and nl in cn):
                 resolved.append(c.peer_id)
                 found = True
                 break
-        # 2. Fuzzy через contact_resolver
         if not found:
             try:
                 from src.bot.contact_resolver import resolve_contact_fast
@@ -68,16 +63,75 @@ async def _resolve_contact_names(
 
 
 @router.message(Command("analyze"))
-async def cmd_analyze(message: Message, userbot_manager=None):
-    """Запуск полного анализа."""
+async def cmd_analyze(message: Message, state=None, userbot_manager=None):
+    """Запуск полного анализа — показывает выбор режима."""
     args = (message.text or "").strip().split()
     folder_filter = args[1:] if len(args) > 1 else []
 
-    await message.answer("🧠 Запускаю полный анализ переписок...")
-    status_msg = await message.answer("⏳ Подготовка...")
+    # Сохраняем аргументы в state для использования в callback
+    if state:
+        await state.update_data(analyze_folders=folder_filter)
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="📝 Все сообщения (текст)",
+            callback_data="analyze:full:text",
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="📷 Все сообщения (текст + фото)",
+            callback_data="analyze:full:photos",
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="⚡ Последние 500 (быстро)",
+            callback_data="analyze:quick:text",
+        ),
+    )
+    if folder_filter:
+        folders_str = sanitize_html(", ".join(folder_filter))
+        hint = f"📂 Папки: {folders_str}\n\n"
+    else:
+        hint = "📂 Все контакты\n\n"
+
+    await message.answer(
+        f"🧠 <b>Анализ переписок</b>\n\n"
+        f"{hint}"
+        "Выбери режим анализа:\n\n"
+        "📝 <b>Все сообщения (текст)</b> — полная переписка, только текст\n"
+        "📷 <b>Все + фото</b> — полная переписка, фото описываются через vision\n"
+        "⚡ <b>Последние 500</b> — быстро, последние 500 сообщений на контакт",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("analyze:"))
+async def cb_analyze_run(callback: CallbackQuery, state=None, userbot_manager=None):
+    """Запускает анализ в выбранном режиме."""
+    await callback.answer()
+
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        return
+    scope = parts[1]  # "full" or "quick"
+    photo_mode = parts[2]  # "text" or "photos"
+    include_photos = photo_mode == "photos"
+    message_limit = 0 if scope == "full" else 500  # 0 = all
+
+    # Restore folder filter from state
+    folder_filter = []
+    if state:
+        data = await state.get_data()
+        folder_filter = data.get("analyze_folders", [])
+
+    status_msg = await callback.message.answer("🧠 Запускаю анализ...")
+    await callback.message.edit_text("📱 Анализ запущен ✅")
 
     async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
+        owner = await get_or_create_user(session, callback.from_user.id)
         provider = await build_provider(session, owner, task_type=TaskType.SUMMARIZE)
 
         import json
@@ -94,7 +148,7 @@ async def cmd_analyze(message: Message, userbot_manager=None):
         contact_ids_arg = None
         folders_to_analyze = folder_filter if folder_filter else monitored
         if not folders_to_analyze:
-            folders_to_analyze = None  # все контакты
+            folders_to_analyze = None
 
         if not provider:
             await status_msg.edit_text(
@@ -105,26 +159,23 @@ async def cmd_analyze(message: Message, userbot_manager=None):
     # Если есть аргументы — пробуем разрешить как имена контактов
     if folder_filter:
         async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
+            owner = await get_or_create_user(session, callback.from_user.id)
             contacts = await list_contacts(
                 session, owner, kinds=("user",), include_bots=False
             )
         resolved_ids, unresolved = await _resolve_contact_names(
-            contacts, folder_filter, userbot_manager, message.from_user.id
+            contacts, folder_filter, userbot_manager, callback.from_user.id
         )
         if resolved_ids:
             contact_ids_arg = resolved_ids
-            folders_to_analyze = None  # не фильтруем по папкам
+            folders_to_analyze = None
         if unresolved and not resolved_ids:
-            # Ни один аргумент не совпал с именем контакта —
-            # продолжаем как обычно, folders_to_analyze уже установлен
             pass
         elif unresolved and resolved_ids:
             await status_msg.edit_text(
                 "❌ Не удалось найти контакты: "
                 + sanitize_html(", ".join(unresolved))
-                + ".\n"
-                + "Попробуй /analyze (без аргументов) или укажи папку."
+                + "."
             )
             return
 
@@ -134,31 +185,33 @@ async def cmd_analyze(message: Message, userbot_manager=None):
             if progress.phase == "scan":
                 await status_msg.edit_text(f"🔍 {progress.message}")
             elif progress.phase == "processing":
-                bar = "▓" * progress.current + "░" * (progress.total - progress.current)
+                bar_filled = min(progress.current, progress.total)
+                bar = "▓" * bar_filled + "░" * max(0, progress.total - bar_filled)
+                photo_tag = " 📷" if include_photos else ""
                 await status_msg.edit_text(
                     f"🔄 [{bar}] {progress.current}/{progress.total}\n"
-                    f"📂 {progress.contact_name}"
+                    f"📂 {progress.contact_name}{photo_tag}"
                 )
             elif progress.phase == "done":
                 await status_msg.edit_text("✅ Анализ завершён, формирую отчёт...")
         except Exception:
-            logger.exception("failed to update analysis progress")
+            logger.debug("progress update failed", exc_info=True)
 
-    # Запустить анализ
     try:
         client = (
-            userbot_manager.get_client(message.from_user.id)
+            userbot_manager.get_client(callback.from_user.id)
             if userbot_manager
             else None
         )
         result = await run_full_analysis(
-            owner_id=message.from_user.id,
+            owner_id=callback.from_user.id,
             provider=provider,
             client=client,
-            message_limit=500,
+            message_limit=message_limit,
             folder_names=folders_to_analyze,
             contact_ids=contact_ids_arg,
             progress_callback=update_progress,
+            include_photos=include_photos,
         )
 
         report = format_analysis_report(result)
