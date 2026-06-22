@@ -140,7 +140,7 @@ class GeminiProvider(BaseLLMProvider):
         def _call() -> str:
             resp = self._client.models.generate_content(
                 model=model,
-                contents=contents,
+                contents=contents,  # type: ignore[arg-type]
                 config=config,
             )
             return resp.text or ""
@@ -204,10 +204,10 @@ class GeminiProvider(BaseLLMProvider):
                     _config["max_output_tokens"] = max_tokens
                 if not _config:
                     _config = None
-                for chunk in self._client.models.generate_content_stream(
+                for chunk in self._client.models.generate_content_stream(  # type: ignore[arg-type]
                     model=model,
-                    contents=contents,
-                    config=_config,
+                    contents=contents,  # type: ignore[arg-type]
+                    config=_config,  # type: ignore[arg-type]
                 ):
                     if chunk.text:
                         token_queue.put(chunk.text)
@@ -263,7 +263,12 @@ class GeminiProvider(BaseLLMProvider):
                 model=embed_model,
                 contents=text,
             )
-            return list(resp.embeddings[0].values)
+            if not resp.embeddings:
+                raise ValueError("Gemini API returned no embeddings")
+            vals = resp.embeddings[0].values
+            if vals is None:
+                raise ValueError("Gemini API returned no embedding values")
+            return list(vals)
 
         result = await asyncio.wait_for(
             _run_in_executor(_call), timeout=_GEMINI_REQUEST_TIMEOUT
@@ -273,13 +278,13 @@ class GeminiProvider(BaseLLMProvider):
 
     async def list_models(self) -> list[str]:
         def _list() -> list[str]:
-            return [m.name for m in self._client.models.list()]
+            return [m.name for m in self._client.models.list()]  # type: ignore[return-value]
 
         return await _run_in_executor(_list)
 
     async def close(self) -> None:
         if hasattr(self._client, "close"):
-            await _run_in_executor(self._client.close)
+            await _run_in_executor(self._client.close)  # type: ignore[arg-type]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         from src.core.actions.embedding_cache import aget, aset
@@ -314,9 +319,17 @@ class GeminiProvider(BaseLLMProvider):
                 def _call(c: list[str] = chunk) -> list[list[float]]:
                     resp = self._client.models.embed_content(
                         model=embed_model,
-                        contents=c,
+                        contents=c,  # type: ignore[arg-type]
                     )
-                    return [list(e.values) for e in resp.embeddings]
+                    if not resp.embeddings:
+                        raise ValueError("Gemini API returned no embeddings")
+                    result: list[list[float]] = []
+                    for e in resp.embeddings:
+                        vals = e.values
+                        if vals is None:
+                            raise ValueError("Gemini API returned no embedding values")
+                        result.append(list(vals))
+                    return result
 
                 api_results.extend(
                     await asyncio.wait_for(

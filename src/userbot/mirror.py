@@ -36,7 +36,9 @@ from telethon.errors import FloodWaitError
 logger = logging.getLogger(__name__)
 
 
-async def _safe_telethon_call(coro_factory, description: str = "", *, max_retries: int = 3):
+async def _safe_telethon_call(
+    coro_factory, description: str = "", *, max_retries: int = 3
+):
     """Execute a Telethon RPC call with FloodWait retry.
 
     Unlike restore_all() which handles FloodWait explicitly, message handlers
@@ -67,7 +69,9 @@ async def _safe_telethon_call(coro_factory, description: str = "", *, max_retrie
                 await asyncio.sleep(max(0.0, min(e.seconds, 300)))
                 continue
             raise
-    raise RuntimeError("unreachable: all attempts exhausted") from last_exc  # unreachable, but for type safety
+    raise RuntimeError(
+        "unreachable: all attempts exhausted"
+    ) from last_exc  # unreachable, but for type safety
 
 
 # ===== PERF-002: TTL-кэш для проверки watched_peers =====
@@ -208,7 +212,7 @@ def _peer_id_of(msg: TgMessage) -> int | None:
     if chat is not None:
         return chat.id
     if msg.peer_id is not None and hasattr(msg.peer_id, "user_id"):
-        return msg.peer_id.user_id
+        return msg.peer_id.user_id  # type: ignore[union-attr]
     return msg.chat_id
 
 
@@ -460,7 +464,9 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                         else:
                             title = getattr(chat, "title", None) or str(peer_id)
                             kind_chat = (
-                                "channel" if getattr(chat, "broadcast", False) else "chat"
+                                "channel"
+                                if getattr(chat, "broadcast", False)
+                                else "chat"
                             )
                             await upsert_contact(
                                 session,

@@ -160,7 +160,7 @@ class AnthropicProvider(BaseLLMProvider):
         async with self._client.messages.stream(**kwargs) as stream:
             async for event in stream:
                 if event.type == "content_block_delta" and hasattr(event.delta, "text"):
-                    yield event.delta.text
+                    yield event.delta.text  # type: ignore[union-attr]
 
     async def embed(self, text: str) -> list[float]:
         # NOTE: Not all providers support embedding/model listing. Router handles this via try/except.

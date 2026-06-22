@@ -320,6 +320,10 @@ async def _light_analysis(
                 },
             )
 
+        if provider is None:
+            logger.debug("_light_analysis: no provider available")
+            return []
+
         proposals = await agent_propose(provider, light_messages)
 
         if not proposals:
@@ -370,6 +374,10 @@ async def _deep_analysis(
                 "timestamp": "",
             },
         )
+
+        if provider is None:
+            logger.debug("_deep_analysis: no provider available")
+            return []
 
         proposals = await agent_propose(provider, deep_messages)
 
@@ -459,6 +467,9 @@ async def propose_skills_from_analysis(
             provider = await build_provider(
                 session, owner, purpose="background", task_type=TaskType.SKILLS
             )
+        if provider is None:
+            logger.debug("propose_skills: no provider available")
+            return []
         proposals = await agent_propose(provider, recent_messages[:50])
 
     else:  # auto
@@ -765,7 +776,9 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
                             ),
                         )
                 else:
-                    logger.debug("skill_optimizer_loop: gatekeeper skip — %s", gate_reason)
+                    logger.debug(
+                        "skill_optimizer_loop: gatekeeper skip — %s", gate_reason
+                    )
             except Exception:
                 logger.exception("skill_optimizer_loop skill creator analysis failed")
 
@@ -783,7 +796,9 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
                 else:
                     logger.debug("skill_optimizer_loop: no edits from corrections")
             except Exception:
-                logger.exception("skill_optimizer_loop correction-based analysis failed")
+                logger.exception(
+                    "skill_optimizer_loop correction-based analysis failed"
+                )
 
             # Step 4: L2 policy induction (MemOS)
             if settings.reward_loop_enabled:
