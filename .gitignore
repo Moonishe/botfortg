@@ -80,3 +80,21 @@ alembic_out.log
 uv.lock
 file
 keys_check.txt
+# Dev infra — not part of the bot
+.opencode/
+opencode.json
+skills/
+hooks/
+plugins/
+scripts/
+tools/
+AGENTS.md
+AGENTS.md.example
+SOUL.md.example
+FINDINGS.md
+PERFORMANCE_AUDIT.md
+PERFORMANCE_AUDIT_DETAILED.md
+SECURITY_AUDIT.md
+DB_LAYER_SUMMARY.md
+ARCHITECTURE.md
+CHANGELOG.md
