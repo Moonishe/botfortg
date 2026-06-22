@@ -358,6 +358,12 @@ async def apply_reval_result(
     new_type_raw = parsed.get("new_memory_type")
     if new_type_raw is not None:
         new_type = new_type_raw
+        # Guard: LLM must not cross personal/contact_fact boundary via type rename.
+        # ponytail: 2-line guard, upgrade to enum+validator if more types need coupling.
+        if fact.contact_id is not None and new_type == "personal":
+            new_type = "contact_fact"
+        elif fact.contact_id is None and new_type == "contact_fact":
+            new_type = "personal"
     else:
         new_type = "personal" if (fact.contact_id is None) else "contact_fact"
     new_decay_raw = parsed.get("decay_rate")

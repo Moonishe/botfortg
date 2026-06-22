@@ -139,7 +139,7 @@ async def cb_settings_back(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == SettingsCB.CLOSE)
 async def cb_close(callback: CallbackQuery) -> None:
     if callback.message:
-        await callback.message.delete()
+        await callback.message.delete()  # type: ignore[union-attr]
     await callback.answer()
 
 
@@ -195,6 +195,10 @@ async def step_import_config(message: Message, state: FSMContext) -> None:
     try:
         file = await message.bot.get_file(message.document.file_id)
         bio = io.BytesIO()
+        if file.file_path is None:
+            await message.answer("❌ Не удалось получить файл.")
+            await state.clear()
+            return
         await message.bot.download_file(file.file_path, bio)
         config = json.loads(bio.getvalue().decode("utf-8"))
 
@@ -603,7 +607,7 @@ async def cb_model_open(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith(SettingsCB.timezone("")))
 async def cb_pick_tz(callback: CallbackQuery) -> None:
-    tz_value = callback.data[len("set:tz:") :]
+    tz_value = (callback.data or "")[len("set:tz:") :]
     if not is_valid_tz(tz_value):
         await callback.answer("Неизвестный TZ", show_alert=True)
         return

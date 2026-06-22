@@ -101,7 +101,7 @@ async def cb_memory_clear_negative(callback: CallbackQuery) -> None:
         negative_ids = [m.id for m in items if m.sentiment == "negative"]
         removed = await bulk_delete_memory_service(session, owner, negative_ids)
     if callback.message:
-        await callback.message.edit_text(f"🧹 Удалено {removed} негативных фактов.")
+        await callback.message.edit_text(f"🧹 Удалено {removed} негативных фактов.")  # type: ignore[union-attr]
     await callback.answer(f"Удалено {removed}")
 
 
@@ -186,7 +186,7 @@ async def cmd_remember(
                 fact = words[1]
 
     contact_id = None
-    if contact_name:
+    if contact_name and client is not None:
         candidates = await resolve(client, owner, contact_name)
         if candidates:
             contact_id = candidates[0].peer_id
@@ -587,14 +587,17 @@ async def cb_summary_save(callback: CallbackQuery) -> None:
         await callback.answer("Неверные данные.", show_alert=True)
         return
     # Извлекаем текст пересказа из сообщения (после заголовка)
-    if callback.message is None or callback.message.text is None:
+    msg_text: str | None = None
+    if callback.message is not None:
+        msg_text = getattr(callback.message, "text", None)
+    if msg_text is None:
         await callback.answer("Не удалось извлечь текст.")
         return
 
     # Текст сообщения: "📊 <b>Пересказ: Имя</b>\n\n...summary..."
     # Отделяем заголовок от тела
-    parts = callback.message.text.split("\n\n", 1)
-    summary_text = parts[1] if len(parts) > 1 else callback.message.text
+    parts = msg_text.split("\n\n", 1)
+    summary_text = parts[1] if len(parts) > 1 else msg_text
     # Убираем HTML-теги для сохранения в память как чистый текст
     import re
 
@@ -615,7 +618,7 @@ async def cb_summary_save(callback: CallbackQuery) -> None:
     # Обновляем кнопку — убираем её
     if callback.message:
         try:
-            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
         except Exception:
             logger.debug(
                 "Non-critical error", exc_info=True

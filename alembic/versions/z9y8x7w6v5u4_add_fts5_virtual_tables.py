@@ -66,7 +66,7 @@ def upgrade() -> None:
         """
     )
 
-    # --- agent_session_messages_fts (external-content, no triggers — reads via content_rowid) ---
+    # --- agent_session_messages_fts (external-content, synced via triggers) ---
     op.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS agent_session_messages_fts USING fts5(
@@ -74,6 +74,32 @@ def upgrade() -> None:
             content='agent_session_messages', content_rowid='id',
             tokenize='unicode61 remove_diacritics 2 categories ''L* N* Co'''
         )
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS agent_session_messages_fts_ai AFTER INSERT ON agent_session_messages BEGIN
+            INSERT INTO agent_session_messages_fts(rowid, content, role)
+            VALUES (new.id, new.content, new.role);
+        END;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS agent_session_messages_fts_ad AFTER DELETE ON agent_session_messages BEGIN
+            INSERT INTO agent_session_messages_fts(agent_session_messages_fts, rowid, content, role)
+            VALUES('delete', old.id, old.content, old.role);
+        END;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS agent_session_messages_fts_au AFTER UPDATE ON agent_session_messages BEGIN
+            INSERT INTO agent_session_messages_fts(agent_session_messages_fts, rowid, content, role)
+            VALUES('delete', old.id, old.content, old.role);
+            INSERT INTO agent_session_messages_fts(rowid, content, role)
+            VALUES (new.id, new.content, new.role);
+        END;
         """
     )
 
@@ -123,6 +149,9 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS messages_fts_ai")
     op.execute("DROP TRIGGER IF EXISTS messages_fts_ad")
     op.execute("DROP TRIGGER IF EXISTS messages_fts_au")
+    op.execute("DROP TRIGGER IF EXISTS agent_session_messages_fts_ai")
+    op.execute("DROP TRIGGER IF EXISTS agent_session_messages_fts_ad")
+    op.execute("DROP TRIGGER IF EXISTS agent_session_messages_fts_au")
     op.execute("DROP TRIGGER IF EXISTS memories_fts_ai")
     op.execute("DROP TRIGGER IF EXISTS memories_fts_ad")
     op.execute("DROP TRIGGER IF EXISTS memories_fts_au")
