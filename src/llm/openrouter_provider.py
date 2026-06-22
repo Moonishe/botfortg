@@ -34,6 +34,10 @@ class OpenRouterProvider(OpenAICompatToolMixin, OpenAICompatBaseMixin, BaseLLMPr
     _LIGHT_MODEL = DEFAULT_MODEL
     _HEAVY_MODEL = HEAVY_MODEL
 
+    def build_extra_body(self) -> dict:
+        """OpenRouter-specific: X-Title header for attribution."""
+        return {"extra_headers": {"X-Title": "TelegramHelper"}}
+
     def __init__(
         self,
         api_key: str,
@@ -66,8 +70,8 @@ class OpenRouterProvider(OpenAICompatToolMixin, OpenAICompatBaseMixin, BaseLLMPr
         model = self._resolve_model(heavy)
         kwargs: dict = {
             "model": model,
-            "messages": self._fmt_messages(messages),
-            "extra_headers": {"X-Title": "TelegramHelper"},
+            "messages": self.prepare_messages(messages),
+            **self.build_extra_body(),
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
@@ -85,9 +89,9 @@ class OpenRouterProvider(OpenAICompatToolMixin, OpenAICompatBaseMixin, BaseLLMPr
         model = self._resolve_model(heavy)
         kwargs: dict = {
             "model": model,
-            "messages": self._fmt_messages(messages),
+            "messages": self.prepare_messages(messages),
             "stream": True,
-            "extra_headers": {"X-Title": "TelegramHelper"},
+            **self.build_extra_body(),
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens

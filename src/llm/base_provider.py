@@ -206,3 +206,27 @@ class BaseLLMProvider(ABC):
         """Список доступных моделей (если поддерживается)."""
         # NOTE: Not all providers expose model listing. Router handles this via try/except.
         raise NotImplementedError(f"{self.name} does not expose model listing")
+
+    # ── Provider Profile Hooks ──────────────────────────────────────
+    # Optional override points for provider-specific customization.
+    # Default implementations are no-ops or delegates to existing methods.
+    # ponytail: hooks formalize the extension pattern, upgrade to ProviderProfile dataclass if config grows.
+
+    def prepare_messages(self, messages: list[ChatMessage]) -> list[dict[str, Any]]:
+        """Hook: transform messages before API call. Default: _fmt_messages."""
+        return self._fmt_messages(messages)
+
+    def build_extra_body(self) -> dict[str, Any]:
+        """Hook: provider-specific request parameters. Default: empty."""
+        return {}
+
+    def fetch_models(self) -> list[str]:
+        """Hook: return available models for this provider. Default: light + heavy."""
+        models = []
+        if self._LIGHT_MODEL:
+            models.append(self._LIGHT_MODEL)
+        if self._HEAVY_MODEL and self._HEAVY_MODEL != self._LIGHT_MODEL:
+            models.append(self._HEAVY_MODEL)
+        if self._model and self._model not in models:
+            models.insert(0, self._model)
+        return models
