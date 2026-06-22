@@ -75,3 +75,18 @@ async def _reset_circuit_breaker():
     await ToolCircuitBreaker.reset()
     yield
     await ToolCircuitBreaker.reset()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _cleanup_resources():
+    """Dispose engine and close event loops at session end to prevent ResourceWarnings."""
+    yield
+    import gc
+
+    gc.collect()
+    try:
+        from src.db.session import engine
+
+        asyncio.run(engine.dispose())
+    except Exception:
+        pass

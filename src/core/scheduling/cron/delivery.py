@@ -181,7 +181,9 @@ async def _deliver_via_userbot(
             return {"success": True, "output": f"Отправлено peer #{peer_id}"}
         elif contact:
             entity = await client.get_entity(contact)
-            await client.send_message(entity, text)
+            if isinstance(entity, list):
+                entity = entity[0] if entity else contact
+            await client.send_message(entity, text)  # type: ignore[arg-type]
             return {"success": True, "output": f"Отправлено контакту {contact}"}
         else:
             # Отправляем самому себе

@@ -353,7 +353,7 @@ async def cb_mimo_region(callback: CallbackQuery, state: FSMContext) -> None:
     kb.button(text="✅ Назад", callback_data="set:done:key")
     kb.adjust(2)
     if callback.message:
-        await callback.message.edit_text(
+        await callback.message.edit_text(  # type: ignore[union-attr]
             f"✅ Сохранено MiMo ключей: {count} (регион: {region_label}).\n"
             f"🔑 В базе MiMo ключей: {total}.\n\n"
             "Добавить ещё?",
