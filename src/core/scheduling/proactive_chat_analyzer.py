@@ -83,8 +83,9 @@ async def _proactive_scan(telegram_id: int) -> None:
             reverse=True,
         )[:MAX_CONTACTS]
 
-        # ── Параллельный анализ контактов с семафором (макс. 2 одновременных LLM-вызова) ──
-        _proactive_analysis_sem = asyncio.Semaphore(2)
+        # ── Параллельный анализ контактов с семафором ──
+        # ponytail: 5 concurrent — was 2. Upgrade if API rate limits allow more.
+        _proactive_analysis_sem = asyncio.Semaphore(5)
 
         async def _analyze_one(contact, msg_count: int) -> None:
             """Анализирует один контакт (с обработкой ошибок)."""

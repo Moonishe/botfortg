@@ -654,7 +654,6 @@ async def cb_sync_start(
             f"⏳ Синхронизация ~{dialogs_estimate} диалогов. "
             "Это займёт 2-5 минут. Я покажу прогресс."
         )
-        await asyncio.sleep(1)
 
     await progress_msg.edit_text("🔄 Синхронизация запущена...")
 

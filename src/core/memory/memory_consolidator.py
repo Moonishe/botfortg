@@ -38,19 +38,24 @@ async def consolidate_memories(telegram_id: int) -> int:
         # Cap comparisons at 5000
         _max_pairs = min(len(memories) * (len(memories) - 1) // 2, 5000)
         pairs_checked = 0
+        # Pre-compute word sets once — avoids O(n²) repeated .lower().split()
+        _word_cache: list[set[str]] = []
+        for m in memories:
+            if m.is_active and m.fact:
+                _word_cache.append(set(m.fact.lower().split()))
+            else:
+                _word_cache.append(set())
         for i, m1 in enumerate(memories):
             if not m1.is_active or not m1.fact:
                 continue
+            words1 = _word_cache[i]
             for j in range(i + 1, len(memories)):
                 if pairs_checked >= _max_pairs:
                     break
                 m2 = memories[j]
                 if not m2.is_active or not m2.fact:
                     continue
-
-                # Check similarity (simple word overlap for speed)
-                words1 = set(m1.fact.lower().split())
-                words2 = set(m2.fact.lower().split())
+                words2 = _word_cache[j]
                 if not words1 or not words2:
                     continue
                 overlap = len(words1 & words2) / max(len(words1), len(words2))
@@ -95,7 +100,9 @@ async def consolidation_loop() -> None:
             try:
                 count = await consolidate_memories(settings.owner_telegram_id)
                 if count:
-                    logger.info("Memory consolidation: merged %d duplicate pairs", count)
+                    logger.info(
+                        "Memory consolidation: merged %d duplicate pairs", count
+                    )
             except Exception:
                 logger.exception("Consolidation failed")
         await asyncio.sleep(settings.memory_consolidation_interval_sec)  # 6 hours
