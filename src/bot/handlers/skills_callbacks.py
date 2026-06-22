@@ -108,7 +108,7 @@ async def _skill_mutation(
         owner = await get_or_create_user(session, callback.from_user.id)
         skill = await _get_skill_by_id(session, owner, skill_id)
         if skill is None:
-            await callback.answer("Skill не найден", show_alert=True)
+            await callback.answer("Навык не найден", show_alert=True)
             return
 
         if pre_check is not None:
@@ -192,7 +192,7 @@ async def cb_skill_detail(
             owner = await get_or_create_user(session, callback.from_user.id)
             skill = await _get_skill_by_id(session, owner, skill_id)
             if skill is None:
-                await callback.answer("Skill не найден", show_alert=True)
+                await callback.answer("Навык не найден", show_alert=True)
                 return
             # Detach so attributes remain available after the session closes.
             session.expunge(skill)
@@ -216,7 +216,7 @@ async def cb_skill_approve(callback: CallbackQuery) -> None:
     await _skill_mutation(
         callback,
         _action,
-        "✅ Skill одобрен",
+        "✅ Навык одобрен",
         "Не удалось одобрить skill",
     )
 
@@ -231,7 +231,7 @@ async def cb_skill_reject(callback: CallbackQuery) -> None:
     await _skill_mutation(
         callback,
         _action,
-        "❌ Skill отклонён",
+        "❌ Навык отклонён",
         "Не удалось отклонить skill",
     )
 
@@ -255,7 +255,7 @@ async def cb_skill_toggle(callback: CallbackQuery) -> None:
     await _skill_mutation(
         callback,
         _action,
-        lambda skill: f"Skill {'включён' if skill.enabled else 'отключён'}",
+        lambda skill: f"Навык {'включён' if skill.enabled else 'отключён'}",
         "Не удалось переключить skill",
         pre_check=_pre_check,
     )
@@ -279,7 +279,7 @@ async def cb_skill_rollback(callback: CallbackQuery) -> None:
     await _skill_mutation(
         callback,
         _action,
-        "↩️ Skill откачен",
+        "↩️ Навык откачен",
         "Не удалось откатить skill",
         pre_check=_pre_check,
     )
@@ -297,7 +297,7 @@ async def cb_skill_promote(callback: CallbackQuery) -> None:
     await _skill_mutation(
         callback,
         _action,
-        "🌍 Skill promoted to global",
+        "🌍 Навык повышен до глобального",
         "Не удалось продвинуть в global (возможно, уже существует)",
     )
 

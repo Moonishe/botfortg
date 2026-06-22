@@ -81,7 +81,7 @@ def test_format_ops_snapshot_alerts_are_html_escaped() -> None:
     assert "cache&lt;hot&gt;" in text
     assert "tool&lt;slow&gt;" in text
     assert "bad<db>" not in text
-    assert "Memory queue is near capacity" in text
+    assert "Очередь памяти почти заполнена" in text
 
 
 def test_format_ops_snapshot_includes_response_metrics() -> None:
@@ -111,7 +111,7 @@ def test_format_ops_snapshot_collector_error_alert() -> None:
 
     text = ops_cmd.format_ops_snapshot(snapshot)
 
-    assert "tools collector failed: ValueError" in text
+    assert "Сборщик tools ошибся: ValueError" in text
 
 
 def test_ops_alerts_for_snapshot_reuses_alert_rules() -> None:
@@ -120,7 +120,7 @@ def test_ops_alerts_for_snapshot_reuses_alert_rules() -> None:
 
     alerts = ops_cmd.ops_alerts_for_snapshot(snapshot)
 
-    assert alerts == ["DB check failed: OperationalError"]
+    assert alerts == ["Проверка БД не прошла: OperationalError"]
 
 
 @pytest.mark.asyncio

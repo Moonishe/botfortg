@@ -532,7 +532,7 @@ class TestCbSkillPromote:
         ):
             await cb_skill_promote(cb)
         cb.answer.assert_called_once()
-        assert "promoted" in cb.answer.call_args[0][0]
+        assert "повышен" in cb.answer.call_args[0][0]
         mock_detail.assert_called_once()
 
     @pytest.mark.asyncio

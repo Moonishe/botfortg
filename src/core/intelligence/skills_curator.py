@@ -923,8 +923,8 @@ async def curator_loop(owner_telegram_id: int) -> None:
                                 category="curator",
                                 priority=2,
                                 text=(
-                                    f"🧠 Curator suggested {suggested} new skill(s) "
-                                    f"from recent trajectories."
+                                    f"🧠 Куратор предложил {suggested} "
+                                    f"новый навык(ов) из недавних запросов."
                                 ),
                             )
                         except Exception:

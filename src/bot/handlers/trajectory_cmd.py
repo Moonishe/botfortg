@@ -24,10 +24,10 @@ async def cmd_trajectory(message: Message, command: CommandObject) -> None:
         )
 
     if not rows:
-        await message.answer("Trajectory пока пустой.")
+        await message.answer("История запросов пока пустая.")
         return
 
-    title = "Ошибки trajectory" if only_errors else "Последние trajectory"
+    title = "Ошибки в истории" if only_errors else "Последние запросы"
     lines = [f"<b>{title}</b>"]
     for row in rows:
         status = "ok" if row.success else "err"
@@ -49,12 +49,10 @@ async def cmd_evolve(message: Message) -> None:
         )
 
     if not pending and not created:
-        await message.answer(
-            "Новых skill-кандидатов нет. Нужно больше успешных trajectory."
-        )
+        await message.answer("Новых кандидатов нет. Нужно больше успешных запросов.")
         return
 
-    lines = [f"<b>Self-evolution</b>: новых кандидатов {created}"]
+    lines = [f"<b>Самоэволюция</b>: новых кандидатов {created}"]
     for skill in pending[:10]:
         lines.append(f"• <b>{skill.name}</b> — {skill.description or ''}")
     lines.append("\nОдобрить: <code>/skills enable name</code>")

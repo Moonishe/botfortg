@@ -755,7 +755,7 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
                         topic="skills",
                         category="self_evolution",
                         priority=2,
-                        text=f"Found {created} new skill suggestions. Open /evolve.",
+                        text=f"Найдено {created} новых навыков. Открой /evolve.",
                     )
             except Exception:
                 logger.exception("skill_optimizer_loop trajectory analysis failed")

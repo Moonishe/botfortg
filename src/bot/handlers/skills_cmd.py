@@ -96,7 +96,7 @@ async def _legacy_text_command(message: Message, parts: Sequence[str]) -> None:
         if sub == "show" and len(parts) > 1:
             skill = await get_skill_by_name(session, owner, parts[1])
             if not skill:
-                await message.answer("Skill не найден.")
+                await message.answer("Навык не найден.")
                 return
             await message.answer(
                 _format_skill_detail(skill),
@@ -107,14 +107,14 @@ async def _legacy_text_command(message: Message, parts: Sequence[str]) -> None:
 
         if sub in {"disable", "off"} and len(parts) > 1:
             skill = await set_skill_enabled(session, owner, parts[1], False)
-            await message.answer("Skill отключен." if skill else "Skill не найден.")
+            await message.answer("Навык отключен." if skill else "Навык не найден.")
             return
 
         if sub in {"enable", "on"} and len(parts) > 1:
             skill = await set_skill_enabled(
                 session, owner, parts[1], True, review_status="approved"
             )
-            await message.answer("Skill включен." if skill else "Skill не найден.")
+            await message.answer("Навык включен." if skill else "Навык не найден.")
             return
 
         if sub == "rollback" and len(parts) > 1:
@@ -141,7 +141,7 @@ async def _rollback_skill(message: Message, owner_id: int, name: str) -> None:
         owner = await get_or_create_user(session, owner_id)
         skill = await get_skill_by_name(session, owner, name)
         if not skill:
-            await message.answer("Skill не найден.")
+            await message.answer("Навык не найден.")
             return
         if skill.best_body is None:
             await message.answer("Нет сохранённой стабильной версии для отката.")
@@ -150,7 +150,7 @@ async def _rollback_skill(message: Message, owner_id: int, name: str) -> None:
         await _perform_rollback(session, skill, owner, "Manual rollback to best_body")
         new_version = skill.version
         await message.answer(
-            f"✅ Skill <b>{html.escape(skill.name)}</b> откачен к стабильной версии v{new_version}.",
+            f"✅ Навык <b>{html.escape(skill.name)}</b> откачен к стабильной версии v{new_version}.",
             parse_mode="HTML",
         )
 
@@ -218,8 +218,8 @@ async def _handle_yaml_add(message: Message, yaml_args: str) -> None:
 
     meta_str = ", ".join(f"{k}={v}" for k, v in yaml_meta.items())
     await message.answer(
-        f"✅ Skill <b>{html.escape(skill.name)}</b> создан с YAML метаданными.\n"
+        f"✅ Навык <b>{html.escape(skill.name)}</b> создан с YAML метаданными.\n"
         f"Метаданные: {html.escape(meta_str)}\n"
-        f"Статус: proposed (включите через /skills enable {html.escape(skill.name)})",
+        f"Статус: предложен (включите через /skills enable {html.escape(skill.name)})",
         parse_mode="HTML",
     )

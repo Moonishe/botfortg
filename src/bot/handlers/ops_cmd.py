@@ -298,43 +298,43 @@ def _ops_alerts(snapshot: dict[str, Any]) -> list[str]:
     alerts: list[str] = []
     for section, value in snapshot.items():
         if isinstance(value, dict) and value.get("error") and section != "db":
-            alerts.append(f"{section} collector failed: {value['error']}")
+            alerts.append(f"Сборщик {section} ошибся: {value['error']}")
 
     db = snapshot.get("db", {})
     if not db.get("ok"):
-        alerts.append(f"DB check failed: {db.get('error', 'unknown')}")
+        alerts.append(f"Проверка БД не прошла: {db.get('error', 'неизвестно')}")
 
     security = snapshot.get("security", {})
     if security.get("overall") == "critical":
-        alerts.append("Security audit has critical findings")
+        alerts.append("Аудит безопасности: критические проблемы")
     elif security.get("overall") == "warning":
-        alerts.append("Security audit has warnings")
+        alerts.append("Аудит безопасности: предупреждения")
 
     tasks = snapshot.get("tasks", {})
     failed_tasks = tasks.get("failed") or []
     if failed_tasks:
-        alerts.append(f"Background tasks need attention: {', '.join(failed_tasks[:3])}")
+        alerts.append(f"Фоновые задачи требуют внимания: {', '.join(failed_tasks[:3])}")
 
     circuits = snapshot.get("circuits", {})
     states = circuits.get("states") or {}
     if states.get("open", 0) > 0:
-        alerts.append(f"{states['open']} circuit breaker(s) open")
+        alerts.append(f"{states['open']} предохранитель(ей) разомкнут")
 
     queue = snapshot.get("memory_queue", {})
     size = int(queue.get("size") or 0)
     max_size = int(queue.get("max_size") or 0)
     if max_size > 0 and size / max_size >= 0.8:
-        alerts.append("Memory queue is near capacity")
+        alerts.append("Очередь памяти почти заполнена")
     if int(queue.get("dlq_size") or 0) > 0:
-        alerts.append("Memory queue DLQ has pending jobs")
+        alerts.append("В очереди памяти есть ожидающие задания (DLQ)")
 
     caches = snapshot.get("caches", {})
     if caches.get("pressure"):
-        alerts.append("Some caches are near capacity")
+        alerts.append("Некоторые кэши почти заполнены")
 
     tools = snapshot.get("tools", {})
     if int(tools.get("errors") or 0) > 0:
-        alerts.append("Tool metrics contain errors")
+        alerts.append("В метриках инструментов есть ошибки")
     return alerts
 
 
