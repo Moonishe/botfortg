@@ -7,17 +7,23 @@ Full Analyzer — пакетный анализатор переписок.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
 
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
+
+# ponytail: JSON state file for incremental analysis. Upgrade to DB column on Contact if needed.
+_ANALYSIS_STATE: Path = settings.data_dir / "analysis_state.json"
 
 
 @dataclass
@@ -62,6 +68,7 @@ async def run_full_analysis(
     progress_callback=None,
     progress_message=None,
     include_photos: bool = False,
+    incremental: bool = False,
 ) -> AnalysisResult:
     """
     Полный анализ всех контактов из выбранных папок.
@@ -137,11 +144,24 @@ async def run_full_analysis(
             ),
         )
 
-    # ponytail: parallel processing with semaphore — 5x speedup for 35 contacts.
+    # ponytail: parallel processing with semaphore — 10 concurrent contacts.
     # Upgrade: make concurrency configurable via settings if API rate limits vary.
-    _sem = asyncio.Semaphore(5)
+    _sem = asyncio.Semaphore(10)
     _counter = 0
     _counter_lock = asyncio.Lock()
+
+    # Load incremental state — {peer_id: max_message_id_analyzed}
+    prev_state: dict[str, int] = {}
+    if incremental:
+        try:
+            prev_state = json.loads(_ANALYSIS_STATE.read_text("utf-8"))
+            prev_state = {str(k): int(v) for k, v in prev_state.items()}
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            prev_state = {}
+        if prev_state:
+            logger.info("Incremental: loaded state for %d contacts", len(prev_state))
+
+    new_state: dict[str, int] = dict(prev_state)
 
     async def _process_one(contact, idx: int) -> None:
         nonlocal _counter
@@ -191,6 +211,21 @@ async def run_full_analysis(
                     result.details.append(f"{contact_name}: нет сообщений")
                     return
 
+                # Incremental: skip contacts with no new messages since last analysis
+                last_analyzed_id = prev_state.get(str(contact.peer_id), 0)
+                if incremental and last_analyzed_id > 0:
+                    max_msg_id = max((getattr(m, "id", 0) for m in messages), default=0)
+                    if max_msg_id <= last_analyzed_id:
+                        result.details.append(f"{contact_name}: нет новых сообщений")
+                        return
+                    # Only process messages newer than last analyzed
+                    messages = [
+                        m for m in messages if getattr(m, "id", 0) > last_analyzed_id
+                    ]
+                    if not messages:
+                        result.details.append(f"{contact_name}: нет новых сообщений")
+                        return
+
                 # Filter photo-only messages if not include_photos
                 if not include_photos:
                     messages = [
@@ -205,9 +240,10 @@ async def run_full_analysis(
                 result.contacts_processed += 1
                 result.messages_scanned += len(messages)
 
-                # Chunking: split large transcripts into chunks of 50 messages
+                # Chunking: split large transcripts into chunks of 30 messages
                 # to avoid token overflow. Each chunk → separate LLM call.
-                CHUNK_SIZE = 50
+                # ponytail: 30 not 50 — faster per-call, more parallelism.
+                CHUNK_SIZE = 30
                 total_mem_count = 0
                 if len(messages) <= CHUNK_SIZE:
                     try:
@@ -252,6 +288,11 @@ async def run_full_analysis(
                 if total_mem_count > 0:
                     result.details.append(f"{contact_name}: +{total_mem_count} фактов")
 
+                # Track max message ID for incremental mode
+                max_id = max((getattr(m, "id", 0) for m in messages), default=0)
+                if max_id > 0:
+                    new_state[str(contact.peer_id)] = max_id
+
                 try:
                     async with get_session() as session:
                         owner_obj = await get_or_create_user(session, owner_id)
@@ -281,6 +322,15 @@ async def run_full_analysis(
     # Run all contacts in parallel with concurrency limit
     tasks = [_process_one(c, i) for i, c in enumerate(contacts)]
     await asyncio.gather(*tasks)
+
+    # Save incremental state — persist max message ID per analyzed contact
+    if incremental or new_state:
+        try:
+            _ANALYSIS_STATE.write_text(
+                json.dumps(new_state, ensure_ascii=False), "utf-8"
+            )
+        except Exception:
+            logger.debug("Failed to save analysis state", exc_info=True)
 
     if progress_callback:
         await progress_callback(

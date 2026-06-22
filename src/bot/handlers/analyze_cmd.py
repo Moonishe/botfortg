@@ -75,6 +75,12 @@ async def cmd_analyze(message: Message, state=None, userbot_manager=None):
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
+            text="⚡ Только новые (инкремент)",
+            callback_data="analyze:incr:text",
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
             text="📝 Все сообщения (текст)",
             callback_data="analyze:full:text",
         ),
@@ -101,6 +107,7 @@ async def cmd_analyze(message: Message, state=None, userbot_manager=None):
         f"🧠 <b>Анализ переписок</b>\n\n"
         f"{hint}"
         "Выбери режим анализа:\n\n"
+        "⚡ <b>Только новые</b> — инкремент, пропускает контакты без новых сообщений\n"
         "📝 <b>Все сообщения (текст)</b> — полная переписка, только текст\n"
         "📷 <b>Все + фото</b> — полная переписка, фото описываются через vision\n"
         "⚡ <b>Последние 500</b> — быстро, последние 500 сообщений на контакт",
@@ -116,10 +123,11 @@ async def cb_analyze_run(callback: CallbackQuery, state=None, userbot_manager=No
     parts = (callback.data or "").split(":")
     if len(parts) < 3:
         return
-    scope = parts[1]  # "full" or "quick"
+    scope = parts[1]  # "full", "quick", or "incr"
     photo_mode = parts[2]  # "text" or "photos"
     include_photos = photo_mode == "photos"
-    message_limit = 0 if scope == "full" else 500  # 0 = all
+    message_limit = 0 if scope in ("full", "incr") else 500  # 0 = all
+    incremental = scope == "incr"
 
     # Restore folder filter from state
     folder_filter = []
@@ -212,6 +220,7 @@ async def cb_analyze_run(callback: CallbackQuery, state=None, userbot_manager=No
             contact_ids=contact_ids_arg,
             progress_callback=update_progress,
             include_photos=include_photos,
+            incremental=incremental,
         )
 
         report = format_analysis_report(result)
