@@ -1,10 +1,10 @@
 """Memory admin utility commands — extracted from memory_cmd.py (Stage 5 refactor).
 
-Commands: /llm_status, /health, /remember, /habits, /insights, /forget,
+Commands: /llm_status, /remember, /habits, /insights, /forget,
           /archetypes, /distill, /instructions, /tag, /conflicts, /warnings,
-          /clusters, /persona
+          /clusters, /persona, /memory
 Callbacks: memory:clear_negative, memory:stats, pattern:*, mem:neighbors:*,
-           conflict:resolve:*
+           conflict:resolve:*, summary_save:*
 """
 
 import logging
@@ -105,16 +105,7 @@ async def cb_memory_clear_negative(callback: CallbackQuery) -> None:
     await callback.answer(f"Удалено {removed}")
 
 
-# NOTE: Дублирует Command("health") из health_cmd.py.
-# Оставлено для обратной совместимости; aiogram позволяет несколько хендлеров на одну команду.
-@router.message(Command("health"))
-async def cmd_health(message: Message) -> None:
-    """Показать здоровье памяти — единый скоринг 0-100."""
-    from src.core.memory.memory_health import calculate_health_score, format_health
-
-    health = await calculate_health_score(message.from_user.id)
-    text = format_health(health)
-    await message.answer(text)
+# Removed: dead code, /health handled by health_cmd.py
 
 
 @router.callback_query(F.data == "memory:stats")
@@ -167,7 +158,7 @@ async def cb_memory_stats(callback: CallbackQuery) -> None:
 
 @router.message(Command("remember"))
 async def cmd_remember(
-    message: Message, command: CommandObject, userbot_manager: UserbotManager
+    message: Message, command: CommandObject, userbot_manager: UserbotManager | None
 ) -> None:
     """Вручную сохранить факт. /remember Настя злится из-за дедлайна"""
     args = (command.args or "").strip()

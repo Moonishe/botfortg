@@ -1,15 +1,18 @@
 import asyncio
-import threading
+import atexit
+import functools
+import logging
 from collections.abc import AsyncGenerator
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
 
 import httpx
 from google import genai
 from google.genai import errors as genai_errors
 
-from src.llm.base_provider import BaseLLMProvider
 from src.core.security.ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
-import logging
+from src.llm.base_provider import BaseLLMProvider
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +21,26 @@ GEMINI_CHAT_LIGHT = "gemini-2.0-flash"
 GEMINI_CHAT_HEAVY = "gemini-2.5-pro"
 
 _GEMINI_REQUEST_TIMEOUT = 90.0  # секунд — таймаут синхронного вызова Gemini API
+
+# ponytail: shared executor avoids creating a fresh OS thread per token / per call.
+# Was: asyncio.to_thread() per token → 500 threads per streaming response.
+# 4 workers is enough: Gemini calls are I/O-bound (network wait), not CPU-bound.
+_GEMINI_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini")
+atexit.register(_GEMINI_EXECUTOR.shutdown, wait=True)
+# ponytail: atexit ensures ThreadPoolExecutor threads (non-daemon) don't block
+# process exit. wait=True completes in-flight Gemini calls before shutdown.
+
+
+async def _run_in_executor(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run sync func in shared Gemini executor (avoids asyncio.to_thread thread-per-call)."""
+    if func is None:
+        raise TypeError("_run_in_executor requires a callable, got None")
+    loop = asyncio.get_running_loop()
+    # ponytail: partial avoids kwargs explosion and keeps executor API simple.
+    # asyncio.to_thread accepted **kwargs but run_in_executor doesn't forward them.
+    if kwargs:
+        func = functools.partial(func, **kwargs)
+    return await loop.run_in_executor(_GEMINI_EXECUTOR, func, *args)
 
 
 def _to_gemini_contents(messages: list[ChatMessage]) -> tuple[str | None, list[dict]]:
@@ -88,7 +111,7 @@ class GeminiProvider(BaseLLMProvider):
             except Exception:
                 return False  # unknown error — assume invalid
 
-        return await asyncio.to_thread(_check)
+        return await _run_in_executor(_check)
 
     async def chat(
         self,
@@ -96,12 +119,25 @@ class GeminiProvider(BaseLLMProvider):
         *,
         heavy: bool = False,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
+        from google.genai import types as genai_types
+
         model = self._resolve_model(heavy)
         system, contents = _to_gemini_contents(messages)
 
+        config_kwargs: dict = {}
+        if system:
+            config_kwargs["system_instruction"] = system
+        if max_tokens is not None and max_tokens > 0:
+            config_kwargs["max_output_tokens"] = max_tokens
+        config = (
+            genai_types.GenerateContentConfig(**config_kwargs)
+            if config_kwargs
+            else None
+        )
+
         def _call() -> str:
-            config = {"system_instruction": system} if system else None
             resp = self._client.models.generate_content(
                 model=model,
                 contents=contents,
@@ -110,7 +146,7 @@ class GeminiProvider(BaseLLMProvider):
             return resp.text or ""
 
         return await asyncio.wait_for(
-            asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
+            _run_in_executor(_call), timeout=_GEMINI_REQUEST_TIMEOUT
         )
 
     async def chat_stream(
@@ -119,13 +155,20 @@ class GeminiProvider(BaseLLMProvider):
         *,
         heavy: bool = False,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
         """Stream chat output token by token using Gemini's streaming API."""
         import queue as sync_queue
 
         model = self._resolve_model(heavy)
         system, contents = _to_gemini_contents(messages)
-        config = {"system_instruction": system} if system else None
+        config: dict | None = {}
+        if system:
+            config["system_instruction"] = system
+        if max_tokens is not None and max_tokens > 0:
+            config["max_output_tokens"] = max_tokens
+        if not config:
+            config = None
 
         # Try async client first (available in google-genai >= 1.0)
         aio_client = getattr(self._client, "aio", None)
@@ -145,11 +188,22 @@ class GeminiProvider(BaseLLMProvider):
                 logger.debug("Non-critical error", exc_info=True)
 
         # Thread-based streaming fallback for sync-only client
+        # DR2 fix: use shared _GEMINI_EXECUTOR instead of spawning a fresh
+        # Thread per call (was: 100+ concurrent streams → 100+ OS threads).
         token_queue: sync_queue.Queue = sync_queue.Queue()
+        stream_future = None  # Future for tracking the submitted streaming task
 
         def _stream_sync() -> None:
             try:
-                _config = {"system_instruction": system} if system else None
+                # ponytail: reuse same config as async path (was: only system_instruction,
+                # silently dropping max_tokens → responses could be truncated/overlong)
+                _config: dict | None = {}
+                if system:
+                    _config["system_instruction"] = system
+                if max_tokens is not None and max_tokens > 0:
+                    _config["max_output_tokens"] = max_tokens
+                if not _config:
+                    _config = None
                 for chunk in self._client.models.generate_content_stream(
                     model=model,
                     contents=contents,
@@ -162,22 +216,37 @@ class GeminiProvider(BaseLLMProvider):
             finally:
                 token_queue.put(None)  # sentinel
 
-        thread = threading.Thread(target=_stream_sync, daemon=True)
-        thread.start()
+        # Submit streaming work to shared executor (4 workers)
+        loop = asyncio.get_running_loop()
+        stream_future = loop.run_in_executor(_GEMINI_EXECUTOR, _stream_sync)
 
-        while True:
-            # 60s timeout per token — prevents indefinite hang on stalled connection
-            try:
-                item = await asyncio.wait_for(
-                    asyncio.to_thread(token_queue.get, timeout=60), timeout=65
-                )
-            except sync_queue.Empty:
-                raise TimeoutError("Gemini stream token queue timed out") from None
-            if item is None:
-                break
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        try:
+            while True:
+                # 60s timeout per token — prevents indefinite hang on stalled connection
+                try:
+                    item = await asyncio.wait_for(
+                        _run_in_executor(token_queue.get, timeout=60), timeout=65
+                    )
+                except sync_queue.Empty:
+                    raise TimeoutError("Gemini stream token queue timed out") from None
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            # DR2: ensure the streaming task completes (waits via future, not thread.join)
+            # ponytail: future.result() will block if _stream_sync is still running,
+            # so we wait with a short timeout to avoid hanging the event loop.
+            if not stream_future.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.wrap_future(stream_future), timeout=5
+                    )
+                except TimeoutError:
+                    logger.debug(
+                        "Stream task did not finish in 5s — daemon executor will clean up"
+                    )
 
     async def embed(self, text: str) -> list[float]:
         from src.core.actions.embedding_cache import aget, aset
@@ -197,7 +266,7 @@ class GeminiProvider(BaseLLMProvider):
             return list(resp.embeddings[0].values)
 
         result = await asyncio.wait_for(
-            asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
+            _run_in_executor(_call), timeout=_GEMINI_REQUEST_TIMEOUT
         )
         await aset(text, result, embed_model)
         return result
@@ -206,11 +275,11 @@ class GeminiProvider(BaseLLMProvider):
         def _list() -> list[str]:
             return [m.name for m in self._client.models.list()]
 
-        return await asyncio.to_thread(_list)
+        return await _run_in_executor(_list)
 
     async def close(self) -> None:
         if hasattr(self._client, "close"):
-            await asyncio.to_thread(self._client.close)
+            await _run_in_executor(self._client.close)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         from src.core.actions.embedding_cache import aget, aset
@@ -240,16 +309,18 @@ class GeminiProvider(BaseLLMProvider):
             for start in range(0, len(uncached_texts), chunk_size):
                 chunk = uncached_texts[start : start + chunk_size]
 
-                def _call(chunk: list[str] = chunk) -> list[list[float]]:
+                # ponytail: explicit default-arg avoids late-binding closure trap
+                # (was: def _call(chunk=chunk) — same effect, less readable)
+                def _call(c: list[str] = chunk) -> list[list[float]]:
                     resp = self._client.models.embed_content(
                         model=embed_model,
-                        contents=chunk,
+                        contents=c,
                     )
                     return [list(e.values) for e in resp.embeddings]
 
                 api_results.extend(
                     await asyncio.wait_for(
-                        asyncio.to_thread(_call), timeout=_GEMINI_REQUEST_TIMEOUT
+                        _run_in_executor(_call), timeout=_GEMINI_REQUEST_TIMEOUT
                     )
                 )
 

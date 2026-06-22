@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SYNC_INTERVAL_SEC = 7200
 
+# overlap guard: предотвращает параллельный запуск auto-sync
+_overlap_guard = asyncio.Lock()
 
 from src.core.infra.task_manager import task_manager
 
@@ -27,32 +29,38 @@ from src.core.infra.task_manager import task_manager
 @task_manager.task("auto-sync")
 async def auto_sync_loop() -> None:
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, settings.owner_telegram_id)
-                enabled = owner.settings.auto_sync_enabled
-                interval_sec = max(
-                    30, getattr(owner.settings, "auto_sync_interval_sec", 7200)
-                )
-                # Сохраняем данные до выхода из сессии — повторный get_or_create_user
-                # не требуется, используем атрибуты из уже загруженного owner.
-                owner_tg_id = owner.telegram_id
-
-            if not enabled:
-                await asyncio.sleep(settings.auto_sync_fallback_sec)
-                continue
-
-            client = get_userbot_gateway().get_client(owner_tg_id)
-            if client is not None:
-                # NOTE: owner передан из первого get_or_create_user — без повторного
-                # fetch'а. sync_dialogs принимает detached User (использует только
-                # .id и .telegram_id — простые атрибуты, доступные вне сессии).
-                stats = await get_userbot_gateway().sync_dialogs(
-                    client, owner, limit=500
-                )
-                logger.info("auto-sync done: %s", stats)
-
-            await asyncio.sleep(interval_sec)
-        except Exception:
-            logger.exception("auto-sync tick failed")
+        if _overlap_guard.locked():
             await asyncio.sleep(settings.auto_sync_fallback_sec)
+            continue
+        async with _overlap_guard:
+            try:
+                async with get_session() as session:
+                    owner = await get_or_create_user(
+                        session, settings.owner_telegram_id
+                    )
+                    enabled = owner.settings.auto_sync_enabled
+                    interval_sec = max(
+                        30, getattr(owner.settings, "auto_sync_interval_sec", 7200)
+                    )
+                    # Сохраняем данные до выхода из сессии — повторный get_or_create_user
+                    # не требуется, используем атрибуты из уже загруженного owner.
+                    owner_tg_id = owner.telegram_id
+
+                if not enabled:
+                    await asyncio.sleep(settings.auto_sync_fallback_sec)
+                    continue
+
+                client = get_userbot_gateway().get_client(owner_tg_id)
+                if client is not None:
+                    # NOTE: owner передан из первого get_or_create_user — без повторного
+                    # fetch'а. sync_dialogs принимает detached User (использует только
+                    # .id и .telegram_id — простые атрибуты, доступные вне сессии).
+                    stats = await get_userbot_gateway().sync_dialogs(
+                        client, owner, limit=500
+                    )
+                    logger.info("auto-sync done: %s", stats)
+
+                await asyncio.sleep(interval_sec)
+            except Exception:
+                logger.exception("auto-sync tick failed")
+                await asyncio.sleep(settings.auto_sync_fallback_sec)

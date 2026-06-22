@@ -199,7 +199,15 @@ async def create_episode(
                     )
                     session.add(ec)
 
-            await session.commit()  # коммитим ДО эмита события
+            try:
+                await session.commit()  # коммитим ДО эмита события
+            except Exception:
+                await session.rollback()
+                logger.warning(
+                    "episodic: create_episode commit failed, episode orphaned",
+                    exc_info=True,
+                )
+                raise
 
             # Emit episode completed event (AFTER commit — subscribers видят данные)
             from src.core.events.event_bus import event_bus, EPISODE_COMPLETED
@@ -272,7 +280,10 @@ async def get_recent_episodes(
             )
             return list(result.scalars().all())
     except Exception:
-        logger.exception("Failed to get recent episodes for user %d", user_id)
+        logger.warning(
+            "episodic: get_recent_episodes DB error, returning empty (caller may get false negative)",
+            exc_info=True,
+        )
         return []
 
 
@@ -311,7 +322,10 @@ async def search_episodes(
 
             return matched
     except Exception:
-        logger.exception("Failed to search episodes for user %d", user_id)
+        logger.warning(
+            "episodic: search_episodes DB error, returning empty (caller may get false negative)",
+            exc_info=True,
+        )
         return []
 
 
@@ -435,7 +449,10 @@ async def _reflect_single_episode(
                 saved_memories.append(memory)
                 saved.append(fact_text)
             except Exception:
-                logger.debug("Failed to save reflected fact", exc_info=True)
+                logger.warning(
+                    "episodic: failed to save reflection fact, data loss possible",
+                    exc_info=True,
+                )
 
         await session.flush()
 

@@ -278,6 +278,9 @@ class SandboxManager:
             "no-new-privileges",
             "--pids-limit",
             "50",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64M",
             "--name",
             name,
         ]

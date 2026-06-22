@@ -212,7 +212,7 @@ async def _render_section(
             kb.row(
                 InlineKeyboardButton(
                     text=f"⏰ Время: {s.news_digest_time}",
-                    callback_data=SettingsCB.input("news_time"),
+                    callback_data=SettingsCB.input("news_digest_time"),
                 )
             )
             kb.row(
@@ -416,14 +416,18 @@ async def _render_section(
                 f"<i>Настрой через .env / переменные окружения</i>"
             )
 
+            kb.row(
+                InlineKeyboardButton(
+                    text=f"{_check(s.pattern_caching_enabled)} Кэшировать паттерны",
+                    callback_data=SettingsCB.toggle("pattern_caching_enabled"),
+                )
+            )
+
             try:
                 from src.core.context.engine import ContextEngine
 
-                stats = (
-                    ContextEngine.get_load_stats()
-                    if hasattr(ContextEngine, "get_load_stats")
-                    else None
-                )
+                _get_stats = getattr(ContextEngine, "get_load_stats", None)
+                stats = _get_stats() if _get_stats else None
             except (ImportError, AttributeError, TypeError):
                 stats = None
             if stats:
@@ -678,6 +682,12 @@ async def _render_section(
                     text="🔄 Обновить папки", callback_data=SettingsCB.FOLDER_REFRESH
                 )
             )
+            kb.row(
+                InlineKeyboardButton(
+                    text="👁 Список наблюдения → /watchlist",
+                    callback_data=SettingsCB.noop("watchlist_info"),
+                )
+            )
             kb.row(*_back_row())
 
         elif section == "sync":
@@ -889,23 +899,22 @@ async def _render_section(
             kb.row(*_back_row())
 
         elif section == "auto_mode":
+            # ponytail: quiet_hours enforcement moved to auto_reply_decision.py (Worker B).
+            # close_contacts/notify enforced via LLM prompt. UI removed to avoid confusion.
             mode_labels = {
                 "offline_only": "🌙 Только когда оффлайн",
                 "always": "🔄 Всегда отвечать",
                 "smart": "🧠 Умный режим (по срочности)",
             }
-            qh_start = s.quiet_hours_start or "не задано"
-            qh_end = s.quiet_hours_end or "не задано"
-            close_contacts = _check(s.auto_reply_close_contacts)
-            notify = _check(s.notify_on_auto_reply)
 
             text = (
                 "🤖 <b>Авто-режим</b>\n\n"
                 "Определяет, когда и как бот отвечает на сообщения.\n\n"
                 f"Режим: <b>{mode_labels.get(s.auto_mode, s.auto_mode)}</b>\n"
-                f"🔕 Тихие часы: <b>{qh_start} – {qh_end}</b>\n"
-                f"{close_contacts} Авто-ответ близким контактам\n"
-                f"{notify} Уведомлять об авто-ответах"
+                f"Тихие часы: <b>{s.quiet_hours_start or '—'} – {s.quiet_hours_end or '—'}</b>\n"
+                f"Только близкие: {'✅' if s.auto_reply_close_contacts else '❌'}"
+                f"  Уведомлять: {'✅' if s.notify_on_auto_reply else '❌'}\n"
+                "\n<i>Тихие часы: установи через «установи тихие часы с 22 до 8»</i>"
             )
 
             for mode in ("offline_only", "always", "smart"):
@@ -915,27 +924,6 @@ async def _render_section(
                     callback_data=SettingsCB.choose("auto_mode", mode),
                 )
             kb.adjust(1)
-
-            kb.row(
-                InlineKeyboardButton(
-                    text="🔕 Начало тихих часов",
-                    callback_data=SettingsCB.input("quiet_hours_start"),
-                ),
-                InlineKeyboardButton(
-                    text="🔕 Конец тихих часов",
-                    callback_data=SettingsCB.input("quiet_hours_end"),
-                ),
-            )
-            kb.row(
-                InlineKeyboardButton(
-                    text=f"{_check(s.auto_reply_close_contacts)} Авто-ответ близким",
-                    callback_data=SettingsCB.toggle("auto_reply_close_contacts"),
-                ),
-                InlineKeyboardButton(
-                    text=f"{_check(s.notify_on_auto_reply)} Уведомлять об авто-ответах",
-                    callback_data=SettingsCB.toggle("notify_on_auto_reply"),
-                ),
-            )
             kb.row(*_back_row())
 
         elif section == "personality":
@@ -1108,6 +1096,19 @@ async def _render_section(
                 )
             )
             kb.row(*_back_row())
+
+        elif section == "memory_ai":
+            text = (
+                "🧠 <b>Память и AI — глобальные</b>\n\n"
+                f"Эпизодическая память: {'✅' if app_config.episodic_memory_enabled else '❌'}\n"
+                f"Reward Loop: {'✅' if app_config.reward_loop_enabled else '❌'}\n"
+                f"Dreaming (консолидация): {'✅' if app_config.dreaming_consolidation_enabled else '❌'}\n"
+                f"Auto-forget: {'✅' if app_config.auto_forget_enabled else '❌'}\n"
+                "\n<i>Эти настройки глобальные (из .env).\n"
+                "Измени .env и перезапусти бота.</i>"
+            )
+            kb.row(*_back_row())
+            return text, kb.as_markup()
 
         else:
             text = "Раздел не найден."

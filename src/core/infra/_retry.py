@@ -63,9 +63,17 @@ async def send_with_retry(
             if "FloodWaitError" in exc_name:
                 if attempt == max_retries - 1:
                     raise
-                wait = getattr(e, "seconds", base_delay * (2**attempt))
+                # ponytail: cap FloodWait at 60s — Telegram can demand 86400+ sec
+                # which would block the coroutine for hours.
+                raw_wait = getattr(e, "seconds", base_delay * (2**attempt))
+                try:
+                    raw_wait_f = float(raw_wait)
+                except (TypeError, ValueError):
+                    raw_wait_f = base_delay * (2**attempt)
+                wait = max(0.0, min(raw_wait_f, 60.0))
                 logger.warning(
-                    "FloodWait %ds (attempt %d/%d)",
+                    "FloodWait %ds (capped to %.0fs, attempt %d/%d)",
+                    raw_wait,
                     wait,
                     attempt + 1,
                     max_retries,

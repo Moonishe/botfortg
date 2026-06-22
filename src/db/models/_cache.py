@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, UTC
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.models._base import Base
@@ -16,7 +16,12 @@ class SmartCacheEntry(Base):
     cache_key: Mapped[str] = mapped_column(String(512), primary_key=True)
     cache_value: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(String(64), default="unknown")
-    owner_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    owner_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

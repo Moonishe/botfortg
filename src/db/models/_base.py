@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, String, Text
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
@@ -21,18 +21,19 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    # NOTE: User.id is implicitly Integer (SQLAlchemy default).
-    # FK references in other tables use BigInteger.
-    # SQLite is type-flexible and this doesn't cause errors.
-    # For PostgreSQL migration: change to BigInteger explicitly.
+    # BigInteger with SQLite variant — uses Integer on SQLite (for autoincrement)
+    # and BigInteger on PostgreSQL to match FK references in other tables.
     id: Mapped[int] = mapped_column(
-        primary_key=True
-    )  # Integer — SQLite autoincrement requires INTEGER
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+    )
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC)
     )
-    last_seen_online: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_online: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     absence_status: Mapped[str | None] = mapped_column(
         String(16), nullable=True
     )  # null | "away" | "soon_back"

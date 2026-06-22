@@ -173,6 +173,12 @@ async def test_memory_queue_stats_shape() -> None:
 
     stats = await get_queue_stats()
 
-    assert set(stats) == {"size", "max_size", "dlq_size", "dlq_max_size"}
+    assert set(stats) == {
+        "size",
+        "max_size",
+        "dlq_size",
+        "dlq_max_size",
+        "dlq_overflow",
+    }
     assert stats["max_size"] >= 1
     assert stats["dlq_max_size"] >= 1

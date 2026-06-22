@@ -36,12 +36,13 @@ from telethon.errors import FloodWaitError
 logger = logging.getLogger(__name__)
 
 
-async def _safe_telethon_call(coro_factory, description: str = "Telethon RPC"):
+async def _safe_telethon_call(coro_factory, description: str = "", *, max_retries: int = 3):
     """Execute a Telethon RPC call with FloodWait retry.
 
     Unlike restore_all() which handles FloodWait explicitly, message handlers
     previously had no protection — a FloodWaitError would silently lose the
-    operation. This wrapper retries once with the server-specified delay.
+    operation. This wrapper retries up to ``max_retries`` times with the
+    server-specified delay.
 
     ``coro_factory`` MUST be a zero-arg callable returning a fresh awaitable
     (e.g. a bound method or a ``lambda``). Passing an already-created coroutine
@@ -49,16 +50,24 @@ async def _safe_telethon_call(coro_factory, description: str = "Telethon RPC"):
     after FloodWait would raise ``RuntimeError: cannot reuse already awaited
     coroutine`` and the operation would be lost.
     """
-    try:
-        return await coro_factory()
-    except FloodWaitError as e:
-        logger.warning(
-            "FloodWait %ds during %s — retrying once after delay",
-            e.seconds,
-            description,
-        )
-        await asyncio.sleep(e.seconds)
-        return await coro_factory()
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return await coro_factory()
+        except FloodWaitError as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                logger.warning(
+                    "FloodWait %ds during %s — retrying (attempt %d/%d)",
+                    e.seconds,
+                    description,
+                    attempt + 1,
+                    max_retries,
+                )
+                await asyncio.sleep(max(0.0, min(e.seconds, 300)))
+                continue
+            raise
+    raise RuntimeError("unreachable: all attempts exhausted") from last_exc  # unreachable, but for type safety
 
 
 # ===== PERF-002: TTL-кэш для проверки watched_peers =====
@@ -107,10 +116,8 @@ async def _mark_message_processed(msg_id: int, peer_id: int) -> None:
         _SEEN_MESSAGES.pop(key, None)
         _SEEN_MESSAGES[key] = None
         if len(_SEEN_MESSAGES) > _SEEN_MESSAGES_MAX:
-            # Remove oldest ~50% (FIFO) — preserves recent entries for dedup.
-            remove_count = len(_SEEN_MESSAGES) // 2
-            for _ in range(remove_count):
-                _SEEN_MESSAGES.popitem(last=False)
+            # Remove oldest ONE entry (FIFO) — no mass eviction.
+            _SEEN_MESSAGES.popitem(last=False)
 
 
 async def _is_edit_duplicate(msg_id: int, peer_id: int) -> bool:
@@ -131,9 +138,8 @@ async def _mark_edit_processed(msg_id: int, peer_id: int) -> None:
         _SEEN_EDITS.pop(key, None)
         _SEEN_EDITS[key] = None
         if len(_SEEN_EDITS) > _SEEN_EDITS_MAX:
-            remove_count = len(_SEEN_EDITS) // 2
-            for _ in range(remove_count):
-                _SEEN_EDITS.popitem(last=False)
+            # Remove oldest ONE entry (FIFO) — no mass eviction.
+            _SEEN_EDITS.popitem(last=False)
 
 
 async def _is_watched_peer_cached(peer_id: int) -> bool | None:
@@ -384,6 +390,9 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             # ===== DEDUP: skip replayed events after Telethon reconnect =====
             if await _is_message_duplicate(msg.id, peer_id):
                 return
+            # Claim immediately to prevent TOCTOU race (ponytail: OrderedDict lock,
+            # per-key locks if contention matters)
+            await _mark_message_processed(msg.id, peer_id)
 
             should_process_inbox = True
 
@@ -402,120 +411,121 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             text = msg.text or msg.message or None
             sender_name = await _sender_label(msg)
 
-            # ===== SESSION: объединённая сессия для всех DB-операций =====
-            # Раньше было две сессии: _w_session (watched_peers) и session (mirror).
-            # Объединены в одну для уменьшения накладных расходов на connect/begin/commit.
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_telegram_id)
+            try:
+                # ===== SESSION: объединённая сессия для всех DB-операций =====
+                # Раньше было две сессии: _w_session (watched_peers) и session (mirror).
+                # Объединены в одну для уменьшения накладных расходов на connect/begin/commit.
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_telegram_id)
 
-                # Проверка watched_peers — фильтрация чатов (PERF-002: TTL-кэш)
-                _cached = await _is_watched_peer_cached(peer_id)
-                if _cached is not None:
-                    _is_watched = _cached
-                else:
-                    _watched = await get_watched_peers(session, owner)
-                    _is_watched = peer_id in _watched or not _watched
-                    await _cache_watched_peer(peer_id, _is_watched)
-                if not _is_watched:
-                    should_process_inbox = False
-
-                # сброс статуса отсутствия при любом исходящем
-                if msg.out and owner.absence_status is not None:
-                    owner.absence_status = None
-                    owner.absence_message = None
-
-                try:
-                    chat = await _safe_telethon_call(event.get_chat, "get_chat")
-                except Exception:
-                    chat = None
-                if chat is not None:
-                    if isinstance(chat, TgUser):
-                        parts = [
-                            getattr(chat, "first_name", None),
-                            getattr(chat, "last_name", None),
-                        ]
-                        display = " ".join(p for p in parts if p).strip() or (
-                            chat.username or str(peer_id)
-                        )
-                        await upsert_contact(
-                            session,
-                            owner,
-                            peer_id=peer_id,
-                            peer_kind="user",
-                            is_bot=bool(getattr(chat, "bot", False)),
-                            display_name=display,
-                            username=getattr(chat, "username", None),
-                            phone=getattr(chat, "phone", None),
-                        )
+                    # Проверка watched_peers — фильтрация чатов (PERF-002: TTL-кэш)
+                    _cached = await _is_watched_peer_cached(peer_id)
+                    if _cached is not None:
+                        _is_watched = _cached
                     else:
-                        title = getattr(chat, "title", None) or str(peer_id)
-                        kind_chat = (
-                            "channel" if getattr(chat, "broadcast", False) else "chat"
-                        )
-                        await upsert_contact(
-                            session,
-                            owner,
-                            peer_id=peer_id,
-                            peer_kind=kind_chat,
-                            is_bot=False,
-                            display_name=title,
-                            username=getattr(chat, "username", None),
-                        )
+                        _watched = await get_watched_peers(session, owner)
+                        _is_watched = peer_id in _watched or not _watched
+                        await _cache_watched_peer(peer_id, _is_watched)
+                    if not _is_watched:
+                        should_process_inbox = False
 
-                # Clock-skew guard: if msg.date is >1 day in the future,
-                # clamp it to now — prevents invalid FTS5/sort orders.
-                _msg_date = msg.date
-                if _msg_date is not None:
-                    _now_utc = datetime.now(UTC)
-                    # Compare as offset-naive after stripping tzinfo
-                    _msg_naive = _msg_date.replace(tzinfo=None)
-                    _now_naive = _now_utc.replace(tzinfo=None)
-                    if _msg_naive > _now_naive + timedelta(days=1):
-                        logger.debug(
-                            "Clock skew detected: msg.date %s is >1d in future, "
-                            "clamping to now for peer %s msg %s",
-                            _msg_date,
-                            peer_id,
-                            msg.id,
-                        )
-                        _msg_date = _now_utc
-                _final_date = (
-                    _msg_date.replace(tzinfo=None)
-                    if _msg_date
-                    else datetime.now(UTC).replace(tzinfo=None)
-                )
+                    # сброс статуса отсутствия при любом исходящем
+                    if msg.out and owner.absence_status is not None:
+                        owner.absence_status = None
+                        owner.absence_message = None
 
-                await upsert_message(
-                    session,
-                    user_id=owner.id,
-                    peer_id=peer_id,
-                    message_id=msg.id,
-                    sender_id=msg.sender_id,
-                    sender_name=sender_name,
-                    is_outgoing=bool(msg.out),
-                    date=_final_date,
-                    kind=kind,
-                    text=text,
-                    transcript=None,
-                    media_path=None,
-                    extracted_text=None,
-                )
+                    try:
+                        chat = await _safe_telethon_call(event.get_chat, "get_chat")
+                    except Exception:
+                        chat = None
+                    if chat is not None:
+                        if isinstance(chat, TgUser):
+                            parts = [
+                                getattr(chat, "first_name", None),
+                                getattr(chat, "last_name", None),
+                            ]
+                            display = " ".join(p for p in parts if p).strip() or (
+                                chat.username or str(peer_id)
+                            )
+                            await upsert_contact(
+                                session,
+                                owner,
+                                peer_id=peer_id,
+                                peer_kind="user",
+                                is_bot=bool(getattr(chat, "bot", False)),
+                                display_name=display,
+                                username=getattr(chat, "username", None),
+                                phone=getattr(chat, "phone", None),
+                            )
+                        else:
+                            title = getattr(chat, "title", None) or str(peer_id)
+                            kind_chat = (
+                                "channel" if getattr(chat, "broadcast", False) else "chat"
+                            )
+                            await upsert_contact(
+                                session,
+                                owner,
+                                peer_id=peer_id,
+                                peer_kind=kind_chat,
+                                is_bot=False,
+                                display_name=title,
+                                username=getattr(chat, "username", None),
+                            )
 
-                # Mark as processed AFTER successful DB insert — if upsert
-                # fails, Telethon replay will retry this message instead of
-                # losing it permanently.
-                await _mark_message_processed(msg.id, peer_id)
-
-                # детекция фраз отсутствия в исходящих сообщениях
-                if msg.out and msg.text:
-                    from src.core.scheduling.absence_detector import (
-                        detect_absence_phrases,
+                    # Clock-skew guard: if msg.date is >1 day in the future,
+                    # clamp it to now — prevents invalid FTS5/sort orders.
+                    _msg_date = msg.date
+                    if _msg_date is not None:
+                        _now_utc = datetime.now(UTC)
+                        # Compare as offset-naive after stripping tzinfo
+                        _msg_naive = _msg_date.replace(tzinfo=None)
+                        _now_naive = _now_utc.replace(tzinfo=None)
+                        if _msg_naive > _now_naive + timedelta(days=1):
+                            logger.debug(
+                                "Clock skew detected: msg.date %s is >1d in future, "
+                                "clamping to now for peer %s msg %s",
+                                _msg_date,
+                                peer_id,
+                                msg.id,
+                            )
+                            _msg_date = _now_utc
+                    _final_date = (
+                        _msg_date.replace(tzinfo=None)
+                        if _msg_date
+                        else datetime.now(UTC).replace(tzinfo=None)
                     )
 
-                    status, message_text = detect_absence_phrases(msg.text)
-                    if status:
-                        owner.absence_status = status
-                        owner.absence_message = message_text or msg.text[:100]
+                    await upsert_message(
+                        session,
+                        user_id=owner.id,
+                        peer_id=peer_id,
+                        message_id=msg.id,
+                        sender_id=msg.sender_id,
+                        sender_name=sender_name,
+                        is_outgoing=bool(msg.out),
+                        date=_final_date,
+                        kind=kind,
+                        text=text,
+                        transcript=None,
+                        media_path=None,
+                        extracted_text=None,
+                    )
+
+                    # детекция фраз отсутствия в исходящих сообщениях
+                    if msg.out and msg.text:
+                        from src.core.scheduling.absence_detector import (
+                            detect_absence_phrases,
+                        )
+
+                        status, message_text = detect_absence_phrases(msg.text)
+                        if status:
+                            owner.absence_status = status
+                            owner.absence_message = message_text or msg.text[:100]
+            except Exception:
+                # Release claim for retry — if DB ops fail, allow Telethon replay
+                async with _SEEN_MESSAGES_LOCK:
+                    _SEEN_MESSAGES.pop((msg.id, peer_id), None)
+                raise
 
             # ===== InboxManager: тяжёлая обработка — в фон =====
             # Skip bot senders — prevents feedback loop with control bot.
@@ -547,7 +557,10 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     )
                 )
         except Exception:
-            logger.exception("mirror handler failed")
+            logger.warning(
+                "mirror: handler failed for incoming message, data loss possible",
+                exc_info=True,
+            )
 
     async def _on_message_edited(event: events.MessageEdited.Event) -> None:
         """Обработка редактирования сообщения.
@@ -594,7 +607,11 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     # instead of losing it permanently.
                     await _mark_edit_processed(msg.id, peer_id)
                 except Exception:
-                    logger.debug("Failed to update edited message text", exc_info=True)
+                    logger.warning(
+                        "mirror: edited message upsert failed for msg_id=%s, data loss possible",
+                        msg.id,
+                        exc_info=True,
+                    )
 
             reactions_obj = msg.reactions
             # recent_reactions — список MessagePeerReaction (кто какую реакцию поставил)

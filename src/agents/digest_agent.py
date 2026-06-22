@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import re
 from typing import Any
 
-from src.llm.base import ChatMessage
+from src.agents._json_utils import extract_json_from_llm_response
+from src.config import settings
+from src.llm.base import ChatMessage, LLMProvider
 
 logger = logging.getLogger(__name__)
+
+_AGENT_TIMEOUT = 60.0  # seconds — agents are background tasks, 60s is generous
 
 DIGEST_SYSTEM = """Ты — AI-ассистент. Собери сводку входящих сообщений.
 Дан список с пометками срочности (🔴 urgent, 🟡 important, 🟢 normal). Сгруппируй кратко.
@@ -23,7 +27,9 @@ DIGEST_SYSTEM = """Ты — AI-ассистент. Собери сводку в�
 """
 
 
-async def build_digest(provider, messages_data: list[dict]) -> dict[str, Any]:
+async def build_digest(
+    provider: LLMProvider, messages_data: list[dict], *, max_tokens: int | None = None
+) -> dict[str, Any]:
     """
     Собирает дайджест входящих сообщений.
 
@@ -31,6 +37,8 @@ async def build_digest(provider, messages_data: list[dict]) -> dict[str, Any]:
         provider: Объект LLMProvider с методом chat().
         messages_data: Список словарей с ключами:
             sender (str), text (str), urgency (str: urgent/important/normal), count (int).
+        max_tokens: Максимальное количество токенов для ответа LLM.
+                    Если None, используется settings.agent_token_budget.
 
     Returns:
         Словарь: urgent_count, important_count, normal_count, highlights, summary, html.
@@ -48,16 +56,26 @@ async def build_digest(provider, messages_data: list[dict]) -> dict[str, Any]:
     msgs_json = json.dumps(messages_data, ensure_ascii=False)
     user_msg = f"Входящие сообщения:\n{msgs_json}"
 
+    effective_max_tokens = (
+        max_tokens if max_tokens is not None else settings.agent_token_budget
+    )
+
     try:
-        raw = await provider.chat(
-            [
-                ChatMessage(role="system", content=DIGEST_SYSTEM),
-                ChatMessage(role="user", content=user_msg),
-            ],
-            heavy=False,
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=DIGEST_SYSTEM),
+                    ChatMessage(role="user", content=user_msg),
+                ],
+                heavy=False,
+                max_tokens=effective_max_tokens,
+            ),
+            timeout=_AGENT_TIMEOUT,
         )
-    except Exception as e:
-        logger.error("Digest agent LLM error: %s", e)
+    except asyncio.TimeoutError:
+        logger.warning("digest_agent: LLM call timed out after %ds", _AGENT_TIMEOUT)
+        # ponytail: fallback can't classify urgency/importance without LLM;
+        # upgrade path: keep last-known counts or use a heuristic classifier.
         return {
             "urgent_count": 0,
             "important_count": 0,
@@ -66,15 +84,22 @@ async def build_digest(provider, messages_data: list[dict]) -> dict[str, Any]:
             "summary": "Ошибка дайджеста.",
             "html": "Ошибка.",
         }
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
-        raw = re.sub(r"\n?\s*```\s*$", "", raw)
-
+    except Exception as e:
+        logger.error("Digest agent LLM error: %s", e)
+        # ponytail: fallback can't classify urgency/importance without LLM;
+        # upgrade path: keep last-known counts or use a heuristic classifier.
+        return {
+            "urgent_count": 0,
+            "important_count": 0,
+            "normal_count": len(messages_data),
+            "highlights": [],
+            "summary": "Ошибка дайджеста.",
+            "html": "Ошибка.",
+        }
     try:
-        m = re.search(r"\{[\s\S]*\}", raw)
-        if m:
-            return json.loads(m.group(0))
+        parsed = extract_json_from_llm_response(raw)
+        if isinstance(parsed, dict):
+            return parsed
         return {
             "urgent_count": len(messages_data),
             "important_count": 0,
@@ -84,7 +109,8 @@ async def build_digest(provider, messages_data: list[dict]) -> dict[str, Any]:
             "html": raw,
         }
     except Exception:
-        logger.debug("Digest parse failed: %s", raw[:100])
+        logger.warning("Digest parse failed: %s", raw[:100])
+        # ponytail: same fallback limitation as LLM error path above.
         return {
             "urgent_count": 0,
             "important_count": 0,

@@ -27,7 +27,12 @@ class FakeProvider:
         self.api_key = api_key
 
     async def chat(
-        self, messages, *, heavy: bool = False, task_type: str = "default"
+        self,
+        messages,
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         self.calls.append(self.api_key)
         if self.api_key.startswith("bad"):
@@ -60,7 +65,12 @@ class SlowProvider(FakeProvider):
         cls.release = None
 
     async def chat(
-        self, messages, *, heavy: bool = False, task_type: str = "default"
+        self,
+        messages,
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         self.entered.append(self.api_key)
         assert self.release is not None
@@ -180,7 +190,12 @@ class ExhaustingProvider:
         self.api_key = api_key
 
     async def chat(
-        self, messages, *, heavy: bool = False, task_type: str = "default"
+        self,
+        messages,
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         self.calls.append(self.api_key)
         raise ExhaustedError(f"All keys for {self.api_key} exhausted")
@@ -202,7 +217,12 @@ class GoodProvider:
         self.api_key = api_key
 
     async def chat(
-        self, messages, *, heavy: bool = False, task_type: str = "default"
+        self,
+        messages,
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         self.calls.append(self.api_key)
         return f"ok:{self.api_key}"

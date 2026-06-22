@@ -11,6 +11,7 @@ Risk: **high** — requires explicit user confirmation before execution.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from src.core.security.web_sanitizer import (
     sanitize_search_result,
     sanitize_search_snippet,
 )
+from src.crypto import decrypt, encrypt
 
 logger = logging.getLogger(__name__)
 
@@ -124,13 +126,22 @@ async def _gmail_check(max_results: int, query: str) -> dict[str, Any]:
     try:
         creds = None
 
-        # Token file for persistent auth
+        # Token file for persistent auth (encrypted at rest)
         token_path = _CREDENTIALS_PATH.with_name("gmail_token.json")
 
         if token_path.is_file():
-            creds = Credentials.from_authorized_user_file(
-                str(token_path), _GMAIL_SCOPES
-            )
+            raw = token_path.read_text()
+            try:
+                creds_data = decrypt(raw)
+            except ValueError:
+                # Backward compat: plaintext token from before encryption
+                creds_data = raw
+            try:
+                creds = Credentials.from_authorized_user_info(
+                    json.loads(creds_data), _GMAIL_SCOPES
+                )
+            except Exception:
+                creds = None
 
         # If no valid credentials, run OAuth flow
         if not creds or not creds.valid:
@@ -142,9 +153,8 @@ async def _gmail_check(max_results: int, query: str) -> dict[str, Any]:
                 )
                 creds = flow.run_local_server(port=0)
 
-            # Save token for next run
-            with open(token_path, "w") as token_file:
-                token_file.write(creds.to_json())
+            # Save encrypted token for next run
+            token_path.write_text(encrypt(creds.to_json()))
 
         # Build service and fetch messages
         service = build("gmail", "v1", credentials=creds)

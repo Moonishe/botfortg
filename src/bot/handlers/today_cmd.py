@@ -24,7 +24,7 @@ from src.db.repo import (
     list_memory_candidates,
 )
 from src.core.contacts.reply_radar import collect_reply_radar, format_radar, RadarItem
-from src.core.contacts.inbox_priority import rank_inbox, format_inbox
+from src.core.contacts.inbox_priority import rank_inbox
 from src.core.memory.memory_health import calculate_health_score, format_health_compact
 from src.core.memory.temporal_layers import utc_naive, utcnow_naive
 
@@ -219,12 +219,7 @@ async def cmd_radar(message: Message):
             )
 
 
-@router.message(Command("inbox"))
-async def cmd_inbox(message: Message):
-    """Приоритизированные входящие: здоровье контакта + дедлайны + обязательства."""
-    ranked = await rank_inbox(message.from_user.id, limit=10)
-    text = await format_inbox(ranked)
-    await message.answer(text)
+# Removed: dead code, /inbox handled by inbox_cmd.py
 
 
 # Callback: radar:why

@@ -72,6 +72,7 @@ SEARCHABLE_SETTINGS: dict[str, str] = {
     # Anti-AI
     "anti_ai_enabled": "Включить Anti-AI защиту",
     "anti_ai_mode": "Режим Anti-AI (off/log/fix)",
+    "pattern_caching_enabled": "кэширование паттернов намерений",
 }
 
 BOOL_KEYS = {
@@ -94,6 +95,7 @@ BOOL_KEYS = {
     "notify_on_auto_reply",
     "adaptive_mode_enabled",
     "anti_ai_enabled",
+    "pattern_caching_enabled",
 }
 
 CHOICE_KEYS = {
@@ -196,7 +198,9 @@ def section_for_key(key: str) -> str:
         "include_saved_messages": "sync",
         "smart_digest_enabled": "smart_digest",
         "urgent_notify_enabled": "smart_digest",
+        "smart_digest_interval_min": "smart_digest",
         "auto_sync_interval_sec": "sync",
+        "pattern_caching_enabled": "brain",
     }.get(key, "menu")
 
 

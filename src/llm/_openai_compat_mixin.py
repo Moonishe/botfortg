@@ -137,6 +137,7 @@ class OpenAICompatToolMixin:
         tools: list[ToolDefinition] | None = None,
         *,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> ChatResponse:
         heavy = task_type not in ("draft", "default", "memory", "classify")
         model = self._resolve_model(heavy)  # type: ignore[attr-defined]
@@ -146,6 +147,8 @@ class OpenAICompatToolMixin:
         )
         if tools:
             kwargs["tools"] = self._tools_to_openai(tools)  # type: ignore[attr-defined]
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         resp = await self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         text = choice.message.content or ""

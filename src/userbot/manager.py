@@ -66,6 +66,7 @@ class UserbotManager:
     _retry_tasks: set[asyncio.Task] = field(default_factory=set)
     _restore_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _restored: bool = False
+    _health_check_running: bool = False
 
     def __post_init__(self) -> None:
         global _MANAGER_SINGLETON
@@ -195,14 +196,15 @@ class UserbotManager:
         attach_dialog_event_handlers(client, telegram_id)
         attach_mirror(client, telegram_id)
 
-    async def remove_client(self, telegram_id: int) -> None:
+    async def remove_client(self, telegram_id: int, *, permanent: bool = False) -> None:
         async with self._clients_lock:
             client = self._clients.pop(telegram_id, None)
         if client is not None:
-            try:
-                await client.log_out()
-            except (RPCError, ConnectionError, OSError):
-                logger.exception("log_out failed")
+            if permanent:
+                try:
+                    await client.log_out()
+                except (RPCError, ConnectionError, OSError):
+                    logger.exception("log_out failed during permanent removal")
             try:
                 await client.disconnect()
             except (RPCError, ConnectionError, OSError):
@@ -331,64 +333,79 @@ class UserbotManager:
 
     async def health_check_loop(self) -> None:
         """Periodically check connected + authorized for all userbot clients."""
-        while True:
-            await asyncio.sleep(300)  # every 5 minutes
-            # Snapshot under lock to prevent dict mutation during iteration.
-            async with self._clients_lock:
-                snapshot = list(self._clients.items())
-            for tg_id, client in snapshot:
-                try:
-                    if not client.is_connected():
-                        logger.warning(
-                            "Userbot for tg_id=%d disconnected — reconnecting…",
-                            tg_id,
-                        )
-                        await client.connect()
-                    me = await client.get_me()
-                    if me is None:
-                        logger.error(
-                            "Userbot for tg_id=%d not authorized — removing",
-                            tg_id,
-                        )
-                        try:
-                            await client.disconnect()
-                        except RPCError:
-                            logger.debug(
-                                "client.disconnect() failed for tg_id=%d",
-                                tg_id,
-                                exc_info=True,
-                            )
-                        # Atomic re-check: only remove if still the same client
-                        # (another coroutine may have replaced/removed it).
-                        async with self._clients_lock:
-                            if self._clients.get(tg_id) is client:
-                                self._clients.pop(tg_id, None)
-                except asyncio.CancelledError:
-                    raise  # propagate for clean shutdown
-                except (RPCError, ConnectionError, OSError):
-                    # Reconnect failed — disconnect to release resources
-                    logger.warning(
-                        "Health check reconnect failed for tg_id=%d — disconnecting",
-                        tg_id,
-                        exc_info=True,
-                    )
+        if self._health_check_running:
+            logger.debug("health_check_loop already running, skipping")
+            return
+        self._health_check_running = True
+        try:
+            while True:
+                await asyncio.sleep(settings.userbot_health_check_interval)
+                # Snapshot under lock to prevent dict mutation during iteration.
+                async with self._clients_lock:
+                    snapshot = list(self._clients.items())
+                for tg_id, client in snapshot:
                     try:
-                        await client.disconnect()
-                    except (RPCError, OSError):
-                        logger.debug(
-                            "client.disconnect() after failed reconnect for tg_id=%d",
+                        if not client.is_connected():
+                            logger.warning(
+                                "Userbot for tg_id=%d disconnected — reconnecting…",
+                                tg_id,
+                            )
+                            await client.connect()
+                        me = await client.get_me()
+                        if me is None:
+                            logger.error(
+                                "Userbot for tg_id=%d not authorized — removing",
+                                tg_id,
+                            )
+                            try:
+                                await client.disconnect()
+                            except RPCError:
+                                logger.debug(
+                                    "client.disconnect() failed for tg_id=%d",
+                                    tg_id,
+                                    exc_info=True,
+                                )
+                            # Atomic re-check: only remove if still the same client
+                            # (another coroutine may have replaced/removed it).
+                            async with self._clients_lock:
+                                if self._clients.get(tg_id) is client:
+                                    self._clients.pop(tg_id, None)
+                    except asyncio.CancelledError:
+                        raise  # propagate for clean shutdown
+                    except FloodWaitError as e:
+                        logger.warning(
+                            "FloodWait %ds in health_check for user %s, sleeping...",
+                            e.seconds,
+                            tg_id,
+                        )
+                        await asyncio.sleep(max(0.0, min(e.seconds, 300)))
+                        continue  # retry on next tick, don't disconnect
+                    except (RPCError, ConnectionError, OSError):
+                        # Reconnect failed — disconnect to release resources
+                        logger.warning(
+                            "Health check reconnect failed for tg_id=%d — disconnecting",
                             tg_id,
                             exc_info=True,
                         )
-                    async with self._clients_lock:
-                        if self._clients.get(tg_id) is client:
-                            self._clients.pop(tg_id, None)
-                except Exception:
-                    logger.debug(
-                        "Health check for tg_id=%d failed (non-critical)",
-                        tg_id,
-                        exc_info=True,
-                    )
+                        try:
+                            await client.disconnect()
+                        except (RPCError, OSError):
+                            logger.debug(
+                                "client.disconnect() after failed reconnect for tg_id=%d",
+                                tg_id,
+                                exc_info=True,
+                            )
+                        async with self._clients_lock:
+                            if self._clients.get(tg_id) is client:
+                                self._clients.pop(tg_id, None)
+                    except Exception:
+                        logger.debug(
+                            "Health check for tg_id=%d failed (non-critical)",
+                            tg_id,
+                            exc_info=True,
+                        )
+        finally:
+            self._health_check_running = False
 
 
 # ── Gateway registration (Protocol from core layer) ──────────────────────

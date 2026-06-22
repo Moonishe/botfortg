@@ -547,8 +547,7 @@ async def _cb_tool_confirm(
 
 
 @confirm_router.callback_query(
-    F.data.startswith("tool:cancel:")
-    | F.data.startswith("ap:cancel:tool:")
+    F.data.startswith("ap:cancel:tool:")
     | F.data.startswith("ap:cancel:intent:")
 )
 async def _cb_tool_cancel(
@@ -558,24 +557,19 @@ async def _cb_tool_cancel(
 ) -> None:
     """Callback: пользователь отменил выполнение инструмента.
 
-    Week 2: accepts unified ``ap:cancel:tool:{action_key}`` and legacy
-    ``tool:cancel:{uid}`` callbacks. Unified cancel callbacks do NOT carry a
-    signature (they are intentionally short), so we verify ownership via
-    user_id for DB-route and by matching the stored telegram_id for memory-route.
-    Legacy memory-route cancel callbacks are rejected to prevent action-key
-    guessing attacks.
+    Accepts ``ap:cancel:tool:{action_key}`` and ``ap:cancel:intent:{action_key}``
+    callbacks. Cancel callbacks do NOT carry an HMAC signature (they are
+    intentionally short), so we verify ownership via user_id for DB-route and
+    by matching the stored telegram_id for memory-route.
     """
     from src.core.security import approval
 
     data = callback.data or ""
-    legacy = data.startswith("tool:cancel:")
     action_key = ""
     if data.startswith("ap:cancel:"):
         parsed = approval.parse_cancel_callback(data)
         if parsed:
             action_key = parsed[1]
-    else:
-        action_key = data.split(":", 2)[2]
 
     if not action_key:
         await callback.answer("⏳ Действие устарело", show_alert=True)
@@ -615,15 +609,6 @@ async def _cb_tool_cancel(
             await callback.answer("⏳ Действие устарело", show_alert=True)
             return
     else:
-        # Memory route: legacy cancel without signature is rejected.
-        if legacy:
-            logger.warning(
-                "_cb_tool_cancel: legacy memory cancel rejected for action_key=%s",
-                action_key,
-            )
-            await callback.answer("⏳ Действие устарело", show_alert=True)
-            return
-
         async with _pending_confirmations_lock:
             _cleanup_stale_pending()
             pending = _pending_confirmations.pop(action_key, None)

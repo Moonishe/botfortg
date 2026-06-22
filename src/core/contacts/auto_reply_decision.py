@@ -77,6 +77,7 @@ class AutoReplyVerdict(Enum):
     SKIP_SPAM = "spam"
     SKIP_RECENT_MY_MESSAGE = "recent"
     SKIP_OFFLINE_ONLY = "offline"
+    SKIP_QUIET_HOURS = "quiet_hours"
     SKIP_GLOBAL_LIMIT = "global_limit"
 
 
@@ -234,6 +235,25 @@ async def decide(
             verdict=AutoReplyVerdict.SKIP_OFFLINE_ONLY,
             reason="Owner is online and auto_mode is offline_only",
         )
+
+    # ── 7b. Quiet hours ───────────────────────────────────────────────────
+    qh_start = owner.settings.quiet_hours_start if owner.settings else None
+    qh_end = owner.settings.quiet_hours_end if owner.settings else None
+    if qh_start and qh_end:
+        from src.core.infra.timeutil import get_user_tz, now_in_tz
+
+        tz = get_user_tz(owner)
+        now_hm = now_in_tz(tz).strftime("%H:%M")
+        # Handle overnight range (e.g. 22:00-08:00)
+        if qh_start <= qh_end:
+            in_quiet = qh_start <= now_hm <= qh_end
+        else:
+            in_quiet = now_hm >= qh_start or now_hm <= qh_end
+        if in_quiet:
+            return AutoReplyChoice(
+                verdict=AutoReplyVerdict.SKIP_QUIET_HOURS,
+                reason=f"Quiet hours: {qh_start}-{qh_end}",
+            )
 
     # ── 8. Global hourly rate-limit ────────────────────────────────────────
     # Atomically reserve a slot: check-and-increment under one lock. Calling

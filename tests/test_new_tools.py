@@ -252,6 +252,10 @@ _SAMPLE_GENIUS_SEARCH = {
 def _isolate_genius(monkeypatch):
     """Гарантировать fake-токен Genius и изолировать сеть."""
     monkeypatch.setenv("GENIUS_ACCESS_TOKEN", "fake-genius-token")
+    # pydantic Settings already loaded at import — patch the attribute directly
+    from src.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "genius_access_token", "fake-genius-token")
 
 
 class TestGeniusHandler:
@@ -314,6 +318,9 @@ class TestGeniusHandler:
     async def test_missing_token_возвращает_ошибку(self, monkeypatch):
         """Отсутствие GENIUS_ACCESS_TOKEN должно вернуть ошибку."""
         monkeypatch.delenv("GENIUS_ACCESS_TOKEN", raising=False)
+        from src.config import settings as _settings
+
+        monkeypatch.setattr(_settings, "genius_access_token", "")
 
         from src.core.connectors.site_connectors import _genius_handler
         from src.core.connectors.base import ConnectorRuntime

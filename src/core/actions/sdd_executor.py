@@ -131,6 +131,16 @@ _BLACKLIST: set[str] = {
 # ── Validation helpers ────────────────────────────────────────────────────
 
 
+# Keys that MUST NOT be passed into the sandbox namespace via **safe_kwargs,
+# as they would override critical safety internals.
+# ponytail: frozenset, upgrade to enum if namespacing gets more complex.
+_RESERVED_NAMESPACE_KEYS: frozenset[str] = frozenset({
+    "__builtins__", "kwargs", "safe_builtins", "safe_kwargs",
+    "namespace", "output_buffer", "_sandbox_print", "code",
+    "result", "session", "user", "provider", "userbot_manager",
+    "owner", "bot",
+})
+
 def _is_safe(node: ast.AST) -> bool:
     """Recursively check that all nodes in the AST are allowed.
 
@@ -224,12 +234,13 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
             return False
         return True
 
-    _safe_kwargs: dict[str, Any] = {
-        k: v
-        for k, v in kwargs.items()
-        if k not in ("session", "user", "provider", "userbot_manager", "owner", "bot")
-        and _is_json_serializable(v)
-    }
+    def _safe_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Filter kwargs for safe passage to sandbox namespace."""
+        return {
+            k: v for k, v in kwargs.items()
+            if k not in _RESERVED_NAMESPACE_KEYS
+            and _is_json_serializable(v)
+        }
 
     # 3. Execute in isolated subprocess (with timeout)
     # Prior design used exec() in a thread pool, which leaked threads
@@ -240,13 +251,13 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
     # Serialize code via marshal+base64 — subprocess script reads and executes.
     # Keeps AST validation in main process, only code execution in subprocess.
     code_bytes = marshal.dumps(compile(tree, "<sdd>", "exec"))
-    safe_kwargs_json = json.dumps(_safe_kwargs)
+    safe_kwargs_json = json.dumps(_safe_kwargs(kwargs), ensure_ascii=True)
     script = (
         "import marshal, base64, json, sys, io\n"
         "code = marshal.loads(base64.b64decode("
-        + json.dumps(base64.b64encode(code_bytes).decode())
+        + json.dumps(base64.b64encode(code_bytes).decode(), ensure_ascii=True)
         + "))\n"
-        "safe_kwargs = json.loads(" + json.dumps(safe_kwargs_json) + ")\n"
+        "safe_kwargs = json.loads(" + json.dumps(safe_kwargs_json, ensure_ascii=True) + ")\n"
         "safe_builtins = {k: getattr(__builtins__, k) for k in ['print','len','range','int','str','float','bool','list','dict','set','tuple','zip','enumerate','sorted','min','max','sum','any','all','isinstance']}\n"
         "safe_builtins.update({'True': True, 'False': False, 'None': None})\n"
         "namespace = {'__builtins__': safe_builtins, 'kwargs': safe_kwargs, **safe_kwargs}\n"

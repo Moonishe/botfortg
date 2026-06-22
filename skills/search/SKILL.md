@@ -1,3 +1,11 @@
+---
+name: search
+description: Полнотекстовый поиск по всем сообщениям пользователя
+version: 1.0.0
+platforms: [telegram]
+tags: [search, fts5, timeline]
+---
+
 # Search
 
 ## Purpose

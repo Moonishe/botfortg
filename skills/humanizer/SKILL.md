@@ -1,3 +1,11 @@
+---
+name: humanizer
+description: Anti-AI humanizer: заменяет AI-маркеры на человеческие аналоги
+version: 1.0.0
+platforms: [telegram]
+tags: [humanize, anti-ai, text]
+---
+
 # Humanizer
 
 ## Purpose

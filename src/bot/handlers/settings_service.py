@@ -15,6 +15,30 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+# P3: Whitelist of settings keys allowed for import — prevents mass assignment.
+_ALLOWED_IMPORT_KEYS: frozenset[str] = frozenset(
+    {
+        "llm_provider",
+        "use_heavy_model",
+        "transcription_mode",
+        "transcription_api_provider",
+        "anti_ai_enabled",
+        "anti_ai_mode",
+        "adaptive_mode_enabled",
+        "auto_sync_enabled",
+        "auto_extract_memories",
+        "include_saved_messages",
+        "monitor_only_selected_folders",
+        "monitored_folders",
+        "timezone",
+        "auto_reply_close_contacts",
+        "smart_digest_enabled",
+        "urgent_notify_enabled",
+        "digest_time",
+        "auto_sync_interval_sec",
+    }
+)
+
 
 async def _count_slots_for_provider(session, owner, provider: str) -> int:
     """Сколько ключей у пользователя для данного провайдера в LlmKeySlot."""
@@ -98,7 +122,7 @@ async def _apply_import_config(telegram_id: int, config: dict) -> dict:
 
         settings_data = config.get("settings", {})
         for key, value in settings_data.items():
-            if hasattr(s, key) and value is not None:
+            if key in _ALLOWED_IMPORT_KEYS and hasattr(s, key) and value is not None:
                 setattr(s, key, value)
 
         overrides = config.get("model_overrides", {})
@@ -140,7 +164,7 @@ async def _apply_import_config(telegram_id: int, config: dict) -> dict:
         await session.commit()
 
     # Invalidate settings cache
-    from src.bot.handlers.free_text_common import invalidate_settings_cache
+    from src.core.infra.settings_cache import invalidate_settings_cache
 
     await invalidate_settings_cache(telegram_id)
 
@@ -153,7 +177,7 @@ async def _apply_import_config(telegram_id: int, config: dict) -> dict:
 
 async def _update_setting(telegram_id: int, key: str, value) -> None:
     """Update a single setting on the user's settings object."""
-    from src.bot.handlers.free_text_common import invalidate_settings_cache
+    from src.core.infra.settings_cache import invalidate_settings_cache
 
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)

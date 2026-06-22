@@ -183,6 +183,7 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
                 lines.append("")
                 lines.append("<b>🔗 Связанные факты:</b>")
                 for lm in linked[:3]:
+                    _rel_type = lm.get("relation_type") or ""
                     _rel_label = {
                         "cause": "причина",
                         "effect": "следствие",
@@ -190,8 +191,8 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
                         "supports": "подтверждение",
                         "continues": "продолжение",
                         "example_of": "пример",
-                    }.get(lm.relation_type or "", lm.relation_type or "связь")
-                    lines.append(f"  {lm.relation_type}: «{lm.fact}»")
+                    }.get(_rel_type, _rel_type or "связь")
+                    lines.append(f"  {_rel_label}: «{lm['memory'].fact}»")
 
             # Семантические соседи для первого факта
             neighbors = await get_neighbors(

@@ -22,6 +22,8 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 _CHUNK = 100
 
 
@@ -29,24 +31,25 @@ async def memory_decay_loop(owner_id: int) -> None:
     """Фоновый цикл: раз в сутки в 03:00 — decay + silent validation."""
     last_run = None
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = get_user_tz(owner)
-            now = now_in_tz(tz_name)
-            if now.hour == 3 and last_run != now.date():
-                last_run = now.date()
-                decayed, closed = await _run_decay_and_validation(owner_id)
-                if closed > 0:
-                    logger.info(
-                        "Memory decay done: %d closed, %d decayed", closed, decayed
-                    )
-            await asyncio.sleep(
-                settings.memory_check_interval_sec
-            )  # каждые 10 минут проверка
-        except (ValueError, AttributeError, LookupError, OSError):
-            logger.exception("Memory decay error")
-            await asyncio.sleep(settings.memory_check_interval_sec)
+        async with _overlap_guard:
+            try:
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    tz_name = get_user_tz(owner)
+                now = now_in_tz(tz_name)
+                if now.hour == 3 and last_run != now.date():
+                    last_run = now.date()
+                    decayed, closed = await _run_decay_and_validation(owner_id)
+                    if closed > 0:
+                        logger.info(
+                            "Memory decay done: %d closed, %d decayed", closed, decayed
+                        )
+                await asyncio.sleep(
+                    settings.memory_check_interval_sec
+                )  # каждые 10 минут проверка
+            except (ValueError, AttributeError, LookupError, OSError):
+                logger.exception("Memory decay error")
+                await asyncio.sleep(settings.memory_check_interval_sec)
 
 
 async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:

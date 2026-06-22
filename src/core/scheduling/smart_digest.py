@@ -12,6 +12,7 @@ from sqlalchemy import select
 from src.config import settings
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.contacts.urgency_classifier import classify_message
+from src.core.infra.settings_cache import invalidate_settings_cache
 from src.db.models import Notification
 from src.db.models import Message, User
 from src.db.repo import get_contact, get_or_create_user
@@ -51,17 +52,29 @@ async def collect_recent_messages(
     )
     rows = list(result.scalars().all())
 
+    # P6: Batch-load conversation states for all unique peer_ids at once
+    unique_peer_ids = {m.peer_id for m in rows}
+    from src.db.models import ConversationState
+    from sqlalchemy import select as _select
+
+    conv_states: dict[int, int] = {}  # peer_id -> unread_count
+    if unique_peer_ids:
+        cs_result = await session.execute(
+            _select(ConversationState).where(
+                ConversationState.user_id == user.id,
+                ConversationState.peer_id.in_(unique_peer_ids),
+            )
+        )
+        for cs in cs_result.scalars().all():
+            conv_states[cs.peer_id] = cs.unread_count
+
     by_peer: dict[int, dict] = {}
     for m in rows:
         if m.peer_id not in by_peer:
             text_content = m.transcript or m.text or m.extracted_text or ""
             urgency = classify_message(text_content) if text_content else "normal"
 
-            # Загрузить состояние диалога (unread_count)
-            from src.db.repo import get_conversation_state
-
-            _state = await get_conversation_state(session, user, m.peer_id)
-            _unread = _state.unread_count if _state else 0
+            _unread = conv_states.get(m.peer_id, 0)
 
             by_peer[m.peer_id] = {
                 "sender_name": m.sender_name or str(m.peer_id),
@@ -165,9 +178,7 @@ def build_smart_digest(messages_by_peer: dict[int, dict], interval: int) -> str:
 async def smart_digest_loop(owner_telegram_id: int) -> None:
     """Фоновый цикл: каждые 60 секунд проверяет, пора ли отправить дайджест."""
     while True:
-        if _overlap_guard.locked():
-            await asyncio.sleep(60)
-            continue
+        need_invalidate = False
         async with _overlap_guard:
             try:
                 async with get_session() as session:
@@ -175,7 +186,7 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                     user_settings = owner.settings
 
                     if not user_settings.smart_digest_enabled:
-                        await asyncio.sleep(60)
+                        await asyncio.sleep(settings.smart_digest_poll_interval)
                         continue
 
                     now = datetime.now(UTC).replace(tzinfo=None)
@@ -185,7 +196,7 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                     if last_sent is not None:
                         elapsed = (now - last_sent).total_seconds() / 60
                         if elapsed < interval:
-                            await asyncio.sleep(60)
+                            await asyncio.sleep(settings.smart_digest_poll_interval)
                             continue
 
                     messages = await collect_recent_messages(
@@ -196,28 +207,31 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                     # — duplicate suppression —
                     current_hash = hashlib.sha256(text.encode()).hexdigest()
                     async with _last_digest_hash_lock:
-                        prev_hash = _last_digest_hash.get(owner.id)
+                        prev_hash = _last_digest_hash.get(owner_telegram_id)
                     if prev_hash == current_hash:
-                        logger.info("duplicate digest skipped for owner %s", owner.id)
+                        logger.info(
+                            "duplicate digest skipped for owner %s", owner_telegram_id
+                        )
                         # still update last_sent so the interval clock resets
                         user_settings.smart_digest_last_sent = now
-                        await session.commit()
-                        await asyncio.sleep(60)
-                        continue
+                        need_invalidate = True
+                    else:
+                        await notification_queue.enqueue(
+                            topic="smart_digest",
+                            text=text,
+                            priority=Notification.PRIORITY_MEDIUM,
+                        )
 
-                    await notification_queue.enqueue(
-                        topic="smart_digest",
-                        text=text,
-                        priority=Notification.PRIORITY_MEDIUM,
-                    )
-
-                    async with _last_digest_hash_lock:
-                        _last_digest_hash[owner.id] = current_hash
-                    user_settings.smart_digest_last_sent = now
-                    await session.commit()
+                        async with _last_digest_hash_lock:
+                            _last_digest_hash[owner_telegram_id] = current_hash
+                        user_settings.smart_digest_last_sent = now
+                        need_invalidate = True
             except Exception:
                 logger.exception("smart_digest_loop tick failed")
-        await asyncio.sleep(60)
+        # P10: invalidate cache AFTER session commit (get_session commits on exit)
+        if need_invalidate:
+            await invalidate_settings_cache(owner_telegram_id)
+        await asyncio.sleep(settings.smart_digest_poll_interval)
 
 
 from functools import partial

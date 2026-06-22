@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import logging.handlers
-import os
 import signal
 import sys
 from collections.abc import Awaitable, Callable
@@ -94,6 +93,51 @@ def _register_background_tasks() -> None:
 
     register_cleanup_timer()
 
+    # ═══════════════════════════════════════════════════════════════
+    # Side-effect imports: каждый модуль регистрирует background-таск(и)
+    # через task_manager.register() или @task_manager.task() на уровне модуля.
+    # Без этих импортов task_manager.start_all() не увидит незарегистрированные задачи.
+    # ═══════════════════════════════════════════════════════════════
+
+    # ── Core Actions ──────────────────────────────────────────
+    import src.core.actions.conflict_predictor  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.actions.conflict_resolver  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+
+    # ── Core Intelligence ─────────────────────────────────────
+    import src.core.intelligence.auto_evolve  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.intelligence.burnout_detector  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.intelligence.skills  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.intelligence.skills_curator  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+
+    # ── Core Memory ───────────────────────────────────────────
+    import src.core.memory.knowledge_distiller  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.memory.memory_checker  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.memory.memory_clusterer  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.memory.memory_consolidator  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.memory.memory_patterns  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.memory.temporal_layers  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+
+    # ── Core Scheduling ────────────────────────────────────────
+    import src.core.scheduling.dream_cycle  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.follow_up  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.habit_tracker  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.proactive_briefing  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.proactive_chat_analyzer  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.proactive_nudge  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.sleep_tracker  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.smart_digest  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.weekly_digest  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.weekly_summarizer  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.avito  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.digest  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.message_scheduler  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.news  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.scheduling.reminders  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+
+    # ── Core Infra ────────────────────────────────────────────
+    import src.core.infra.auto_sync  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+    import src.core.infra.system_tasks  # side-effect: registers background task  # pyright: ignore[reportUnusedImport]
+
 
 async def main() -> None:
     logging.basicConfig(
@@ -103,7 +147,7 @@ async def main() -> None:
     # NOTE: Для агрегации логов в production — установите LOG_FORMAT=json
     # в .env. Тогда логи будут выводиться в JSON-формате (ключи: timestamp,
     # level, logger, message, module, lineno).
-    if os.getenv("LOG_FORMAT", "").lower() == "json":
+    if settings.log_format == "json":
         _setup_json_logging()
 
     # KeyMaskFilter: маскирует API-ключи даже в plain-text логах
@@ -163,29 +207,58 @@ async def main() -> None:
     _ = src.bot.callback_utils  # pyright: ignore[reportUnusedImport]
 
     # --- Обработчики сигналов для graceful shutdown ---
+    # Кроссплатформенный подход:
+    # - Unix: loop.add_signal_handler (best practice, в контексте event loop)
+    # - Windows: signal.signal + loop.call_soon_threadsafe (add_signal_handler
+    #   не поддерживается; SIGTERM не существует, используем SIGBREAK)
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
     if main_task is None:
         raise RuntimeError("main() must be called via asyncio.run()")
 
-    def _shutdown() -> None:
+    shutdown_event = asyncio.Event()
+
+    def _trigger_shutdown() -> None:
+        """Thread-safe shutdown: cancel main task + signal event."""
         logger.info("Received shutdown signal, cancelling main task...")
         main_task.cancel()
+        shutdown_event.set()
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, _shutdown)
-        except (NotImplementedError, ValueError):
-            # Windows: add_signal_handler не поддерживается — fallback на signal.signal.
-            # signal.signal из non-main thread или для SIGTERM на Windows выбрасывает
-            # ValueError; пропускаем такие случаи.
+    if sys.platform == "win32":
+        # Windows: add_signal_handler не поддерживается.
+        # SIGTERM не существует — используем SIGINT + SIGBREAK.
+        # signal.signal callback выполняется вне event loop —
+        # оборачиваем в call_soon_threadsafe для потокобезопасности.
+        for sig in (signal.SIGINT, signal.SIGBREAK):
             try:
-                signal.signal(sig, lambda s, f: main_task.cancel())
-            except (ValueError, RuntimeError):
-                logger.warning(
-                    "Signal handler for %s not registered (platform limitation)",
-                    sig.name,
+                signal.signal(
+                    sig,
+                    lambda s, f: loop.call_soon_threadsafe(_trigger_shutdown),
                 )
+            except (ValueError, RuntimeError) as e:
+                logger.warning(
+                    "Signal handler for %s not registered: %s",
+                    getattr(sig, "name", sig),
+                    e,
+                )
+    else:
+        # Unix: add_signal_handler — best practice.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _trigger_shutdown)
+            except NotImplementedError:
+                # Крайне редкий случай: fallback на signal.signal.
+                try:
+                    signal.signal(
+                        sig,
+                        lambda s, f: loop.call_soon_threadsafe(_trigger_shutdown),
+                    )
+                except (ValueError, RuntimeError) as e:
+                    logger.warning(
+                        "Signal handler for %s not registered: %s",
+                        getattr(sig, "name", sig),
+                        e,
+                    )
 
     # Initialize all shutdown-tracked tasks before any await so that CancelledError
     # during startup never causes NameError in the finally block.
@@ -382,7 +455,7 @@ async def main() -> None:
             try:
                 from src.core.actions.tool_middleware import DecisionRepairGuard
 
-                removed_drg = DecisionRepairGuard.cleanup_stale()
+                removed_drg = await DecisionRepairGuard.cleanup_stale()
                 if removed_drg:
                     logger.info(
                         "DecisionRepairGuard cleanup: evicted %d stale entries",
@@ -482,6 +555,27 @@ async def main() -> None:
         asyncio.create_task(
             _run_periodic(userbot_manager.cleanup_stale_pending, interval=300)
         )
+    )
+
+    # --- Background: proactive scheduler — run due goals (every 10 minutes) ---
+    # IG3 fix: run_due() was never called — goals registered but never executed.
+    async def _run_proactive_goals() -> None:
+        from src.core.agents.proactive_scheduler import proactive_scheduler
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            # ponytail: use first user as owner — multi-user proactive goals
+            # need per-user iteration; add when multi-user goes live.
+            from sqlalchemy import select
+            from src.db.models import User
+
+            result = await session.execute(select(User).limit(1))
+            user = result.scalar_one_or_none()
+            if user is not None:
+                await proactive_scheduler.run_due(session, user)
+
+    _proactive_task = track_ff(
+        asyncio.create_task(_run_periodic(_run_proactive_goals, interval=600))
     )
 
     # --- Background: userbot health check (every 5 minutes) ---
@@ -657,6 +751,7 @@ async def main() -> None:
                 (_snapshot_task, "snapshot"),
                 (_pending_cleanup_task, "pending_cleanup"),
                 (_health_check_task, "health_check"),
+                (_proactive_task, "proactive_goals"),
             ]
             if _t is not None
         ]
@@ -673,6 +768,13 @@ async def main() -> None:
             from src.core.avito.service import shutdown_avito_rotator
 
             await shutdown_avito_rotator()
+
+        async def _shutdown_deep_research() -> None:
+            """D3: Graceful shutdown for DeepResearchPipeline."""
+            from src.core.rag.deep_research_pipeline import get_deep_research_pipeline
+
+            pipeline = get_deep_research_pipeline()
+            await pipeline.shutdown(timeout=10.0)
 
         # Save final snapshot before shutting down components
         if snapshot_engine is not None:
@@ -692,6 +794,7 @@ async def main() -> None:
             ("notification queue", notification_queue.stop()),
             ("cache manager", cache_manager.stop_background_cleanup()),
             ("avito rotator", _shutdown_avito_rotator()),
+            ("deep research", _shutdown_deep_research()),
         ]:
             try:
                 logger.debug("Stopping %s…", step)

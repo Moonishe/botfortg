@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
-        extra="ignore",
+        extra="ignore",  # pydantic-core 2.46 doesn't support "warn" yet; TODO: upgrade to "warn" when pydantic supports it
     )
 
     # Empty string in .env → None for optional fields.
@@ -851,6 +851,23 @@ class Settings(BaseSettings):
             self._data_dir_path = PROJECT_ROOT / "data"
             self._data_dir_path.mkdir(parents=True, exist_ok=True)
         return self._data_dir_path
+
+    # ── Background loop intervals (seconds) ──
+    userbot_health_check_interval: int = Field(
+        300, description="Интервал health-check userbot-клиентов (сек)"
+    )
+    memory_queue_poll_interval: int = Field(
+        30, description="Интервал опроса DLQ очереди памяти (сек)"
+    )
+    task_manager_retry_interval: int = Field(
+        60, description="Интервал retry-цикла task manager (сек)"
+    )
+    smart_digest_poll_interval: int = Field(
+        60, description="Интервал проверки smart-digest (сек)"
+    )
+    memory_patterns_poll_interval: int = Field(
+        600, description="Интервал поиска паттернов памяти (сек)"
+    )
 
 
 settings = Settings()

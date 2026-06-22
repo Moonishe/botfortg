@@ -21,14 +21,32 @@ DEFAULT_MAX_TOKENS = 4096
 
 
 def estimate_tokens(text: str) -> int:
-    """Fast token count estimate: word count × 1.3.
+    """Fast token count estimate with improved CJK/emoji heuristic.
 
-    Works for Russian and English. Error margin ~10-15%.
+    CJK chars ≈ 1 token each, emoji ≈ 2 tokens, words ≈ 1.3 tokens.
+    No tiktoken dependency. Error margin ~10-15% for mixed text.
     """
     if not text:
         return 0
+    # Count CJK characters (Chinese, Japanese, Korean)
+    cjk_count = sum(
+        1
+        for c in text
+        if "\u4e00" <= c <= "\u9fff"
+        or "\u3040" <= c <= "\u30ff"
+        or "\uac00" <= c <= "\ud7af"
+    )
+    # Count emoji (basic ranges)
+    emoji_count = sum(
+        1
+        for c in text
+        if "\U0001F000" <= c <= "\U0001FFFF" or "\u2600" <= c <= "\u27BF"
+    )
+    # Word count for remaining text
     words = len(re.findall(r"\w+", text))
-    return max(1, int(words * 1.3))
+    remaining = len(text) - cjk_count - emoji_count
+    # CJK: ~1 token/char, emoji: ~2 tokens, words: ~1.3 tokens/word
+    return int(cjk_count + emoji_count * 2 + max(words * 1.3, remaining * 0.25))
 
 
 def count_prompt_tokens(

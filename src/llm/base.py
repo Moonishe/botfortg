@@ -51,6 +51,7 @@ class LLMProvider(Protocol):
         heavy: bool
         | None = None,  # DEPRECATED: use task_type instead. Kept for backward compat.
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -61,6 +62,7 @@ class LLMProvider(Protocol):
         heavy: bool
         | None = None,  # DEPRECATED: use task_type instead. Kept for backward compat.
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
         """Stream tokens from chat completion.
         Raises NotImplementedError if unsupported."""
@@ -89,6 +91,7 @@ class LLMProvider(Protocol):
         tools: list["ToolDefinition"] | None = None,
         *,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> "ChatResponse":
         """Chat completion with tool definitions, returning ChatResponse.
 

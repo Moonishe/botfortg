@@ -27,6 +27,8 @@ from src.llm.base import TaskType
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 
 def bayesian_skill_score(skill: Skill, alpha: float = 5.0, prior: float = 0.7) -> float:
     """Bayesian shrinkage: pull observed success rate toward a prior.
@@ -729,69 +731,70 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
     _gatekeeper = get_gatekeeper()
 
     while True:
-        # Step 1: Trajectory-based suggestions (бесплатно, всегда)
-        try:
-            created = await suggest_skills_from_trajectories(telegram_id)
-            if created:
-                await notification_queue.enqueue(
-                    topic="skills",
-                    category="self_evolution",
-                    priority=2,
-                    text=f"Found {created} new skill suggestions. Open /evolve.",
-                )
-        except Exception:
-            logger.exception("skill_optimizer_loop trajectory analysis failed")
-
-        # Step 2: LLM-based proposals — только если gatekeeper разрешает
-        try:
-            should_run, gate_reason = await _gatekeeper.should_analyze(telegram_id)
-            if should_run:
-                proposed = await propose_skills_from_analysis(
-                    telegram_id, tier="auto", force=True
-                )
-                if proposed:
-                    names = [s["name"] for s in proposed]
+        async with _overlap_guard:
+            # Step 1: Trajectory-based suggestions (бесплатно, всегда)
+            try:
+                created = await suggest_skills_from_trajectories(telegram_id)
+                if created:
                     await notification_queue.enqueue(
                         topic="skills",
                         category="self_evolution",
-                        priority=3,
-                        text=(
-                            f"Skill Creator создал {len(proposed)} навыков: "
-                            f"{', '.join(names[:5])}. "
-                            f"Уже активны в /skills."
-                        ),
+                        priority=2,
+                        text=f"Found {created} new skill suggestions. Open /evolve.",
                     )
-            else:
-                logger.debug("skill_optimizer_loop: gatekeeper skip — %s", gate_reason)
-        except Exception:
-            logger.exception("skill_optimizer_loop skill creator analysis failed")
-
-        # Step 3: Correction-based edits — analyse recent user corrections
-        try:
-            edits = await propose_edits_from_corrections(
-                telegram_id,
-                max_corrections=5,
-            )
-            if edits:
-                logger.info(
-                    "skill_optimizer_loop: proposed %d edits from corrections",
-                    len(edits),
-                )
-            else:
-                logger.debug("skill_optimizer_loop: no edits from corrections")
-        except Exception:
-            logger.exception("skill_optimizer_loop correction-based analysis failed")
-
-        # Step 4: L2 policy induction (MemOS)
-        if settings.reward_loop_enabled:
-            try:
-                from src.core.learning import reward_loop
-
-                induced = await reward_loop.induce_policies(telegram_id)
-                if induced:
-                    logger.info("L2 induction: %d new candidate policies", induced)
             except Exception:
-                logger.debug("L2 policy induction failed", exc_info=True)
+                logger.exception("skill_optimizer_loop trajectory analysis failed")
+
+            # Step 2: LLM-based proposals — только если gatekeeper разрешает
+            try:
+                should_run, gate_reason = await _gatekeeper.should_analyze(telegram_id)
+                if should_run:
+                    proposed = await propose_skills_from_analysis(
+                        telegram_id, tier="auto", force=True
+                    )
+                    if proposed:
+                        names = [s["name"] for s in proposed]
+                        await notification_queue.enqueue(
+                            topic="skills",
+                            category="self_evolution",
+                            priority=3,
+                            text=(
+                                f"Skill Creator создал {len(proposed)} навыков: "
+                                f"{', '.join(names[:5])}. "
+                                f"Уже активны в /skills."
+                            ),
+                        )
+                else:
+                    logger.debug("skill_optimizer_loop: gatekeeper skip — %s", gate_reason)
+            except Exception:
+                logger.exception("skill_optimizer_loop skill creator analysis failed")
+
+            # Step 3: Correction-based edits — analyse recent user corrections
+            try:
+                edits = await propose_edits_from_corrections(
+                    telegram_id,
+                    max_corrections=5,
+                )
+                if edits:
+                    logger.info(
+                        "skill_optimizer_loop: proposed %d edits from corrections",
+                        len(edits),
+                    )
+                else:
+                    logger.debug("skill_optimizer_loop: no edits from corrections")
+            except Exception:
+                logger.exception("skill_optimizer_loop correction-based analysis failed")
+
+            # Step 4: L2 policy induction (MemOS)
+            if settings.reward_loop_enabled:
+                try:
+                    from src.core.learning import reward_loop
+
+                    induced = await reward_loop.induce_policies(telegram_id)
+                    if induced:
+                        logger.info("L2 induction: %d new candidate policies", induced)
+                except Exception:
+                    logger.debug("L2 policy induction failed", exc_info=True)
 
         await asyncio.sleep(settings.skill_optimizer_interval_sec)
 

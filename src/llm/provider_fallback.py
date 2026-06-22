@@ -75,6 +75,7 @@ class ProviderFallback:
         *,
         heavy: bool | None = None,
         task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> str:
         """Chat c адаптивным выбором провайдера.
 
@@ -104,7 +105,10 @@ class ProviderFallback:
                     msg_count=len(messages),
                 ):
                     return await provider.chat(
-                        messages, heavy=mkp_heavy, task_type=task_type
+                        messages,
+                        heavy=mkp_heavy,
+                        task_type=task_type,
+                        max_tokens=max_tokens,
                     )
             except Exception as exc:
                 if not isinstance(
@@ -125,6 +129,7 @@ class ProviderFallback:
         *,
         heavy: bool | None = None,
         task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
         """Stream chat with adaptive provider fallback. Falls back to regular chat."""
         now = asyncio.get_running_loop().time()
@@ -142,7 +147,10 @@ class ProviderFallback:
         for provider in sorted_providers:
             try:
                 async for token in provider.chat_stream(
-                    messages, heavy=mkp_heavy, task_type=task_type
+                    messages,
+                    heavy=mkp_heavy,
+                    task_type=task_type,
+                    max_tokens=max_tokens,
                 ):
                     yield token
                 return
@@ -159,7 +167,9 @@ class ProviderFallback:
                     safe_str(exc)[:200],
                 )
         # All streaming failed — fallback to regular chat
-        yield await self.chat(messages, heavy=heavy, task_type=task_type)
+        yield await self.chat(
+            messages, heavy=heavy, task_type=task_type, max_tokens=max_tokens
+        )
 
     async def chat_with_tools(
         self,
@@ -167,6 +177,7 @@ class ProviderFallback:
         tools: list[ToolDefinition] | None = None,
         *,
         task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> ChatResponse:
         """Tool chat with adaptive provider fallback."""
         last_error: Exception | None = None
@@ -188,7 +199,10 @@ class ProviderFallback:
                     msg_count=len(messages),
                 ):
                     return await provider.chat_with_tools(
-                        messages, tools=tools, task_type=task_type
+                        messages,
+                        tools=tools,
+                        task_type=task_type,
+                        max_tokens=max_tokens,
                     )
             except Exception as exc:
                 if not isinstance(
@@ -281,9 +295,15 @@ class ProviderFallback:
         return False
 
     async def close(self) -> None:
-        """Close all child provider instances."""
+        """Close all child provider instances.
+
+        Idempotent: после первого вызова providers заменяется на [] —
+        повторные вызовы — no-op.
+        """
+        providers = self.providers
+        self.providers = []  # атомарный swap — идемпотентность
         _cancelled = False
-        for p in self.providers:
+        for p in providers:
             if hasattr(p, "close"):
                 try:
                     await p.close()

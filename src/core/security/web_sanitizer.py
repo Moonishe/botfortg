@@ -1,5 +1,6 @@
 """Sanitize external content before injecting into LLM prompts."""
 
+import re
 import unicodedata
 
 # Common Cyrillic + Greek homoglyphs that visually mimic Latin letters.
@@ -56,6 +57,8 @@ _CYRILLIC_HOMOGLYPHS = str.maketrans(
         "\u03b6": "z",  # ζ — GREEK SMALL LETTER ZETA
         "\u03b7": "n",  # η — GREEK SMALL LETTER ETA
         "\u03b9": "i",  # ι — GREEK SMALL LETTER IOTA
+        "\u03b3": "y",  # γ GREEK SMALL LETTER GAMMA → y
+        "\u03bc": "u",  # μ GREEK SMALL LETTER MU → u
         # Greek uppercase
         "\u039f": "O",  # Ο — GREEK CAPITAL LETTER OMICRON
         "\u039d": "N",  # Ν — GREEK CAPITAL LETTER NU
@@ -67,6 +70,7 @@ _CYRILLIC_HOMOGLYPHS = str.maketrans(
         "\u03a7": "X",  # Χ — GREEK CAPITAL LETTER CHI
         "\u03a5": "Y",  # Υ — GREEK CAPITAL LETTER UPSILON
         "\u039c": "M",  # Μ — GREEK CAPITAL LETTER MU
+        "\u0393": "G",  # Γ GREEK CAPITAL LETTER GAMMA → G
         "\u0397": "H",  # Η — GREEK CAPITAL LETTER ETA
         "\u0392": "B",  # Β — GREEK CAPITAL LETTER BETA
         "\u0399": "I",  # Ι — GREEK CAPITAL LETTER IOTA
@@ -79,8 +83,17 @@ _CYRILLIC_HOMOGLYPHS = str.maketrans(
 # U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ, U+200E LRM, U+200F RLM,
 # U+FEFF BOM/ZWNBS, U+2060 WJ (word joiner).
 _ZERO_WIDTH_CHARS = str.maketrans(
-    dict.fromkeys("\u200b\u200c\u200d\u200e\u200f\ufeff\u2060", "")
+    dict.fromkeys(
+        "\u200b\u200c\u200d\u200e\u200f\ufeff\u2060"
+        "\u2061\u2062\u2063\u2064"          # invisible operators
+        "\u202a\u202b\u202c\u202d\u202e"    # BiDi overrides
+        "\u2066\u2067\u2068\u2069",          # directional isolates
+        "",
+    )
 )
+
+# Tags block (U+E0001-U+E007F) — invisible language tagging characters.
+_TAGS_BLOCK = re.compile(r"[\U000E0001-\U000E007F]")
 
 _INJECTION_BLACKLIST = [
     "ignore previous instructions",
@@ -106,6 +119,7 @@ def _normalize(text: str) -> str:
     lookalikes to Latin equivalents. Zero-width characters are stripped.
     """
     text = text.translate(_ZERO_WIDTH_CHARS)
+    text = _TAGS_BLOCK.sub("", text)
     text = unicodedata.normalize("NFKC", text)
     text = text.translate(_CYRILLIC_HOMOGLYPHS)
     return text.lower()

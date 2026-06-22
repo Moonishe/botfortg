@@ -129,6 +129,7 @@ class BaseLLMProvider(ABC):
         tools: list[ToolDefinition] | None = None,
         *,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> ChatResponse:
         """Chat completion with tool definitions. Default: raises NotImplementedError.
 
@@ -149,6 +150,7 @@ class BaseLLMProvider(ABC):
         *,
         heavy: bool | None = None,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         """Основной вызов: chat completion (не стриминг).
 
@@ -164,6 +166,7 @@ class BaseLLMProvider(ABC):
         *,
         heavy: bool | None = None,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
         """Стриминг chat completion (если поддерживается).
 

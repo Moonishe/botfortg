@@ -17,49 +17,8 @@ from src.core.infra.text_sanitizer import sanitize_html
 
 logger = logging.getLogger(__name__)
 
-# ── Cached Bot singleton ─────────────────────────────────────────────────
-# Создание Bot() на каждый dispatch — утечка TCP-соединений.
-# Один Bot на всё приложение переиспользует aiohttp ClientSession.
-_telegram_bot: Any = None
-_bot_lock = asyncio.Lock()
+# ponytail: uses shared notifier bot, was lazy singleton
 _DISPATCH_TIMEOUT = 30.0  # секунд на канал доставки
-
-
-def _get_bot():
-    """Вернуть глобальный Bot-инстанс (ленивая инициализация)."""
-    return _telegram_bot
-
-
-async def _init_bot() -> Any:
-    """Лениво создать Bot (вызывается один раз при первом delivery)."""
-    global _telegram_bot
-    if _telegram_bot is not None:
-        return _telegram_bot
-    async with _bot_lock:
-        if _telegram_bot is not None:  # double-check
-            return _telegram_bot
-        try:
-            from aiogram import Bot
-            from src.config import settings
-
-            _telegram_bot = Bot(token=settings.bot_token)
-            logger.info("CronDelivery: Bot singleton инициализирован")
-        except ImportError:
-            logger.warning("CronDelivery: aiogram недоступен, Bot не создан")
-        return _telegram_bot
-
-
-async def close_delivery_bot() -> None:
-    """Закрыть сессию Bot при graceful shutdown."""
-    global _telegram_bot
-    if _telegram_bot is not None:
-        try:
-            await _telegram_bot.session.close()
-            logger.info("CronDelivery: Bot сессия закрыта")
-        except Exception:
-            logger.exception("CronDelivery: ошибка при закрытии Bot сессии")
-        _telegram_bot = None
-
 
 
 async def dispatch_cron_job(
@@ -144,13 +103,14 @@ async def _deliver_via_notification_queue(
         logger.exception("CronDelivery: ошибка notification_queue")
         return {"success": False, "output": "Ошибка доставки через notification_queue"}
 
+
 async def _deliver_via_telegram(
     user_id: int,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     """Прямая отправка через Telegram Bot API.
 
-    Использует глобальный singleton Bot — не создаёт новый
+    Использует общий bot из notifier — не создаёт новый
     aiohttp ClientSession на каждый вызов, избегая утечки
     TCP-соединений.
 
@@ -158,9 +118,9 @@ async def _deliver_via_telegram(
     Всегда применяется sanitize_html() для предотвращения HTML-инъекций.
     """
     try:
-        bot = _get_bot()
-        if bot is None:
-            bot = await _init_bot()
+        from src.core.infra.notifier import notifier
+
+        bot = notifier.get_bot()
         if bot is None:
             return {"success": False, "output": "aiogram Bot недоступен"}
 
@@ -233,21 +193,3 @@ async def _deliver_via_userbot(
     except Exception:
         logger.exception("CronDelivery: ошибка userbot")
         return {"success": False, "output": "Ошибка отправки через userbot"}
-
-
-async def test_delivery(channel: str = "notification_queue") -> dict[str, Any]:
-    """Тестовая отправка — проверить что канал работает.
-
-    Args:
-        channel: Канал для теста.
-
-    Returns:
-        Результат отправки.
-    """
-    return await dispatch_cron_job(
-        job_id=0,
-        user_id=0,
-        payload_type="message",
-        payload=json.dumps({"text": "🧪 Тестовое уведомление от Cron Scheduler"}),
-        channel=channel,
-    )

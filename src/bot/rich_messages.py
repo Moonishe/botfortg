@@ -124,10 +124,24 @@ async def send_rich_message(
             return None
 
     except Exception:
-        logger.debug(
-            "sendRichMessage network error (chat_id=%s)", chat_id, exc_info=True
-        )
+        logger.debug("sendRichMessage network error (chat_id=%s)", chat_id)
         return None
+
+
+from urllib.parse import urlparse
+
+_ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({"http", "https", "tg"})
+
+
+def _validate_url(url: str) -> str:
+    """ponytail: block javascript:, data:, vbscript: URLs in markdown links."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme.lower() in _ALLOWED_URL_SCHEMES:
+            return url
+    except Exception:
+        pass
+    return ""  # strip dangerous URLs
 
 
 def to_rich_markdown(text: str) -> str:
@@ -153,10 +167,17 @@ def to_rich_markdown(text: str) -> str:
     Returns:
         Строка в GFM-разметке, пригодная для ``sendRichMessage``.
     """
+
     # Порядок важен: <a> до остальных, чтобы не сломать вложенность
+    def _link_repl(m: re.Match[str]) -> str:
+        url = _validate_url(m.group(1))
+        if not url:
+            return m.group(2)  # strip link, keep text
+        return f"[{m.group(2)}]({url})"
+
     text = re.sub(
         r'<a\s+href="([^"]*)"\s*>(.*?)</a>',
-        r"[\2](\1)",
+        _link_repl,
         text,
         flags=re.DOTALL,
     )

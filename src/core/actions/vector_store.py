@@ -471,6 +471,53 @@ class VectorStore:
             for p in raw
         ]
 
+    async def delete(
+        self,
+        *,
+        user_id: int,
+        peer_id: int | None = None,
+    ) -> int:
+        """Удалить точки пользователя (опционально в рамках peer_id).
+
+        Возвращает количество удалённых точек.
+        # ponytail: count+delete вместо одного atomic вызова — Qdrant
+        # delete по фильтру не возвращает affected count.
+        """
+        flt = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="user_id", match=qmodels.MatchValue(value=user_id)
+                )
+            ]
+        )
+        if peer_id is not None:
+            flt.must.append(
+                qmodels.FieldCondition(
+                    key="peer_id", match=qmodels.MatchValue(value=peer_id)
+                )
+            )
+
+        # Сначала считаем, сколько будет удалено
+        count_result = await asyncio.to_thread(
+            self._client.count,
+            collection_name=COLLECTION,
+            count_filter=flt,
+            exact=True,
+        )
+        n = count_result.count
+        if n == 0:
+            return 0
+
+        def _do() -> None:
+            self._client.delete(
+                collection_name=COLLECTION,
+                points_selector=qmodels.FilterSelector(filter=flt),
+            )
+
+        async with self._lock:
+            await asyncio.to_thread(_do)
+        return n
+
     async def reindex_collection(
         self, dim: int, *, provider: str = "", model: str = ""
     ) -> None:

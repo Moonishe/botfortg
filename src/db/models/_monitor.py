@@ -76,12 +76,13 @@ class MonitorRule(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True,
     )
     source_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("monitored_sources.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
     name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)

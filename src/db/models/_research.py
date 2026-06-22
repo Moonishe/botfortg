@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, UTC
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.models._base import Base
@@ -26,9 +26,10 @@ class ResearchJob(Base):
     )
     owner_id: Mapped[int | None] = mapped_column(
         BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=True,
         index=True,
-        comment="ID владельца (users.telegram_id)",
+        comment="ID владельца (users.id)",
     )
     query: Mapped[str] = mapped_column(
         Text, nullable=False, comment="Оригинальный поисковый запрос"

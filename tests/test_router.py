@@ -29,7 +29,12 @@ class _CloseTracker:
         self.api_key = api_key
 
     async def chat(
-        self, messages, *, heavy: bool = False, task_type: str = "default"
+        self,
+        messages,
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         if self.api_key == "bad-1":
             raise RuntimeError("rate limit")

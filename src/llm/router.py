@@ -78,6 +78,9 @@ _UNSET = object()
 
 # ── Module constants ─────────────────────────────────────────────────────
 _DEFAULT_LLM_TIMEOUT = 90.0  # секунд — таймаут одного LLM-вызова (включая retries)
+_DEFAULT_TOTAL_LLM_TIMEOUT = (
+    300.0  # секунд — общий таймаут всего retry-loop (15 keys × 3 retries × 90s)
+)
 
 
 class ExhaustedError(Exception):
@@ -251,96 +254,119 @@ class MultiKeyProvider:
                     "LLM call budget exhausted — too many calls in window"
                 )
 
-        # Round-robin: reserve a unique start index for concurrent calls.
-        start_idx = await self._reserve_start_idx()
+        # ── Total timeout: prevent hours-long hangs on 15×3 retries ──
+        async with asyncio.timeout(_DEFAULT_TOTAL_LLM_TIMEOUT):
+            # Round-robin: reserve a unique start index for concurrent calls.
+            start_idx = await self._reserve_start_idx()
 
-        skipped = 0
-        for attempt in range(len(self._keys)):
-            idx = (start_idx + attempt) % len(self._keys)
-            key = self._keys[idx]
-            cache_key = _make_cache_key(self.provider_name, self._slot_ids, idx, key)
-            if not await _check_key_circuit_breaker(cache_key):
-                skipped += 1
-                continue
-            # Create provider instance — handle creation failure separately
-            try:
-                provider_kwargs = self._build_provider_kwargs(idx, model_override)
-                provider = self._provider_class(key, **provider_kwargs)
-                async with self._providers_lock:
-                    self._providers.append(provider)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                last_error = exc
-                continue
-
-            try:
-                for retry in range(MAX_RETRIES_PER_KEY):
-                    try:
-                        result = await asyncio.wait_for(
-                            operation(provider, *args, **kwargs),
-                            timeout=_DEFAULT_LLM_TIMEOUT,
-                        )
-                    except Exception as exc:
-                        if not _is_retryable_llm_error(exc):
-                            raise
-                        if retry < MAX_RETRIES_PER_KEY - 1:
-                            delay = RETRY_BASE_DELAY * (2**retry)
-                            logger.warning(
-                                "LLM %s key %s attempt %d/%d "
-                                "failed, retrying in %.1fs: %s",
-                                self.provider_name,
-                                _mask_key(key),
-                                retry + 1,
-                                MAX_RETRIES_PER_KEY,
-                                delay,
-                                safe_str(exc)[:200],
-                            )
-                            await asyncio.sleep(delay)
-                        else:
-                            raise
-                    else:
-                        await _record_key_success(
-                            self.provider_name,
-                            cache_key,
-                            self._slot_ids,
-                            idx,
-                            start_time,
-                        )
-                        # _reserve_start_idx already advanced the round-robin index;
-                        # no separate advance needed — avoids double-increment race.
-                        return result
-            except Exception as exc:
-                if _is_retryable_llm_error(exc):
-                    # ── Error Classifier: more nuanced retry decision ──
-                    from src.core.intelligence.error_classifier import (
-                        classify_llm_error,
-                        should_retry,
-                    )
-
-                    category = classify_llm_error(exc)
-                    if not should_retry(category):
-                        logger.info(
-                            "LLM error category %r is not retryable — propagate",
-                            category,
-                        )
-                        raise
-                    logger.debug("LLM error category=%r — retrying", category)
-                    await _record_key_failure(
-                        self.provider_name, cache_key, self._slot_ids, idx, exc
-                    )
-                    last_error = exc
-                    logger.warning(
-                        "LLM %s key %s temporarily failed, rotating: %s",
-                        self.provider_name,
-                        _mask_key(key),
-                        safe_str(exc)[:200],
-                    )
+            skipped = 0
+            for attempt in range(len(self._keys)):
+                idx = (start_idx + attempt) % len(self._keys)
+                key = self._keys[idx]
+                cache_key = _make_cache_key(
+                    self.provider_name, self._slot_ids, idx, key
+                )
+                if not await _check_key_circuit_breaker(cache_key):
+                    skipped += 1
                     continue
-                raise
-            # ponytail: provider lifecycle left to caller; per-attempt close removed
-            # to avoid repeated close/recreate overhead during key rotation.
-        if last_error:
+                # Create provider instance — handle creation failure separately
+                try:
+                    provider_kwargs = self._build_provider_kwargs(idx, model_override)
+                    provider = self._provider_class(key, **provider_kwargs)
+                    async with self._providers_lock:
+                        self._providers.append(provider)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    continue
+
+                try:
+                    for retry in range(MAX_RETRIES_PER_KEY):
+                        try:
+                            result = await asyncio.wait_for(
+                                operation(provider, *args, **kwargs),
+                                timeout=_DEFAULT_LLM_TIMEOUT,
+                            )
+                        except Exception as exc:
+                            if not _is_retryable_llm_error(exc):
+                                raise
+                            if retry < MAX_RETRIES_PER_KEY - 1:
+                                delay = RETRY_BASE_DELAY * (2**retry)
+                                logger.warning(
+                                    "LLM %s key %s attempt %d/%d "
+                                    "failed, retrying in %.1fs: %s",
+                                    self.provider_name,
+                                    _mask_key(key),
+                                    retry + 1,
+                                    MAX_RETRIES_PER_KEY,
+                                    delay,
+                                    safe_str(exc)[:200],
+                                )
+                                await asyncio.sleep(delay)
+                            else:
+                                raise
+                        else:
+                            await _record_key_success(
+                                self.provider_name,
+                                cache_key,
+                                self._slot_ids,
+                                idx,
+                                start_time,
+                            )
+                            # _reserve_start_idx already advanced the round-robin index;
+                            # no separate advance needed — avoids double-increment race.
+                            return result
+                except Exception as exc:
+                    if _is_retryable_llm_error(exc):
+                        # ── Error Classifier: more nuanced retry decision ──
+                        from src.core.intelligence.error_classifier import (
+                            classify_llm_error,
+                            should_retry,
+                        )
+
+                        category = classify_llm_error(exc)
+                        if not should_retry(category):
+                            logger.info(
+                                "LLM error category %r is not retryable — propagate",
+                                category,
+                            )
+                            raise
+                        logger.debug("LLM error category=%r — retrying", category)
+                        await _record_key_failure(
+                            self.provider_name, cache_key, self._slot_ids, idx, exc
+                        )
+                        last_error = exc
+                        logger.warning(
+                            "LLM %s key %s temporarily failed, rotating: %s",
+                            self.provider_name,
+                            _mask_key(key),
+                            safe_str(exc)[:200],
+                        )
+                        continue
+                    raise
+                # ponytail: provider lifecycle left to caller; per-attempt close removed
+                # to avoid repeated close/recreate overhead during key rotation.
+            if last_error:
+                try:
+                    await _record_provider_failure(self.provider_name)
+                except Exception:
+                    logger.exception(
+                        "Failed to record provider failure metric for %s",
+                        self.provider_name,
+                    )
+                raise ExhaustedError(
+                    f"Все {len(self._keys)} ключей {self.provider_name} недоступны "
+                    f"(последняя ошибка: {last_error}, "
+                    f"пропущено по кулдауну: {skipped})"
+                )
+            # Все ключи пропущены по кулдауну — ни один не был опробован
+            if skipped != len(self._keys):
+                logger.error(
+                    "BUG: skipped=%d != total_keys=%d but last_error is None",
+                    skipped,
+                    len(self._keys),
+                )
             try:
                 await _record_provider_failure(self.provider_name)
             except Exception:
@@ -349,45 +375,44 @@ class MultiKeyProvider:
                     self.provider_name,
                 )
             raise ExhaustedError(
-                f"Все {len(self._keys)} ключей {self.provider_name} недоступны "
-                f"(последняя ошибка: {last_error}, "
-                f"пропущено по кулдауну: {skipped})"
+                f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне"
             )
-        # Все ключи пропущены по кулдауну — ни один не был опробован
-        if skipped != len(self._keys):
-            logger.error(
-                "BUG: skipped=%d != total_keys=%d but last_error is None",
-                skipped,
-                len(self._keys),
-            )
-        try:
-            await _record_provider_failure(self.provider_name)
-        except Exception:
-            logger.exception(
-                "Failed to record provider failure metric for %s",
-                self.provider_name,
-            )
-        raise ExhaustedError(
-            f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне"
-        )
 
     async def chat(
-        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
+        self,
+        messages,
+        *,
+        heavy=_UNSET,
+        task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> str:
         sem = await acquire_purpose_slot(self._current_purpose)
         try:
             return await self._chat_with_retry(
-                messages, heavy=heavy, task_type=task_type
+                messages,
+                heavy=heavy,
+                task_type=task_type,
+                max_tokens=max_tokens,
             )
         finally:
             release_purpose_slot(sem)
 
     async def _chat_with_retry(
-        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
+        self,
+        messages,
+        *,
+        heavy=_UNSET,
+        task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> str:
         await self._semaphore.acquire()
         try:
-            return await self._retry_inner(messages, heavy=heavy, task_type=task_type)
+            return await self._retry_inner(
+                messages,
+                heavy=heavy,
+                task_type=task_type,
+                max_tokens=max_tokens,
+            )
         finally:
             self._semaphore.release()
 
@@ -397,6 +422,7 @@ class MultiKeyProvider:
         *,
         heavy=_UNSET,
         task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
         _skip_budget: bool = False,
     ) -> str:
         """Core retry logic WITHOUT semaphore acquisition.
@@ -409,7 +435,7 @@ class MultiKeyProvider:
         effective_heavy = self._default_heavy if heavy is _UNSET else heavy
         model_override = self._resolve_model_for_task(task_type)
         result = await self._try_with_retry(
-            lambda p: p.chat(messages, heavy=effective_heavy),
+            lambda p: p.chat(messages, heavy=effective_heavy, max_tokens=max_tokens),
             model_override=model_override,
             _skip_budget=_skip_budget,
         )
@@ -436,18 +462,15 @@ class MultiKeyProvider:
         return None
 
     async def chat_stream(
-        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
+        self,
+        messages,
+        *,
+        heavy=_UNSET,
+        task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
         """Stream chat output token by token with key rotation.
         Falls back to regular chat() if no provider supports streaming."""
-        # ── Iteration Budget check for streaming calls ──
-        from src.core.intelligence.iteration_budget import IterationBudget
-
-        if not hasattr(self, "_llm_budget"):
-            self._llm_budget = IterationBudget()
-        if not self._llm_budget.record_llm_call():
-            raise RuntimeError("LLM call budget exhausted — too many calls in window")
-
         # Resolve heavy: explicit True/False wins; if not passed, use _default_heavy
         effective_heavy = self._default_heavy if heavy is _UNSET else heavy
         model_override = self._resolve_model_for_task(task_type)
@@ -477,7 +500,9 @@ class MultiKeyProvider:
                         # 180s overall timeout; httpx 60s socket-level timeout per read
                         async with asyncio.timeout(180):
                             async for token in provider.chat_stream(
-                                messages, heavy=effective_heavy
+                                messages,
+                                heavy=effective_heavy,
+                                max_tokens=max_tokens,
                             ):
                                 total_text += token
                                 yield token
@@ -553,6 +578,7 @@ class MultiKeyProvider:
         tools: list[ToolDefinition] | None = None,
         *,
         task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> ChatResponse:
         """Chat with tool definitions and key rotation."""
         sem = await acquire_purpose_slot(self._current_purpose)
@@ -562,7 +588,10 @@ class MultiKeyProvider:
                 model_override = self._resolve_model_for_task(task_type)
                 resp = await self._try_with_retry(
                     lambda p: p.chat_with_tools(
-                        messages, tools=tools, task_type=task_type
+                        messages,
+                        tools=tools,
+                        task_type=task_type,
+                        max_tokens=max_tokens,
                     ),
                     model_override=model_override,
                 )
@@ -718,6 +747,7 @@ class ExhaustedProvider:
         *,
         heavy: bool = False,
         task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> str:
         raise ExhaustedError(self._reason)
 
@@ -727,6 +757,7 @@ class ExhaustedProvider:
         *,
         heavy: bool = False,
         task_type: str = TaskType.DEFAULT,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
         raise ExhaustedError(self._reason)
         yield  # type: ignore[unreachable]

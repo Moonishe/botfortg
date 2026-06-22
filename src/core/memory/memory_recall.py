@@ -21,7 +21,7 @@ from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import TaskType
 from src.core.infra.task_manager import track_ff
-from src.core.infra.timeutil import ensure_utc as _ensure_utc
+from src.core.infra.timeutil import ensure_utc as _ensure_utc, now_utc as _utc_now
 from src.llm.router import build_provider
 from src.core.memory.temporal_layers import compute_retention
 
@@ -108,10 +108,6 @@ async def bump_recall_version(telegram_id: int) -> None:
             telegram_id,
             exc_info=True,
         )
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _make_recall_cache_key(

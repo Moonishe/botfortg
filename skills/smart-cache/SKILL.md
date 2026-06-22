@@ -1,3 +1,11 @@
+---
+name: smart-cache
+description: Трёхуровневый умный кеш: L0→L1→L2 с авто-promotion
+version: 1.0.0
+platforms: [telegram]
+tags: [cache, performance, sqlite]
+---
+
 # Smart Cache
 
 ## Purpose

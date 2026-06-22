@@ -1,56 +1,36 @@
-"""Авто-ответ оффлайн. Жёсткие правила: только входящие в ЛС от людей (не боты),
+"""Авто-ответ оффлайн. Фасад — реэкспорт публичного API и тонкий оркестратор.
+
+Жёсткие правила: только входящие в ЛС от людей (не боты),
 только если включено и владелец действительно оффлайн (или статус скрыт),
-один ответ на контакт раз в COOLDOWN_MINUTES."""
+один ответ на контакт (cooldown logic: src/core/contacts/auto_reply_decision.py).
+
+Структура после split (v2.0):
+- auto_reply_context.py — context utilities (offline, memory, profile, system prompt)
+- auto_reply_handler.py — event handler + public API (attach, generate)
+- auto_reply.py (этот файл) — фасад: константы + _build_reply_text + реэкспорт
+"""
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-from datetime import datetime, timedelta, UTC
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from src.config import settings
-from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError
-from telethon.tl.custom import Message as TgMessage
-from telethon.tl.types import (
-    User as TgUser,
-    UserStatusLastMonth,
-    UserStatusLastWeek,
-    UserStatusOffline,
-    UserStatusOnline,
-    UserStatusRecently,
-)
-
-from src.core.contacts.auto_reply_decision import (
-    AutoReplyVerdict,
-    decide,
-)
 from src.core.contacts.chat_service import load_chat, message_to_text
-from src.core.scheduling.notification_queue import notification_queue
 from src.core.contacts.style_profile import style_profile_as_prompt_hint
-from src.core.infra.timeutil import get_user_tz, now_in_tz
-from src.db.models import User
-from src.llm.base import TaskType
-from src.core.memory.memory_recall import recall, format_recall_for_prompt
-from src.db.repo import (
-    add_auto_reply_log,
-    get_contact,
-    get_contact_profile,
-    get_or_create_user,
-    upsert_contact,
-)
+from src.db.repo import get_contact, get_or_create_user
 from src.db.session import get_session
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
-from src.core.infra.text_sanitizer import sanitize_html
 
+# Re-exports for backward compatibility — public API доступен по старому пути
+from src.userbot.auto_reply_handler import (  # noqa: F401
+    _attached_auto_reply_clients,
+    attach_auto_reply,
+    generate_smart_reply,
+)
 
 logger = logging.getLogger(__name__)
 
 
-COOLDOWN_MINUTES = 30
 CONTEXT_LIMIT = 100
 
 
@@ -75,69 +55,6 @@ AUTO_REPLY_SYSTEM_BASE = (
 )
 
 
-async def _check_and_track_offline(
-    client: TelegramClient, session: AsyncSession, owner: User
-) -> bool:
-    try:
-        me = await client.get_me()
-        status = getattr(me, "status", None)
-        if isinstance(status, UserStatusOnline):
-            owner.last_seen_online = datetime.now(UTC).replace(tzinfo=None)
-            # Сброс absence статуса — владелец онлайн
-            if owner.absence_status in ("sleeping", "away", "soon_back"):
-                owner.absence_status = None
-                owner.absence_message = None
-            await session.flush()
-            return False
-        if isinstance(
-            status, (UserStatusRecently, UserStatusLastWeek, UserStatusLastMonth)
-        ):
-            # Owner was recently online — not definitely offline, do not auto-reply
-            owner.last_seen_online = datetime.now(UTC).replace(tzinfo=None)
-            await session.flush()
-            return False
-        if isinstance(status, UserStatusOffline):
-            now = datetime.now(UTC).replace(tzinfo=None)
-            last_seen = owner.last_seen_online
-            if last_seen is None or (now - last_seen) > timedelta(minutes=10):
-                # Sleep detection — определяем, не спит ли владелец
-                tz_name = get_user_tz(owner)
-                local_now = now_in_tz(tz_name)
-                hour = local_now.hour
-                is_night = hour >= 22 or hour < 8
-
-                if is_night:
-                    if last_seen is not None:
-                        offline_minutes = (now - last_seen).total_seconds() / 60
-                        if offline_minutes > 30 and owner.absence_status != "sleeping":
-                            owner.absence_status = "sleeping"
-                            owner.absence_message = (
-                                f"Спит с {local_now.strftime('%H:%M')}"
-                            )
-                            await session.flush()
-                else:
-                    # Дневное время — сброс sleeping статуса
-                    if owner.absence_status == "sleeping":
-                        owner.absence_status = None
-                        owner.absence_message = None
-                        await session.flush()
-
-                return True
-            return False
-        return True
-    except FloodWaitError as e:
-        logger.warning(
-            "FloodWait %ds in _check_and_track_offline — retrying after delay",
-            e.seconds,
-        )
-        await asyncio.sleep(e.seconds)
-        me = await client.get_me()
-        return me is not None
-    except Exception:
-        logger.exception("get_me failed in _check_and_track_offline")
-        return False
-
-
 async def _build_reply_text(
     owner_telegram_id: int,
     peer_id: int,
@@ -145,124 +62,49 @@ async def _build_reply_text(
     incoming_text: str,
     style: str = "default",
 ) -> str | None:
-    memory_context = ""
-    profile_prompt = ""
+    """Тонкий оркестратор: собирает контекст через auto_reply_context,
+    формирует prompt и вызывает LLM.
+    """
+    from src.userbot.auto_reply_context import (
+        _build_system_prompt,
+        _gather_memory_context,
+        _gather_profile_hints,
+    )
+
     provider = None
     global_profile = None
     contact_style_profile = None
-    contact_archetype = None
-    owner_absence_status = None
-    owner_absence_message = None
+    contact_archetype_val: str | None = None
+    owner_absence_status: str | None = None
+    owner_absence_message: str | None = None
+
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
         provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
         contact = await get_contact(session, owner, peer_id)
 
         # ── Memory context: try contact digest first (fast precomputed) ──
-        relevant_facts = []
-        memory_context = ""
-        digest_used = False
-        try:
-            from src.core.contacts.contact_memory_digest import (
-                get_contact_digest,
-            )
-
-            digest = await get_contact_digest(owner_telegram_id, peer_id)
-            if digest.get("facts"):
-                # Use digest facts — much faster than full recall
-                relevant_facts = [(f["confidence"], f["fact"]) for f in digest["facts"]]
-                relevant_facts.sort(key=lambda x: x[0], reverse=True)
-                memory_context = (
-                    "<recall_context>\n"
-                    + "\n".join(f"- {f['fact']}" for f in digest["facts"][:5])
-                    + "\n</recall_context>"
-                )
-                digest_used = True
-            else:
-                raise ValueError("empty digest facts")
-        except Exception:
-            logger.debug(
-                "Digest unavailable for peer %d, falling back to recall",
-                peer_id,
-            )
-
-        # Fallback: full recall if digest didn't provide facts
-        if not digest_used:
-            try:
-                result = await recall(
-                    owner_telegram_id,
-                    contact_id=peer_id,
-                    query=incoming_text[:200],
-                    limit=8,
-                    include_self=True,
-                    include_pinned=True,
-                    include_tasks=False,
-                    mode="light",
-                )
-                # Safety net: if light mode returned too few facts, retry with normal
-                if len(result.facts) < 3:
-                    result = await recall(
-                        owner_telegram_id,
-                        contact_id=peer_id,
-                        query=incoming_text[:200],
-                        limit=8,
-                        include_self=True,
-                        include_pinned=True,
-                        include_tasks=False,
-                        mode="normal",
-                    )
-                relevant_facts = [(rf.confidence, rf.fact) for rf in result.facts]
-                relevant_facts.sort(key=lambda x: x[0], reverse=True)
-                memory_context = format_recall_for_prompt(result)
-            except Exception:
-                logger.warning("recall failed, skipping memory context")
+        memory_context = await _gather_memory_context(
+            owner_telegram_id, peer_id, incoming_text
+        )
 
         # Contact Archetype — вычисляем если ещё не задан
         if contact and contact.archetype is None:
             from src.core.contacts.contact_archetypes import classify_contact
 
-            archetype = await classify_contact(owner_telegram_id, peer_id)
-            if archetype:
-                contact.archetype = archetype
+            _archetype_result = await classify_contact(owner_telegram_id, peer_id)
+            if _archetype_result:
+                contact.archetype = _archetype_result
                 await session.commit()
 
         global_profile = owner.global_style_profile
         owner_absence_status = owner.absence_status
         owner_absence_message = owner.absence_message
         contact_style_profile = contact.style_profile if contact else None
-        contact_archetype = contact.archetype if contact else None
+        contact_archetype_val = contact.archetype if contact else None
 
-        # ContactProfile — подсказки о стиле и ограничениях. Собираем их внутри DB-сессии.
-        try:
-            profile = await get_contact_profile(session, owner, peer_id)
-            if profile:
-                profile_hints = []
-                if profile.communication_style:
-                    profile_hints.append(
-                        f"Стиль общения: {profile.communication_style}"
-                    )
-                if profile.communication_dos:
-                    dos_list = (
-                        json.loads(profile.communication_dos)
-                        if isinstance(profile.communication_dos, str)
-                        and (profile.communication_dos or "").startswith("[")
-                        else [profile.communication_dos]
-                    )
-                    profile_hints.append(f"МОЖНО: {', '.join(dos_list[:4])}")
-                if profile.communication_donts:
-                    donts_list = (
-                        json.loads(profile.communication_donts)
-                        if isinstance(profile.communication_donts, str)
-                        and (profile.communication_donts or "").startswith("[")
-                        else [profile.communication_donts]
-                    )
-                    profile_hints.append(f"НЕЛЬЗЯ: {', '.join(donts_list[:4])}")
-                if profile_hints:
-                    profile_prompt = "\n\nПРОФИЛЬ КОНТАКТА:\n" + "\n".join(
-                        profile_hints
-                    )
-        except Exception:
-            logger.debug("get_contact_profile failed, skipping profile hints")
+        # ContactProfile — подсказки о стиле и ограничениях.
+        profile_prompt = await _gather_profile_hints(session, owner, peer_id)
 
     if provider is None:
         logger.warning("auto-reply: no LLM provider configured")
@@ -288,44 +130,17 @@ async def _build_reply_text(
         contact_style_profile,
         global_profile,
     )
-    system = AUTO_REPLY_SYSTEM_BASE
-    if memory_context:
-        system = system + "\n\n" + memory_context
-    if owner_absence_status == "away":
-        system += f"\n\nВАЖНО: Владелец сказал перед уходом: «{owner_absence_message}». Учти это в ответе. Он отсутствует."
-    elif owner_absence_status == "soon_back":
-        system += f"\n\nВладелец скоро вернётся: «{owner_absence_message}». Ответь обнадёживающе, он скоро будет."
-    elif owner_absence_status == "sleeping":
-        system += (
-            f"\n\n🌙💤 Владелец СПИТ ({owner_absence_message}). "
-            "Никаких «занят» или «не у телефона» — честно скажи что он спит. "
-            "Используй эмодзи: 😴🛏️🌙💤🌌. Тон: заботливый, сонный. "
-            "Пример: «Владелец сейчас спит сладким сном 😴💤 "
-            "Как проснётся — обязательно ответит! 🌙»"
-        )
-    if style_hint:
-        system = system + "\n" + style_hint
-
-    # Архетип контакта (подсказка для тона)
-    if contact_archetype:
-        from src.core.contacts.contact_archetypes import archetype_reply_hint
-
-        hint = archetype_reply_hint(contact_archetype)
-        if hint:
-            system += hint
-
-    if profile_prompt:
-        system += profile_prompt
-
-    # Per-contact rules (custom_instructions)
-    try:
-        from src.core.contacts.contact_rules import get_contact_rules_block
-
-        _rules_block = await get_contact_rules_block(owner_telegram_id, peer_id)
-        if _rules_block:
-            system += "\n\n" + _rules_block
-    except Exception:
-        logger.debug("Failed to load contact rules block in auto-reply", exc_info=True)
+    system = await _build_system_prompt(
+        base=AUTO_REPLY_SYSTEM_BASE,
+        memory_context=memory_context,
+        profile_prompt=profile_prompt,
+        style_hint=style_hint,
+        contact_archetype=contact_archetype_val,
+        owner_absence_status=owner_absence_status,
+        owner_absence_message=owner_absence_message,
+        owner_telegram_id=owner_telegram_id,
+        peer_id=peer_id,
+    )
 
     user_prompt = (
         f"<contact_name>{sender_name}</contact_name>\n"
@@ -357,232 +172,3 @@ async def _build_reply_text(
     except Exception:
         logger.exception("auto-reply: LLM call failed")
         return None
-
-
-async def _make_handler(client: TelegramClient, owner_telegram_id: int):
-    """Возвращает event handler, замкнутый на owner_telegram_id."""
-
-    async def handler(event: events.NewMessage.Event) -> None:
-        try:
-            msg: TgMessage = event.message
-            if msg.out:
-                return
-            if getattr(msg, "sticker", None) or getattr(msg, "gif", None):
-                return  # stickers/GIFs don't need replies
-            if not event.is_private:
-                return  # только ЛС, не группы/каналы
-            sender = await event.get_sender()
-            if not isinstance(sender, TgUser):
-                return  # только от User-объектов
-            is_bot = bool(getattr(sender, "bot", False))
-            is_private = bool(event.is_private)
-
-            # ── Skip bots: never auto-reply or pair with bot accounts ────
-            if is_bot:
-                return
-
-            async with get_session() as session:
-                owner: User = await get_or_create_user(session, owner_telegram_id)
-                if owner.settings is None or not owner.settings.auto_reply_enabled:
-                    return
-
-                # ── Spam detection: garbage — mute reply ───────────────────
-                # AFTER auto_reply_enabled check to prevent unsolicited messages
-                sender_id = sender.id
-                if sender_id != settings.owner_telegram_id:
-                    _msg_text = (msg.text or msg.message or "").strip()
-                    _is_garbage = len(_msg_text) < 2 and not msg.sticker
-                    if _is_garbage:
-                        await event.reply("🚫🤡 Ты в муте. Сиди.")
-                        return
-
-                # запомним / обновим контакт до принятия решения
-                parts = [
-                    getattr(sender, "first_name", None),
-                    getattr(sender, "last_name", None),
-                ]
-                display = " ".join(p for p in parts if p).strip() or (
-                    sender.username or str(sender.id)
-                )
-                existing = await get_contact(session, owner, sender.id)
-                await upsert_contact(
-                    session,
-                    owner,
-                    peer_id=sender.id,
-                    peer_kind="user",
-                    is_bot=is_bot,
-                    display_name=display,
-                    username=getattr(sender, "username", None),
-                    phone=getattr(sender, "phone", None),
-                )
-
-                # Folder filter (остаётся отдельно — это не про auto-reply решение,
-                # а про то, какие чаты вообще мониторим)
-                if (
-                    owner.settings.monitor_only_selected_folders
-                    and owner.settings.monitored_folders
-                ):
-                    import json as _ar_json
-
-                    monitored = _ar_json.loads(owner.settings.monitored_folders)
-                    if monitored:
-                        contact_folders = (
-                            (existing.folder_names or "").split(",") if existing else []
-                        )
-                        contact_folders = [
-                            f.strip() for f in contact_folders if f.strip()
-                        ]
-                        if not any(f in monitored for f in contact_folders):
-                            return
-
-                # Определяем онлайн-статус владельца (и трекаем сон/absence)
-                owner_offline = await _check_and_track_offline(client, session, owner)
-
-                # ── Единый вызов decision layer ────────────────────────────
-                choice = await decide(
-                    session=session,
-                    owner=owner,
-                    peer_id=sender.id,
-                    is_private=is_private,
-                    is_bot=is_bot,
-                    contact=existing,
-                    is_online=not owner_offline,
-                    msg_text=msg.text or msg.message or "",
-                )
-
-                if choice.verdict != AutoReplyVerdict.SEND:
-                    logger.debug(
-                        "auto-reply skip: %s (style=%s) — %s",
-                        choice.verdict.value,
-                        choice.style,
-                        choice.reason,
-                    )
-                    return
-
-                incoming_text = msg.text or msg.message or ""
-                if not incoming_text.strip():
-                    return  # медиа без текста — не отвечаем автоматически
-
-                mode = owner.settings.auto_reply_mode
-                static_text = owner.settings.auto_reply_text or ""
-
-            # ── Генерация ответа (вне сессии, может быть долгой) ──────────
-            if mode == "smart":
-                reply = await _build_reply_text(
-                    owner_telegram_id,
-                    sender.id,
-                    display,
-                    incoming_text,
-                    style=choice.style,
-                )
-                if not reply:
-                    return
-                # Humanizer для smart-ответов (чтобы не звучать как AI)
-                try:
-                    from src.core.humanizer.humanizer import humanize_response
-
-                    reply = humanize_response(reply or "")
-                except Exception:
-                    logger.debug("Non-critical error", exc_info=True)
-
-            else:  # static (default)
-                reply = static_text.strip()
-                if not reply:
-                    return
-
-            await event.respond(reply)
-
-            # NOTE: global rate-limit slot is now reserved atomically inside
-            # auto_reply_decision.decide() via _global_reply_reserve(). The
-            # previous separate _global_reply_increment() call would double-
-            # count and also re-open the TOCTOU window that reserve() closes.
-
-            # Обновить ConversationState
-            async with get_session() as _ar_session:
-                _ar_owner = await get_or_create_user(_ar_session, owner_telegram_id)
-                from src.db.repo import upsert_conversation_state
-
-                await upsert_conversation_state(
-                    _ar_session,
-                    _ar_owner,
-                    sender.id,
-                    status="active",
-                    last_outgoing_at=datetime.now(UTC).replace(tzinfo=None),
-                    last_auto_reply_at=datetime.now(UTC).replace(tzinfo=None),
-                )
-
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_telegram_id)
-                await add_auto_reply_log(
-                    session,
-                    user_id=owner.id,
-                    peer_id=sender.id,
-                    peer_name=display,
-                    incoming_text=incoming_text[:500],
-                    reply_text=reply,
-                )
-
-            await notification_queue.enqueue(
-                topic="auto_reply",
-                text=f"🤖 <b>Авто-ответ</b> для <b>{sanitize_html(display)}</b>\n\n"
-                f"<i>Им:</i> {sanitize_html(incoming_text[:200])}\n"
-                f"<i>Я:</i> {sanitize_html(reply)}",
-                priority=2,
-                category="auto_reply",
-            )
-        except Exception:
-            logger.exception("auto-reply handler failed")
-
-    return handler
-
-
-async def generate_smart_reply(
-    client: TelegramClient,
-    owner_telegram_id: int,
-    peer_id: int,
-    sender_name: str,
-    incoming_text: str,
-    style: str = "default",
-) -> str | None:
-    """Публичная обёртка для генерации умного авто-ответа.
-
-    Вызывается из InboxManager или напрямую из других модулей.
-    Возвращает сгенерированный текст или None."""
-    try:
-        return await _build_reply_text(
-            owner_telegram_id=owner_telegram_id,
-            peer_id=peer_id,
-            sender_name=sender_name,
-            incoming_text=incoming_text,
-            style=style,
-        )
-    except Exception:
-        logger.exception("generate_smart_reply failed")
-        return None
-
-
-# Защита от утечки обработчиков при переподключении.
-# При повторном вызове attach_auto_reply на том же клиенте — не дублируем обработчик.
-_attached_auto_reply_clients: set[int] = set()
-
-
-def attach_auto_reply(client: TelegramClient, owner_telegram_id: int) -> None:
-    client_id = id(client)
-    if client_id in _attached_auto_reply_clients:
-        logger.debug(
-            "Auto-reply handler already attached for client %s — skipping duplicate",
-            client_id,
-        )
-        return
-    _attached_auto_reply_clients.add(client_id)
-
-    _handler_cache = None
-
-    async def _wrapper(event):
-        nonlocal _handler_cache
-        if _handler_cache is None:
-            _handler_cache = await _make_handler(client, owner_telegram_id)
-        await _handler_cache(event)
-
-    client.add_event_handler(_wrapper, events.NewMessage(incoming=True))
-    logger.info("Auto-reply handler attached for user %s", owner_telegram_id)

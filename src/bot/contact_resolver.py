@@ -11,6 +11,7 @@ full DB + Telethon resolution.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
     from src.db.models import User
 
 logger = logging.getLogger(__name__)
+
+# Deduplication: prevents concurrent resolve() calls for the same query key
+_inflight_resolves: dict[str, asyncio.Future] = {}
 
 
 async def resolve_contact_fast(
@@ -75,17 +79,32 @@ async def resolve_contact_fast(
             )
         return cached
 
-    # 2. Cache miss — full resolution
+    # 2. Cache miss — full resolution (deduplicated per query key)
     logger.debug("resolve_contact_fast: cache miss for user=%d query=%r", uid, query)
-    return await resolve(
-        client,
-        owner,
-        query,
-        limit=limit,
-        min_score=min_score,
-        kinds=kinds,
-        include_bots=include_bots,
+    query_key = f"{uid}:{query.lower().strip()}"
+    if query_key in _inflight_resolves:
+        return await _inflight_resolves[query_key]
+    future: asyncio.Future[list[ContactCandidate]] = (
+        asyncio.get_event_loop().create_future()
     )
+    _inflight_resolves[query_key] = future
+    try:
+        result = await resolve(
+            client,
+            owner,
+            query,
+            limit=limit,
+            min_score=min_score,
+            kinds=kinds,
+            include_bots=include_bots,
+        )
+        future.set_result(result)
+        return result
+    except Exception as e:
+        future.set_exception(e)
+        raise
+    finally:
+        _inflight_resolves.pop(query_key, None)
 
 
 # Re-export for convenience

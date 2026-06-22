@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, UTC
 
 from aiogram import Router
@@ -78,7 +79,7 @@ async def cmd_monitor(message: Message, command: CommandObject) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def _handle_add(message: Message, args: list[str]) -> None:
+async def _handle_add(message: Message, args: Sequence[str]) -> None:
     """Добавляет источник мониторинга."""
     if not args:
         await message.answer(
@@ -238,7 +239,7 @@ async def _handle_list(message: Message) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def _handle_fetch(message: Message, args: list[str]) -> None:
+async def _handle_fetch(message: Message, args: Sequence[str]) -> None:
     """Ручной запуск фетчинга сообщений из источника."""
     if not args:
         await message.answer(
@@ -397,7 +398,7 @@ async def _handle_fetch(message: Message, args: list[str]) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def _handle_remove(message: Message, args: list[str]) -> None:
+async def _handle_remove(message: Message, args: Sequence[str]) -> None:
     """Удаляет источник мониторинга."""
     if not args:
         await message.answer(
@@ -527,7 +528,7 @@ async def _handle_status(message: Message) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def _handle_rules(message: Message, args: list[str]) -> None:
+async def _handle_rules(message: Message, args: Sequence[str]) -> None:
     """Показывает правила для источника."""
     if not args:
         await message.answer(
@@ -603,7 +604,7 @@ async def _handle_rules(message: Message, args: list[str]) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def _handle_rule_add(message: Message, args: list[str]) -> None:
+async def _handle_rule_add(message: Message, args: Sequence[str]) -> None:
     """Добавляет правило фильтрации для источника."""
     if len(args) < 2:
         await message.answer(
@@ -700,7 +701,7 @@ async def _handle_rule_add(message: Message, args: list[str]) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def _handle_rule_del(message: Message, args: list[str]) -> None:
+async def _handle_rule_del(message: Message, args: Sequence[str]) -> None:
     """Удаляет правило фильтрации."""
     if not args:
         await message.answer(

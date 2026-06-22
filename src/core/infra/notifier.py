@@ -40,6 +40,11 @@ class Notifier:
     def get_bot(self) -> "Bot | None":
         return self._bot
 
+    def cleanup(self) -> None:
+        """Detach bot reference so stale session is never reused after shutdown."""
+        self._bot = None
+        logger.debug("Notifier: bot reference cleared")
+
     async def _flush_buffer(self) -> None:
         async with self._flush_lock:
             while self._buffer:

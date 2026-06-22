@@ -144,7 +144,7 @@ class LazyModule:
 
     def _sync_import(self) -> None:
         """Perform the import synchronously (callable from any context)."""
-        if self._module is not _SENTINEL:
+        if self._module is not _SENTINEL or self._error is not None:
             return
 
         try:

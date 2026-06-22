@@ -5,8 +5,10 @@ Full Analyzer — пакетный анализатор переписок.
 """
 
 from __future__ import annotations
+
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -55,7 +57,7 @@ async def run_full_analysis(
     *,
     client=None,
     message_limit: int = 500,
-    folder_names: list[str] | None = None,
+    folder_names: Sequence[str] | None = None,
     contact_ids: list[int] | None = None,
     progress_callback=None,
     progress_message=None,

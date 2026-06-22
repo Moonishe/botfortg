@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 # Максимальная длина промпта в символах (безопасный лимит для большинства LLM)
 MAX_PROMPT_CHARS = 32_000
 
+# Максимальная длина промпта в токенах (prompt budget — НЕ output limit).
+# DEFAULT_MAX_TOKENS (4096) — это output limit; prompt может быть намного больше.
+# 24000 = ~32K chars при ratio ~0.75 tokens/char для русского текста.
+MAX_PROMPT_TOKENS = 24_000
+
 # ---------------------------------------------------------------------------
 # Owner self-reference patterns
 # ---------------------------------------------------------------------------
@@ -358,7 +363,17 @@ class PromptAssembler:
 
         # Session replay hint (if available)
         if ctx.session_summary:
-            parts.append(ctx.session_summary)
+            scan_result = scan_content(
+                ctx.session_summary, "prompt_assembler:session_summary"
+            )
+            if scan_result.blocked:
+                logger.warning(
+                    "prompt_assembler: session_summary blocked by injection scanner"
+                )
+                session_summary = "[blocked by security scanner]"
+            else:
+                session_summary = ctx.session_summary
+            parts.append(f"<memory-context>\n{session_summary}\n</memory-context>")
 
         # Conversation history
         if ctx.history_block:
@@ -374,7 +389,17 @@ class PromptAssembler:
 
         # Frozen memory snapshot (top-3 facts pre-loaded)
         if ctx.frozen_snapshot:
-            parts.append(ctx.frozen_snapshot)
+            scan_result = scan_content(
+                ctx.frozen_snapshot, "prompt_assembler:frozen_snapshot"
+            )
+            if scan_result.blocked:
+                logger.warning(
+                    "prompt_assembler: frozen_snapshot blocked by injection scanner"
+                )
+                frozen_snapshot = "[blocked by security scanner]"
+            else:
+                frozen_snapshot = ctx.frozen_snapshot
+            parts.append(f"<memory-context>\n{frozen_snapshot}\n</memory-context>")
 
         # RAG context
         if ctx.rag_context:
@@ -491,10 +516,22 @@ class PromptAssembler:
         tokens = estimate_tokens(prompt)
         stage, _ = get_budget_stage(tokens, DEFAULT_MAX_TOKENS)
 
+        # Check token budget — enforce MAX_PROMPT_TOKENS (prompt budget, NOT output limit)
+        if tokens > MAX_PROMPT_TOKENS:
+            logger.warning(
+                "prompt_assembler: token budget exceeded: %d > %d, truncating",
+                tokens,
+                MAX_PROMPT_TOKENS,
+            )
+            ratio = MAX_PROMPT_TOKENS / tokens
+            max_chars = int(chars_before * ratio * 0.9)  # 90% safety margin
+            prompt = _truncate_smart(prompt, max_chars)
+            tokens = estimate_tokens(prompt)
+
         if chars_before <= MAX_PROMPT_CHARS:
             return prompt, {
                 "chars_before": chars_before,
-                "chars_after": chars_before,
+                "chars_after": len(prompt),
                 "tokens": tokens,
                 "stage": stage,
             }

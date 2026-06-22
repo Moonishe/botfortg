@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.types import Message
+from aiogram.types import MenuButtonCommands, Message
 
 from src.bot.handlers import (
     analyze_cmd,
@@ -417,6 +417,10 @@ async def _setup_commands_and_allowlist(bot: Bot, dp: Dispatcher) -> None:
         )
 
     await bot.set_my_commands(registry.as_telegram_commands())
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    except Exception:
+        logger.warning("Failed to set chat menu button (non-critical)", exc_info=True)
     logger.info(
         "Bot commands menu updated: %d commands",
         len(registry.as_telegram_commands()),
@@ -444,6 +448,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
         )
     finally:
         await bot.session.close()
+        notifier.cleanup()
 
 
 async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
@@ -536,5 +541,6 @@ async def run_bot_webhook(userbot_manager: UserbotManager) -> None:
                 _cancelled = True
             except Exception:
                 logger.exception("Failed to %s during shutdown", name)
+        notifier.cleanup()
         if _cancelled:
             raise asyncio.CancelledError()

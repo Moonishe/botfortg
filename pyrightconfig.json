@@ -12,5 +12,10 @@
   "reportUnusedVariable": "warning",
   "reportOptionalMemberAccess": false,
   "pythonVersion": "3.13",
-  "pythonPlatform": "Linux"
+  "pythonPlatform": "Windows",
+  "venvPath": ".",
+  "extraPaths": [
+    "C:\\Users\\My\\AppData\\Roaming\\Python\\Python313\\site-packages",
+    "C:\\Python313\\Lib\\site-packages"
+  ]
 }

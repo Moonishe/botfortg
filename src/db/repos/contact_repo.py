@@ -36,8 +36,9 @@ async def upsert_contact(
 ) -> Contact:
     """Создать или обновить Contact.
 
-    Race-safe: используется INSERT ... ON CONFLICT DO UPDATE,
-    поэтому параллельные вызовы не вызывают IntegrityError.
+    Race-safe: используется INSERT ... ON CONFLICT DO UPDATE
+    с ``.returning(Contact)`` — атомарно возвращает строку без
+    отдельного SELECT'а.
     """
     user_id = user.id
     values = {
@@ -71,14 +72,10 @@ async def upsert_contact(
             index_elements=["user_id", "peer_id"],
             set_=set_values,
         )
+        .returning(Contact)
     )
-    await session.execute(stmt)
-    await session.flush()
-    result = await session.execute(
-        select(Contact).where(Contact.user_id == user_id, Contact.peer_id == peer_id)
-    )
-    contact = result.scalar_one()
-    return contact
+    result = await session.execute(stmt)
+    return result.scalar_one()
 
 
 async def list_contacts(

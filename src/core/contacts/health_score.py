@@ -64,7 +64,7 @@ async def get_contacts_health_batch(
     open_commitments, message_count, reply_ratio}.
     """
     from src.db.session import get_session
-    from src.db.repo import get_or_create_user, list_open_commitments
+    from src.db.repo import get_or_create_user
 
     if not peer_ids:
         return {}
@@ -72,7 +72,7 @@ async def get_contacts_health_batch(
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id, use_cache=True)
         from sqlalchemy import select, func
-        from src.db.models import Message
+        from src.db.models import Commitment, Message
 
         peer_set = set(peer_ids)
 
@@ -137,19 +137,24 @@ async def get_contacts_health_batch(
             row.peer_id: row.outgoing for row in outgoing_rows
         }
 
-        # Open commitments: still one query per peer (no batch API), but
-        # we batch where possible. For now, loop is acceptable since
-        # commitments are usually few.
+        # Single query: open commitments count per peer (batch, no N+1)
         commitments_map: dict[int, int] = {}
-        for peer_id in peer_set:
-            try:
-                cmts = await list_open_commitments(session, owner, peer_id=peer_id)
-                commitments_map[peer_id] = len(cmts)
-            except Exception:
-                logger.debug(
-                    "list_open_commitments failed for peer %d", peer_id, exc_info=True
+        if peer_set:
+            cmt_rows = (
+                await session.execute(
+                    select(
+                        Commitment.peer_id,
+                        func.count(Commitment.id).label("open_count"),
+                    )
+                    .where(
+                        Commitment.user_id == owner.id,
+                        Commitment.peer_id.in_(peer_set),
+                        Commitment.status == "open",
+                    )
+                    .group_by(Commitment.peer_id)
                 )
-                commitments_map[peer_id] = 0
+            ).all()
+            commitments_map = {row.peer_id: row.open_count for row in cmt_rows}
 
     now = datetime.now(UTC)
     result: dict[int, dict[str, Any]] = {}

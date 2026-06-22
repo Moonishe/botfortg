@@ -160,6 +160,16 @@ class CommandRegistry:
             if cmd_name not in self._commands:
                 missing.append(cmd_name)
 
+        # Reverse check: commands in registry but missing from routers
+        # Uses debug (not warning) — some commands use F.text/MagicFilter instead of Command()
+        for cmd_name in sorted(self._commands):
+            if cmd_name not in router_commands:
+                logger.debug(
+                    "Command /%s in registry but no Command() filter in routers "
+                    "(may use F.text or other filter)",
+                    cmd_name,
+                )
+
         return missing
 
 

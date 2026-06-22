@@ -12,6 +12,7 @@ os.environ["OWNER_TELEGRAM_ID"] = "123456789"
 
 from src.db.session import init_db, get_session
 from src.db.models._cache import SmartCacheEntry
+from src.db.models._base import User
 from src.core.cache.smart_cache import (
     SmartCache,
     smart_cache,
@@ -38,6 +39,12 @@ def setup_db():
             await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
             await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
         await init_db()
+
+        # Create test users so FK constraints on SmartCacheEntry.owner_id are satisfied
+        async with get_session() as session:
+            session.add(User(id=OWNER_ID, telegram_id=OWNER_ID))
+            session.add(User(id=OWNER2_ID, telegram_id=OWNER2_ID))
+            await session.flush()
 
     asyncio.run(_recreate())
 

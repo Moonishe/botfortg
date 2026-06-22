@@ -22,7 +22,7 @@ from typing import Any
 
 
 from src.core.scheduling.cron.parser import get_next_run, validate_cron
-from src.core.scheduling.cron.delivery import close_delivery_bot, dispatch_cron_job
+from src.core.scheduling.cron.delivery import dispatch_cron_job
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +57,6 @@ class CronScheduler:
         )
         try:
             while True:
-                if self._overlap_guard.locked():
-                    await asyncio.sleep(CRON_TICK_SECONDS)
-                    continue
-
                 async with self._overlap_guard:
                     try:
                         await self._tick()
@@ -70,10 +66,6 @@ class CronScheduler:
                 await asyncio.sleep(CRON_TICK_SECONDS)
         except asyncio.CancelledError:
             logger.info("CronScheduler: graceful shutdown (CancelledError)")
-            try:
-                await close_delivery_bot()
-            except Exception:
-                logger.exception("CronScheduler: ошибка при закрытии delivery Bot")
             raise
 
     async def _tick(self) -> None:

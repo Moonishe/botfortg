@@ -7,7 +7,6 @@ from datetime import datetime, UTC
 from random import randint
 from typing import TYPE_CHECKING
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,15 +18,20 @@ from src.db.models import Memory, User
 from src.db.repos.memory_repo import save_memory_version
 
 if TYPE_CHECKING:
-    pass
+    from aiogram.types import InlineKeyboardMarkup
+
+# ADR-001: Core builds InlineKeyboardMarkup via lazy import inside functions.
+# See src/core/services/chat_actions.py for full rationale.
 
 logger = logging.getLogger(__name__)
 
 _NUDGE_INTRO = "🧠 Проверка памяти:\n\n"
 
 
-def build_nudge_keyboard(candidate: NudgeCandidate) -> InlineKeyboardMarkup:
+def build_nudge_keyboard(candidate: NudgeCandidate) -> "InlineKeyboardMarkup":
     """Build confirm/forget/edit inline keyboard for a candidate."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
     memory_id = candidate.memory_id
     return InlineKeyboardMarkup(
         inline_keyboard=[

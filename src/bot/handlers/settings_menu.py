@@ -185,6 +185,10 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
             text="📥 Импорт конфига", callback_data=SettingsCB.IMPORT_CONFIG
         ),
     )
+    kb.row(InlineKeyboardButton(
+        text="🧠 Memory & AI",
+        callback_data=SettingsCB.section("memory_ai"),
+    ))
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data=SettingsCB.CLOSE))
     # Быстрые тогглы (авто-память, избранное, дайджест, авто-ответ)
     text += "\n⚡ <b>Быстрые тогглы:</b>"

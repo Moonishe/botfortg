@@ -138,11 +138,11 @@ class TestOwnerOnlyFilter:
 
 
 class TestCmdHealth:
-    """Tests for /health command."""
+    """Tests for /health command (smoke: produces non-empty output)."""
 
     @pytest.mark.asyncio
     async def test_cmd_health_returns_message(self):
-        from src.bot.handlers.memory_admin_cmds import cmd_health
+        from src.bot.handlers.health_cmd import cmd_health
         from src.db.repo import get_or_create_user
         from src.db.session import get_session
 
@@ -151,21 +151,11 @@ class TestCmdHealth:
             await get_or_create_user(session, OWNER_TG_ID)
 
         msg = _make_message(text="/health")
-
-        with (
-            patch(
-                "src.core.memory.memory_health.calculate_health_score",
-                new=AsyncMock(return_value={"score": 85, "details": "ok"}),
-            ),
-            patch(
-                "src.core.memory.memory_health.format_health",
-                return_value="🫀 Health: 85/100",
-            ),
-        ):
-            await cmd_health(msg)
+        await cmd_health(msg)
 
         msg.answer.assert_called_once()
-        assert "85" in msg.answer.call_args[0][0]
+        answer_text = msg.answer.call_args[0][0] if msg.answer.call_args[0] else ""
+        assert "Статус системы" in answer_text
 
 
 # ═══════════════════════════════════════════════════════════════════

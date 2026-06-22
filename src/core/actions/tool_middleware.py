@@ -31,6 +31,7 @@ from typing import Any
 
 from src.config import settings
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -181,348 +182,7 @@ class MiddlewareChain:
 middleware_chain = MiddlewareChain()
 
 
-# ===================================================================
-# Circuit Breaker
-# ===================================================================
-
-
-@dataclass
-class CBState:
-    """Internal state of a single tool's circuit breaker."""
-
-    failures: int = 0
-    state: str = "CLOSED"  # CLOSED | OPEN | HALF_OPEN
-    opened_at: float = 0.0
-    _probe_in_flight: bool = (
-        False  # ponytail: simple bool, no semaphore; prevents multi-probe race
-    )
-
-
-class ToolCircuitBreaker:
-    """Per-tool circuit breaker that blocks calls after consecutive failures.
-
-    States:
-        CLOSED     — normal operation, counting failures
-        OPEN       — >FAILURE_THRESHOLD consecutive failures, blocked for COOLDOWN
-        HALF_OPEN  — cooldown expired, a single probe call is permitted
-
-    If the probe succeeds → back to CLOSED (failures=0).
-    If the probe fails    → back to OPEN (cooldown restarts).
-
-    Usage (via middleware factory)::
-
-        pre, post = _build_circuit_breaker()
-        chain.register(name="circuit_breaker", priority=30, pre=pre, post=post)
-    """
-
-    _states: dict[str, CBState] = {}
-    _lock: asyncio.Lock = asyncio.Lock()
-    FAILURE_THRESHOLD: int = 5
-    COOLDOWN_SECONDS: float = 120.0
-
-    @classmethod
-    async def check(cls, tool_name: str) -> bool:
-        """Check whether *tool_name* is allowed to execute.
-
-        Returns:
-            ``True`` if the call is permitted, ``False`` if blocked (OPEN).
-        """
-        async with cls._lock:
-            state = cls._states.get(tool_name)
-            if state is None:
-                return True  # No failures recorded — circuit is implicitly CLOSED
-
-            if state.state == "CLOSED":
-                return True
-            if state.state == "HALF_OPEN":
-                # Only allow one probe call at a time
-                if state._probe_in_flight:
-                    return False
-                state._probe_in_flight = True
-                return True  # Allow probe call
-
-            # state == OPEN
-            elapsed = time.monotonic() - state.opened_at
-            # Guard against pre-reboot monotonic timestamps: negative elapsed
-            # means ``opened_at`` is from a previous process — treat as expired.
-            if elapsed < 0 or elapsed >= cls.COOLDOWN_SECONDS:
-                old_state = state.state
-                state.state = "HALF_OPEN"
-                state._probe_in_flight = True  # this transition IS the probe flight
-                from src.core.events.event_bus import event_bus, CIRCUIT_STATE
-
-                await event_bus.emit(
-                    CIRCUIT_STATE,
-                    tool_name=tool_name,
-                    from_state=old_state,
-                    to_state="HALF_OPEN",
-                    reason="cooldown_expired",
-                    failures=state.failures,
-                )
-                logger.debug(
-                    "Circuit for %r: OPEN → HALF_OPEN (%.1fs elapsed)",
-                    tool_name,
-                    elapsed,
-                )
-                return True  # Allow probe call
-
-            return False  # Still in cooldown — block
-
-    @classmethod
-    async def record_success(cls, tool_name: str) -> None:
-        """Record a successful call — reset failures (CLOSED)."""
-        async with cls._lock:
-            state = cls._states.get(tool_name)
-            if state is None:
-                return  # No state — nothing to update
-            old_state = state.state
-            state.failures = 0
-            state.state = "CLOSED"
-            state._probe_in_flight = False
-            if old_state != "CLOSED":
-                from src.core.events.event_bus import event_bus, CIRCUIT_STATE
-
-                await event_bus.emit(
-                    CIRCUIT_STATE,
-                    tool_name=tool_name,
-                    from_state=old_state,
-                    to_state="CLOSED",
-                    reason="probe_success",
-                    failures=0,
-                )
-                logger.info(
-                    "Circuit for %r: %s → CLOSED (successful probe)",
-                    tool_name,
-                    old_state,
-                )
-
-    @classmethod
-    async def record_failure(cls, tool_name: str) -> None:
-        """Record a failed call and trip the circuit if threshold exceeded."""
-        async with cls._lock:
-            state = cls._states.get(tool_name)
-            if state is None:
-                state = CBState()
-                cls._states[tool_name] = state
-
-            state.failures += 1
-            state._probe_in_flight = False  # probe resolved (either success or failure)
-
-            if state.state == "HALF_OPEN":
-                # Probe failed — back to OPEN
-                old_state = state.state
-                state.state = "OPEN"
-                state.opened_at = time.monotonic()
-                from src.core.events.event_bus import event_bus, CIRCUIT_STATE
-
-                await event_bus.emit(
-                    CIRCUIT_STATE,
-                    tool_name=tool_name,
-                    from_state=old_state,
-                    to_state="OPEN",
-                    reason="probe_failure",
-                    failures=state.failures,
-                )
-                logger.warning(
-                    "Circuit for %r: HALF_OPEN probe failed — back to OPEN "
-                    "(failures=%d)",
-                    tool_name,
-                    state.failures,
-                )
-            elif state.failures >= cls.FAILURE_THRESHOLD and state.state != "OPEN":
-                old_state = state.state
-                state.state = "OPEN"
-                state.opened_at = time.monotonic()
-                from src.core.events.event_bus import event_bus, CIRCUIT_STATE
-
-                await event_bus.emit(
-                    CIRCUIT_STATE,
-                    tool_name=tool_name,
-                    from_state=old_state,
-                    to_state="OPEN",
-                    reason="failure_threshold",
-                    failures=state.failures,
-                )
-                logger.warning(
-                    "Circuit for %r: tripped OPEN after %d failures",
-                    tool_name,
-                    state.failures,
-                )
-            else:
-                # No transition yet, but push updated failure count to telemetry
-                from src.core.events.event_bus import event_bus, CIRCUIT_STATE
-
-                await event_bus.emit(
-                    CIRCUIT_STATE,
-                    tool_name=tool_name,
-                    from_state=state.state,
-                    to_state=state.state,  # no transition
-                    reason="failure_count",
-                    failures=state.failures,
-                )
-
-    @classmethod
-    async def reset(cls, tool_name: str | None = None) -> None:
-        """Reset circuit state for *tool_name* (or all tools if None/empty).
-
-        Useful for testing.
-        """
-        from src.core.events.event_bus import event_bus, CIRCUIT_STATE
-
-        async with cls._lock:
-            if not tool_name:
-                for name in list(cls._states.keys()):
-                    old_state = cls._states[name].state
-                    cls._states[name]._probe_in_flight = False
-                    await event_bus.emit(
-                        CIRCUIT_STATE,
-                        tool_name=name,
-                        from_state=old_state,
-                        to_state="CLOSED",
-                        reason="manual_reset",
-                        failures=0,
-                    )
-                cls._states.clear()
-            else:
-                old = cls._states.pop(tool_name, None)
-                if old is not None:
-                    old._probe_in_flight = (
-                        False  # ponytail: reset clears the probe flight
-                    )
-                    await event_bus.emit(
-                        CIRCUIT_STATE,
-                        tool_name=tool_name,
-                        from_state=old.state,
-                        to_state="CLOSED",
-                        reason="manual_reset",
-                        failures=0,
-                    )
-
-    @classmethod
-    async def get_state(cls, tool_name: str) -> CBState | None:
-        """Return a copy of the circuit state for *tool_name*, or ``None``."""
-        async with cls._lock:
-            state = cls._states.get(tool_name)
-            if state is None:
-                return None
-            return CBState(
-                failures=state.failures,
-                state=state.state,
-                opened_at=state.opened_at,
-                _probe_in_flight=state._probe_in_flight,
-            )
-
-    @classmethod
-    async def get_all_states(cls) -> dict[str, CBState]:
-        """Return copies of all circuit states."""
-        async with cls._lock:
-            return {
-                name: CBState(
-                    failures=s.failures,
-                    state=s.state,
-                    opened_at=s.opened_at,
-                    _probe_in_flight=s._probe_in_flight,
-                )
-                for name, s in cls._states.items()
-            }
-
-    @classmethod
-    async def _push_full_state(cls) -> None:
-        """Emit a CIRCUIT_STATE snapshot for every currently tracked tool.
-
-        Called once at startup so that CircuitTelemetry can initialise its
-        ``_current_states`` cache without importing ToolCircuitBreaker.
-        """
-        from src.core.events.event_bus import event_bus, CIRCUIT_STATE
-
-        async with cls._lock:
-            for tool_name, state in cls._states.items():
-                await event_bus.emit(
-                    CIRCUIT_STATE,
-                    tool_name=tool_name,
-                    from_state=state.state,
-                    to_state=state.state,  # snapshot — no transition
-                    reason="startup_snapshot",
-                    failures=state.failures,
-                )
-
-    @classmethod
-    async def capture_state(cls) -> dict[str, dict]:
-        """Return a serializable snapshot of all circuit breaker states.
-
-        Public method for snapshot engine — avoids direct ``_states``/``_lock`` access.
-        """
-        async with cls._lock:
-            return {
-                tool_name: {
-                    "failures": state.failures,
-                    "state": state.state,
-                    "opened_at": state.opened_at,
-                    "_probe_in_flight": state._probe_in_flight,
-                }
-                for tool_name, state in cls._states.items()
-            }
-
-    @classmethod
-    async def restore_state(cls, data: dict) -> None:
-        """Restore circuit breaker states from a snapshot dict.
-
-        Public method for snapshot engine — avoids direct ``_states``/``_lock`` access.
-        Accepts pre-processed data (caller handles cooldown expiry, clamping, etc.).
-        """
-        async with cls._lock:
-            for tool_name, state_data in data.items():
-                cls._states[tool_name] = CBState(
-                    failures=int(state_data.get("failures", 0)),
-                    state=str(state_data.get("state", "CLOSED")),
-                    opened_at=float(state_data.get("opened_at", 0.0)),
-                    _probe_in_flight=bool(state_data.get("_probe_in_flight", False)),
-                )
-
-    @classmethod
-    async def get_cooldown_remaining(cls, tool_name: str) -> float:
-        """Return seconds remaining for OPEN circuits, 0 for CLOSED/HALF_OPEN.
-
-        Returns 0.0 if the circuit is not OPEN, expired, or ``opened_at``
-        is stale (pre-reboot monotonic timestamp).
-        """
-        async with cls._lock:
-            state = cls._states.get(tool_name)
-            if state is None or state.state != "OPEN":
-                return 0.0
-            elapsed = time.monotonic() - state.opened_at
-            # Negative elapsed → stale timestamp → treat as expired
-            if elapsed < 0:
-                return 0.0
-            remaining = cls.COOLDOWN_SECONDS - elapsed
-            return max(0.0, round(remaining, 3))
-
-    @classmethod
-    async def cleanup_stale(cls) -> int:
-        """Remove CLOSED entries with zero failures (default state).
-
-        These entries are re-created on next failure — keeping them is
-        harmless but grows the dict unboundedly when tools are renamed
-        or removed.  Called periodically from the global cleanup loop.
-
-        Returns:
-            Number of entries removed.
-        """
-        async with cls._lock:
-            stale = [
-                name
-                for name, s in cls._states.items()
-                if s.state == "CLOSED" and s.failures == 0
-            ]
-            for name in stale:
-                del cls._states[name]
-        if stale:
-            logger.debug(
-                "ToolCircuitBreaker cleanup_stale: removed %d idle entries (%d remain)",
-                len(stale),
-                len(cls._states),
-            )
-        return len(stale)
+from src.core.actions.circuit_breaker import ToolCircuitBreaker, CBState  # re-export for backward compat
 
 
 class DecisionRepairGuard:
@@ -533,11 +193,18 @@ class DecisionRepairGuard:
     Gated by settings.reward_loop_enabled + settings.decision_repair_failure_threshold.
     """
 
+    _lock: asyncio.Lock | None = None
     _failures: dict[str, deque] = {}  # signature → deque of timestamps
     _stash: dict[int, str] = {}  # telegram_id → stashed repair hint
 
     FAILURE_THRESHOLD: int = 3  # overridden by settings at runtime
     STEP_WINDOW: int = 5  # overridden by settings at runtime
+
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
 
     @classmethod
     def _get_threshold(cls) -> int:
@@ -559,16 +226,17 @@ class DecisionRepairGuard:
         window = cls._get_window()
         if window <= 0:
             return False
-        if signature not in cls._failures:
-            cls._failures[signature] = deque(maxlen=window)
+        async with cls._get_lock():
+            if signature not in cls._failures:
+                cls._failures[signature] = deque(maxlen=window)
 
-        now = time.monotonic()
-        # Evict stale entries before checking threshold
-        d = cls._failures[signature]
-        while d and (now - d[0]) > 300:  # 5 min TTL
-            d.popleft()
-        d.append(now)
-        return len(d) >= cls._get_threshold()
+            now = time.monotonic()
+            # Evict stale entries before checking threshold
+            d = cls._failures[signature]
+            while d and (now - d[0]) > 300:  # 5 min TTL
+                d.popleft()
+            d.append(now)
+            return len(d) >= cls._get_threshold()
 
     @classmethod
     def stash_repair(cls, telegram_id: int, hint: str) -> None:
@@ -576,6 +244,8 @@ class DecisionRepairGuard:
         if not settings.reward_loop_enabled:
             return
         cls._stash[telegram_id] = hint[:2000]  # bounded
+        # ponytail: _stash write-only per key, single caller per user;
+        # sync wrapper is fine since asyncio.Lock requires async ctx.
 
     @classmethod
     def pop_stash(cls, telegram_id: int) -> str | None:
@@ -583,19 +253,22 @@ class DecisionRepairGuard:
         return cls._stash.pop(telegram_id, None)
 
     @classmethod
-    def cleanup_stale(cls) -> int:
-        """Evict old failure entries. Called from periodic cleanup."""
+    async def cleanup_stale(cls) -> int:
+        """Evict old failure entries. Called from periodic cleanup.
+
+        Now async + lock-protected to prevent race with bump_failure()
+        which mutates _failures under the same lock.
+        """
         evicted = 0
         now = time.monotonic()
-        for sig in list(cls._failures.keys()):
-            d = cls._failures[sig]
-            while d and (now - d[0]) > 300:  # 5 min TTL
-                d.popleft()
-                evicted += 1
-            if not d:
-                del cls._failures[sig]
-        # ponytail: _stash is self-cleaning via pop_stash; single-owner ≤1 entry always.
-        # No separate TTL needed. Add TTL if multi-user goes live and _stash outgrows 1 key.
+        async with cls._get_lock():
+            for sig in list(cls._failures.keys()):
+                d = cls._failures[sig]
+                while d and (now - d[0]) > 300:  # 5 min TTL
+                    d.popleft()
+                    evicted += 1
+                if not d:
+                    del cls._failures[sig]
         return evicted
 
 
@@ -713,7 +386,9 @@ def _build_tool_metrics_post() -> PostHook:
                     )
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "tool_middleware: JSONL metric write failed", exc_info=True
+                )
 
             # Decision-repair: bump failure counter on tool failure
             if not success:
@@ -737,14 +412,17 @@ def _build_tool_metrics_post() -> PostHook:
                             f"Tool '{ctx.tool_name}' failed repeatedly (code: {err_code}). "
                             "Consider alternative approach."
                         )
-                        # ponytail: settings.owner_telegram_id only (single-user).
-                        # ctx.meta["telegram_id"] not yet populated; add when multi-user goes live.
+                        # ponytail: single-user bot, owner_telegram_id fallback is safe.
+                        # Populate ctx.meta["telegram_id"] when multi-user goes live.
                         DecisionRepairGuard.stash_repair(
                             ctx.meta.get("telegram_id", settings.owner_telegram_id),
                             hint,
                         )
                 except Exception:
-                    pass
+                    logger.warning(
+                        "tool_middleware: DecisionRepairGuard stash_repair failed",
+                        exc_info=True,
+                    )
 
     return _post
 
@@ -761,9 +439,10 @@ def _build_input_validator() -> PreHook:
 
     .. note::
 
-       ``jsonschema`` is an optional dependency.  If not installed, schema
-       validation is **silently skipped** with a WARNING log, and the tool
-       executes without input validation.  Install with::
+       ``jsonschema`` is an optional dependency.  If not installed and a tool
+       has an ``input_schema``, the tool is **blocked** with an ERROR log
+       (fail-safe: no validation means no execution).  Tools without an
+       ``input_schema`` are unaffected.  Install with::
 
            pip install jsonschema
 
@@ -772,7 +451,7 @@ def _build_input_validator() -> PreHook:
        # becomes a compliance/security requirement.
     """
 
-    def _pre(ctx: ToolContext) -> ToolContext | None:
+    async def _pre(ctx: ToolContext) -> ToolContext | None:
         # Lazy imports to avoid circular dependencies
         from src.core.actions.tool_registry import tool_registry
 
@@ -783,19 +462,32 @@ def _build_input_validator() -> PreHook:
         try:
             import jsonschema
         except ImportError:
-            logger.warning(
-                "jsonschema not installed — input schema validation disabled. "
+            # Fail-safe: if jsonschema is missing and tool has a schema,
+            # BLOCK the tool rather than silently skipping validation.
+            logger.error(
+                "jsonschema not installed — tool %r blocked (input schema "
+                "validation unavailable). Install with: pip install jsonschema",
+                ctx.tool_name,
+            )
+            ctx.blocked = True
+            ctx.block_reason = (
+                "Input validation unavailable: jsonschema not installed. "
                 "Install with: pip install jsonschema"
             )
-            return ctx  # jsonschema not available — skip validation
+            return None
 
         # Strip meta-params (underscore-prefixed, e.g. _confirmed)
         # before validation — they are added by execute(), not by the
         # tool's declared schema.
         clean_params = {k: v for k, v in ctx.params.items() if not k.startswith("_")}
 
-        try:
+        # ponytail: jsonschema.validate is CPU-bound for complex schemas.
+        # Run in executor to avoid blocking event loop (was: sync call).
+        def _validate() -> None:
             jsonschema.validate(instance=clean_params, schema=spec.input_schema)
+
+        try:
+            await asyncio.to_thread(_validate)
         except jsonschema.ValidationError as exc:
             ctx.blocked = True
             ctx.block_reason = f"Input validation failed: {exc.message}"

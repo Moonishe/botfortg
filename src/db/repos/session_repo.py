@@ -11,6 +11,7 @@ from datetime import datetime, UTC
 from itertools import count
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -198,6 +199,9 @@ async def upsert_self_profile(
 
     Списки/словари автоматически сериализуются в JSON (Text колонки).
     Переданные ``**kwargs`` применяются только если значение не None.
+
+    Race-safe: ``INSERT ... ON CONFLICT DO UPDATE ... RETURNING`` —
+    атомарный upsert, без отдельного read-check-write.
     """
     import json
 
@@ -207,15 +211,18 @@ async def upsert_self_profile(
             serialized[k] = (
                 json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v
             )
-    profile = await get_self_profile(session, user)
-    if profile is None:
-        profile = SelfProfile(user_id=user.id, **serialized)
-        session.add(profile)
-    else:
-        for k, v in serialized.items():
-            setattr(profile, k, v)
-    await session.flush()
-    return profile
+
+    stmt = (
+        insert(SelfProfile)
+        .values(user_id=user.id, **serialized)
+        .on_conflict_do_update(
+            index_elements=["user_id"],
+            set_=dict(serialized),
+        )
+        .returning(SelfProfile)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one()
 
 
 async def get_persona(session: AsyncSession, user: User) -> AdaptivePersona:

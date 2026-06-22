@@ -694,4 +694,10 @@ AGENT_SPECS: dict[str, AgentSpec] = {
     "draft": AgentSpec(name="draft", timeout=30, cache_ttl=60, purpose="draft"),
     "digest": AgentSpec(name="digest", timeout=30, cache_ttl=300, purpose="fallback"),
     "random": AgentSpec(name="random", timeout=60, cache_ttl=0, purpose="fallback"),
+    # IG4 fix: skill_creator and delegate were in AGENT_REGISTRY (agent_dispatcher.py)
+    # but missing from AGENT_SPECS → orchestrator returned "Unknown agent".
+    "skill_creator": AgentSpec(
+        name="skill_creator", timeout=60, cache_ttl=0, purpose="analysis"
+    ),
+    "delegate": AgentSpec(name="delegate", timeout=60, cache_ttl=0, purpose="fallback"),
 }

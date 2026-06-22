@@ -182,6 +182,9 @@ async def prefetch_contact(
 
         async with _CACHE_LOCK:
             await _cleanup_stale()
+            cached = _contact_cache.get(user_id)
+            if cached is not None and not _is_expired(cached):
+                return  # another coroutine already filled the cache
             _contact_cache[user_id] = _CachedEntry(
                 contacts=contacts,
                 resolved=resolved,

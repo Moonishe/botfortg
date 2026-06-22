@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
+from src.config import settings
+
 import httpx
 from bs4 import BeautifulSoup
 import feedparser
@@ -220,20 +222,16 @@ def _limit(params: dict[str, Any], default: int = 10, maximum: int = 50) -> int:
 
 
 def _headers(
-    token_env: str | None = None, cookie_env: str | None = None
+    token: str | None = None, cookie: str | None = None
 ) -> dict[str, str]:
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
     }
-    if token_env:
-        token_value = os.getenv(token_env)
-        if token_value:
-            headers["Authorization"] = f"Bearer {token_value}"
-    if cookie_env:
-        cookie_value = os.getenv(cookie_env)
-        if cookie_value:
-            headers["Cookie"] = cookie_value
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if cookie:
+        headers["Cookie"] = cookie
     return headers
 
 
@@ -331,7 +329,7 @@ async def _fetch_text(
 
 
 def _github_token_headers() -> dict[str, str]:
-    headers = _headers("GITHUB_TOKEN")
+    headers = _headers(token=os.getenv("GITHUB_TOKEN"))
     headers["Accept"] = "application/vnd.github+json"
     headers["X-GitHub-Api-Version"] = "2022-11-28"
     return headers
@@ -585,7 +583,7 @@ def _extract_links(
 async def _fourpda_handler(
     action: str, params: dict[str, Any], runtime: ConnectorRuntime
 ) -> ConnectorResult:
-    headers = _headers(cookie_env="FOURPDA_COOKIE")
+    headers = _headers(cookie=os.getenv("FOURPDA_COOKIE"))
     if action == "search_topics":
         query = str(params.get("query") or "").strip()
         if not query:
@@ -671,7 +669,7 @@ async def _fourpda_handler(
         html = await _fetch_text(url, headers=headers, allowed_hosts=FOURPDA_HOSTS)
         soup = BeautifulSoup(html, "html.parser")
         attachments = _extract_links(soup, url, attachment_only=True)[:limit]
-        if os.getenv("FOURPDA_ALLOW_RESTRICTED_DOWNLOADS") != "1":
+        if not settings.fourpda_allow_restricted_downloads:
             return ConnectorResult(
                 True,
                 data={
@@ -705,12 +703,12 @@ async def _fourpda_handler(
 async def _x_handler(
     action: str, params: dict[str, Any], runtime: ConnectorRuntime
 ) -> ConnectorResult:
-    token = os.getenv("X_BEARER_TOKEN")
+    token = settings.x_bearer_token
     if not token:
         return ConnectorResult(
             False, error="X_BEARER_TOKEN is required for X/Grok connector"
         )
-    headers = _headers("X_BEARER_TOKEN")
+    headers = _headers(token=settings.x_bearer_token)
     if action == "search_topics":
         query = str(params.get("query") or "").strip()
         if not query:
@@ -969,7 +967,7 @@ async def _x_rss_handler(
 def _genius_token_headers() -> dict[str, str]:
     """Заголовки с Genius-токеном."""
     headers = _headers()
-    token = os.getenv("GENIUS_ACCESS_TOKEN")
+    token = settings.genius_access_token
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
@@ -1060,7 +1058,7 @@ async def _scrape_genius_lyrics(song_url: str) -> str | None:
 async def _genius_handler(
     action: str, params: dict[str, Any], runtime: ConnectorRuntime
 ) -> ConnectorResult:
-    token = os.getenv("GENIUS_ACCESS_TOKEN")
+    token = settings.genius_access_token
     if not token:
         return ConnectorResult(False, error="GENIUS_ACCESS_TOKEN не задан")
 

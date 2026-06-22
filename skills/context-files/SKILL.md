@@ -1,3 +1,11 @@
+---
+name: context-files
+description: LLM-WIKI: Markdown-файлы с per-contact знаниями
+version: 1.0.0
+platforms: [telegram]
+tags: [wiki, context, llm, fts5]
+---
+
 # Context Files
 
 ## Purpose

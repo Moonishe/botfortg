@@ -70,6 +70,7 @@ _DISCOVERY_CACHE_TTL: float = 3600.0  # 1 час
 # Design trade-off: in-memory state resets on restart. Acceptable for single-user bot.
 _multiselect_state: dict[int, set[str]] = {}  # slot_id → {выбранные model names}
 _multiselect_page: dict[int, int] = {}  # slot_id → текущая страница
+_multiselect_lock = asyncio.Lock()
 
 # ─── Capability metadata для авто-обнаруженных моделей (Improvement 2) ─────
 _discovery_models_info: dict[int, list[dict]] = {}
@@ -331,56 +332,57 @@ async def _do_import_keys(
                 category=category,
             )
 
-        if not is_new:
-            results.append(
-                f"  #{slot.id} {detected}/{purpose} — Этот ключ уже добавлен (слот #{slot.id})"
-            )
-            total_found += 1
-            continue
-
-        # Валидируем (только для новых слотов)
-        try:
-            try:
-                key = decrypt(slot.key_enc)
-            except ValueError:
-                logger.warning("Key decryption failed for slot %d", slot.id)
-                async with get_session() as session:
-                    bad_slot = await session.get(LlmKeySlot, slot.id)
-                    if bad_slot:
-                        await session.delete(bad_slot)
-                        await session.flush()
-                results.append(f"  #{slot.id} — ❌ ключ повреждён")
-                continue
-            prov_class = _provider_class_for(detected)
-            if prov_class is None:
-                results.append(f"  #{slot.id} — провайдер {detected} не поддерживается")
-                continue
-            try:
-                prov = (
-                    prov_class(key, base_url=endpoint) if endpoint else prov_class(key)
+            if not is_new:
+                results.append(
+                    f"  #{slot.id} {detected}/{purpose} — Этот ключ уже добавлен (слот #{slot.id})"
                 )
-            except TypeError:
-                prov = prov_class(key)
+                total_found += 1
+                continue
+
+            # Валидируем (только для новых слотов) — внутри той же сессии
             try:
-                valid = await prov.validate_key()
-                if not valid:
-                    async with get_session() as session:
-                        owner = await get_or_create_user(session, message.from_user.id)
-                        bad_slot = await session.get(LlmKeySlot, slot.id)
-                        if bad_slot:
-                            await session.delete(bad_slot)
-                            await session.flush()
+                try:
+                    key = decrypt(slot.key_enc)
+                except ValueError:
+                    logger.warning("Key decryption failed for slot %d", slot.id)
+                    # ponytail: delete directly in outer session, no re-fetch needed
+                    await session.delete(slot)
+                    await session.flush()
+                    results.append(f"  #{slot.id} — ❌ ключ повреждён")
+                    continue
+                prov_class = _provider_class_for(detected)
+                if prov_class is None:
                     results.append(
-                        f"  #{slot.id} {detected}/{purpose} ❌ (не прошёл проверку)"
+                        f"  #{slot.id} — провайдер {detected} не поддерживается"
                     )
-                else:
-                    results.append(f"  #{slot.id} {detected}/{purpose} ✅")
-                    total_found += 1
-            finally:
-                await prov.close()
-        except Exception:
-            results.append(f"  #{slot.id} {detected}/{purpose} ✅ (ошибка проверки)")
-            total_found += 1
+                    continue
+                try:
+                    prov = (
+                        prov_class(key, base_url=endpoint)
+                        if endpoint
+                        else prov_class(key)
+                    )
+                except TypeError:
+                    prov = prov_class(key)
+                try:
+                    valid = await prov.validate_key()
+                    if not valid:
+                        # ponytail: delete directly in outer session
+                        await session.delete(slot)
+                        await session.flush()
+                        results.append(
+                            f"  #{slot.id} {detected}/{purpose} ❌ (не прошёл проверку)"
+                        )
+                    else:
+                        results.append(f"  #{slot.id} {detected}/{purpose} ✅")
+                        total_found += 1
+                finally:
+                    await prov.close()
+            except Exception:
+                results.append(
+                    f"  #{slot.id} {detected}/{purpose} ✅ (ошибка проверки)"
+                )
+                total_found += 1
 
     # Итоговое сообщение
     header = f"📥 <b>Импорт ключей</b> (purpose: {purpose})\n\n"
@@ -694,7 +696,8 @@ async def _show_model_discovery(message: Message, slot: LlmKeySlot) -> None:
         return
 
     # Инициализируем multi-select — пока ничего не выбрано
-    _multiselect_state[slot.id] = set()
+    async with _multiselect_lock:
+        _multiselect_state[slot.id] = set()
     _multiselect_page[slot.id] = 0
 
     await status_msg.edit_text(
@@ -764,57 +767,51 @@ async def cmd_keys(message: Message) -> None:
                     label=f"{provider}/{purpose}",
                     priority=priority,
                 )
-            if not is_new:
-                results.append(
-                    f"  #{slot.id} {provider}/{purpose} — Этот ключ уже добавлен (слот #{slot.id})"
-                )
-                success += 1
-                continue
-            # Валидируем ключ (только для новых слотов)
-            try:
-                try:
-                    key = decrypt(slot.key_enc)
-                except ValueError:
-                    logger.warning("Key decryption failed for slot %d", slot.id)
-                    async with get_session() as session:
-                        bad_slot = await session.get(LlmKeySlot, slot.id)
-                        if bad_slot:
-                            await session.delete(bad_slot)
-                            await session.flush()
-                    results.append(f"  #{slot.id} — ❌ ключ повреждён")
-                    failed += 1
-                    continue
-                prov_class = _provider_class_for(provider)
-                if prov_class is None:
+
+                if not is_new:
                     results.append(
-                        f"  #{slot.id} — провайдер {provider} не поддерживается"
+                        f"  #{slot.id} {provider}/{purpose} — Этот ключ уже добавлен (слот #{slot.id})"
                     )
-                    failed += 1
+                    success += 1
                     continue
-                prov = prov_class(key)
+                # Валидируем ключ (только для новых слотов) — внутри той же сессии
                 try:
-                    valid = await prov.validate_key()
-                    if not valid:
-                        async with get_session() as session:
-                            owner = await get_or_create_user(
-                                session, message.from_user.id
-                            )
-                            bad_slot = await session.get(LlmKeySlot, slot.id)
-                            if bad_slot:
-                                await session.delete(bad_slot)
-                                await session.flush()
-                        results.append(f"  #{slot.id} {provider}/{purpose} ❌")
+                    try:
+                        key = decrypt(slot.key_enc)
+                    except ValueError:
+                        logger.warning("Key decryption failed for slot %d", slot.id)
+                        # ponytail: delete directly in outer session, no re-fetch needed
+                        await session.delete(slot)
+                        await session.flush()
+                        results.append(f"  #{slot.id} — ❌ ключ повреждён")
                         failed += 1
-                    else:
-                        results.append(f"  #{slot.id} {provider}/{purpose} ✅")
-                        success += 1
-                finally:
-                    await prov.close()
-            except Exception:
-                results.append(
-                    f"  #{slot.id} {provider}/{purpose} ✅ (ошибка проверки)"
-                )
-                success += 1
+                        continue
+                    prov_class = _provider_class_for(provider)
+                    if prov_class is None:
+                        results.append(
+                            f"  #{slot.id} — провайдер {provider} не поддерживается"
+                        )
+                        failed += 1
+                        continue
+                    prov = prov_class(key)
+                    try:
+                        valid = await prov.validate_key()
+                        if not valid:
+                            # ponytail: delete directly in outer session
+                            await session.delete(slot)
+                            await session.flush()
+                            results.append(f"  #{slot.id} {provider}/{purpose} ❌")
+                            failed += 1
+                        else:
+                            results.append(f"  #{slot.id} {provider}/{purpose} ✅")
+                            success += 1
+                    finally:
+                        await prov.close()
+                except Exception:
+                    results.append(
+                        f"  #{slot.id} {provider}/{purpose} ✅ (ошибка проверки)"
+                    )
+                    success += 1
 
         if len(keys) == 1 and success == 1:
             kb = InlineKeyboardMarkup(
@@ -975,6 +972,13 @@ async def cmd_keys(message: Message) -> None:
             keys_text = keys_text.replace(",", "\n")
             await _do_import_keys(message, keys_text, purpose)
             return
+
+        # Clean up stale pending imports (>1h TTL) — ponytail: opportunistic cleanup,
+        # no background task needed, bounded by user count.
+        now = time.monotonic()
+        for uid in list(_PENDING_IMPORTS):
+            if now - _PENDING_IMPORTS[uid].get("deadline", 0) > 3600:
+                del _PENDING_IMPORTS[uid]
 
         # Иначе — ждём следующего сообщения
         _PENDING_IMPORTS[message.from_user.id] = {
@@ -1399,7 +1403,8 @@ async def cb_multiselect_toggle(callback: CallbackQuery):
             selected.discard(model_name)
         else:
             selected.add(model_name)
-    _multiselect_state[slot_id] = selected
+    async with _multiselect_lock:
+        _multiselect_state[slot_id] = selected
 
     if callback.message:
         await callback.message.edit_reply_markup(
@@ -1450,7 +1455,8 @@ async def cb_multiselect_all(callback: CallbackQuery):
         await callback.answer("Неверные данные.", show_alert=True)
         return
     models = _get_visible_models_for_slot(slot_id)
-    _multiselect_state[slot_id] = set(models)
+    async with _multiselect_lock:
+        _multiselect_state[slot_id] = set(models)
 
     if callback.message:
         await callback.message.edit_reply_markup(
@@ -1474,7 +1480,8 @@ async def cb_multiselect_none(callback: CallbackQuery):
         await callback.answer("Неверные данные.", show_alert=True)
         return
     models = _get_visible_models_for_slot(slot_id)
-    _multiselect_state[slot_id] = set()
+    async with _multiselect_lock:
+        _multiselect_state[slot_id] = set()
 
     if callback.message:
         await callback.message.edit_reply_markup(
@@ -1512,7 +1519,8 @@ async def cb_multiselect_filter(callback: CallbackQuery):
     selected = _multiselect_state.get(slot_id, set())
     # Убираем выбор с моделей, которых нет в отфильтрованном списке
     selected = selected & set(models)
-    _multiselect_state[slot_id] = selected
+    async with _multiselect_lock:
+        _multiselect_state[slot_id] = selected
     _multiselect_page[slot_id] = 0
 
     if callback.message:
@@ -1681,7 +1689,8 @@ async def _pending_key_entry_handler(message: Message) -> None:
         selected = _multiselect_state.get(slot_id, set())
         # Убираем выбор с моделей, которых нет в результате поиска
         selected = selected & set(filtered)
-        _multiselect_state[slot_id] = selected
+        async with _multiselect_lock:
+            _multiselect_state[slot_id] = selected
         _multiselect_page[slot_id] = 0
 
         await message.answer(

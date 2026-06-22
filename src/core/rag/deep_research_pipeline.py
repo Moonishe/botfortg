@@ -61,6 +61,9 @@ class DeepResearchPipeline:
         self._user: Any = None
         self._provider: Any = None
         self._progress_callback: ProgressCallback | None = None
+        # P5 fix: per-job callback map — was: singleton _progress_callback
+        # overwritten by concurrent jobs → progress updates went to wrong chat.
+        self._job_callbacks: dict[str, ProgressCallback] = {}
         self._pending_tasks: dict[str, asyncio.Task[None]] = {}
         """Фоновые задачи фазы 1 по job_id — для возможности отмены при shutdown."""
 
@@ -76,7 +79,9 @@ class DeepResearchPipeline:
         self._session = session
         self._user = user
 
-    def set_progress_callback(self, callback: ProgressCallback | None) -> None:
+    def set_progress_callback(
+        self, callback: ProgressCallback | None, job_id: str | None = None
+    ) -> None:
         """Установить callback для оповещений о прогрессе исследования.
 
         Callback вызывается с сигнатурой (job_id: str, phase: str, detail: str).
@@ -84,19 +89,64 @@ class DeepResearchPipeline:
 
         Args:
             callback: Асинхронная функция оповещения или None.
+            job_id: Если передан — callback устанавливается только для этого job
+                    (per-job callback). Иначе — глобальный callback (legacy).
         """
-        self._progress_callback = callback
+        if job_id is not None:
+            if callback is None:
+                self._job_callbacks.pop(job_id, None)
+            else:
+                self._job_callbacks[job_id] = callback
+        else:
+            self._progress_callback = callback
+
+    async def shutdown(self, timeout: float = 10.0) -> None:
+        """D3: Graceful shutdown — cancel all pending tasks and cleanup.
+
+        Cancels all running phase1 tasks, waits up to *timeout* seconds
+        for them to finish, then clears jobs and callbacks.
+        """
+        logger.info(
+            "DeepResearchPipeline shutdown: %d pending tasks, %d jobs",
+            len(self._pending_tasks),
+            len(self._jobs),
+        )
+        # Cancel all pending tasks
+        tasks = list(self._pending_tasks.values())
+        for task in tasks:
+            task.cancel()
+        # Wait for cancellation with timeout
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "DeepResearch shutdown: %d tasks didn't finish in %.1fs",
+                    len(tasks),
+                    timeout,
+                )
+        # Clear all state
+        self._pending_tasks.clear()
+        self._job_callbacks.clear()
+        self._jobs.clear()
+        logger.info("DeepResearchPipeline shutdown complete")
 
     async def _notify_progress(self, job_id: str, phase: str, detail: str = "") -> None:
         """Отправить оповещение о прогрессе через callback (если задан).
 
-        Все ошибки внутри callback'а перехватываются — оповещения
-        не должны ломать конвейер.
+        P5 fix: per-job callback takes priority over global singleton.
+        All errors inside callback are caught — notifications must not
+        break the pipeline.
         """
-        if self._progress_callback is None:
+        # Per-job callback takes priority
+        cb = self._job_callbacks.get(job_id) or self._progress_callback
+        if cb is None:
             return
         try:
-            await self._progress_callback(job_id, phase, detail)
+            await cb(job_id, phase, detail)
         except Exception:
             logger.debug("Progress callback failed (non-critical)", exc_info=True)
 
@@ -142,10 +192,13 @@ class DeepResearchPipeline:
             name=f"deep-research-{result.job_id}",
         )
         self._pending_tasks[result.job_id] = task
-        # Автоочистка ссылки при завершении задачи (успех/отмена/ошибка)
-        task.add_done_callback(
-            lambda _t, jid=result.job_id: self._pending_tasks.pop(jid, None)
-        )
+
+        # Автоочистка ссылки + per-job callback при завершении задачи
+        def _on_done(_t: asyncio.Task[None], jid: str = result.job_id) -> None:
+            self._pending_tasks.pop(jid, None)
+            self._job_callbacks.pop(jid, None)  # P5: cleanup per-job callback
+
+        task.add_done_callback(_on_done)
 
         logger.info(
             "Deep research job %s submitted: query=%r max_minutes=%d",
@@ -469,6 +522,19 @@ class DeepResearchPipeline:
                 len(result.sources),
             )
 
+        except asyncio.CancelledError:
+            # D3 fix: handle CancelledError (BaseException, not Exception) —
+            # was: job stuck in PHASE1_RUNNING forever after cancellation.
+            # D4 guard: don't overwrite terminal states — CancelledError can
+            # arrive after COMPLETED assignment but before return (race at await point).
+            logger.info("Phase 1 cancelled for job %s", job_id)
+            if result.status not in (ResearchStatus.COMPLETED, ResearchStatus.FAILED):
+                result.status = ResearchStatus.FAILED
+                result.error = "Job cancelled"
+                result.completed_at = datetime.now(UTC)
+            await self._notify_progress(job_id, "failed", "💥 Исследование отменено")
+            raise  # re-raise to let asyncio handle task cancellation properly
+
         except Exception as exc:
             logger.exception("Phase 1 failed for job %s", job_id)
             result.status = ResearchStatus.FAILED
@@ -535,7 +601,9 @@ class DeepResearchPipeline:
             # Pre-request SSRF check on the original URL
             ssrf_error = await _check_ssrf_async(url)
             if ssrf_error:
-                logger.warning("SSRF blocked: %s — %s", url, ssrf_error.get("error", "unknown"))
+                logger.warning(
+                    "SSRF blocked: %s — %s", url, ssrf_error.get("error", "unknown")
+                )
                 return ""
 
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -553,7 +621,9 @@ class DeepResearchPipeline:
                     if ssrf_error:
                         logger.warning(
                             "SSRF blocked after redirect: %s -> %s — %s",
-                            url, final_url, ssrf_error.get("error", "unknown"),
+                            url,
+                            final_url,
+                            ssrf_error.get("error", "unknown"),
                         )
                         return ""
 
@@ -562,8 +632,6 @@ class DeepResearchPipeline:
         except Exception:
             logger.debug("Failed to fetch page content for %s", url, exc_info=True)
             return ""
-
-
 
     async def _do_fetch(self, query: str) -> list[ResearchSource]:
         """Непосредственно выполнить поиск через DuckDuckGo.
@@ -883,3 +951,26 @@ def get_deep_research_pipeline() -> DeepResearchPipeline:
     if _pipeline is None:
         _pipeline = DeepResearchPipeline()
     return _pipeline
+
+
+# ── IG1 fix: RESEARCH_COMPLETED subscriber ─────────────────────────────
+# Was: event emitted to 0 subscribers → research completion invisible to system.
+# Now: logs completion + records metrics for observability.
+@event_bus.on(RESEARCH_COMPLETED)
+async def _on_research_completed(job_id: str, result: Any) -> None:
+    """Log research completion for observability and metrics."""
+    topics = len(getattr(result, "topics", []))
+    sources = len(getattr(result, "sources", []))
+    duration = (
+        (result.completed_at - result.started_at).total_seconds()
+        if getattr(result, "completed_at", None) and getattr(result, "started_at", None)
+        else 0.0
+    )
+    logger.info(
+        "RESEARCH_COMPLETED: job=%s topics=%d sources=%d duration=%.1fs query=%r",
+        job_id,
+        topics,
+        sources,
+        duration,
+        getattr(result, "query", "")[:80],
+    )

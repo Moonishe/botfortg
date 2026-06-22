@@ -40,6 +40,9 @@ router.callback_query.filter(OwnerOnly())
 @router.callback_query(F.data.startswith("memb:"))
 async def cb_memory_inbox(callback: CallbackQuery) -> None:
     """Обрабатывает кнопки Inbox для MemoryCandidate."""
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно", show_alert=True)
+        return
 
     parts = callback.data.split(":")
     action = parts[1]
@@ -80,14 +83,14 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
                 confidence=0.5,
                 memory_type=None)
             await session.delete(candidate)
-            await callback.message.edit_text(  # type: ignore[union-attr]
+            await callback.message.edit_text(
                 f"✅ Запомнил: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт сохранён")
 
         elif action == "discard":
             await session.delete(candidate)
-            await callback.message.edit_text(  # type: ignore[union-attr]
+            await callback.message.edit_text(
                 f"🗑 Удалил: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт удалён")
@@ -106,7 +109,7 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
                 decay_rate=0.3,
                 confidence=0.5)
             await session.delete(candidate)
-            await callback.message.edit_text(  # type: ignore[union-attr]
+            await callback.message.edit_text(
                 f"⏳ Сохранено на неделю: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт сохранён временно")
@@ -125,14 +128,14 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
                 confidence=0.5,
                 memory_type=None)
             await session.delete(candidate)
-            await callback.message.edit_text(  # type: ignore[union-attr]
+            await callback.message.edit_text(
                 f"♾ Сохранено навсегда: <i>{sanitize_html(candidate.fact)}</i>"
             )
             await callback.answer("Факт сохранён навсегда")
 
         elif action == "edit":
             await session.delete(candidate)
-            await callback.message.edit_text(  # type: ignore[union-attr]
+            await callback.message.edit_text(
                 f"✏️ Напиши исправленный текст для факта:\n\n"
                 f"<i>{sanitize_html(candidate.fact)}</i>\n\n"
                 f"<code>/remember исправленный текст</code>"

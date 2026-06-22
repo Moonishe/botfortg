@@ -16,7 +16,7 @@ from src.core.actions.vector_store import get_vector_store
 from src.db.models import Message as DBMessage
 from src.db.repo import (
     FtsHit,
-    cross_chat_search,
+    fts_search,
     get_contact,
     get_or_create_user,
 )
@@ -155,12 +155,8 @@ async def cmd_search(
 
     # Шаг 1: FTS-поиск по всем чатам (кросс-чатовый)
     async with get_session() as session:
-        grouped = await cross_chat_search(session, owner, query, limit=30)
+        fts_hits = await fts_search(session, owner.id, query, limit=30)
 
-    # Если FTS ничего не дал — fallback на векторный / LIKE
-    fts_hits: list[FtsHit] = []
-    for peer_hits in grouped.values():
-        fts_hits.extend(peer_hits)
     fts_hits.sort(key=lambda h: h.rank)
 
     if not fts_hits and provider is not None:

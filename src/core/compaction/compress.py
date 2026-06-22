@@ -149,7 +149,8 @@ async def temporal_compress(
             confidence=0.9,
             memory_type="personal" if contact_id is None else "contact_fact",
             decay_rate=0.02,
-            deduplicate=False,)
+            deduplicate=False,
+        )
         if new_mem is None:
             continue
 
@@ -173,9 +174,6 @@ async def temporal_compress(
             result.facts_deactivated += 1
 
     await session.flush()
-    # ponytail: commit before vector I/O to release SQLite writer lock;
-    # Qdrant upsert is idempotent and can be retried next run if it fails.
-    await session.commit()
 
     # Upsert compressed facts into Qdrant with real embeddings if possible
     if vector_store is not None and compressed_entries:
@@ -184,7 +182,8 @@ async def temporal_compress(
 
         async def _upsert_one(
             new_mem: Memory, text: str, embedding: list[float]
-        ) -> None:
+        ) -> bool:
+            """Returns True on success, False on failure."""
             try:
                 await vector_store.upsert_memory(
                     memory_id=new_mem.id,
@@ -198,14 +197,16 @@ async def temporal_compress(
                     if new_mem.created_at
                     else None,
                 )
+                return True
             except Exception:
                 logger.warning(
                     "Failed to upsert compressed memory %d to Qdrant",
                     new_mem.id,
                     exc_info=True,
                 )
+                return False
 
-        await asyncio.gather(
+        upsert_results = await asyncio.gather(
             *(
                 _upsert_one(new_mem, text, embedding)
                 for (new_mem, text), embedding in zip(
@@ -214,6 +215,26 @@ async def temporal_compress(
             ),
             return_exceptions=True,
         )
+
+        # Check if any Qdrant upsert failed — if so, rollback to prevent
+        # DB↔Qdrant desync (old facts stay active, retry next cycle).
+        upsert_failures = sum(1 for r in upsert_results if r is not True)
+        if upsert_failures > 0:
+            logger.error(
+                "Compaction: %d/%d Qdrant upserts failed — rolling back "
+                "SQL commit to prevent DB↔Qdrant desync",
+                upsert_failures,
+                len(compressed_entries),
+            )
+            await session.rollback()
+            result.groups_compressed = 0
+            result.facts_deactivated = 0
+            result.facts_merged = 0
+            return result
+
+    # ponytail: commit AFTER Qdrant upsert — if vectors fail,
+    # SQL not committed, old facts stay active, retry next cycle.
+    await session.commit()
 
     return result
 

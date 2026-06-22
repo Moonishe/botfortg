@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-import re
 from typing import Any
 
-from src.llm.base import ChatMessage
+from src.agents._json_utils import extract_json_from_llm_response
+from src.config import settings
+from src.llm.base import ChatMessage, LLMProvider
 
 logger = logging.getLogger(__name__)
+
+_AGENT_TIMEOUT = 60.0  # seconds — agents are background tasks, 60s is generous
 
 SKILL_CREATOR_SYSTEM = """Ты — агент-аналитик AI-ассистента в Telegram. 
 Анализируй паттерны общения пользователя и предлагай новые навыки (skills) для ассистента.
@@ -52,8 +55,10 @@ SKILL_CREATOR_SYSTEM = """Ты — агент-аналитик AI-ассисте
 
 
 async def propose(
-    provider,
+    provider: LLMProvider,
     recent_messages: list[dict[str, Any]],
+    *,
+    max_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
     """Анализирует историю сообщений и предлагает новые навыки.
 
@@ -61,6 +66,8 @@ async def propose(
         provider: Объект LLMProvider с методом chat().
         recent_messages: Список сообщений вида
             [{"text": "...", "is_outgoing": bool, "timestamp": "..."}, ...].
+        max_tokens: Максимальное количество токенов для ответа LLM.
+                    Если None, используется settings.agent_token_budget.
 
     Returns:
         Список предложенных навыков:
@@ -82,6 +89,10 @@ async def propose(
     transcript = "\n".join(transcript_parts)
     if len(transcript) > 8000:
         transcript = transcript[-8000:]
+        space_idx = transcript.find(" ")
+        if space_idx > 0:
+            transcript = transcript[space_idx + 1 :]
+        logger.debug("skill_creator: truncated transcript to %d chars", len(transcript))
 
     user_msg = (
         f"Проанализируй историю сообщений пользователя и предложи новые навыки.\n\n"
@@ -90,31 +101,39 @@ async def propose(
         f"Предложи навыки в формате JSON-массива."
     )
 
+    effective_max_tokens = (
+        max_tokens if max_tokens is not None else settings.agent_token_budget
+    )
+
     try:
-        raw = await provider.chat(
-            [
-                ChatMessage(role="system", content=SKILL_CREATOR_SYSTEM),
-                ChatMessage(role="user", content=user_msg),
-            ],
-            heavy=True,
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=SKILL_CREATOR_SYSTEM),
+                    ChatMessage(role="user", content=user_msg),
+                ],
+                heavy=True,
+                max_tokens=effective_max_tokens,
+            ),
+            timeout=_AGENT_TIMEOUT,
         )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "skill_creator_agent: LLM call timed out after %ds", _AGENT_TIMEOUT
+        )
+        return []
     except Exception as e:
         logger.error("Skill creator agent LLM error: %s", e)
         return []
 
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
-        raw = re.sub(r"\n?\s*```\s*$", "", raw)
-
     try:
-        m = re.search(r"\[[\s\S]*\]", raw)
-        if m:
-            proposals = json.loads(m.group(0))
+        parsed = extract_json_from_llm_response(raw, default={"items": []})
+        if isinstance(parsed, dict):
+            proposals = parsed.get("items", [])
             if isinstance(proposals, list):
                 return proposals
-        logger.debug("Skill creator parse failed, raw: %s", raw[:200])
+        logger.warning("Skill creator parse failed, raw: %s", raw[:200])
         return []
-    except (json.JSONDecodeError, Exception) as e:
-        logger.debug("Skill creator parse error: %s, raw: %s", e, raw[:200])
+    except Exception as e:
+        logger.warning("Skill creator parse error: %s, raw: %s", e, raw[:200])
         return []

@@ -1,5 +1,6 @@
 """Memory Conflict Resolution — автоматическое разрешение противоречивых фактов."""
 
+import asyncio
 import logging
 from collections import defaultdict
 from src.core.scheduling.notification_queue import notification_queue
@@ -179,58 +180,64 @@ def format_conflicts(conflicts: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# overlap guard: предотвращает параллельный запуск conflict resolver
+_resolver_guard = asyncio.Lock()
+
+
 async def conflict_check_loop(owner_id: int):
     """Фоновый цикл: раз в 12 часов проверяет конфликты."""
-    import asyncio
     from src.core.infra.timeutil import get_user_tz, now_in_tz
     from src.db.models import Notification
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
     last_check_date = None
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = get_user_tz(owner)
-            now = now_in_tz(tz_name)
-            today = now.date()
-            if now.hour == 12 and last_check_date != today:
-                last_check_date = today
-                conflicts = await find_conflicts(owner_id)
-                if conflicts:
-                    text = format_conflicts(conflicts)
-                    kb = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="✅ Позитив актуален",
-                                    callback_data=f"conflict:resolve:{conflicts[0]['positive_id']}:{conflicts[0]['negative_id']}:positive_wins",
-                                ),
-                            ],
-                            [
-                                InlineKeyboardButton(
-                                    text="❌ Негатив актуален",
-                                    callback_data=f"conflict:resolve:{conflicts[0]['positive_id']}:{conflicts[0]['negative_id']}:negative_wins",
-                                ),
-                            ],
-                            [
-                                InlineKeyboardButton(
-                                    text="⏰ Оба устарели",
-                                    callback_data=f"conflict:resolve:{conflicts[0]['positive_id']}:{conflicts[0]['negative_id']}:both_stale",
-                                ),
-                            ],
-                        ]
-                    )
-                    await notification_queue.enqueue(
-                        topic="conflict",
-                        text=text,
-                        priority=Notification.PRIORITY_HIGH,
-                        reply_markup=kb,
-                    )
+        if _resolver_guard.locked():
             await asyncio.sleep(settings.conflict_resolver_interval_sec)
-        except Exception:
-            logger.exception("Conflict check error")
-            await asyncio.sleep(settings.conflict_resolver_interval_sec)
+            continue
+        async with _resolver_guard:
+            try:
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    tz_name = get_user_tz(owner)
+                now = now_in_tz(tz_name)
+                today = now.date()
+                if now.hour == 12 and last_check_date != today:
+                    last_check_date = today
+                    conflicts = await find_conflicts(owner_id)
+                    if conflicts:
+                        text = format_conflicts(conflicts)
+                        kb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="✅ Позитив актуален",
+                                        callback_data=f"conflict:resolve:{conflicts[0]['positive_id']}:{conflicts[0]['negative_id']}:positive_wins",
+                                    ),
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        text="❌ Негатив актуален",
+                                        callback_data=f"conflict:resolve:{conflicts[0]['positive_id']}:{conflicts[0]['negative_id']}:negative_wins",
+                                    ),
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        text="⏰ Оба устарели",
+                                        callback_data=f"conflict:resolve:{conflicts[0]['positive_id']}:{conflicts[0]['negative_id']}:both_stale",
+                                    ),
+                                ],
+                            ]
+                        )
+                        await notification_queue.enqueue(
+                            topic="conflict",
+                            text=text,
+                            priority=Notification.PRIORITY_HIGH,
+                            reply_markup=kb,
+                        )
+            except Exception:
+                logger.exception("Conflict check error")
+        await asyncio.sleep(settings.conflict_resolver_interval_sec)
 
 
 from functools import partial

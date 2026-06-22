@@ -10,8 +10,11 @@ from src.db.repo import list_memories, get_or_create_user
 from src.db.session import get_session
 from src.config import settings
 from src.core.memory.memory_recall import bump_recall_version
+from src.core.infra.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
+
+_overlap_guard = asyncio.Lock()
 
 # Similarity threshold for consolidation
 SIM_THRESHOLD = 0.85
@@ -88,14 +91,17 @@ async def consolidate_memories(telegram_id: int) -> int:
 async def consolidation_loop() -> None:
     """Periodic consolidation — runs every 6 hours."""
     while True:
-        try:
-            count = await consolidate_memories(settings.owner_telegram_id)
-            if count:
-                logger.info("Memory consolidation: merged %d duplicate pairs", count)
-        except Exception:
-            logger.exception("Consolidation failed")
+        async with _overlap_guard:
+            try:
+                count = await consolidate_memories(settings.owner_telegram_id)
+                if count:
+                    logger.info("Memory consolidation: merged %d duplicate pairs", count)
+            except Exception:
+                logger.exception("Consolidation failed")
         await asyncio.sleep(settings.memory_consolidation_interval_sec)  # 6 hours
 
 
-# NOTE: registration moved to dream_cycle.py (unified nightly job).
-# task_manager.register("memory-consolidator", partial(consolidation_loop))
+# NOTE: originally planned to move to dream_cycle.py (unified nightly job),
+# but that module is not yet imported. Standalone registration for now.
+# TODO(B3-fix): migrate to dream_cycle.py once dream_cycle.py is importable.
+task_manager.register("memory-consolidator", consolidation_loop)

@@ -48,8 +48,10 @@ class SnapshotEngine:
 
         def _write() -> None:
             os.makedirs(os.path.dirname(_SNAPSHOT_PATH), exist_ok=True)
-            with open(_SNAPSHOT_PATH, "w", encoding="utf-8") as f:
+            tmp_path = _SNAPSHOT_PATH + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, ensure_ascii=False, default=str)
+            os.replace(tmp_path, _SNAPSHOT_PATH)  # atomic on same filesystem
 
         await asyncio.to_thread(_write)
         logger.info("Snapshot saved to %s", _SNAPSHOT_PATH)

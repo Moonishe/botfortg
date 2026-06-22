@@ -17,13 +17,9 @@ class SettingsStates(StatesGroup):
     waiting_cloudflare_key = State()
     waiting_digest_time = State()
     waiting_news_time = State()
-    # waiting_lead_hours removed — dead code, no handler references.
     waiting_timezone = State()
     waiting_auto_reply_text = State()
     waiting_sync_interval = State()
-    waiting_quiet_hours_start = State()
-    waiting_quiet_hours_end = State()
-    # waiting_import_keys removed — dead code, no handler references.
     waiting_custom_instructions = State()
     waiting_alias = State()
     waiting_deepseek_key = State()
@@ -50,7 +46,6 @@ class DraftStates(StatesGroup):
 
 
 class OnboardingStates(StatesGroup):
-    # waiting_start removed — dead code, no handler references.
     waiting_login = State()
     waiting_provider_choice = State()  # новый: выбор провайдера инлайн-клавиатурой
     waiting_llm_key = State()

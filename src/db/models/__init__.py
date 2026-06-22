@@ -70,6 +70,7 @@ from src.db.models._session import (
     SessionContext,
 )
 from src.db.models._encryption import EncryptionKey
+from src.db.models._research import ResearchJob
 from src.db.models._timer import Timer
 
 __all__ = [
@@ -119,6 +120,7 @@ __all__ = [
     "Notification",
     "PendingAction",
     "PendingQuestion",
+    "ResearchJob",
     "ScheduledMessage",
     "SelfProfile",
     "SessionContext",

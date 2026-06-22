@@ -1,3 +1,11 @@
+---
+name: reminders
+description: Отслеживает обещания и дедлайны владельца
+version: 1.0.0
+platforms: [telegram]
+tags: [reminders, deadlines, commitments, scheduling]
+---
+
 # Reminders
 
 ## Purpose

@@ -387,7 +387,7 @@ _LLM_ANALYSIS_SEM = asyncio.Semaphore(3)
 
 def _cache_hash(params: SearchParams) -> str:
     return hashlib.sha256(
-        f"{params.city}:{params.query}:{params.price_min}:{params.price_max}".encode()
+        f"{params.city}:{params.query}:{params.category}:{params.price_min}:{params.price_max}".encode()
     ).hexdigest()
 
 
@@ -742,6 +742,3 @@ async def _llm_analyze_listings(
         *[_analyze_one(listing) for listing in to_analyze],
         return_exceptions=True,
     )
-
-
-

@@ -232,6 +232,10 @@ def _score_provider(name: str, now: float) -> float:
     - dict.get() атомарен в CPython (GIL)
     - поля _ProviderMetrics — простые типы (int/float), атомарное чтение
     - худший случай: score на слегка устаревших данных (метрики — soft state)
+
+    Функция синхронная (не async), поэтому asyncio.Lock недоступен.
+    При необходимости точной консистентности — вызывать из async-контекста
+    с копированием метрик под _PROVIDER_METRICS_LOCK.
     """
     metrics = _PROVIDER_METRICS.get(name)
     if metrics is None:
@@ -250,18 +254,22 @@ async def _check_key_circuit_breaker(cache_key: tuple[str, str]) -> bool:
 
     Returns False if the key is in OPEN state with active cooldown
     and ``try_half_open`` fails — caller should skip this key.
+
+    Держит _CIRCUIT_BREAKERS_LOCK всё время проверки —
+    предотвращает TOCTOU между is_ready() и try_half_open().
     """
     if _CIRCUIT_BREAKERS_LOCK is not None:
         async with _CIRCUIT_BREAKERS_LOCK:
             cb = _CIRCUIT_BREAKERS.get(cache_key)
+            if cb is None:
+                return True
+            now = asyncio.get_running_loop().time()
+            if cb.is_ready(now):
+                return True
+            return cb.try_half_open(now)
     else:
-        cb = None
-    if cb is None:
+        # Locks not initialized yet — no breaker, allow
         return True
-    now = asyncio.get_running_loop().time()
-    if cb.is_ready(now):
-        return True
-    return cb.try_half_open(now)
 
 
 def _make_cache_key(
@@ -501,6 +509,7 @@ _PURPOSE_SEMAPHORES: dict[str, asyncio.Semaphore] | None = (
 )
 
 _locks_initialized = False
+_init_lock = asyncio.Lock()  # ponytail: module-level lock for double-checked init; safe to create outside event loop in 3.10+
 
 
 async def ensure_locks_initialized() -> None:
@@ -508,13 +517,20 @@ async def ensure_locks_initialized() -> None:
 
     Вызывается при старте приложения — безопасная альтернатива lazy-init,
     который имеет race condition при первом обращении.
+
+    Double-checked locking через _init_lock предотвращает TOCTOU race:
+    две корутины не могут одновременно проскочить ``if not _locks_initialized``.
     """
     global \
         _PROVIDER_METRICS_LOCK, \
         _CIRCUIT_BREAKERS_LOCK, \
         _PURPOSE_SEMAPHORES, \
         _locks_initialized
-    if not _locks_initialized:
+    if _locks_initialized:
+        return
+    async with _init_lock:
+        if _locks_initialized:  # double-check
+            return
         _PROVIDER_METRICS_LOCK = asyncio.Lock()
         _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
         _PURPOSE_SEMAPHORES = {
@@ -537,14 +553,18 @@ def _trim_circuit_breakers_if_needed() -> None:
     Called by _record_key_failure (in this module) before inserting a new
     breaker. Removes the oldest CLOSED entries first; preserves
     OPEN/HALF_OPEN entries.
+
+    Сортировка: CLOSED первыми (удаляем самые старые по _last_touched),
+    затем не-CLOSED.
     """
     excess = len(_CIRCUIT_BREAKERS) - _CIRCUIT_BREAKERS_MAX_SIZE
     if excess <= 0:
         return
-    # Sort by last access time; remove oldest CLOSED entries first.
+    # Sort: CLOSED first (oldest _last_touched), then non-CLOSED.
+    # Negative _last_touched ensures oldest-CLOSED-first within the CLOSED group.
     ordered = sorted(
         _CIRCUIT_BREAKERS.items(),
-        key=lambda item: (item[1].state != _CircuitState.CLOSED, item[1]._last_touched),
+        key=lambda item: (item[1].state != _CircuitState.CLOSED, -item[1]._last_touched),
     )
     for key, _ in ordered[:excess]:
         del _CIRCUIT_BREAKERS[key]
@@ -563,7 +583,12 @@ async def acquire_purpose_slot(
         raise RuntimeError("ensure_locks_initialized() must be called at startup")
     sem = _PURPOSE_SEMAPHORES.get(purpose)
     if sem is None:
-        sem = _PURPOSE_SEMAPHORES.get("fallback", asyncio.Semaphore(1))
+        sem = _PURPOSE_SEMAPHORES.get("fallback")
+        if sem is None:
+            raise RuntimeError(
+                "Purpose semaphores not initialized — "
+                "call ensure_locks_initialized() first"
+            )
     try:
         await asyncio.wait_for(sem.acquire(), timeout=timeout)
         return sem
@@ -575,7 +600,10 @@ async def acquire_purpose_slot(
         )
         fallback = _PURPOSE_SEMAPHORES.get("fallback")
         if fallback is None:
-            fallback = asyncio.Semaphore(1)
+            raise RuntimeError(
+                "Fallback purpose semaphore not initialized — "
+                "call ensure_locks_initialized() first"
+            )
         await fallback.acquire()
         return fallback
 
@@ -640,7 +668,12 @@ async def _restore_cooldowns(slot_ids: list[int]) -> None:
             if not cooldown_slots:
                 return
 
-            now_mono = asyncio.get_running_loop().time()
+            try:
+                now_mono = asyncio.get_running_loop().time()
+            except RuntimeError:
+                # ponytail: fallback when called outside event loop (e.g. sync init path)
+                import time as _time_mod
+                now_mono = _time_mod.monotonic()
             restored_by_provider: dict[str, int] = {}
 
             if _CIRCUIT_BREAKERS_LOCK is None:

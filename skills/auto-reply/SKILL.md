@@ -1,3 +1,11 @@
+---
+name: auto-reply
+description: Автоматически отвечает в ЛС когда владелец оффлайн или спит
+version: 1.0.0
+platforms: [telegram]
+tags: [auto-reply, offline, generation]
+---
+
 # Auto-Reply
 
 ## Purpose

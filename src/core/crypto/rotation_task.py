@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 # Флаг для предотвращения множественного запуска
 _initialized: bool = False
 
+# overlap guard: предотвращает параллельный запуск цикла ротации
+_overlap_guard = asyncio.Lock()
+
 
 async def _rotate_keys_async() -> None:
     """Асинхронная ротация ключей с перешифрованием данных в БД."""
@@ -152,11 +155,15 @@ async def key_rotation_loop() -> None:
     interval_sec = settings.key_rotation_interval_days * 86400
 
     while True:
+        if _overlap_guard.locked():
+            await asyncio.sleep(interval_sec)
+            continue
+        async with _overlap_guard:
+            try:
+                await _rotate_keys_async()
+            except Exception:
+                logger.exception(
+                    "Ошибка в цикле ротации ключей — следующая попытка через %s дней",
+                    settings.key_rotation_interval_days,
+                )
         await asyncio.sleep(interval_sec)
-        try:
-            await _rotate_keys_async()
-        except Exception:
-            logger.exception(
-                "Ошибка в цикле ротации ключей — следующая попытка через %s дней",
-                settings.key_rotation_interval_days,
-            )

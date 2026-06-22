@@ -1,3 +1,11 @@
+---
+name: draft
+description: Генерирует черновики ответов с учётом стиля собеседника
+version: 1.0.0
+platforms: [telegram]
+tags: [draft, reply, generation]
+---
+
 # Draft
 
 ## Purpose

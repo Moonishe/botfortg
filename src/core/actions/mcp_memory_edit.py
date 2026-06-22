@@ -16,6 +16,7 @@ from typing import Any
 
 from src.core.actions.tool_registry import tool
 from src.db.repo import get_or_create_user
+from src.db.repos.memory_repo import get_memory_history
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
     ),
     category="memory",
     risk="high",
+    requires_confirmation=True,
     params={
         "action": "str — 'edit', 'history' или 'rollback'",
         "memory_id": "int — ID факта памяти",
@@ -83,8 +85,6 @@ async def mcp_memory_edit(
 
         # ── action = history ─────────────────────────────────────────
         if action == "history":
-            from src.db.repos.memory_repo import get_memory_history
-
             versions = await get_memory_history(session, owner, memory_id)
             if not versions:
                 return {
@@ -140,8 +140,6 @@ async def mcp_memory_edit(
                 await session.commit()
 
                 # Получаем актуальную историю после коммита
-                from src.db.repos.memory_repo import get_memory_history
-
                 versions = await get_memory_history(session, owner, memory_id)
                 history_count = len(versions)
 

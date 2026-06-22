@@ -488,15 +488,21 @@ class CacheManager:
             )
             return
 
+        _cleanup_guard = asyncio.Lock()
+
         async def _cleanup_loop():
             while True:
-                try:
+                if _cleanup_guard.locked():
                     await asyncio.sleep(interval)
-                    await self.cleanup_all()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("cache_manager.cleanup_all() failed")
+                    continue
+                async with _cleanup_guard:
+                    try:
+                        await asyncio.sleep(interval)
+                        await self.cleanup_all()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("cache_manager.cleanup_all() failed")
 
         self._cleanup_task = asyncio.create_task(_cleanup_loop())
 

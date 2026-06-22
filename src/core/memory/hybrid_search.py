@@ -41,8 +41,9 @@ def reciprocal_rank_fusion(
     """Combine two or three ranked result lists via Reciprocal Rank Fusion.
 
     Each input is a list of (id, score) tuples, sorted by relevance
-    (best first). The score is used as a weight multiplier in RRF so that
-    higher-relevance results contribute more, even at the same position.
+    (best first). Uses standard RRF (Reciprocal Rank Fusion) with
+    position-based scoring. Score values from input rankings are not used
+    as weights — only rank position matters.
 
     Args:
         vector_results: Ranked list of (memory_id, cosine_score) from Qdrant.

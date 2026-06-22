@@ -19,6 +19,8 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 
 async def check_burnout(owner_telegram_id: int) -> str | None:
     """Check if the owner shows signs of burnout.
@@ -108,17 +110,18 @@ async def check_burnout(owner_telegram_id: int) -> str | None:
 async def burnout_loop(owner_telegram_id: int) -> None:
     """Periodic burnout check loop — runs every 6 hours."""
     while True:
-        try:
-            msg = await check_burnout(owner_telegram_id)
-            if msg:
-                await notification_queue.enqueue(
-                    topic="wellness",
-                    text=msg,
-                    priority=Notification.PRIORITY_HIGH,
-                )
-                logger.info("Burnout detected, notification sent")
-        except Exception:
-            logger.debug("Burnout check failed", exc_info=True)
+        async with _overlap_guard:
+            try:
+                msg = await check_burnout(owner_telegram_id)
+                if msg:
+                    await notification_queue.enqueue(
+                        topic="wellness",
+                        text=msg,
+                        priority=Notification.PRIORITY_HIGH,
+                    )
+                    logger.info("Burnout detected, notification sent")
+            except Exception:
+                logger.debug("Burnout check failed", exc_info=True)
         await asyncio.sleep(21600)  # every 6 hours
 
 

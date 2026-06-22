@@ -6,12 +6,14 @@ from __future__ import annotations
 from datetime import datetime, UTC
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
     ForeignKey,
     Integer,
     JSON,
+    PrimaryKeyConstraint,
     String,
     Text,
 )
@@ -21,16 +23,27 @@ from ._base import Base
 
 
 class AgentCache(Base):
-    """Кэш результатов сабагентов."""
+    """Кэш результатов сабагентов.
+
+    Составной PK (user_id, cache_key) — кэш изолирован по пользователям.
+    # TODO: Alembic migration required for PK change.
+    """
 
     __tablename__ = "agent_cache"
 
-    cache_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    cache_key: Mapped[str] = mapped_column(String(128), nullable=False)
     result_json: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     ttl_seconds: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "cache_key"),
+    )
 
 
 class SelfProfile(Base):

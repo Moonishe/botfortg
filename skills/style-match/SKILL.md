@@ -1,3 +1,11 @@
+---
+name: style-match
+description: Анализирует стиль общения и адаптирует ответы ассистента
+version: 1.0.0
+platforms: [telegram]
+tags: [style, profile, tone, adaptation]
+---
+
 # Style Match
 
 ## Purpose

@@ -33,6 +33,8 @@ SETTING_FIELDS: dict[str, str] = {
     "auto_reply_mode": "choice:static,smart",
     "auto_reply_text": "str",
     "auto_reply_cooldown_min": "int",
+    "auto_reply_close_contacts": "bool",
+    "notify_on_auto_reply": "bool",
     "digest_enabled": "bool",
     "digest_time": "hm",
     "news_enabled": "bool",

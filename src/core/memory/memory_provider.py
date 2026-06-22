@@ -138,13 +138,12 @@ class QdrantMemoryBackend(VectorMemoryBackend):
         ]
 
     async def delete(self, user_id: int, peer_id: int | None = None) -> int:
-        """Удалить точки.  Сейчас удаляет коллекцию целиком для простоты;
-        в production следует использовать delete_points с фильтром."""
-        logger.warning(
-            "QdrantMemoryProvider.delete — заглушка: удаляет всю коллекцию %s",
-            self._collection,
-        )
-        return await asyncio.to_thread(self._client.delete_collection, self._collection)
+        """Удалить точки пользователя через фильтр VectorStore.
+
+        # ponytail: VectorStore.delete не атомарен (count → delete),
+        # но в пределах asyncio.Lock защищён от гонок с upsert/search.
+        """
+        return await self._vs.delete(user_id=user_id, peer_id=peer_id)
 
     async def count(self, user_id: int) -> int:
         result = await asyncio.to_thread(

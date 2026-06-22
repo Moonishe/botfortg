@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
 from src.core.actions.tool_registry import tool
 from src.core.scheduling.cron.parser import (
@@ -158,7 +158,7 @@ async def cron_create(
     _uid = _resolve_user_id(user_id, kwargs)
     if _uid is None:
         return {"success": False, "error": "user_id does not match caller identity"}
-    user_id = _uid  # type: ignore[assignment]
+    user_id = cast(int, _uid)
     if not name or not name.strip():
         return {
             "success": False,
@@ -319,7 +319,7 @@ async def cron_list(
     _uid = _resolve_user_id(user_id, kwargs)
     if _uid is None:
         return {"success": False, "error": "user_id does not match caller identity"}
-    user_id = _uid  # type: ignore[assignment]
+    user_id = cast(int, _uid)
     from src.db.repos.cron_repo import list_user_jobs
     from src.db.session import get_session
 
@@ -399,7 +399,7 @@ async def cron_delete(job_id: int, user_id: int, **kwargs: Any) -> dict[str, Any
     _uid = _resolve_user_id(user_id, kwargs)
     if _uid is None:
         return {"success": False, "error": "user_id does not match caller identity"}
-    user_id = _uid  # type: ignore[assignment]
+    user_id = cast(int, _uid)
     from src.db.repos.cron_repo import delete_cron_job
     from src.db.session import get_session
 
@@ -454,7 +454,7 @@ async def cron_toggle(
     _uid = _resolve_user_id(user_id, kwargs)
     if _uid is None:
         return {"success": False, "error": "user_id does not match caller identity"}
-    user_id = _uid  # type: ignore[assignment]
+    user_id = cast(int, _uid)
     from src.db.repos.cron_repo import update_cron_job
     from src.db.session import get_session
 
@@ -503,7 +503,7 @@ async def cron_info(job_id: int, user_id: int, **kwargs: Any) -> dict[str, Any]:
     _uid = _resolve_user_id(user_id, kwargs)
     if _uid is None:
         return {"success": False, "error": "user_id does not match caller identity"}
-    user_id = _uid  # type: ignore[assignment]
+    user_id = cast(int, _uid)
     from src.db.session import get_session
 
     async with get_session() as session:
@@ -618,7 +618,7 @@ async def cron_blueprint(
     _uid = _resolve_user_id(user_id, kwargs)
     if _uid is None:
         return {"success": False, "error": "user_id does not match caller identity"}
-    user_id = _uid  # type: ignore[assignment]
+    user_id = cast(int, _uid)
     bp = get_blueprint(blueprint_name)
     if bp is None:
         return {
@@ -752,7 +752,7 @@ async def cron_update(
     _uid = _resolve_user_id(user_id, kwargs)
     if _uid is None:
         return {"success": False, "error": "user_id does not match caller identity"}
-    user_id = _uid  # type: ignore[assignment]
+    user_id = cast(int, _uid)
     from src.db.repos.cron_repo import update_cron_job
     from src.db.session import get_session
 

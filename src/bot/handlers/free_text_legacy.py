@@ -129,12 +129,13 @@ async def _do_prefetch_contact(
                 except Exception:
                     logger.debug("Non-critical error", exc_info=True)
 
-        await prefetch_contact(
-            user_id,
-            contact_hint=contact_hint,
-            telethon_client=telethon_client,
-            owner=owner,
-        )
+            if owner is not None:
+                await prefetch_contact(
+                    user_id,
+                    contact_hint=contact_hint,
+                    telethon_client=telethon_client,
+                    owner=owner,
+                )
     except Exception:
         logger.debug(
             "_do_prefetch_contact failed for user=%d hint=%r",
@@ -403,9 +404,13 @@ async def _maybe_schedule_nl_goal(
         if session is None:
             async with get_session() as session_ctx:
                 user = await get_or_create_user(session_ctx, owner_telegram_id)
+                if user is None:
+                    return False
                 goal = await NLProgrammer().parse(text, session_ctx, user)
         else:
             user = await get_or_create_user(session, owner_telegram_id)
+            if user is None:
+                return False
             goal = await NLProgrammer().parse(text, session, user)
 
         if goal is None:
@@ -934,6 +939,9 @@ async def _process_text(
     if session is None:
         async with get_session() as session:
             owner_db = await get_or_create_user(session, owner_telegram_id)
+            if owner_db is None:
+                await message.answer("⚠️ Внутренняя ошибка. Попробуй ещё раз.")
+                return
             provider = await build_provider(
                 session, owner_db, purpose=purpose, task_type=TaskType.DEFAULT
             )
@@ -944,6 +952,9 @@ async def _process_text(
                 )
     else:
         owner_db = await get_or_create_user(session, owner_telegram_id)
+        if owner_db is None:
+            await message.answer("⚠️ Внутренняя ошибка. Попробуй ещё раз.")
+            return
         provider = await build_provider(
             session, owner_db, purpose=purpose, task_type=TaskType.DEFAULT
         )

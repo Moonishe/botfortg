@@ -68,6 +68,14 @@ class UnifiedDispatcher:
         # Defensive: plan=None → fallback to maestro
         if plan is None:
             logger.warning("dispatch() called with plan=None, falling back to maestro")
+            try:
+                await safe_answer(
+                    message, "⚠️ Внутренняя ошибка маршрутизации. Попробуй ещё раз."
+                )
+            except Exception:
+                logger.warning(
+                    "dispatcher: failed to send routing error message", exc_info=True
+                )
             return DispatchResult(
                 handled=False, route_mode="unknown", error="plan is None"
             )
@@ -134,9 +142,8 @@ class UnifiedDispatcher:
                 )
             except Exception as e:
                 logger.exception("UnifiedDispatcher fast_route failed")
-                handled = True
                 return DispatchResult(
-                    handled=True,
+                    handled=False,
                     route_mode="fast_route",
                     success=False,
                     error=safe_str(e)[:4000],

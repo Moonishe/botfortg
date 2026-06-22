@@ -348,6 +348,9 @@ async def rebuild_index(
 
 # ── Background task: watch and auto-index ──
 
+# overlap guard: предотвращает параллельный запуск watchdog
+_watchdog_guard = asyncio.Lock()
+
 
 async def _watch_and_reindex():
     """Background task that periodically re-indexes DOCUMENTS_DIR.
@@ -369,34 +372,38 @@ async def _watch_and_reindex():
     known_hashes: dict[str, str] = {}
 
     while True:
-        try:
-            files = await _scan_directory(directory)
+        if _watchdog_guard.locked():
+            await asyncio.sleep(settings.digest_check_sec)
+            continue
+        async with _watchdog_guard:
+            try:
+                files = await _scan_directory(directory)
 
-            for fpath in files:
-                try:
-                    fhash = await asyncio.to_thread(_compute_hash, fpath)
-                    fname = fpath.name
+                for fpath in files:
+                    try:
+                        fhash = await asyncio.to_thread(_compute_hash, fpath)
+                        fname = fpath.name
 
-                    if fname not in known_hashes or known_hashes[fname] != fhash:
-                        result = await ingest_file(fpath, user_id)
-                        if result.get("ok") and not result.get("skipped"):
-                            logger.info(
-                                "Auto-indexed '%s': %d chunks",
-                                fname,
-                                result.get("chunks", 0),
-                            )
-                        known_hashes[fname] = fhash
-                except Exception:
-                    continue
+                        if fname not in known_hashes or known_hashes[fname] != fhash:
+                            result = await ingest_file(fpath, user_id)
+                            if result.get("ok") and not result.get("skipped"):
+                                logger.info(
+                                    "Auto-indexed '%s': %d chunks",
+                                    fname,
+                                    result.get("chunks", 0),
+                                )
+                            known_hashes[fname] = fhash
+                    except Exception:
+                        continue
 
-            # Clean up hashes for deleted files
-            current_names = {f.name for f in files}
-            for name in list(known_hashes):
-                if name not in current_names:
-                    del known_hashes[name]
+                # Clean up hashes for deleted files
+                current_names = {f.name for f in files}
+                for name in list(known_hashes):
+                    if name not in current_names:
+                        del known_hashes[name]
 
-        except Exception:
-            logger.exception("watch_and_reindex iteration failed")
+            except Exception:
+                logger.exception("watch_and_reindex iteration failed")
 
         await asyncio.sleep(settings.digest_check_sec)  # reuse interval
 

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import asyncio
 import re
 
 from src.db.repo import get_or_create_user, list_memories
@@ -13,6 +14,8 @@ from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
+
+_overlap_guard = asyncio.Lock()
 
 DISTILLATION_PROMPT = """Ты сжимаешь факты памяти в одно связное знание.
 
@@ -140,37 +143,37 @@ async def run_distillation(owner_id: int, contact_id: int | None = None) -> dict
 
 async def distillation_loop(owner_id: int) -> None:
     """Фоновый цикл: раз в день (14:00) запускает дистилляцию общих фактов."""
-    import asyncio
 
     from src.core.infra.timeutil import get_user_tz, now_in_tz
     from src.db.models import Notification
 
     last_run_date = None
     while True:
-        try:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                tz_name = get_user_tz(owner)
-            now = now_in_tz(tz_name)
-            today = now.date()
-            if now.hour == 14 and last_run_date != today:
-                last_run_date = today
-                # Дистилляция общих фактов
-                result = await run_distillation(owner_id, contact_id=None)
-                if result["success"]:
-                    await notification_queue.enqueue(
-                        topic="knowledge_distillation",
-                        text=(
-                            f"🧠 <b>Дистилляция знаний:</b>\n"
-                            f"Сжато {result['deactivated']} фактов в одно знание:\n"
-                            f"<i>«{result['fact'][:200]}»</i>"
-                        ),
-                        priority=Notification.PRIORITY_MEDIUM,
-                    )
-            await asyncio.sleep(settings.knowledge_distiller_interval_sec)
-        except Exception:
-            logger.exception("Distillation loop error")
-            await asyncio.sleep(settings.knowledge_distiller_interval_sec)
+        async with _overlap_guard:
+            try:
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    tz_name = get_user_tz(owner)
+                now = now_in_tz(tz_name)
+                today = now.date()
+                if now.hour == 14 and last_run_date != today:
+                    last_run_date = today
+                    # Дистилляция общих фактов
+                    result = await run_distillation(owner_id, contact_id=None)
+                    if result["success"]:
+                        await notification_queue.enqueue(
+                            topic="knowledge_distillation",
+                            text=(
+                                f"🧠 <b>Дистилляция знаний:</b>\n"
+                                f"Сжато {result['deactivated']} фактов в одно знание:\n"
+                                f"<i>«{result['fact'][:200]}»</i>"
+                            ),
+                            priority=Notification.PRIORITY_MEDIUM,
+                        )
+                await asyncio.sleep(settings.knowledge_distiller_interval_sec)
+            except Exception:
+                logger.exception("Distillation loop error")
+                await asyncio.sleep(settings.knowledge_distiller_interval_sec)
 
 
 from functools import partial

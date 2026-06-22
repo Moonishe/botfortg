@@ -26,6 +26,7 @@ from src.userbot.manager import UserbotManager
 from httpx import RequestError, HTTPStatusError
 from aiogram.exceptions import TelegramAPIError
 
+from src.core.infra.task_manager import track_ff
 from src.core.security.prompt_injection_scanner import scan_content
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ def start_voice_worker() -> list[asyncio.Task]:
     global _voice_worker_tasks
     if not _voice_worker_tasks or all(t.done() for t in _voice_worker_tasks):
         _voice_worker_tasks = [
-            asyncio.create_task(_voice_worker(), name=f"voice-transcription-worker-{i}")
+            track_ff(asyncio.create_task(_voice_worker(), name=f"voice-transcription-worker-{i}"))
             for i in range(VOICE_WORKER_COUNT)
         ]
     return _voice_worker_tasks

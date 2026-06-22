@@ -338,10 +338,11 @@ class TestScannerEdgeCases:
         assert result.blocked
         assert result.category == "combining_chars"
 
-    def test_two_combining_chars_not_blocked(self):
-        """2 combining marks should NOT be blocked."""
+    def test_two_combining_chars_blocked(self):
+        """2 combining marks ARE blocked after security fix (threshold lowered from 3 to 1)."""
         result = scan_content("a\u0301\u0302b", "test")
-        assert not result.blocked
+        assert result.blocked
+        assert result.category == "combining_chars"
 
     def test_homoglyph_cyrillic_a(self):
         """Cyrillic 'а' (U+0430) substituted in 'ignore' should be caught."""

@@ -81,16 +81,38 @@ class AnthropicProvider(BaseLLMProvider):
         *,
         heavy: bool = False,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
+        # Anthropic prompt caching: system + last user message get cache_control
+        # breakpoints. Cache TTL is 5 minutes (ephemeral). Saves ~90% on repeated
+        # system prompts. See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
         system, anthropic_messages = self._convert_messages(messages)
         model = self._resolve_model(heavy)
         kwargs: dict = {
             "model": model,
-            "max_tokens": 4000,
+            "max_tokens": max_tokens if max_tokens is not None else 4096,
             "messages": anthropic_messages,
         }
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
+        # Add cache breakpoint to last user message for rolling window cache
+        if anthropic_messages:
+            last_msg = anthropic_messages[-1]
+            if last_msg.get("role") == "user" and isinstance(
+                last_msg.get("content"), str
+            ):
+                anthropic_messages[-1] = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": last_msg["content"],
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
         resp = await self._client.messages.create(**kwargs)
         # Anthropic returns content as list of blocks
         for block in resp.content or []:
@@ -104,16 +126,37 @@ class AnthropicProvider(BaseLLMProvider):
         *,
         heavy: bool = False,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
+        # Anthropic prompt caching: system + last user message get cache_control
+        # breakpoints. See chat() for full explanation.
         system, anthropic_messages = self._convert_messages(messages)
         model = self._resolve_model(heavy)
         kwargs: dict = {
             "model": model,
-            "max_tokens": 4000,
+            "max_tokens": max_tokens if max_tokens is not None else 4096,
             "messages": anthropic_messages,
         }
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
+        # Add cache breakpoint to last user message for rolling window cache
+        if anthropic_messages:
+            last_msg = anthropic_messages[-1]
+            if last_msg.get("role") == "user" and isinstance(
+                last_msg.get("content"), str
+            ):
+                anthropic_messages[-1] = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": last_msg["content"],
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
         async with self._client.messages.stream(**kwargs) as stream:
             async for event in stream:
                 if event.type == "content_block_delta" and hasattr(event.delta, "text"):

@@ -1024,12 +1024,14 @@ class TestPromptInjectionScanner:
         assert "combining" in result
 
     def test_check_combining_chars_two_only(self) -> None:
-        """PI-14c: _check_combining_chars passes for only 2 combining chars."""
+        """PI-14c: _check_combining_chars blocks 2 combining chars (threshold lowered from 3 to 1 for security)."""
         from src.core.security.prompt_injection_scanner import _check_combining_chars
 
-        # Only two combining chars — should pass
+        # Two combining chars — now blocked after security fix
         benign = "a\u0301\u0301"
-        assert _check_combining_chars(benign) is None
+        result = _check_combining_chars(benign)
+        assert result is not None
+        assert "combining" in result
 
     def test_scan_combining_chars_triggered(self) -> None:
         """PI-14d: scan_content blocks content with excessive combining chars."""

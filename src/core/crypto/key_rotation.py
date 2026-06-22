@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Awaitable, Callable
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING, Any
@@ -57,10 +58,13 @@ class KeyRotationManager:
         self._active_key_id: int | None = None
         # Защита от конкурентной ротации (только один rotate за раз)
         self._lock = asyncio.Lock()
+        # ponytail: threading.Lock for sync access from decrypt() threads.
+        # asyncio.Lock can't be acquired from sync code (to_thread workers).
+        self._deks_lock = threading.Lock()
         # Максимальное число DEK'ов в in-memory кэше.
         # При превышении — LRU-эвикция: удаляется самый старый (минимальный key_id),
-        # кроме активного. get_dek() возвращает только из кэша; при cache miss
-        # вызывайте load_from_db() для перезагрузки из БД.
+        # кроме активного. active_dek/get_all_dek_bytes() возвращают только из кэша;
+        # при cache miss вызывайте load_from_db() для перезагрузки из БД.
         self._MAX_CACHED_DEKS: int = 10
 
     @property
@@ -87,34 +91,17 @@ class KeyRotationManager:
             "только для шифрования/расшифровки DEK'ов."
         )
 
-    @property
-    def dek_for_decryption(self) -> bytes:
-        """DEK для расшифровки (с KEK-fallback для обратной совместимости).
+    def get_all_dek_bytes(self) -> list[bytes]:
+        """Возвращает все известные DEK (active + historical) для decrypt fallback.
 
-        Используется ТОЛЬКО для расшифровки legacy-данных, которые
-        были зашифрованы напрямую KEK до внедрения DEK-ротации.
+        Public API для crypto.decrypt() — не обращается к _deks напрямую.
+        KEK не включается — он обрабатывается отдельно в decrypt fallback.
 
-        Returns:
-            DEK если загружен, иначе KEK (только для расшифровки).
+        Thread-safe: использует threading.Lock (вызывается из sync decrypt()
+        в asyncio.to_thread worker, где asyncio.Lock недоступен).
         """
-        if self._active_key_id is not None and self._active_key_id in self._deks:
-            return self._deks[self._active_key_id]
-        logger.warning(
-            "dek_for_decryption: DEK не загружен — возвращаю KEK как fallback "
-            "(только для расшифровки legacy-данных)"
-        )
-        return self._kek_bytes
-
-    def get_dek(self, key_id: int) -> bytes | None:
-        """Получить DEK по ID для расшифровки старых данных.
-
-        Args:
-            key_id: идентификатор ключа из таблицы encryption_keys.
-
-        Returns:
-            DEK в виде bytes (urlsafe-base64) или None, если ключ не найден.
-        """
-        return self._deks.get(key_id)
+        with self._deks_lock:
+            return list(self._deks.values())
 
     @property
     def active_key_id(self) -> int | None:
@@ -129,12 +116,15 @@ class KeyRotationManager:
         """LRU eviction: remove oldest non-protected keys until within cap."""
         if len(self._deks) <= self._MAX_CACHED_DEKS:
             return
-        evict_candidates = sorted(k for k in self._deks if k != protect_key_id)
-        for old_id in evict_candidates:
-            self._deks.pop(old_id, None)
-            logger.debug("%s DEK key_id=%s", log_prefix, old_id)
-            if len(self._deks) <= self._MAX_CACHED_DEKS:
-                break
+        # ponytail: _deks_lock protects against concurrent get_all_dek_bytes()
+        # reads from sync decrypt() threads (asyncio.Lock can't be acquired there).
+        with self._deks_lock:
+            evict_candidates = sorted(k for k in self._deks if k != protect_key_id)
+            for old_id in evict_candidates:
+                self._deks.pop(old_id, None)
+                logger.debug("%s DEK key_id=%s", log_prefix, old_id)
+                if len(self._deks) <= self._MAX_CACHED_DEKS:
+                    break
 
     def _encrypt_dek(self, dek: bytes) -> str:
         """Шифрует DEK с помощью KEK для хранения в БД.

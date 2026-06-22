@@ -95,7 +95,7 @@ async def cmd_cancel(
 @router.message(Command("logout"))
 async def cmd_logout(message: Message, userbot_manager: UserbotManager) -> None:
     tg_id = message.from_user.id
-    await userbot_manager.remove_client(tg_id)
+    await userbot_manager.remove_client(tg_id, permanent=True)
     async with get_session() as session:
         user = await get_or_create_user(session, tg_id)
         await delete_telegram_session(session, user)

@@ -164,6 +164,7 @@ async def cb_export_config(callback: CallbackQuery) -> None:
             json_str.encode("utf-8"), filename="telegram_helper_config.json"
         ),
         caption="📤 Твой конфиг бота. Сохрани этот файл.\n\n"
+        "⚠️ Файл содержит зашифрованные API-ключи — не передавай его третьим лицам.\n"
         "Для восстановления используй 📥 Импорт конфига в настройках.",
     )
 
@@ -665,3 +666,14 @@ async def cancel_settings_state(message: Message, state: FSMContext) -> None:
     await state.clear()
     text, kb = await _render_menu(message.from_user.id)
     await message.answer(f"🚫 Отменено.\n\n{text}", reply_markup=kb)
+
+
+# =====================================================================
+#  NOOP catch-all — handles decorative "set:noop:*" callbacks silently
+# =====================================================================
+
+
+@router.callback_query(F.data.startswith("set:noop:"))
+async def cb_noop_catch_all(callback: CallbackQuery) -> None:
+    """Consume noop callbacks silently (decorative buttons)."""
+    await callback.answer()

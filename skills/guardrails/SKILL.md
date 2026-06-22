@@ -1,3 +1,11 @@
+---
+name: guardrails
+description: Risk-based система безопасности: оценивает риск каждого действия
+version: 1.0.0
+platforms: [telegram]
+tags: [security, risk, sanitize]
+---
+
 # Guardrails
 
 ## Purpose

@@ -194,7 +194,7 @@ async def cb_input_sync_interval(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer()
 
 
-@router.callback_query(F.data == SettingsCB.input("news_time"))
+@router.callback_query(F.data == SettingsCB.input("news_digest_time"))
 async def cb_input_news_time(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_news_time)
     await callback.message.answer(
@@ -208,27 +208,9 @@ async def cb_noop_news_topics(callback: CallbackQuery) -> None:
     await callback.answer("Открой /news_topics в меню команд", show_alert=True)
 
 
-# ── Тихие часы ──
-
-
-@router.callback_query(F.data == SettingsCB.input("quiet_hours_start"))
-async def cb_input_quiet_hours_start(
-    callback: CallbackQuery, state: FSMContext
-) -> None:
-    await state.set_state(SettingsStates.waiting_quiet_hours_start)
-    await callback.message.answer(
-        "Введи время начала тихих часов (HH:MM, например 23:00):"
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == SettingsCB.input("quiet_hours_end"))
-async def cb_input_quiet_hours_end(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(SettingsStates.waiting_quiet_hours_end)
-    await callback.message.answer(
-        "Введи время конца тихих часов (HH:MM, например 07:00):"
-    )
-    await callback.answer()
+# ponytail: quiet_hours FSM handlers removed — NL path via free_text_settings.py
+# (_exec_set_quiet_hours) handles DB write + cache invalidation directly.
+# Enforcement is in auto_reply_decision.py::decide().
 
 
 # ── Личность ──
@@ -637,41 +619,7 @@ async def step_sync_interval(message: Message, state: FSMContext) -> None:
     await message.answer(f"✅ Интервал авто-синка: <b>{secs} сек</b>")
 
 
-# ── Quiet hours ──
-
-
-@router.message(SettingsStates.waiting_quiet_hours_start)
-async def step_quiet_hours_start(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not HM_RE.match(text):
-        await message.answer("❌ Неверный формат. Введи HH:MM (например 23:00):")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        owner.settings.quiet_hours_start = text
-        await session.flush()
-    from src.bot.handlers.free_text_common import invalidate_settings_cache
-
-    await invalidate_settings_cache(message.from_user.id)
-    await state.clear()
-    await message.answer(f"✅ Тихие часы начало: <b>{text}</b>")
-
-
-@router.message(SettingsStates.waiting_quiet_hours_end)
-async def step_quiet_hours_end(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not HM_RE.match(text):
-        await message.answer("❌ Неверный формат. Введи HH:MM (например 07:00):")
-        return
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        owner.settings.quiet_hours_end = text
-        await session.flush()
-    from src.bot.handlers.free_text_common import invalidate_settings_cache
-
-    await invalidate_settings_cache(message.from_user.id)
-    await state.clear()
-    await message.answer(f"✅ Тихие часы конец: <b>{text}</b>")
+# ponytail: quiet_hours step handlers removed — NL path handles this directly.
 
 
 # ── Alias ──

@@ -43,8 +43,8 @@ async def test_remove_client_atomic_pop():
     async with mgr._clients_lock:
         mgr._clients[12345] = mock_client
 
-    # Remove — should pop atomically
-    await mgr.remove_client(12345)
+    # Remove — should pop atomically (permanent=True for log_out, default=False just disconnects)
+    await mgr.remove_client(12345, permanent=True)
 
     assert 12345 not in mgr._clients, (
         "Client should be removed from _clients after remove_client"
@@ -61,6 +61,26 @@ async def test_remove_client_nonexistent():
     mgr = UserbotManager()
     # Should not raise
     await mgr.remove_client(99999)
+
+
+@pytest.mark.asyncio
+async def test_remove_client_default_no_logout():
+    """remove_client with default permanent=False should NOT call log_out."""
+    from src.userbot.manager import UserbotManager
+
+    mgr = UserbotManager()
+    mock_client = MagicMock()
+    mock_client.log_out = AsyncMock()
+    mock_client.disconnect = AsyncMock()
+
+    async with mgr._clients_lock:
+        mgr._clients[67890] = mock_client
+
+    await mgr.remove_client(67890)  # permanent=False by default
+
+    assert 67890 not in mgr._clients
+    mock_client.log_out.assert_not_awaited()
+    mock_client.disconnect.assert_awaited_once()
 
 
 # ── Test health_check_loop atomic re-check ────────────────────────────────

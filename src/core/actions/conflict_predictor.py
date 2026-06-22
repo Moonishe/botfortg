@@ -177,20 +177,28 @@ def format_conflict_warnings(triggers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# overlap guard: предотвращает параллельный запуск predictor
+_predictor_guard = asyncio.Lock()
+
+
 async def conflict_predictor_loop(owner_id: int) -> None:
     """Фоновый цикл: проверка каждые 3 часа."""
     while True:
-        try:
-            triggers = await detect_silence_triggers(owner_id)
-            if triggers:
-                text = format_conflict_warnings(triggers)
-                await notification_queue.enqueue(
-                    topic="conflict",
-                    text=text,
-                    priority=Notification.PRIORITY_HIGH,
-                )
-        except Exception as e:
-            logger.exception("Conflict predictor error: %s", e)
+        if _predictor_guard.locked():
+            await asyncio.sleep(settings.conflict_predictor_interval_sec)
+            continue
+        async with _predictor_guard:
+            try:
+                triggers = await detect_silence_triggers(owner_id)
+                if triggers:
+                    text = format_conflict_warnings(triggers)
+                    await notification_queue.enqueue(
+                        topic="conflict",
+                        text=text,
+                        priority=Notification.PRIORITY_HIGH,
+                    )
+            except Exception as e:
+                logger.exception("Conflict predictor error: %s", e)
         await asyncio.sleep(settings.conflict_predictor_interval_sec)
 
 

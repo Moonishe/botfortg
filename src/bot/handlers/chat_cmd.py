@@ -1152,17 +1152,19 @@ async def cb_story(callback: CallbackQuery) -> None:
     from src.core.memory.memory_chain import build_chain_narrative
 
     narrative = await build_chain_narrative(peer_id, callback.from_user.id)
-    if callback.message:
-        if narrative:
-            await callback.message.edit_text(  # type: ignore[union-attr]
-                narrative,
-                reply_markup=_actions_keyboard(peer_id),
-            )
-        else:
-            await callback.message.edit_text(  # type: ignore[union-attr]
-                "Недостаточно данных для истории (нужно минимум 3 факта).",
-                reply_markup=_actions_keyboard(peer_id),
-            )
+    if callback.message is None:
+        await callback.answer()
+        return
+    if narrative:
+        await callback.message.edit_text(
+            narrative,
+            reply_markup=_actions_keyboard(peer_id),
+        )
+    else:
+        await callback.message.edit_text(
+            "Недостаточно данных для истории (нужно минимум 3 факта).",
+            reply_markup=_actions_keyboard(peer_id),
+        )
     await callback.answer()
 
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import inspect
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache, wraps
 from typing import Any
@@ -42,6 +43,30 @@ from src.core.actions.tool_middleware import (
 logger = logging.getLogger(__name__)
 
 CONFIRMATION_RISKS = {"high", "critical"}
+
+_check_fn_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _cached_check_fn(name: str, check_fn: Callable[[], bool], ttl: float) -> bool:
+    """Cache check_fn() result for ttl seconds (sync). ttl=0 disables cache."""
+    if ttl <= 0:
+        try:
+            return bool(check_fn())
+        except Exception:
+            logger.debug("check_fn for %r raised exception", name, exc_info=True)
+            return False
+    now = time.monotonic()
+    cached = _check_fn_cache.get(name)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+    try:
+        result = bool(check_fn())
+    except Exception:
+        logger.debug("check_fn for %r raised exception", name, exc_info=True)
+        result = False
+    _check_fn_cache[name] = (now + ttl, result)
+    return result
+
 
 # Keys whose values should be redacted in logs
 _REDACT_KEYS = frozenset(
@@ -150,6 +175,7 @@ class ToolSpec:
     output_schema: dict[str, Any] | None = None  # JSON Schema for return value
     action_metadata: dict[str, ToolActionMetadata] = field(default_factory=dict)
     check_fn: Callable[[], bool] | None = None
+    check_ttl: float = 30.0  # TTL in seconds for check_fn cache (0 = no cache)
     requires_env: list[str] = field(default_factory=list)
 
     def get_action_metadata(self, action: Any) -> ToolActionMetadata | None:
@@ -359,11 +385,7 @@ class ToolRegistry:
             return False
         if spec.check_fn is None:
             return True
-        try:
-            return bool(spec.check_fn())
-        except Exception:
-            logger.debug("check_fn for %r raised exception", name, exc_info=True)
-            return False
+        return _cached_check_fn(name, spec.check_fn, spec.check_ttl)
 
     def get_available_tools(self) -> list[ToolSpec]:
         """Return all tools whose ``check_fn`` (if any) passes.
@@ -797,7 +819,6 @@ class ToolRegistry:
     # Execution
     # ------------------------------------------------------------------
 
-
     def reset_budget(self) -> None:
         """Reset the iteration budget for a new request.
 
@@ -929,6 +950,7 @@ def tool(
     actions: dict[str, ToolActionSpec | dict[str, Any]] | None = None,
     action_metadata: dict[str, ToolActionMetadata | dict[str, Any]] | None = None,
     check_fn: Callable[[], bool] | None = None,
+    check_ttl: float = 30.0,
     requires_env: list[str] | None = None,
 ) -> Callable[[Callable[..., Awaitable[dict]]], Callable[..., Awaitable[dict]]]:
     """Decorator that registers an async function as a tool.
@@ -949,6 +971,8 @@ def tool(
         output_schema: Optional JSON Schema describing the return value.
         check_fn: Optional zero-argument callable returning ``True`` if the
             tool is currently available.
+        check_ttl: TTL in seconds for caching the ``check_fn`` result.
+            Set to ``0`` to disable caching (check every call). Default 30.0.
         requires_env: Optional list of env var names this tool depends on.
 
     Example::
@@ -982,6 +1006,7 @@ def tool(
             action_metadata=normalized_action_metadata,
             actions=tool_actions,
             check_fn=check_fn,
+            check_ttl=check_ttl,
             requires_env=requires_env or [],
         )
         tool_registry.register(spec)

@@ -1,6 +1,8 @@
 """Команда /analyze — полный анализ переписок."""
 
 import logging
+from collections.abc import Sequence
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -24,7 +26,7 @@ router.callback_query.filter(OwnerOnly())
 
 
 async def _resolve_contact_names(
-    contacts, names: list[str], userbot_manager, telegram_id: int
+    contacts, names: Sequence[str], userbot_manager, telegram_id: int
 ) -> tuple[list[int], list[str]]:
     """Пытается найти контакты по имени — точное совпадение → fuzzy через contact_resolver.
 

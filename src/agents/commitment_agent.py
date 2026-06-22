@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-import re
 from typing import Any
 
-from src.llm.base import ChatMessage
+from src.agents._json_utils import extract_json_from_llm_response
+from src.config import settings
+from src.llm.base import ChatMessage, LLMProvider
 
 logger = logging.getLogger(__name__)
+
+_AGENT_TIMEOUT = 60.0  # seconds — agents are background tasks, 60s is generous
 
 COMMITMENT_SYSTEM = """Ты — AI-ассистент. Извлеки обещания и дедлайны из переписки.
 Искать: явные обещания («сделаю», «пришлю», «договорились»), дедлайны, обязательства.
@@ -23,12 +26,16 @@ COMMITMENT_SYSTEM = """Ты — AI-ассистент. Извлеки обеща
 """
 
 
-async def extract(provider, messages_text: str) -> dict[str, Any]:
+async def extract(
+    provider: LLMProvider, messages_text: str, *, max_tokens: int | None = None
+) -> dict[str, Any]:
     """Извлекает обязательства из текста переписки.
 
     Args:
         provider: Объект LLMProvider с методом chat().
         messages_text: Текст переписки для анализа.
+        max_tokens: Максимальное количество токенов для ответа LLM.
+                    Если None, используется settings.agent_token_budget.
 
     Returns:
         Словарь с ключом commitments (список обещаний).
@@ -38,27 +45,31 @@ async def extract(provider, messages_text: str) -> dict[str, Any]:
 
     user_msg = f"Переписка:\n{messages_text[:3000]}"
 
+    effective_max_tokens = (
+        max_tokens if max_tokens is not None else settings.agent_token_budget
+    )
+
     try:
-        raw = await provider.chat(
-            [
-                ChatMessage(role="system", content=COMMITMENT_SYSTEM),
-                ChatMessage(role="user", content=user_msg),
-            ],
-            heavy=False,
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=COMMITMENT_SYSTEM),
+                    ChatMessage(role="user", content=user_msg),
+                ],
+                heavy=False,
+                max_tokens=effective_max_tokens,
+            ),
+            timeout=_AGENT_TIMEOUT,
         )
+    except asyncio.TimeoutError:
+        logger.warning("commitment_agent: LLM call timed out after %ds", _AGENT_TIMEOUT)
+        return {"commitments": []}
     except Exception as e:
         logger.error("Commitment agent LLM error: %s", e)
         return {"commitments": []}
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
-        raw = re.sub(r"\n?\s*```\s*$", "", raw)
-
     try:
-        m = re.search(r"\{[\s\S]*\}", raw)
-        if m:
-            return json.loads(m.group(0))
-        return {"commitments": []}
+        parsed = extract_json_from_llm_response(raw, default={"commitments": []})
+        return parsed if isinstance(parsed, dict) else {"commitments": []}
     except Exception:
-        logger.debug("Commitment parse failed: %s", raw[:100])
+        logger.warning("Commitment parse failed: %s", raw[:100])
         return {"commitments": []}

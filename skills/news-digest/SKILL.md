@@ -1,3 +1,11 @@
+---
+name: news-digest
+description: Собирает посты из каналов и генерирует сводку через LLM
+version: 1.0.0
+platforms: [telegram]
+tags: [news, digest, channels, llm]
+---
+
 # News Digest
 
 ## Purpose

@@ -35,9 +35,9 @@ def _entity_display_name(entity: object) -> str:
         name = " ".join(p for p in parts if p).strip()
         if name:
             return name
-        if getattr(entity, "username", None):
-            return f"@{entity.username}"
-        return f"User {entity.id}"
+        if username := getattr(entity, "username", None):
+            return f"@{username}"
+        return f"User {getattr(entity, 'id', '')}"
     title = getattr(entity, "title", None)
     return title or f"Chat {getattr(entity, 'id', '')}"
 

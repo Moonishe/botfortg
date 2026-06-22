@@ -17,11 +17,16 @@ import json as _json
 import logging
 from dataclasses import dataclass, field
 
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from aiogram.types import InlineKeyboardMarkup
+
+# ADR-001: Core builds InlineKeyboardMarkup via lazy import inside functions.
+# This is a deliberate choice: callback_data strings are domain logic (peer_id,
+# action types), separating them from rendering would add a data/render split
+# (~55 LoC) with minimal benefit for a single-frontend project.
+# Full split: move _actions_keyboard to src/bot/keyboards/, return dataclass.
 
 from src.core.humanizer import (
     analyze_ai_score as _analyze_ai_score,
@@ -69,7 +74,7 @@ class ChatActionResult:
 
     html: str  # HTML-текст результата
     display_name: str  # имя контакта для заголовка
-    markup: InlineKeyboardMarkup | None = None  # инлайн-клавиатура
+    markup: "InlineKeyboardMarkup | None" = None  # инлайн-клавиатура
     raw_items: list[dict] = field(default_factory=list)  # извлечённые данные
 
 
@@ -201,6 +206,9 @@ async def draft_reply_action(
     limit: int = 50,
 ) -> ChatActionResult | None:
     """Черновик ответа контакту. Создаёт pending action для подтверждения отправки."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+
     ctx = await _load_chat_context(telegram_id, peer_id, limit=limit)
     if ctx is None:
         return None
@@ -476,8 +484,11 @@ async def load_working_memory_context(telegram_id: int) -> str:
 # ── Shared keyboard ─────────────────────────────────────────────────────
 
 
-def _actions_keyboard(peer_id: int) -> InlineKeyboardMarkup:
+def _actions_keyboard(peer_id: int) -> "InlineKeyboardMarkup":
     """Кнопки дальнейших действий с чатом."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(

@@ -29,19 +29,26 @@ def test_type_captured_before_nullify():
     assert "_type = type" in _WRAPPER_TEMPLATE, (
         "_type = type must be captured before type is nullified"
     )
-    # Must use _type, not type, in exception handler
-    assert "_type(e).__name__" in _WRAPPER_TEMPLATE, (
-        "Exception handler must use _type(e).__name__"
+    # _type is deleted before user code runs — exception handler uses e.__class__.__name__
+    assert "e.__class__.__name__" in _WRAPPER_TEMPLATE, (
+        "Exception handler must use e.__class__.__name__ (not _type, which is deleted)"
     )
     # The bare f-string expression {type(e).__name__} must NOT appear
-    # (note: _type(e).__name__ contains this as substring, use braces to disambiguate)
     assert "{type(e).__name__}" not in _WRAPPER_TEMPLATE, (
-        "bare {type(e).__name__} f-string expr must not appear; use _type(e).__name__"
+        "bare {type(e).__name__} f-string expr must not appear;"
+        " type() is nullified in builtins"
     )
     # _type capture must precede BOTH the nullify loop AND the del builtins
     type_pos = _WRAPPER_TEMPLATE.index("_type = type")
     nullify_pos = _WRAPPER_TEMPLATE.index("for name in _DISALLOWED:")
+    # _type must be in the del statement (not left accessible to user code)
     del_pos = _WRAPPER_TEMPLATE.index("del _original_import, _safe_import")
+    assert (
+        "_type"
+        in _WRAPPER_TEMPLATE.split("del _original_import, _safe_import")[1].split("\n")[
+            0
+        ]
+    ), "_type must be deleted (must appear in del statement)"
     assert type_pos < nullify_pos < del_pos, (
         "_type capture must be before nullify loop, which is before del builtins"
     )
@@ -179,3 +186,22 @@ async def test_code_exec_exception_handling():
     assert "NoneType" not in error_msg, (
         f"type(e) returned None — _type capture failed. Error: {error_msg!r}"
     )
+
+
+# ── HIGH: subscript bypass blocked ────────────────────────────────────
+
+
+def test_subscript_bypass_blocked():
+    """Subscript access to blacklisted attrs must be blocked."""
+    code = 'obj.__dict__["__subclasses__"]'
+    err = _check_sandbox_safety(code)
+    assert err is not None, "Expected block for subscript bypass"
+    assert "not allowed" in err
+
+
+def test_subscript_bypass_blocked_simple():
+    """Direct subscript with blacklisted string must be blocked."""
+    code = 'd["__class__"]'
+    err = _check_sandbox_safety(code)
+    assert err is not None, "Expected block for d['__class__']"
+    assert "not allowed" in err

@@ -446,14 +446,10 @@ def track_ff(task: asyncio.Task) -> asyncio.Task:
     # immediately on an empty set (no-op), and we'd never remove it.
     if task.done():
         return task
-    # If no event loop is running yet (e.g. during module import),
-    # add without lock for bootstrapping.  At runtime the lock is used.
-    import contextlib
-
-    with contextlib.suppress(RuntimeError):
-        asyncio.get_running_loop()  # no-op check
-    _ff_tasks.add(task)
+    # Register callback BEFORE adding to set — prevents memory leak if
+    # task completes between the two operations (callback would never fire).
     task.add_done_callback(_ff_tasks.discard)
+    _ff_tasks.add(task)
     return task
 
 

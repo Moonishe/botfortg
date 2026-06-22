@@ -1133,8 +1133,9 @@ async def execute_instant(
             name = getattr(owner, "alias", None) or ""
     except Exception:
         logger.exception("execute_instant: DB/recall failed, using default greeting")
-        has_memory = False
-        has_session = False
+        # ponytail: assume existing user on DB error — safer than onboarding spam
+        has_memory = True
+        has_session = True
         name = ""
 
     if not has_memory and not has_session:
@@ -2050,6 +2051,11 @@ async def execute_maestro(
             )
         return MaestroResult(handled=False)
     except Exception:
+        logger.exception("execute_maestro failed")
+        try:
+            await safe_answer(message, "⚠️ Произошла ошибка. Попробуй ещё раз.")
+        except Exception:
+            pass  # don't crash on error notification
         try:
             from src.core.infra.hooks import hooks
 

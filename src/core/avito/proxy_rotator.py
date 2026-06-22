@@ -148,6 +148,17 @@ class ProxyRotator:
         """
         async with self._lock:
             now = time.time()
+            # Watchdog: сброс залипших "changing" прокси через 60 сек
+            for _pe in self._entries:
+                if _pe.status == "changing":
+                    _since = getattr(_pe, "_changing_since", None)
+                    if _since is not None and (now - _since) > 60:
+                        logger.warning(
+                            "ProxyRotator: proxy %s stuck 'changing' for >60s → cooldown",
+                            _safe_url(_pe.url, 50),
+                        )
+                        _pe.status = "cooldown"
+                        _pe.cooldown_until = now + self._cooldown_sec
             active = [
                 e
                 for e in self._entries
@@ -210,6 +221,7 @@ class ProxyRotator:
                 if proxy.type == "mobile" and proxy.change_ip_url:
                     # Мобильный прокси — пробуем сменить IP
                     proxy.status = "changing"
+                    proxy._changing_since = time.time()  # type: ignore[reportAttributeAccessIssue]  # ponytail: dynamic attr, no dataclass change, no dataclass change
                     logger.info(
                         "ProxyRotator: запуск смены IP для %s...",
                         _safe_url(proxy.url, 50),

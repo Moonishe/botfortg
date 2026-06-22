@@ -119,6 +119,8 @@ _CYR_TO_LAT: dict[str, str] = {
     "\u03b6": "z",  # ζ zeta
     "\u03b7": "n",  # η eta
     "\u03b9": "i",  # ι iota
+    "\u03b3": "y",  # γ gamma → y
+    "\u03bc": "u",  # μ mu → u
     # Greek uppercase
     "\u039f": "O",  # Ο omicron
     "\u039d": "N",  # Ν nu
@@ -130,6 +132,7 @@ _CYR_TO_LAT: dict[str, str] = {
     "\u03a7": "X",  # Χ chi
     "\u03a5": "Y",  # Υ upsilon — visually mimics Latin 'Y'
     "\u039c": "M",  # Μ mu
+    "\u0393": "G",  # Γ gamma → G
     "\u0397": "H",  # Η eta
     "\u0392": "B",  # Β beta
     "\u0399": "I",  # Ι iota
@@ -153,7 +156,7 @@ _INJECTION_AFTER_NORMALIZE = [
     r"override\s+(system\s+)?prompt",
 ]
 
-_COMBINING_RANGE = re.compile(r"[\u0300-\u036F\uFE00-\uFE0F\u1DC0-\u1DFF]{3,}")
+_COMBINING_RANGE = re.compile(r"[\u0300-\u036F\uFE00-\uFE0F\u1DC0-\u1DFF]{1,}")
 _BASE64_SUSPECT = re.compile(r"[A-Za-z0-9+/]{30,}={0,2}")
 
 _LEET_MAP: dict[str, str] = {

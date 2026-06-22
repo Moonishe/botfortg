@@ -53,12 +53,13 @@ class DeepSeekProvider(OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMPro
         *,
         heavy: bool = False,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> str:
         model = self._resolve_model(heavy)
-        resp = await self._client.chat.completions.create(
-            model=model,
-            messages=self._fmt_messages(messages),
-        )
+        kwargs: dict = {"model": model, "messages": self._fmt_messages(messages)}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        resp = await self._client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content or ""
 
     async def chat_stream(
@@ -67,12 +68,17 @@ class DeepSeekProvider(OpenAICompatToolMixin, OpenAICompatEmbedMixin, BaseLLMPro
         *,
         heavy: bool = False,
         task_type: str = "default",
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str]:
         model = self._resolve_model(heavy)
-        fmt = self._fmt_messages(messages)
-        stream = await self._client.chat.completions.create(
-            model=model, messages=fmt, stream=True
-        )
+        kwargs: dict = {
+            "model": model,
+            "messages": self._fmt_messages(messages),
+            "stream": True,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        stream = await self._client.chat.completions.create(**kwargs)
         async with stream:
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:

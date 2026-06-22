@@ -1,3 +1,11 @@
+---
+name: memory-recall
+description: Единая точка входа в подсистему памяти
+version: 1.0.0
+platforms: [telegram]
+tags: [memory, recall, semantic, mmr]
+---
+
 # Memory Recall
 
 ## Purpose

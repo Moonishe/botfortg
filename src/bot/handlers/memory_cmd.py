@@ -760,6 +760,30 @@ async def cb_memreval(callback: CallbackQuery, state: FSMContext) -> None:
                 state, callback.from_user.id, callback.message.chat.id
             )
 
+        elif action == "confirm":
+            # IG2 fix: "✏️ Исправить" button → enter FSM waiting_new_text state.
+            # Was: fell through to else → "Неизвестное действие".
+            # Same flow as /memory --correct <id>.
+            import time as _time
+
+            from src.bot.handlers.memory_correction import (
+                schedule_correction_ttl_cleanup,
+            )
+
+            await state.set_state(MemoryCorrectionStates.waiting_new_text)
+            await state.update_data(
+                memory_id=memory_id,
+                original_fact=mem.fact,
+                set_at_ts=_time.monotonic(),
+            )
+            await schedule_correction_ttl_cleanup(state, callback.message)
+            await callback.message.edit_text(
+                f"✏️ Введите новый текст для факта #{memory_id}:\n"
+                f"<i>Старый текст: {sanitize_html(mem.fact[:100])}</i>\n\n"
+                f"Или /cancel для отмены."
+            )
+            await callback.answer("Введите новый текст")
+
         else:
             await callback.answer("Неизвестное действие", show_alert=True)
 

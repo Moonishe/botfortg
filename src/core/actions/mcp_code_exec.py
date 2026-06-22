@@ -31,6 +31,7 @@ _SANDBOX_BLACKLIST = frozenset(
         "__getattr__",
         "__setattr__",
         "__delattr__",
+        "__dict__",
         "__dir__",
         "__format__",
         "__reduce__",
@@ -38,6 +39,7 @@ _SANDBOX_BLACKLIST = frozenset(
         "__sizeof__",
         "__traceback__",
         "tb_frame",
+        "tb_lasti",
         "tb_lineno",
         "tb_next",
         "f_back",
@@ -48,9 +50,29 @@ _SANDBOX_BLACKLIST = frozenset(
         "f_lineno",
         "f_locals",
         "f_trace",
+        "f_trace_lines",
+        "f_trace_opcodes",
         "cr_code",
         "cr_frame",
         "cr_globals",
+        "gi_frame",
+        "gi_code",
+        "ag_frame",
+        "ag_code",
+        "co_consts",
+        "co_names",
+        "co_code",
+        "co_filename",
+        "co_varnames",
+        "co_freevars",
+        "co_cellvars",
+        "cr_await",
+        "cr_origin",
+        "cr_running",
+        "gi_running",
+        "gi_yieldfrom",
+        "ag_running",
+        "ag_yieldfrom",
         "exec",
         "eval",
         "compile",
@@ -117,6 +139,7 @@ _DISALLOWED_IMPORTS = {
     "_thread",
     "pty",
     "atexit",
+    "builtins",
     "faulthandler",
 }
 
@@ -140,6 +163,21 @@ def _check_sandbox_safety(code: str) -> str | None:
         # Check attribute blacklist
         if isinstance(node, ast.Attribute) and node.attr in _SANDBOX_BLACKLIST:
             return f"Access to attribute '.{node.attr}' is not allowed in sandbox"
+
+        # Check subscript with string constant key (blocks obj['__subclasses__'] bypass)
+        if isinstance(node, ast.Subscript):
+            slice_val = node.slice
+            # Python 3.9+: slice is directly an ast.Constant
+            if isinstance(slice_val, ast.Constant) and isinstance(slice_val.value, str):
+                if slice_val.value in _SANDBOX_BLACKLIST:
+                    return f"Subscript access to '{slice_val.value}' is not allowed in sandbox"
+            # Handle ast.Index wrapper (removed in 3.9+, defense-in-depth for older Python)
+            _Index = getattr(ast, "Index", None)
+            if _Index is not None and isinstance(slice_val, _Index):
+                inner = slice_val.value  # type: ignore[attr-defined]
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    if inner.value in _SANDBOX_BLACKLIST:
+                        return f"Subscript access to '{inner.value}' is not allowed in sandbox"
 
         # Block disallowed imports at AST level (defense in depth)
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -195,7 +233,10 @@ try:
         pass  # RLIMITs недоступны на данной платформе
     del _resource
 except ImportError:
-    pass  # Windows — модуль resource отсутствует
+    # Windows — модуль resource отсутствует.
+    # RLIMITs не применяются; defence-in-depth обеспечивается через asyncio.wait_for timeout
+    # (см. proc.communicate() с asyncio.wait_for в вызывающем коде).
+    pass
 
 _SAFE_BUILTINS = {
     name: getattr(builtins, name)
@@ -243,7 +284,7 @@ _stderr = sys.stderr
 
 # Скрываем внутренние переменные от пользовательского кода
 # ponytail: _DISALLOWED captured via default arg in _safe_import, safe to del here
-del _original_import, _safe_import, _SAFE_BUILTINS, _DISALLOWED, builtins, sys
+del _original_import, _safe_import, _SAFE_BUILTINS, _DISALLOWED, builtins, sys, _type
 
 # Выполняем код пользователя
 try:
@@ -253,7 +294,7 @@ except MemoryError:
 except TimeoutError:
     print("Error: TimeoutError: превышен лимит CPU (5 сек)", file=_stderr)
 except Exception as e:
-    print(f"Error: {_type(e).__name__}: {e}", file=_stderr)
+    print(f"Error: {e.__class__.__name__}: {e}", file=_stderr)
 """
 
 

@@ -169,8 +169,8 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
 
             await invalidate_contact_digest(job.contact_id)
         except Exception:
-            logger.debug(
-                "Failed to invalidate digest for peer %d",
+            logger.warning(
+                "memory_queue: invalidate_contact_digest failed, cache may be stale (peer %d)",
                 job.contact_id,
                 exc_info=True,
             )
@@ -285,7 +285,7 @@ def _on_dlq_done(task: asyncio.Task) -> None:
         logger.exception("DLQ retry loop died unexpectedly", exc_info=exc)
         # Restart after a short delay to avoid tight crash loops.
         # Must acquire _worker_lock to avoid racing with stop_worker().
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _restart() -> None:
             if not _worker_lock.locked():

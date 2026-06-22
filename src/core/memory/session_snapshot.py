@@ -201,50 +201,75 @@ def format_snapshot(snapshot: dict[str, Any] | None) -> str:
 
     Returns:
         Compact text block for injection into the system prompt.
-        Returns empty string if the content is blocked by the injection scanner.
+        Returns empty string if all content is blocked by the injection scanner.
     """
     if not snapshot:
         return ""
 
     parts: list[str] = []
 
+    # Scan each section individually before combining
     _session_summary = snapshot.get("session_summary") or ""
     if _session_summary:
+        scan = scan_content(_session_summary, "session_snapshot:session_summary")
+        if scan.blocked:
+            logger.warning(
+                "session_snapshot: session_summary blocked by injection scanner: %s",
+                scan.message,
+            )
+            _session_summary = "[blocked]"
         parts.append(f"[КОНТЕКСТ СЕССИИ]\n{_session_summary}")
 
     _facts = snapshot.get("facts") or []
     if _facts:
-        parts.append(
-            "[ПАМЯТЬ] Используй факты естественно, не перечисляй списком:\n"
-            + "\n".join(f"- {f}" for f in _facts)
-        )
+        facts_text = "\n".join(f"- {f}" for f in _facts)
+        scan = scan_content(facts_text, "session_snapshot:facts")
+        if scan.blocked:
+            logger.warning(
+                "session_snapshot: facts blocked by injection scanner: %s",
+                scan.message,
+            )
+            facts_text = "[blocked]"
+        parts.append("[ПАМЯТЬ] Используй факты естественно, не перечисляй списком:\n" + facts_text)
 
     _digest = snapshot.get("contact_digest")
     if _digest:
+        contact_digest_text = ""
         _name = _digest.get("display_name") or "?"
         _contact_line = f"Контакт: {_name}"
         if snapshot.get("style"):
             _contact_line += f" | стиль: {snapshot['style']}"
-        parts.append(_contact_line)
+        contact_digest_text += _contact_line
 
         _promises = _digest.get("promises") or []
         if _promises:
             _promises_text = ", ".join(p.get("text", "") for p in _promises)
-            parts.append(f"Обещания: {_promises_text}")
+            contact_digest_text += f"\nОбещания: {_promises_text}"
 
         _risks = snapshot.get("risk_hints") or []
         if _risks:
-            parts.append(f"Риски: {', '.join(str(r) for r in _risks)}")
+            contact_digest_text += f"\nРиски: {', '.join(str(r) for r in _risks)}"
+
+        scan = scan_content(contact_digest_text, "session_snapshot:contact_digest")
+        if scan.blocked:
+            logger.warning(
+                "session_snapshot: contact_digest blocked by injection scanner: %s",
+                scan.message,
+            )
+            parts.append("[blocked]")
+        else:
+            parts.append(contact_digest_text)
 
     _pending = snapshot.get("pending_questions") or []
     if _pending:
-        parts.append(f"[ОЖИДАЮТ ОТВЕТА] {'; '.join(_pending)}")
+        pending_text = f"[ОЖИДАЮТ ОТВЕТА] {'; '.join(_pending)}"
+        scan = scan_content(pending_text, "session_snapshot:pending")
+        if scan.blocked:
+            logger.warning(
+                "session_snapshot: pending blocked by injection scanner: %s",
+                scan.message,
+            )
+            pending_text = "[blocked]"
+        parts.append(pending_text)
 
-    text = "\n\n".join(parts)
-    scan = scan_content(text, filename="session_snapshot")
-    if scan.blocked:
-        logger.warning(
-            "Session snapshot blocked by prompt injection scanner: %s", scan.message
-        )
-        return ""
-    return text
+    return "\n\n".join(parts)

@@ -99,15 +99,27 @@ async def deep_research(
 
     try:
         pipeline = get_deep_research_pipeline()
+        # P5 fix: configure pipeline with user so LLM-dependent features work
+        # (was: configure() never called → _user always None → memory seed,
+        # timeline, KG all dead). user comes from tool_registry execute kwargs.
+        user = kwargs.get("user")
+        if user is not None:
+            pipeline.configure(user=user)
         request = ResearchRequest(
             query=query.strip(),
             max_minutes=max_minutes,
         )
 
+        job_id = pipeline.submit(request)
+
         # Если есть Telegram-сообщение — включаем стриминг прогресса
+        # P5 fix: set per-job callback AFTER submit (need job_id), not before.
+        # Was: singleton callback overwritten by concurrent jobs.
         if _has_streaming:
             try:
-                pipeline.set_progress_callback(_build_progress_callback(message))
+                pipeline.set_progress_callback(
+                    _build_progress_callback(message), job_id=job_id
+                )
             except Exception:
                 logger.debug(
                     "Failed to set progress callback, falling back to logging",
@@ -115,10 +127,7 @@ async def deep_research(
                 )
                 _has_streaming = False
 
-        job_id = pipeline.submit(request)
-
-        # Если стриминг — редактируем сообщение с начальным статусом
-        if _has_streaming:
+            # Если стриминг — редактируем сообщение с начальным статусом
             try:
                 await message.edit_text(
                     f"🔍 **Deep Research** `{job_id[:8]}`\nЗапускаю исследование…\n\n📝 {query[:200]}"

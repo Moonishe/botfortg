@@ -6,13 +6,30 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from .base import ConnectorExposure, ConnectorHandler, ConnectorResult, ConnectorRuntime, ConnectorSpec
+from .base import (
+    ConnectorExposure,
+    ConnectorHandler,
+    ConnectorResult,
+    ConnectorRuntime,
+    ConnectorSpec,
+)
 from .credentials import redact_secrets
 from .sanitize import sanitize_untrusted
+from src.core.security.hardline_blocklist import check_params as _hardline_check
 
 logger = logging.getLogger(__name__)
 
 CONFIRMATION_RISKS = {"high", "critical"}
+
+
+def _err(error: str, **metadata: Any) -> dict[str, Any]:
+    """Canonical error response for connector execute()."""
+    return {
+        "ok": False,
+        "error": error or "Unknown error",
+        "data": None,
+        "metadata": metadata,
+    }
 
 
 @dataclass(frozen=True)
@@ -45,9 +62,13 @@ class ConnectorRegistry:
         return self._connectors.get(name.strip().lower())
 
     def list(self, *, exposure: ConnectorExposure = "all") -> list[dict[str, Any]]:
-        return [self.describe(name, exposure=exposure) for name in sorted(self._connectors)]
+        return [
+            self.describe(name, exposure=exposure) for name in sorted(self._connectors)
+        ]
 
-    def describe(self, name: str, *, exposure: ConnectorExposure = "all") -> dict[str, Any]:
+    def describe(
+        self, name: str, *, exposure: ConnectorExposure = "all"
+    ) -> dict[str, Any]:
         registered = self.get(name)
         if not registered:
             raise KeyError(f"Unknown connector: {name}")
@@ -96,42 +117,62 @@ class ConnectorRegistry:
     ) -> dict[str, Any]:
         registered = self.get(connector_name)
         if not registered:
-            return {"ok": False, "error": f"Unknown connector: {connector_name}", "data": None, "metadata": {}}
+            return _err(f"Unknown connector: {connector_name}")
 
         action = registered.spec.get_action(action_name)
         if not action:
-            return {
-                "ok": False,
-                "error": f"Unknown connector action: {connector_name}.{action_name}",
-                "data": None,
-                "metadata": {},
-            }
+            return _err(f"Unknown connector action: {connector_name}.{action_name}")
         if exposure == "read-only" and not action.read_only:
-            return {
-                "ok": False,
-                "error": "Connector action is not exposed in read-only mode",
-                "data": None,
-                "metadata": {"connector": connector_name, "action": action.name, "exposure": exposure},
-            }
+            return _err(
+                "Connector action is not exposed in read-only mode",
+                connector=connector_name,
+                action=action.name,
+                exposure=exposure,
+            )
         risk = action.risk.strip().lower()
-        if (action.requires_confirmation or risk in CONFIRMATION_RISKS) and not confirmed:
-            return {
-                "ok": False,
-                "error": "requires confirmation",
-                "data": None,
-                "metadata": {"connector": connector_name, "action": action.name, "risk": action.risk},
-            }
+        if (
+            action.requires_confirmation or risk in CONFIRMATION_RISKS
+        ) and not confirmed:
+            return _err(
+                "requires confirmation",
+                connector=connector_name,
+                action=action.name,
+                risk=action.risk,
+            )
+
+        # ── HARDLINE BLOCKLIST — блок ВСЕГДА, до выполнения handler ──
+        # Defense-in-depth: проверяем командные параметры даже в connector path.
+        hardline_block = _hardline_check(
+            f"{connector_name}.{action_name}", params or {}
+        )
+        if hardline_block is not None:
+            logger.warning(
+                "Hardline blocklist blocked connector %s.%s rule=%s",
+                connector_name,
+                action_name,
+                hardline_block.get("rule_id"),
+            )
+            # Extract error separately — hardline_block contains "error" key
+            # which would collide with _err's positional error param.
+            block_error = hardline_block.get("error", "blocked by hardline blocklist")
+            block_meta = {k: v for k, v in hardline_block.items() if k != "error"}
+            return _err(
+                block_error,
+                connector=connector_name,
+                action=action.name,
+                **block_meta,
+            )
 
         try:
-            result = await registered.handler(action.name, params or {}, runtime or ConnectorRuntime())
+            result = await registered.handler(
+                action.name, params or {}, runtime or ConnectorRuntime()
+            )
         except Exception as exc:
             logger.exception("Connector %s.%s failed", connector_name, action_name)
-            return {
-                "ok": False,
-                "error": f"Connector execution failed: {exc.__class__.__name__}",
-                "data": None,
-                "metadata": {"connector": connector_name},
-            }
+            return _err(
+                f"Connector execution failed: {exc.__class__.__name__}",
+                connector=connector_name,
+            )
 
         if isinstance(result, ConnectorResult):
             payload = result.to_dict()

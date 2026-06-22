@@ -74,6 +74,24 @@ INSTANT_PATTERNS = [
 ]
 
 
+# ponytail: negation prefixes — add more if false positives remain.
+# Upgrade path: integrate with NLP lemmatizer if precision drops.
+_NEGATION_PREFIXES = (
+    "не ", "нет ", "не надо", "не хочу", "без ",
+    "no ", "don't ", "not ",
+)
+
+
+def _has_negation_before(text: str, word: str) -> bool:
+    """Check if word is preceded by a negation within 20 chars."""
+    idx = text.find(word)
+    while idx != -1:
+        prefix = text[max(0, idx - 20):idx]
+        if any(neg in prefix for neg in _NEGATION_PREFIXES):
+            return True
+        idx = text.find(word, idx + 1)
+    return False
+
 async def classify_mode(user_text: str) -> ResponseMode:
     """Определяет режим ответа: instant / fast_route / maestro."""
     t = user_text.lower().strip()
@@ -102,12 +120,12 @@ async def classify_risk(user_text: str) -> RiskLevel:
     """Быстрая эвристика для определения уровня риска."""
     t = user_text.lower().strip()
     # CRITICAL: удаление, сброс
-    if any(w in t for w in RISK_CRITICAL_WORDS):
+    if any(w in t and not _has_negation_before(t, w) for w in RISK_CRITICAL_WORDS):
         return RiskLevel.CRITICAL
     # HIGH: отправка, настройки
-    if any(w in t for w in RISK_HIGH_WORDS):
+    if any(w in t and not _has_negation_before(t, w) for w in RISK_HIGH_WORDS):
         return RiskLevel.HIGH
     # MEDIUM: поиск, анализ
-    if any(w in t for w in RISK_MEDIUM_WORDS):
+    if any(w in t and not _has_negation_before(t, w) for w in RISK_MEDIUM_WORDS):
         return RiskLevel.MEDIUM
     return RiskLevel.LOW

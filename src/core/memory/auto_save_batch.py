@@ -498,7 +498,9 @@ class FactBatchBuffer:
 # ══════════════════════════════════════════════════════════════════════════
 
 _batch_buffer: FactBatchBuffer | None = None
-_buffer_lock = asyncio.Lock()
+_buffers_lock = (
+    asyncio.Lock()
+)  # protects _batch_buffer singleton, NOT buffer operations
 
 
 async def get_batch_buffer() -> FactBatchBuffer:
@@ -506,7 +508,7 @@ async def get_batch_buffer() -> FactBatchBuffer:
     global _batch_buffer
     if _batch_buffer is not None:
         return _batch_buffer
-    async with _buffer_lock:
+    async with _buffers_lock:
         if _batch_buffer is not None:
             return _batch_buffer
         _batch_buffer = FactBatchBuffer(

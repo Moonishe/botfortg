@@ -11,6 +11,7 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
+from src.core.infra.task_manager import track_ff
 from src.core.infra.text_sanitizer import sanitize_html
 
 logger = logging.getLogger(__name__)
@@ -91,11 +92,11 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
             logger.debug("Message search inline: %s", e)
         return results
 
-    memory_results_future = asyncio.create_task(_search_memory(query))
-    context_results_future = asyncio.create_task(_search_context(query))
-    message_results_future = asyncio.create_task(
+    memory_results_future = track_ff(asyncio.create_task(_search_memory(query)))
+    context_results_future = track_ff(asyncio.create_task(_search_context(query)))
+    message_results_future = track_ff(asyncio.create_task(
         _search_messages(query, inline_query.from_user.id)
-    )
+    ))
 
     memory_results, context_results, message_results = await asyncio.gather(
         memory_results_future,

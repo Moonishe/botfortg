@@ -37,6 +37,8 @@ from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
 
+_overlap_guard = asyncio.Lock()
+
 # ── Constants ──────────────────────────────────────────────────────────
 
 MAX_SKILLS_PER_CYCLE = 5
@@ -536,90 +538,101 @@ async def auto_evolve_loop(owner_telegram_id: int) -> None:
     )
 
     while True:
-        cycle_start = datetime.now(UTC)
+        async with _overlap_guard:
+            cycle_start = datetime.now(UTC)
 
-        # Crystallize L2 policies (MemOS)
-        if settings.reward_loop_enabled:
+            # Crystallize L2 policies (MemOS)
+            if settings.reward_loop_enabled:
+                try:
+                    from src.core.learning import reward_loop
+
+                    result = await reward_loop.crystallize_policies(owner_telegram_id)
+                    if result["crystallized"] or result["rejected"]:
+                        logger.info(
+                            "Crystallization: %d approved, %d rejected",
+                            result["crystallized"],
+                            result["rejected"],
+                        )
+                except Exception:
+                    logger.debug("Crystallization failed", exc_info=True)
+
+            # 1. Find candidates
             try:
-                from src.core.learning import reward_loop
+                skills = await find_underperforming_skills(owner_telegram_id)
+            except Exception as exc:
+                logger.exception(
+                    "auto_evolve_loop: find_underperforming_skills failed: %s", exc
+                )
+                await asyncio.sleep(interval_sec)
+                continue
 
-                result = await reward_loop.crystallize_policies(owner_telegram_id)
-                if result["crystallized"] or result["rejected"]:
-                    logger.info(
-                        "Crystallization: %d approved, %d rejected",
-                        result["crystallized"],
-                        result["rejected"],
-                    )
-            except Exception:
-                logger.debug("Crystallization failed", exc_info=True)
-
-        # 1. Find candidates
-        try:
-            skills = await find_underperforming_skills(owner_telegram_id)
-        except Exception as exc:
-            logger.exception(
-                "auto_evolve_loop: find_underperforming_skills failed: %s", exc
-            )
-            await asyncio.sleep(interval_sec)
-            continue
-
-        if not skills:
-            logger.info("auto_evolve_loop: no underperforming skills found")
-        else:
-            logger.info(
-                "auto_evolve_loop: found %d underperforming skill(s)",
-                len(skills),
-            )
-            evolved = 0
-            failed = 0
-
-            # 2. Evolve candidates in parallel (bounded by semaphore)
-            async def _evolve_with_limit(skill: Skill) -> dict:
-                async with _EVOLVE_SEMAPHORE:
-                    return await evolve_skill(owner_telegram_id, skill)
-
-            results = await asyncio.gather(
-                *[_evolve_with_limit(s) for s in skills],
-                return_exceptions=True,
-            )
-
-            for res in results:
-                if isinstance(res, BaseException):
-                    failed += 1
-                    logger.error("auto_evolve_loop: evolve raised: %s", res)
-                    continue
-                # res is a dict from evolve_skill()
-                res_dict: dict = res  # type: ignore[assignment]
-                if res_dict.get("applied"):
-                    evolved += 1
-                elif not res_dict.get("success"):
-                    failed += 1
-
+            if not skills:
+                logger.info("auto_evolve_loop: no underperforming skills found")
+            else:
                 logger.info(
-                    "auto_evolve_loop: %s → success=%s applied=%s reason=%s",
-                    res_dict["skill_name"],
-                    res_dict["success"],
-                    res_dict["applied"],
-                    res_dict["reason"],
+                    "auto_evolve_loop: found %d underperforming skill(s)",
+                    len(skills),
                 )
+                evolved = 0
+                failed = 0
 
-            # 3. Notify
-            if evolved:
-                text = f"🧠 Auto-evolved {evolved} skill(s)"
-                if failed:
-                    text += f" ({failed} failed)"
-                await notification_queue.enqueue(
-                    topic="skills",
-                    category="auto-evolve",
-                    priority=2,  # MEDIUM
-                    metadata={"evolved": evolved, "failed": failed},
-                    text=text,
-                )
+                # 2. Evolve candidates in parallel (bounded by semaphore)
+                async def _evolve_with_limit(skill: Skill) -> dict:
+                    async with _EVOLVE_SEMAPHORE:
+                        return await evolve_skill(owner_telegram_id, skill)
 
-        # 4. Sleep until next cycle (clock-based interval)
-        elapsed = (datetime.now(UTC) - cycle_start).total_seconds()
-        sleep_time = max(MIN_SLEEP_SEC, interval_sec - elapsed)
-        await asyncio.sleep(sleep_time)
+                try:
+                    results = await asyncio.wait_for(
+                        asyncio.gather(
+                            *[_evolve_with_limit(s) for s in skills],
+                            return_exceptions=True,
+                        ),
+                        timeout=300.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "auto_evolve_loop: timed out after 300s, "
+                        "some skills may not have evolved"
+                    )
+                    results = []  # ponytail: empty results; timeout means no partial gather
+
+                for res in results:
+                    if isinstance(res, BaseException):
+                        failed += 1
+                        logger.error("auto_evolve_loop: evolve raised: %s", res)
+                        continue
+                    # res is a dict from evolve_skill()
+                    res_dict: dict = res  # type: ignore[assignment]
+                    if res_dict.get("applied"):
+                        evolved += 1
+                    elif not res_dict.get("success"):
+                        failed += 1
+
+                    logger.info(
+                        "auto_evolve_loop: %s → success=%s applied=%s reason=%s",
+                        res_dict["skill_name"],
+                        res_dict["success"],
+                        res_dict["applied"],
+                        res_dict["reason"],
+                    )
+
+                # 3. Notify
+                if evolved:
+                    text = f"🧠 Auto-evolved {evolved} skill(s)"
+                    if failed:
+                        text += f" ({failed} failed)"
+                    await notification_queue.enqueue(
+                        topic="skills",
+                        category="auto-evolve",
+                        priority=2,  # MEDIUM
+                        metadata={"evolved": evolved, "failed": failed},
+                        text=text,
+                    )
+
+            # 4. Sleep until next cycle (clock-based interval)
+            elapsed = (datetime.now(UTC) - cycle_start).total_seconds()
+            sleep_time = max(MIN_SLEEP_SEC, interval_sec - elapsed)
+            await asyncio.sleep(sleep_time)
 
 
 # ── Task registration ──────────────────────────────────────────────────

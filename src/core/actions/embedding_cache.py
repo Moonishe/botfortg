@@ -196,10 +196,10 @@ async def clear() -> None:
 
 
 def size() -> int:
-    """Return the number of entries in the in-memory cache.
+    """Return approximate number of entries in L1 cache.
 
-    Note: accesses ``_cache`` without holding ``_lock`` — the returned
-    value may be slightly stale, which is acceptable for informational use.
+    Accesses ``_cache`` without holding ``_lock`` — the returned value
+    may be slightly stale, which is acceptable for monitoring/diagnostics.
     """
     return len(_cache)
 

@@ -1,3 +1,11 @@
+---
+name: onboarding
+description: Визард первичной настройки: проверяет готовность пользователя
+version: 1.0.0
+platforms: [telegram]
+tags: [wizard, setup, onboarding]
+---
+
 # Onboarding
 
 ## Purpose
