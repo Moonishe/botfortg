@@ -903,14 +903,135 @@ async def step_custom_provider_key(message: Message, state: FSMContext) -> None:
         logger.debug("Non-critical error", exc_info=True)
     await state.update_data(custom_provider_key=key)
     await state.set_state(CustomProviderStates.waiting_model)
-    await message.answer(
-        "✅ Ключ сохранён.\n\n"
-        "Шаг 4/4: Пришли название модели через запятую "
-        "(лёгкая, тяжёлая, vision).\n"
-        "Например: <code>llama3:8b,llama3:70b,llava:13b</code>\n\n"
-        "Если модель одна — просто пришли её название.\n"
-        "/cancel — отмена."
+
+    # Auto-detect models from endpoint
+    endpoint = (await state.get_data()).get("custom_provider_endpoint", "")
+    detected: list[str] = []
+    if endpoint:
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=10) as c:
+                resp = await c.get(
+                    f"{endpoint.rstrip('/')}/models",
+                    headers={"Authorization": f"Bearer {key.split(',')[0].strip()}"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    detected = [
+                        m.get("id", "") for m in data.get("data", []) if m.get("id")
+                    ]
+        except Exception:
+            pass  # endpoint doesn't support /models — manual entry
+
+    if detected:
+        detected_str = ", ".join(detected[:20])
+        await message.answer(
+            "✅ Ключ работает!\n\n"
+            f"🔍 Найдено {len(detected)} моделей:\n<code>{detected_str}</code>\n\n"
+            "Шаг 4/4: Пришли модели через запятую "
+            "(лёгкая, тяжёлая, vision).\n"
+            "Или нажми кнопку чтобы использовать первые 3:\n\n"
+            "/cancel — отмена."
+        )
+        kb = InlineKeyboardBuilder()
+        if len(detected) >= 1:
+            auto_models = detected[:3]
+            kb.button(
+                text=f"✅ Авто: {', '.join(auto_models[:2])}",
+                callback_data=OnboardingCB.custom(f"models:{','.join(auto_models)}"),
+            )
+        kb.button(
+            text="✏️ Ввести вручную", callback_data=OnboardingCB.custom("models:manual")
+        )
+        await message.answer("Выбери вариант:", reply_markup=kb.as_markup())
+    else:
+        await message.answer(
+            "✅ Ключ сохранён.\n\n"
+            "Шаг 4/4: Пришли название модели через запятую "
+            "(лёгкая, тяжёлая, vision).\n"
+            "Например: <code>llama3:8b,llama3:70b,llava:13b</code>\n\n"
+            "Если модель одна — просто пришли её название.\n"
+            "/cancel — отмена."
+        )
+
+
+@router.callback_query(F.data.startswith(OnboardingCB.custom("models:")))
+async def cb_custom_auto_models(callback: CallbackQuery, state: FSMContext) -> None:
+    """Auto-select detected models or switch to manual entry."""
+    await callback.answer()
+    payload = (
+        (callback.data or "").split("models:", 1)[1]
+        if "models:" in (callback.data or "")
+        else ""
     )
+
+    if payload == "manual":
+        # Just prompt for manual entry — state already waiting_model
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    "✏️ Введи модели через запятую (лёгкая, тяжёлая, vision):\n"
+                    "Например: <code>gpt-4,gpt-3.5-turbo</code>\n/cancel — отмена."
+                )
+            except Exception:
+                pass
+        return
+
+    # Auto-models: simulate the message handler with detected models
+    models_str = payload
+    parts = [p.strip() for p in models_str.split(",") if p.strip()]
+    if not parts:
+        await callback.answer("Ошибка: модели не найдены", show_alert=True)
+        return
+
+    models = {
+        "chat_light": parts[0] if len(parts) >= 1 else "default",
+        "chat_heavy": parts[1] if len(parts) >= 2 else parts[0] if parts else "default",
+        "vision": parts[2] if len(parts) >= 3 else None,
+    }
+
+    data = await state.get_data()
+    provider_name = data.get("custom_provider_name", "custom")
+    endpoint = data.get("custom_provider_endpoint", "")
+    key = data.get("custom_provider_key", "")
+    tg_id = callback.from_user.id
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, tg_id)
+        for purpose, model in models.items():
+            if model:
+                await add_key_slot(
+                    session,
+                    owner,
+                    "custom",
+                    key,
+                    purpose=purpose,
+                    model=model,
+                    endpoint=endpoint,
+                    label=provider_name,
+                    category="llm",
+                )
+
+    await state.set_state(OnboardingStates.waiting_llm_key)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить ещё ключ", callback_data=OnboardingCB.GOBACK)
+    kb.button(text="✅ Закончить", callback_data=OnboardingCB.DONE_KEYS)
+    kb.adjust(2)
+
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"✅ Кастомный провайдер <b>{provider_name}</b> добавлен!\n"
+                f"Модели: {', '.join(v for v in models.values() if v)}\n\n"
+                "Добавить ещё ключ или перейти дальше?",
+                reply_markup=kb.as_markup(),
+            )
+        except Exception:
+            await callback.message.answer(
+                f"✅ Провайдер добавлен! Модели: {', '.join(v for v in models.values() if v)}",
+                reply_markup=kb.as_markup(),
+            )
 
 
 @router.message(CustomProviderStates.waiting_model)
