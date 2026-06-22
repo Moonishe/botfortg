@@ -171,9 +171,9 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     return
                 # Humanizer для smart-ответов (чтобы не звучать как AI)
                 try:
-                    from src.core.humanizer.humanizer import humanize_response
+                    from src.core.humanizer.humanizer import humanize_response_async
 
-                    reply = humanize_response(reply or "")
+                    reply = await humanize_response_async(reply or "")
                 except Exception:
                     logger.debug("Non-critical error", exc_info=True)
 

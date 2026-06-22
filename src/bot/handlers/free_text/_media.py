@@ -135,9 +135,9 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
         # Humanize vision output
         desc = result.description
         try:
-            from src.core.humanizer.humanizer import humanize_response
+            from src.core.humanizer.humanizer import humanize_response_async
 
-            desc = humanize_response(desc)
+            desc = await humanize_response_async(desc)
         except Exception:
             logger.debug(
                 "Photo humanizer failed", exc_info=True

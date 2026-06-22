@@ -482,9 +482,9 @@ async def _cmd_memory_story(
     narrative = await build_chain_narrative(contact_id, message.from_user.id)
     if narrative:
         # Применить humanizer — сгенерированный нарратив должен звучать естественно
-        from src.core.humanizer.humanizer import humanize_response as _humanize_response
+        from src.core.humanizer.humanizer import humanize_response_async
 
-        narrative = _humanize_response(narrative, context_hint="memory")
+        narrative = await humanize_response_async(narrative, context_hint="memory")
         await message.answer(sanitize_html(narrative))
     else:
         await message.answer("Недостаточно данных для истории (нужно минимум 3 факта).")
