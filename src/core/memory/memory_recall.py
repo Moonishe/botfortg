@@ -686,7 +686,6 @@ async def recall(
 
         # --- 3. Hybrid search: Qdrant semantic + FTS5 keyword (RRF) ---
         if include_semantic:
-            query_text = query or ""
             try:
                 from src.core.memory.hybrid_search import search_memories_hybrid
 
@@ -696,6 +695,20 @@ async def recall(
 
                 if not qdrant_limit:
                     raise ValueError("qdrant_limit=0, skipping hybrid search")
+
+                # M1: Contact-aware query expansion — если пользователь пишет
+                # "а он ответил?", добавляем имя контакта к запросу для лучшего recall.
+                # ponytail: simple prepend, upgrade to coreference resolution if needed.
+                query_text = query or ""
+                if contact_id and query_text:
+                    from src.db.repo import get_contact
+
+                    contact_obj = await get_contact(session, owner, contact_id)
+                    if contact_obj and contact_obj.display_name:
+                        cn = contact_obj.display_name.lower()
+                        # Only add if not already in query
+                        if cn not in query_text.lower() and len(cn) > 2:
+                            query_text = f"{query_text} {cn}"
 
                 # Issue 4 dedup: use shared search_memories_hybrid for FTS5+vector+RRF
                 # Pass graph_results for proper three-way RRF (not score addition)
@@ -864,6 +877,16 @@ async def recall(
                                 "KG boost failed (non-critical)", exc_info=True
                             )
 
+                    # M3: Fact text dedup — remove near-identical facts before MMR
+                    # ponytail: simple text match, upgrade to fuzzy if needed.
+                    _seen_texts: set[str] = set()
+                    hybrid_ranked = [
+                        rf
+                        for rf in hybrid_ranked
+                        if rf.fact.lower().strip() not in _seen_texts
+                        and not _seen_texts.add(rf.fact.lower().strip())
+                    ]
+
                     # MMR rerank: balance relevance vs diversity
                     if len(hybrid_ranked) > 2:
                         mmr_input = [
@@ -895,17 +918,26 @@ async def recall(
             except (ImportError, ValueError, ConnectionError, OSError):
                 logger.debug("Hybrid recall failed, skipping", exc_info=True)
 
-        # --- 4. Fresh (7 days, high confidence) ---
-        cutoff_7d = _utc_now()
-        from datetime import timedelta
+        # --- 4. Fresh (adaptive cutoff, high confidence) ---
+        # M2: adaptive window — more facts → shorter window (less noise),
+        # fewer facts → longer window (don't miss anything).
+        # ponytail: simple heuristic, upgrade to percentile-based if needed.
+        from datetime import timedelta as _td
 
-        cutoff_7d = cutoff_7d - timedelta(days=7)
+        _fact_count = len(all_facts)
+        if _fact_count > 200:
+            _fresh_days = 3
+        elif _fact_count > 50:
+            _fresh_days = 7
+        else:
+            _fresh_days = 14
+        cutoff_fresh = _utc_now() - _td(days=_fresh_days)
         fresh = [
             m
             for m in all_facts
             if m.id not in seen_ids
             and (ca := _ensure_utc(m.created_at))
-            and ca >= cutoff_7d
+            and ca >= cutoff_fresh
             and (m.confidence or 0) >= 0.5
             and (m.contact_id == contact_id if contact_id is not None else True)
         ]

@@ -151,19 +151,26 @@ _PRESERVE_NAME_RE = re.compile(r"(?<![.!?] )[А-ЯЁ][а-яё]+")
 _PRESERVE_QUOTED_RE = re.compile(r'["«][^"»]+["»]')
 _PRESERVE_LIST_ITEM_RE = re.compile(r"^[\d•\-]\s", re.MULTILINE)
 
-# Контекстные дополнения к ответу (текст без эмодзи — эмодзи добавляет _pick_context_emoji)
-_CONTEXT_FOLLOWUPS: dict[str, str] = {
-    "recipe": "приятного аппетита!",
-    "news": "буду держать в курсе",
-    "summary": "буду держать в курсе",
-    "search": "если нужно копнуть глубже — скажи",
-    "analysis": "если нужно копнуть глубже — скажи",
-    "memory": "запомнил, не забуду",
-    "reminder": "запомнил, не забуду",
-    "contact": "отправлю, как скажешь",
-    "send": "отправлю, как скажешь",
-    "task": "сделаем",
-    "commitment": "сделаем",
+# Контекстные дополнения к ответу — несколько вариантов для естественности
+# ponytail: random.choice per call, upgrade to weighted by user style if needed.
+import random as _random
+
+_CONTEXT_FOLLOWUPS: dict[str, list[str]] = {
+    "recipe": ["приятного аппетита!", "приятного!", "ну, приятного"],
+    "news": ["буду держать в курсе", "ещё новости будут — напишу", "следим дальше"],
+    "summary": ["буду держать в курсе", "если что — дополню", "как-то так"],
+    "search": ["если нужно копнуть глубже — скажи", "копнуть ещё?", "что ещё найти?"],
+    "analysis": [
+        "если нужно копнуть глубже — скажи",
+        "ещё поанализировать?",
+        "что ещё?",
+    ],
+    "memory": ["запомнил", "записал, не забуду", "ок, учту", "запомнил, не забуду"],
+    "reminder": ["запомнил", "напомню", "ок, поставлю напоминание"],
+    "contact": ["отправлю", "ок, отправлю", "передам"],
+    "send": ["отправлю", "ок, отправлю", "передам"],
+    "task": ["сделаем", "ок, берём в работу", "принял"],
+    "commitment": ["сделаем", "ок, договорились", "принял"],
 }
 
 # Контекстно-зависимые эмодзи для разных стилей
@@ -463,7 +470,7 @@ def humanize_response(
         ):
             pass  # не добавляем tail
         else:
-            followup = _CONTEXT_FOLLOWUPS[context_hint]
+            followup = _random.choice(_CONTEXT_FOLLOWUPS[context_hint])
             # Контекстно-зависимый эмодзи вместо хардкода
             context_emoji = _pick_context_emoji(context_hint, style_profile)
             if context_emoji:
@@ -594,9 +601,11 @@ async def apply_anti_ai_mode(
 
 
 # Filler words for casual/friendly style — разбиты по позиции в тексте
-_FILLERS_START = ["ну", "короче", "слушай", "так", "эм", "ой", "блин", "ща"]
-_FILLERS_MID = ["кстати", ", блин", ", как бы", ", хех", ", в общем"]
-_FILLERS_END = [", короче", ", ну такое", ")", ", похоже"]
+# ponytail: gentler fillers — "блин"/"ща"/"ой" too informal for most contexts.
+# Upgrade: per-user filler preference from style profile if needed.
+_FILLERS_START = ["ну", "короче", "так", "кстати"]
+_FILLERS_MID = [", кстати", ", в общем", ", правда"]
+_FILLERS_END = [", короче", ", ну", ", наверное"]
 
 
 def _maybe_add_fillers(text: str, probability: float = 0.15) -> str:
@@ -807,6 +816,7 @@ async def humanize_deep(
     user_id: int = 0,
     tone: str = "natural",
     user_slots: list | None = None,
+    recent_context: str = "",
 ) -> str:
     """LLM-based глубокое очеловечивание текста.
 
@@ -821,6 +831,7 @@ async def humanize_deep(
         user_id: ID пользователя для персонализированных замен (0=нет).
         tone: Тон ответа — "natural", "formal" или "friendly".
         user_slots: Список LlmKeySlot для динамических AI-маркеров (None=базовые).
+        recent_context: Последние 1-2 сообщения пользователя для контекста (опционально).
 
     Returns:
         Переписанный текст. При ошибке возвращает оригинал.
@@ -835,12 +846,16 @@ async def humanize_deep(
     style_hint = f"Стиль: {user_style}" if user_style else ""
     tone_hint = _TONE_DESCRIPTIONS.get(tone, _TONE_DESCRIPTIONS["natural"])
     prompt = DEEP_HUMANIZE_PROMPT.format(style_hint=style_hint, tone_hint=tone_hint)
+    # Add conversation context so LLM can match the tone
+    context_block = ""
+    if recent_context:
+        context_block = f"\n\nПредыдущие сообщения:\n{recent_context[:500]}"
     try:
         from src.llm.base import ChatMessage, TaskType
 
         result = await provider.chat(
             [
-                ChatMessage(role="system", content=prompt),
+                ChatMessage(role="system", content=prompt + context_block),
                 ChatMessage(role="user", content=text),
             ],
             task_type=TaskType.HUMANIZE,

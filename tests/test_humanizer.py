@@ -147,7 +147,10 @@ class TestHumanizeResponse:
         """Добавляет контекстную фразу для recipe."""
         text = "Вот рецепт борща: свёкла, капуста, мясо."
         result = humanize_response(text, context_hint="recipe")
-        assert "приятного аппетита" in result.lower()
+        assert any(
+            v in result.lower()
+            for v in ["приятного аппетита", "приятного", "ну, приятного"]
+        )
 
     def test_humanize_response_short_clean(self):
         """Короткий естественный текст возвращается без изменений."""
@@ -167,7 +170,15 @@ class TestHumanizeResponse:
             "Вот сводка новостей за сегодня: всё спокойно, ничего важного",
             context_hint="news",
         )
-        assert "буду держать в курсе" in result.lower()
+        # Now followups are randomized — check any news variant
+        assert any(
+            v in result.lower()
+            for v in [
+                "буду держать в курсе",
+                "ещё новости будут — напишу",
+                "следим дальше",
+            ]
+        )
 
     def test_humanize_response_memory_context(self):
         """Контекстная фраза для memory."""
@@ -175,7 +186,7 @@ class TestHumanizeResponse:
             "Я запомнил этот важный факт на будущее",
             context_hint="memory",
         )
-        assert "запомнил" in result.lower()
+        assert any(v in result.lower() for v in ["запомнил", "записал", "ок, учту"])
 
     def test_humanize_response_unknown_context(self):
         """Неизвестный context_hint не добавляет фразу."""
@@ -190,7 +201,10 @@ class TestHumanizeResponse:
             style_profile="без эмодзи",
         )
         assert "🍲" not in result
-        assert "приятного аппетита" in result.lower()
+        assert any(
+            v in result.lower()
+            for v in ["приятного аппетита", "приятного", "ну, приятного"]
+        )
 
 
 class TestHumanizeResponseNoTouch:
@@ -225,39 +239,49 @@ class TestHumanizeResponseTails:
     """Regression: контекстные tail-фразы добавляются для длинных ответов."""
 
     def test_tail_on_news(self):
-        """news → хвост 'буду держать в курсе 📰'."""
+        """news → хвост 'буду держать в курсе 📰' (or variant)."""
         result = humanize_response(
             "Вот сводка новостей за сегодня: всё спокойно, "
             "ничего важного не произошло, все события штатно развиваются",
             context_hint="news",
         )
-        assert "буду держать в курсе" in result.lower()
+        assert any(
+            v in result.lower()
+            for v in [
+                "буду держать в курсе",
+                "ещё новости будут — напишу",
+                "следим дальше",
+            ]
+        )
 
     def test_tail_on_recipe(self):
-        """recipe → хвост 'приятного аппетита! 🍲'."""
+        """recipe → хвост 'приятного аппетита! 🍲' (or variant)."""
         result = humanize_response(
             "Вот рецепт борща: свёкла, капуста, мясо, картошка, "
             "морковка, лук, томатная паста и сметана",
             context_hint="recipe",
         )
-        assert "приятного аппетита" in result.lower()
+        assert any(
+            v in result.lower()
+            for v in ["приятного аппетита", "приятного", "ну, приятного"]
+        )
 
     def test_tail_on_memory(self):
-        """memory → хвост 'запомнил, не забуду 🧠'."""
+        """memory → хвост 'запомнил, не забуду 🧠' (or variant)."""
         result = humanize_response(
             "Я запомнил этот важный факт на будущее, он пригодится в работе",
             context_hint="memory",
         )
-        assert "запомнил, не забуду" in result.lower()
+        assert any(v in result.lower() for v in ["запомнил", "записал", "ок, учту"])
 
     def test_tail_on_search(self):
-        """search → хвост 'если нужно копнуть глубже — скажи 🔍'."""
+        """search → хвост 'если нужно копнуть глубже — скажи 🔍' (or variant)."""
         result = humanize_response(
             "Вот результаты поиска по вашему запросу: "
             "найдено несколько подходящих вариантов",
             context_hint="search",
         )
-        assert "глубже" in result.lower()
+        assert any(v in result.lower() for v in ["глубже", "копнуть", "что ещё найти"])
 
 
 class TestHumanizeResponseClicheRemoval:
