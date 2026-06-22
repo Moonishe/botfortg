@@ -96,6 +96,40 @@ async def _stage2_summarise(
         logger.debug("Stage 2 skipped: no session/user provided")
         return messages
 
+    # ── Memory flush: extract facts from messages about to be discarded ──
+    # ponytail: best-effort extraction before summarization. Upgrade to batched if throughput matters.
+    try:
+        from src.core.memory.memory_extractor import extract_and_save_memories
+        from src.llm.base import TaskType
+        from src.llm.router import build_provider
+
+        flush_provider = await build_provider(
+            session=session,
+            user=user,
+            purpose="background",
+            task_type=TaskType.SUMMARIZE,
+        )
+        if flush_provider:
+            # Build transcript from messages being discarded
+            flush_transcript = "\n".join(
+                f"[{m.get('role', '?')}]: {m.get('content', '')[:500]}"
+                for m in to_summarise[:20]
+                if m.get("content")
+            )
+            if flush_transcript.strip():
+                facts_saved = await extract_and_save_memories(
+                    flush_provider,
+                    user.telegram_id,
+                    None,  # no contact context during offload flush
+                    transcript=flush_transcript,
+                )
+                if facts_saved:
+                    logger.info(
+                        "Memory flush: %d facts extracted before offload", facts_saved
+                    )
+    except Exception:
+        logger.debug("Memory flush before offload failed (non-critical)", exc_info=True)
+
     try:
         from src.llm.base import ChatMessage, TaskType
         from src.llm.router import build_provider

@@ -614,6 +614,25 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 text=text,
                 priority=3,  # PRIORITY_LOW — информационное
             )
+
+            # ── Dream Diary: persist human-readable log ──
+            # ponytail: append-only markdown file, upgrade to DB table if querying needed.
+            try:
+                from src.config import settings as _cfg
+                from datetime import datetime as _dt
+
+                log_path = _cfg.data_dir / "dreams_log.md"
+                log_lines: list[str] = [
+                    f"\n## {_dt.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC\n",
+                ]
+                for line in summary_lines:
+                    log_lines.append(line)
+                log_lines.append("")
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write("\n".join(log_lines))
+            except Exception:
+                logger.debug("Dream diary write failed", exc_info=True)
         except Exception:
             logger.debug("Non-critical error", exc_info=True)
 
