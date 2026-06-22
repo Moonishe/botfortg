@@ -109,6 +109,18 @@ async def sync_dialogs(
         async for dialog in client.iter_dialogs(limit=limit, archived=archived_pass):
             all_dialogs.append((dialog, archived_pass))
 
+    # Deduplicate by peer_id — same dialog can appear in both archived and
+    # non-archived passes. ON CONFLICT doesn't fire for pending (unflushed)
+    # rows in the same transaction → IntegrityError without this.
+    seen_peers: set[int] = set()
+    deduped: list[tuple] = []
+    for dialog, archived_pass in all_dialogs:
+        pid = dialog.entity.id
+        if pid not in seen_peers:
+            seen_peers.add(pid)
+            deduped.append((dialog, archived_pass))
+    all_dialogs = deduped
+
     total = len(all_dialogs)
 
     async with get_session() as session:
@@ -272,6 +284,16 @@ async def sync_dialogs_with_options(
                     continue
 
             collected.append(dialog)
+
+    # Deduplicate by peer_id — same dialog can appear in both passes.
+    seen_peers_opt: set[int] = set()
+    deduped_opt: list = []
+    for dialog in collected:
+        pid = dialog.entity.id
+        if pid not in seen_peers_opt:
+            seen_peers_opt.add(pid)
+            deduped_opt.append(dialog)
+    collected = deduped_opt
 
     stats["contacts"] = len(collected)
     total = len(collected)

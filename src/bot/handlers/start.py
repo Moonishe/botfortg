@@ -1,5 +1,6 @@
 """Handler for /start and the onboarding wizard for first-time users."""
 
+import asyncio
 import logging
 
 from aiogram import Bot, F, Router
@@ -1148,12 +1149,39 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
 
     await callback.answer("📱 Начинаю синхронизацию...")
 
+    # Progress message — updated during sync so user sees what's happening
+    progress_msg = await callback.bot.send_message(
+        callback.message.chat.id,
+        "📱 Синхронизация: подготавливаю список чатов...",
+    )
+
+    _last_update = asyncio.get_event_loop().time()
+
+    async def _progress_cb(current: int, total: int, name: str) -> None:
+        nonlocal _last_update
+        now = asyncio.get_event_loop().time()
+        # Throttle: update at most every 2 seconds, or on completion
+        if now - _last_update < 2.0 and current < total:
+            return
+        _last_update = now
+        try:
+            await progress_msg.edit_text(
+                f"📱 Синхронизация: {current}/{total} чатов\n📄 {name[:40]}"
+            )
+        except Exception:
+            pass  # message deleted or rate-limited
+
     try:
-        await sync_dialogs(client, owner)
+        await sync_dialogs(client, owner, progress_callback=_progress_cb)
         status = "✅ Список чатов обновлён!"
     except Exception as exc:
         logger.warning("sync_dialogs during onboarding failed: %s", exc)
         status = "⚠️ Синхронизация не удалась. Попробуй позже"
+
+    try:
+        await progress_msg.delete()
+    except Exception:
+        pass
 
     await state.clear()
     await _finish_onboarding(
@@ -1224,12 +1252,33 @@ async def step_onboarding_sync_folders_text(
     if client is None:
         status = "❌ Telegram-сессия не активна. Сначала /login."
     else:
+        progress_msg = await message.answer("📱 Синхронизация папок: подготавливаю...")
+        _last_update = asyncio.get_event_loop().time()
+
+        async def _progress_cb_folders(current: int, total: int, name: str) -> None:
+            nonlocal _last_update
+            now = asyncio.get_event_loop().time()
+            if now - _last_update < 2.0 and current < total:
+                return
+            _last_update = now
+            try:
+                await progress_msg.edit_text(
+                    f"📱 Синхронизация: {current}/{total}\n📄 {name[:40]}"
+                )
+            except Exception:
+                pass
+
         try:
-            await sync_dialogs(client, owner)
+            await sync_dialogs(client, owner, progress_callback=_progress_cb_folders)
             status = "✅ Чаты из выбранных папок синхронизированы!"
         except Exception as exc:
             logger.warning("sync_dialogs during onboarding (folders) failed: %s", exc)
             status = "⚠️ Синхронизация не удалась. Попробуй позже"
+
+        try:
+            await progress_msg.delete()
+        except Exception:
+            pass
 
     await state.clear()
     await _finish_onboarding(
