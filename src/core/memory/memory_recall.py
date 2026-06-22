@@ -355,6 +355,9 @@ async def _bump_use_counts(fact_ids: list[int]) -> None:
                 .values(
                     use_count=Memory.use_count + 1,
                     last_used_at=now_dt,
+                    # ponytail: corroboration_count tracks "fact was relevant enough
+                    # to surface in recall" — boosts importance in meta_memory.py.
+                    corroboration_count=Memory.corroboration_count + 1,
                 )
             )
             await session.commit()

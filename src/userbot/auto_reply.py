@@ -31,7 +31,7 @@ from src.userbot.auto_reply_handler import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
-CONTEXT_LIMIT = 100
+CONTEXT_LIMIT = 10  # ponytail: was 100 — too many tokens for auto-reply context.
 
 
 AUTO_REPLY_SYSTEM_BASE = (

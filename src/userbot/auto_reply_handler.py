@@ -6,6 +6,7 @@ from context-building for maintainability.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, UTC
 
@@ -171,9 +172,18 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     return
                 # Humanizer для smart-ответов (чтобы не звучать как AI)
                 try:
-                    from src.core.humanizer.humanizer import humanize_response_async
+                    from src.core.humanizer.humanizer import (
+                        humanize_response_async,
+                        record_owner_emojis,
+                    )
 
-                    reply = await humanize_response_async(reply or "")
+                    # H2: Track owner's emoji preferences from incoming message
+                    record_owner_emojis(owner_telegram_id, incoming_text)
+
+                    reply = await humanize_response_async(
+                        reply or "",
+                        user_message_len=len(incoming_text),
+                    )
                 except Exception:
                     logger.debug("Non-critical error", exc_info=True)
 
@@ -198,6 +208,17 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     return
             except Exception:
                 logger.debug("SendGuard check failed (non-critical)", exc_info=True)
+
+            # A2: Natural response delay — simulate reading + typing time.
+            # ponytail: simple heuristic, upgrade to WPM-based if realism matters.
+            _msg_len = len(incoming_text)
+            if _msg_len < 50:
+                _delay = 1.5  # short message — quick reply
+            elif _msg_len < 200:
+                _delay = 3.0  # medium — read + think
+            else:
+                _delay = 5.0  # long — takes time to read
+            await asyncio.sleep(_delay)
 
             await event.respond(reply)
 

@@ -17,6 +17,39 @@ logger = logging.getLogger(__name__)
 
 ANTI_AI_MODES = {"off", "log", "fix"}
 
+# H2: Owner emoji frequency tracking — in-memory, per user_id.
+# ponytail: simple dict, upgrade to DB if persistence needed.
+_owner_emoji_freq: dict[int, dict[str, int]] = {}
+_EMOJI_RE = re.compile(
+    "[\U0001f300-\U0001f9ff\U00002600-\U000027bf\U0001f600-\U0001f64f"
+    "\U0001f680-\U0001f6ff\U0001f1e0-\U0001f1ff]+",
+    flags=re.UNICODE,
+)
+
+
+def record_owner_emojis(user_id: int, text: str) -> None:
+    """Track which emojis the owner uses frequently — for personalized humanizer."""
+    if not text or user_id <= 0:
+        return
+    freq = _owner_emoji_freq.setdefault(user_id, {})
+    for match in _EMOJI_RE.findall(text):
+        for ch in match:
+            freq[ch] = freq.get(ch, 0) + 1
+    # Cap to prevent unbounded growth
+    if len(freq) > 50:
+        sorted_items = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+        _owner_emoji_freq[user_id] = dict(sorted_items[:30])
+
+
+def _get_owner_top_emojis(user_id: int, limit: int = 3) -> list[str]:
+    """Return the owner's most frequently used emojis."""
+    freq = _owner_emoji_freq.get(user_id)
+    if not freq:
+        return []
+    sorted_items = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+    return [e for e, _ in sorted_items[:limit]]
+
+
 _REPLACEMENTS: dict[str, str] = {
     "конечно": "",  # удаляем
     "разумеется": "",
@@ -189,12 +222,13 @@ _EMOJI_BY_CONTEXT: dict[str, dict[str, str]] = {
 }
 
 
-def _pick_context_emoji(context_hint: str, style_profile: str) -> str:
-    """Выбирает эмодзи на основе контекста и стилевого профиля.
+def _pick_context_emoji(context_hint: str, style_profile: str, user_id: int = 0) -> str:
+    """Выбирает эмодзи на основе контекста, стиля и предпочтений владельца.
 
     Args:
         context_hint: Категория контекста (recipe, news, search, ...).
         style_profile: Строка стилевого профиля пользователя.
+        user_id: ID пользователя — для персонализированных эмодзи (H2).
 
     Returns:
         Строка с эмодзи (может быть пустой, если стиль запрещает эмодзи).
@@ -205,6 +239,11 @@ def _pick_context_emoji(context_hint: str, style_profile: str) -> str:
     style_lower = (style_profile or "").lower()
     if "сухой" in style_lower or "без эмодзи" in style_lower:
         return ""
+    # H2: Use owner's preferred emojis if available
+    if user_id > 0:
+        owner_emojis = _get_owner_top_emojis(user_id, limit=1)
+        if owner_emojis:
+            return owner_emojis[0]
     if "тёплый" in style_lower or "warm" in style_lower:
         return entry.get("warm", entry.get("default", ""))
     if "коротко" in style_lower or "brief" in style_lower:
@@ -406,6 +445,7 @@ def humanize_response(
     user_id: int = 0,
     tone: str = "natural",
     user_slots: list | None = None,
+    user_message_len: int = 0,
 ) -> str:
     """Улучшить ответ бота: убрать шаблонные концовки и добавить естественное
     завершение в зависимости от контекста.
@@ -413,14 +453,12 @@ def humanize_response(
     Args:
         text: Исходный текст ответа.
         context_hint: Категория контекста для подбора фразы-дополнения.
-            Одна из: recipe, news, summary, search, analysis,
-            memory, reminder, contact, send, task, commitment или None.
-        style_profile: Строка стилевого профиля пользователя
-            (из get_or_update_style_profile). Если содержит указания
-            «без эмодзи» — эмодзи из контекстных фраз убираются.
+        style_profile: Строка стилевого профиля пользователя.
         user_id: ID пользователя для персонализированных замен (0=нет).
         tone: Тон ответа — "natural", "formal", "friendly".
-        user_slots: Список LlmKeySlot для динамических AI-маркеров (None=базовые).
+        user_slots: Список LlmKeySlot для динамических AI-маркеров.
+        user_message_len: Длина сообщения пользователя (0=неизвестно).
+            Если короткое — бот тоже отвечает кратко, без fillers и followups.
 
     Returns:
         Текст с более естественным тоном.
@@ -443,6 +481,10 @@ def humanize_response(
     if not context_hint and not has_cliche and not has_ai_patterns and len(text) < 30:
         return text
 
+    # H1: Length matching — if user wrote short message, keep bot response concise.
+    # ponytail: skip followups+fillers for short user input, upgrade to LLM-based if needed.
+    _user_brief = 0 < user_message_len < 50
+
     # 3. Light pass: реально применяем marker replacements, если скорер их нашёл.
     result = text
     if has_ai_patterns:
@@ -458,7 +500,7 @@ def humanize_response(
     result = result.strip()
 
     # 5. Защита: не добавлять контекстный хвост к коротким/техническим ответам
-    if context_hint and context_hint in _CONTEXT_FOLLOWUPS:
+    if context_hint and context_hint in _CONTEXT_FOLLOWUPS and not _user_brief:
         stripped = result.rstrip(".!?,;: \n")
         short_answer = len(stripped) < 50 and not any(
             stripped.lower().startswith(kw)
@@ -472,7 +514,9 @@ def humanize_response(
         else:
             followup = _random.choice(_CONTEXT_FOLLOWUPS[context_hint])
             # Контекстно-зависимый эмодзи вместо хардкода
-            context_emoji = _pick_context_emoji(context_hint, style_profile)
+            context_emoji = _pick_context_emoji(
+                context_hint, style_profile, user_id=user_id
+            )
             if context_emoji:
                 followup = f"{followup} {context_emoji}"
             if result:
@@ -489,9 +533,8 @@ def humanize_response(
             result = re.sub(re.escape(phrase), replacement, result, flags=re.IGNORECASE)
 
     # 7. Filler injection (разговорные filler-слова)
-    # Добавляем fillers только когда текст AI-шный (score > 0.3),
-    # иначе текст уже человечный — fillers не нужны.
-    if score > 0.3:
+    # Добавляем fillers только когда текст AI-шный (score > 0.3) и пользователь не краток
+    if score > 0.3 and not _user_brief:
         result = _maybe_add_fillers(result)
 
     # 8. Taboo detector (только логирование)
@@ -514,6 +557,7 @@ async def humanize_response_async(
     user_id: int = 0,
     tone: str = "natural",
     user_slots: list | None = None,
+    user_message_len: int = 0,
 ) -> str:
     """Async wrapper for humanize_response — offloads sync regex to thread pool.
 
@@ -527,6 +571,7 @@ async def humanize_response_async(
         user_id=user_id,
         tone=tone,
         user_slots=user_slots,
+        user_message_len=user_message_len,
     )
 
 
