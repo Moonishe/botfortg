@@ -45,7 +45,20 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             if getattr(msg, "sticker", None) or getattr(msg, "gif", None):
                 return  # stickers/GIFs don't need replies
             if not event.is_private:
-                return  # только ЛС, не группы/каналы
+                # Group/channel gating — only respond if explicitly enabled.
+                # ponytail: config-based whitelist + mention check, upgrade to DB-stored per-group policy if needed.
+                if not settings.userbot_group_enabled:
+                    return
+                group_id = event.chat_id
+                allowed = settings.userbot_group_allowed_ids
+                if allowed and str(group_id) not in allowed.split(","):
+                    return
+                if settings.userbot_group_require_mention:
+                    msg_text = (msg.text or msg.message or "").lower()
+                    me = await client.get_me()
+                    bot_username = getattr(me, "username", None)
+                    if bot_username and f"@{bot_username.lower()}" not in msg_text:
+                        return
             sender = await event.get_sender()
             if not isinstance(sender, TgUser):
                 return  # только от User-объектов

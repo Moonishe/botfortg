@@ -446,6 +446,17 @@ class Settings(BaseSettings):
         description="Макс контактов при штатной экстракции (в warmup — все контакты)",
     )
 
+    # ── Userbot Group Gating — control group/topic responses ──
+    userbot_group_enabled: bool = Field(
+        False, description="Enable userbot responses in group chats"
+    )
+    userbot_group_allowed_ids: str = Field(
+        "", description="Comma-separated allowed group IDs (empty = all groups)"
+    )
+    userbot_group_require_mention: bool = Field(
+        True, description="Require @bot mention in groups (safety: no spam)"
+    )
+
     # Авто-пересборка профиля каждые N новых личных фактов (0 = только вручную)
     persona_trigger_every_n_facts: int = Field(
         default=15,
