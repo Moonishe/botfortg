@@ -76,7 +76,9 @@ def _safe_context_path(key: str) -> Path:
 OWNER_KEY = "_owner"  # special key for owner profile
 
 # === FTS5 helpers ===
-_FTS5_KEYWORDS = frozenset({"or", "and", "not", "near"})
+# ponytail: delegate to canonical _fts_query_for — one sanitize implementation, not three.
+# Upgrade: merge _fts module into context_files if coupling grows.
+from src.db.repos.memory_repo._fts import _fts_query_for as _fts5_simple_query  # noqa: E402
 
 # === Qdrant semantic search ===
 _QDRANT_COLLECTION = "contexts"
@@ -85,27 +87,6 @@ _qdrant_dim: int | None = None
 # Guard concurrent first-callers: _get_qdrant() is called from asyncio.to_thread,
 # so a threading.Lock (not asyncio.Lock) is required for mutual exclusion.
 _qdrant_init_lock: threading.Lock = threading.Lock()
-
-
-def _fts5_simple_query(query: str) -> str:
-    """Build a safe FTS5 MATCH expression from free-text query.
-
-    Each word becomes a prefix-match joined with OR.
-    FTS5 operator keywords are escaped with double-quotes.
-    """
-    parts: list[str] = []
-    for raw in query.split():
-        clean = "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
-        if len(clean) < 2:
-            continue
-        lower = clean.lower()
-        if lower in _FTS5_KEYWORDS:
-            parts.append(f'"{lower}"')
-        else:
-            parts.append(lower + "*")
-    if not parts:
-        return ""
-    return " OR ".join(parts)
 
 
 # Per-file locks for thread-safe append (TOCTOU prevention)

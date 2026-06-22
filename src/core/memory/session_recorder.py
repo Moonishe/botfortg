@@ -30,9 +30,26 @@ from src.db.repo import get_or_create_user
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache of active sessions: {telegram_id: (session_id, started_at)}
+# In-memory cache of active sessions: {telegram_id: (session_id, started_at, last_active)}
 _active_sessions: dict[int, tuple[int, datetime, datetime]] = {}
-_active_sessions_lock: asyncio.Lock = asyncio.Lock()
+# ponytail: per-user locks reduce contention — global lock serialised all users.
+# Upgrade: asyncio.Lock per telegram_id, created lazily.
+_user_locks: dict[int, asyncio.Lock] = {}
+_user_locks_guard: asyncio.Lock = asyncio.Lock()
+
+
+async def _get_user_lock(telegram_id: int) -> asyncio.Lock:
+    """Get or create a per-user asyncio.Lock."""
+    lock = _user_locks.get(telegram_id)
+    if lock is not None:
+        return lock
+    async with _user_locks_guard:
+        lock = _user_locks.get(telegram_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _user_locks[telegram_id] = lock
+        return lock
+
 
 SESSION_INACTIVITY_TIMEOUT = timedelta(minutes=30)
 
@@ -64,7 +81,8 @@ async def record_turn(
         session_type: Session type label (default "chat").
     """
     # ponytail: single lock acquisition fixes TOCTOU — session can't change between check and update.
-    async with _active_sessions_lock:
+    user_lock = await _get_user_lock(telegram_id)
+    async with user_lock:
         cached = _active_sessions.get(telegram_id)
         session_id = cached[0] if cached else None
 
@@ -137,7 +155,8 @@ async def record_turn(
 
 async def close_session(telegram_id: int, db_session: AsyncSession) -> None:
     """Close the active session for a user (set ended_at)."""
-    async with _active_sessions_lock:
+    user_lock = await _get_user_lock(telegram_id)
+    async with user_lock:
         cached = _active_sessions.pop(telegram_id, None)
     session_id = cached[0] if cached else None
     if session_id is not None:
@@ -252,15 +271,16 @@ async def get_session_history(
 
 async def capture_state():
     """Public snapshot of _active_sessions (JSON-serializable)."""
-    async with _active_sessions_lock:
-        return {
-            str(tg): {
-                "session_id": s[0],
-                "started_at": s[1].isoformat(),
-                "last_active": s[2].isoformat(),
-            }
-            for tg, s in _active_sessions.items()
+    # Snapshot needs global view — acquire all user locks is impractical,
+    # so use a best-effort copy without lock (dict iteration is atomic in CPython).
+    return {
+        str(tg): {
+            "session_id": s[0],
+            "started_at": s[1].isoformat(),
+            "last_active": s[2].isoformat(),
         }
+        for tg, s in _active_sessions.items()
+    }
 
 
 async def restore_state(data):
@@ -269,13 +289,13 @@ async def restore_state(data):
         return
     from datetime import datetime
 
-    async with _active_sessions_lock:
-        for tg_str, d in data.items():
-            try:
-                _active_sessions[int(tg_str)] = (
-                    d["session_id"],
-                    datetime.fromisoformat(d["started_at"]),
-                    datetime.fromisoformat(d["last_active"]),
-                )
-            except Exception:
-                logger.exception("Failed to restore session for %s", tg_str)
+    # Best-effort restore — no global lock needed (startup-only, single-threaded).
+    for tg_str, d in data.items():
+        try:
+            _active_sessions[int(tg_str)] = (
+                d["session_id"],
+                datetime.fromisoformat(d["started_at"]),
+                datetime.fromisoformat(d["last_active"]),
+            )
+        except Exception:
+            logger.exception("Failed to restore session for %s", tg_str)
