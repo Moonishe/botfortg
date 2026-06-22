@@ -61,14 +61,16 @@ RUN playwright install-deps chromium
 
 # Copy application code (frequently changes — keep AFTER heavy layers)
 COPY src/ ./src/
-COPY skills/ ./skills/
-COPY docs/ ./docs/
 COPY main.py healthcheck.py ./
 COPY alembic.ini .
 COPY alembic/ alembic/
 
+# Copy skills and docs if they exist (optional, may be empty)
+COPY skills/ ./skills/
+COPY docs/ ./docs/
+
 # Copy entrypoint script
-COPY scripts/docker-entrypoint.sh /entrypoint.sh
+COPY docker-entrypoint.sh /entrypoint.sh
 
 # Safety: ensure .env did NOT accidentally leak into the image
 RUN test ! -f /app/.env || (echo "ERROR: .env in image!" && exit 1)
