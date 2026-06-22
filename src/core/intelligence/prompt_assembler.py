@@ -217,6 +217,25 @@ class PromptAssembler:
             parts.append("")
             parts.append("[ПАМЯТЬ] Не читай файлы вручную.")
             parts.append("Используй recall_memory, search_contexts, cross_chat_search.")
+
+            # Available commands — so LLM can suggest them to users
+            try:
+                from src.bot.command_registry import get_registry
+
+                reg = get_registry()
+                cmd_lines = []
+                for cat, cmds in reg.by_category().items():
+                    if cat in ("admin", "diagnostics"):
+                        continue
+                    names = ", ".join(f"/{c.name}" for c in cmds[:8])
+                    cmd_lines.append(f"  {names}")
+                if cmd_lines:
+                    parts.append(
+                        "[КОМАНДЫ] Доступные команды бота (можешь предлагать их):\n"
+                        + "\n".join(cmd_lines)
+                    )
+            except Exception:
+                pass
             parts.append("Frozen snapshot уже в промпте. Для деталей — вызывай tools.")
             parts.append(
                 "Для сложных запросов — обрабатывай данные через tools, не загружай в контекст."
