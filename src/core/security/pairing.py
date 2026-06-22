@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import secrets
+import time
 from pathlib import Path
 
 from src.config import settings
@@ -16,13 +17,17 @@ logger = logging.getLogger(__name__)
 # ponytail: persistent file is best-effort recovery storage, not a transaction log.
 # Atomic write via temp-file + rename avoids losing all pending codes on crash.
 _PENDING_FILE = "pending_pairings.json"
+_PENDING_TTL = 600  # 10 minutes — pending codes expire after this.
+_MAX_PENDING = 100  # Rate-limit: max concurrent pending codes (DoS guard).
 
 
 class PairingManager:
     """Security layer: unknown contacts must be approved before interaction."""
 
     def __init__(self, data_dir: Path | None = None) -> None:
-        self._pending: dict[int, str] = {}  # sender_id → code
+        self._pending: dict[
+            int, tuple[str, float]
+        ] = {}  # sender_id → (code, created_at)
         self._allowlist: set[int] = set()
         # asyncio.Lock: methods are async and must not block the event loop.
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -30,26 +35,42 @@ class PairingManager:
         self._load_pending()
 
     def _load_pending(self) -> None:
-        """Load pending pairings from disk so codes survive process restarts."""
+        """Load pending pairings from disk, expiring stale entries."""
         if not self._pending_path.exists():
             return
         try:
             data = json.loads(self._pending_path.read_text(encoding="utf-8"))
+            now = time.time()
             for k, v in data.items():
                 try:
-                    self._pending[int(k)] = str(v)
+                    sender_id = int(k)
                 except (ValueError, TypeError):
                     continue
+                # Support both old format (str) and new format (dict with ts).
+                if isinstance(v, dict):
+                    code = str(v.get("code", ""))
+                    ts = float(v.get("ts", 0))
+                elif isinstance(v, str):
+                    # Old format — no timestamp, expire immediately.
+                    code = v
+                    ts = 0.0
+                else:
+                    continue
+                if now - ts <= _PENDING_TTL and code:
+                    self._pending[sender_id] = (code, ts)
         except Exception:
             logger.warning("Failed to load pending pairings", exc_info=True)
 
-    def _save_pending(self, pending: dict[int, str]) -> None:
+    def _save_pending(self, pending: dict[int, tuple[str, float]]) -> None:
         """Persist a snapshot of pending pairings to disk atomically."""
         try:
             self._pending_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self._pending_path.with_suffix(".tmp")
+            serializable = {
+                str(k): {"code": v[0], "ts": v[1]} for k, v in pending.items()
+            }
             tmp_path.write_text(
-                json.dumps(pending, ensure_ascii=False, indent=2),
+                json.dumps(serializable, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             tmp_path.replace(self._pending_path)
@@ -103,7 +124,21 @@ class PairingManager:
         """
         self._validate_sender_id(sender_id)
         async with self._lock:
-            return sender_id in self._pending
+            entry = self._pending.get(sender_id)
+            if entry is None:
+                return False
+            # Expire stale entry on read.
+            if time.time() - entry[1] > _PENDING_TTL:
+                self._pending.pop(sender_id, None)
+                return False
+            return True
+
+    def _purge_expired(self) -> None:
+        """Remove expired pending entries. Caller must hold _lock."""
+        now = time.time()
+        expired = [k for k, (_, ts) in self._pending.items() if now - ts > _PENDING_TTL]
+        for k in expired:
+            self._pending.pop(k, None)
 
     async def start_pairing(self, sender_id: int) -> str:
         """Generate or reuse a pairing code for a contact.
@@ -114,10 +149,14 @@ class PairingManager:
         """
         self._validate_sender_id(sender_id)
         async with self._lock:
-            if sender_id in self._pending:
-                return self._pending[sender_id]
+            self._purge_expired()
+            entry = self._pending.get(sender_id)
+            if entry is not None:
+                return entry[0]
+            if len(self._pending) >= _MAX_PENDING:
+                raise RuntimeError("Pending pairing limit reached — try again later")
             code = secrets.token_hex(16)  # 32-char hex, 128 bits — bruteforce-resistant
-            self._pending[sender_id] = code
+            self._pending[sender_id] = (code, time.time())
         await self._persist_pending()
         logger.info("Pairing started for sender %d", sender_id)
         return code
@@ -126,7 +165,9 @@ class PairingManager:
         """Approve a pending contact and persist to DB."""
         self._validate_sender_id(sender_id)
         async with self._lock:
-            if not (sender_id in self._pending and self._pending[sender_id] == code):
+            self._purge_expired()
+            entry = self._pending.get(sender_id)
+            if entry is None or entry[0] != code:
                 return False
 
         # Persist to DB BEFORE updating in-memory state.

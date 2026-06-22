@@ -52,3 +52,30 @@ def sanitize_pii(text: str) -> str:
     text = _EMAIL_RE.sub("[EMAIL]", text)
     text = _PHONE_RE.sub("[PHONE]", text)
     return text
+
+
+# ponytail: regex scrub, upgrade to stateful buffer if partial-tag flicker matters.
+_INTERNAL_TAGS = re.compile(
+    r"</?(?:memory-context|system-note|think|reasoning|context-block|user_input)"
+    r"(?:\s[^>]*)?/?>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_INTERNAL_TAG_BLOCKS = re.compile(
+    r"<(?:memory-context|system-note|think|reasoning|context-block)"
+    r"(?:\s[^>]*)?>.*?</(?:memory-context|system-note|think|reasoning|context-block)>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def scrub_internal_tags(text: str) -> str:
+    """Remove internal XML-style tags from LLM output before user display.
+
+    Strips both full tag blocks (with content) and standalone tag markers.
+    Handles partial tags gracefully: unclosed tags are left in place until
+    the closing tag arrives in a subsequent chunk, then removed on next call.
+    """
+    if not text:
+        return text
+    text = _INTERNAL_TAG_BLOCKS.sub("", text)
+    text = _INTERNAL_TAGS.sub("", text)
+    return text

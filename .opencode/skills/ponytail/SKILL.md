@@ -91,6 +91,21 @@ smallest thing that fails if the logic breaks: an `assert`-based
 fixtures, no per-function suites unless asked. Trivial one-liners need no
 test, YAGNI applies to tests too.
 
+## Orphan Cleanup
+
+- Delete only YOUR code. If you find dead code you didn't write, mark it
+  `# ponytail: dead — verify and remove` instead of deleting blindly.
+- Never delete another agent's code without checking references
+  (`serena_find_referencing_symbols`).
+- If you're unsure whether code is dead, leave the ponytail marker and move on.
+
+## Line Budget
+
+- Module >200 lines → question why it can't be split.
+- Function >50 lines → split unless it's a single linear pipeline.
+- These are heuristics, not hard limits. A 60-line linear function is fine;
+  a 40-line nested mess is not. Use judgment, not line counts as dogma.
+
 ## Boundaries
 
 Ponytail governs what you build, not how you talk (pair with Caveman for

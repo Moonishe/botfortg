@@ -8,6 +8,8 @@ instructions → routing → dispatch). Parallelization is at the tool-execution
 
 from __future__ import annotations
 
+from src.core.security.prompt_guard import scrub_internal_tags
+
 import asyncio
 import json
 import logging
@@ -1634,7 +1636,9 @@ async def execute_maestro(
                             or now - last_update >= time_interval
                         ):
                             try:
-                                await sent_msg.edit_text((full_text + cursor)[:4000])
+                                await sent_msg.edit_text(
+                                    (scrub_internal_tags(full_text) + cursor)[:4000]
+                                )
                             except TelegramAPIError:
                                 pass  # сообщение удалено или устарело
                             last_update = now
@@ -1652,6 +1656,15 @@ async def execute_maestro(
                     logger.debug("Stream interrupted", exc_info=True)
                 full_text = "".join(chunks)
 
+            if not full_text.strip():
+                try:
+                    await sent_msg.edit_text("⚠️ Не получилось сгенерировать ответ")
+                except TelegramAPIError:
+                    await message.answer("⚠️ Не получилось сгенерировать ответ")
+                return MaestroResult(handled=True)
+
+            # Scrub internal tags from final text before humanize/display.
+            full_text = scrub_internal_tags(full_text)
             if not full_text.strip():
                 try:
                     await sent_msg.edit_text("⚠️ Не получилось сгенерировать ответ")
