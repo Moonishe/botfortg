@@ -68,7 +68,7 @@ async def sync_dialogs(
         filters_result = await client(GetDialogFiltersRequest())
         peer_to_folder: dict[int, str] = {}
         folders_data = []
-        for f in filters_result.filters:
+        for f in filters_result.filters:  # type: ignore
             if hasattr(f, "title") and f.title:
                 folders_data.append(
                     {
@@ -202,7 +202,7 @@ async def sync_dialogs_with_options(
         filters_result = await client(GetDialogFiltersRequest())
         peer_to_folder: dict[int, str] = {}
         folders_data = []
-        for f in filters_result.filters:
+        for f in filters_result.filters:  # type: ignore
             if hasattr(f, "title") and f.title:
                 folders_data.append(
                     {

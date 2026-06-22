@@ -342,6 +342,25 @@ def _setup_bot_and_dispatcher(
             logger.debug("Non-critical error", exc_info=True)
         return
 
+    # ─── Rate limiting middleware — token bucket per user ───
+    @dp.message.outer_middleware()  # type: ignore[arg-type]
+    async def rate_limit_middleware(
+        handler: Callable[[Message, dict[str, Any]], Awaitable[Any]],
+        message: Message,
+        data: dict[str, Any],
+    ) -> Any:
+        from src.core.security.rate_limiter import check_rate_limit
+
+        if message.from_user:
+            allowed = await check_rate_limit(message.from_user.id)
+            if not allowed:
+                try:
+                    await message.answer("⏳ Слишком много сообщений. Подожди немного.")
+                except Exception:
+                    logger.debug("Rate limit reply failed", exc_info=True)
+                return
+        return await handler(message, data)
+
     # Inline-режим — самый первый, чтобы ловить @botname до команд
     dp.include_router(inline_query.router)
     dp.include_router(approve_cmd.router)

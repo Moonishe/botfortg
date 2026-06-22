@@ -93,4 +93,34 @@ async def cmd_health(message: Message) -> None:
     except Exception:
         logger.debug("Non-critical error", exc_info=True)
 
+    # ── 7. Cron jobs ────────────────────────────────────────
+    try:
+        from sqlalchemy import func, select
+
+        from src.db.models import CronJob
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            total = await session.scalar(select(func.count()).select_from(CronJob))
+            enabled = await session.scalar(
+                select(func.count())
+                .select_from(CronJob)
+                .where(CronJob.enabled.is_(True))
+            )
+        lines.append(f"\n⏰ Cron: {enabled or 0}/{total or 0} активных")
+    except Exception:
+        logger.debug("Cron status check failed", exc_info=True)
+
+    # ── 8. Userbot ──────────────────────────────────────────
+    try:
+        from src.userbot.manager import userbot_manager
+
+        clients = (
+            userbot_manager._clients if hasattr(userbot_manager, "_clients") else {}
+        )
+        connected = sum(1 for c in clients.values() if c.is_connected())
+        lines.append(f"👤 Userbot: {connected}/{len(clients)} подключено")
+    except Exception:
+        logger.debug("Userbot status check failed", exc_info=True)
+
     await message.answer("\n".join(lines))

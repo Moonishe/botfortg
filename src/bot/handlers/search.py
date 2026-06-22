@@ -86,7 +86,7 @@ async def cmd_index(
 async def cb_idx_pick(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
     peer_id = int(callback.data.split(":")[2])
     if callback.message is not None:
-        await callback.message.edit_text("⏳ Индексирую...")
+        await callback.message.edit_text("⏳ Индексирую...")  # type: ignore
         await _do_index(
             callback.message,
             peer_id,
@@ -131,7 +131,7 @@ async def _do_index(
 @router.callback_query(F.data == "search:cancel:0")
 async def cb_cancel(callback: CallbackQuery) -> None:
     if callback.message:
-        await callback.message.edit_text("Отменено.")
+        await callback.message.edit_text("Отменено.")  # type: ignore
     await callback.answer()
 
 
@@ -261,7 +261,9 @@ async def cb_forward(callback: CallbackQuery, userbot_manager: UserbotManager) -
         return
     try:
         entity = await client.get_entity(peer_id)
-        await client.forward_messages("me", msg_id, entity)
+        if isinstance(entity, list):
+            entity = entity[0] if entity else peer_id
+        await client.forward_messages("me", msg_id, entity)  # type: ignore
     except Exception:
         logger.exception("forward failed")
         await callback.answer("Не удалось переслать", show_alert=True)

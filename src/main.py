@@ -405,7 +405,7 @@ async def main() -> None:
         logger.debug("hooks.emit('on_startup') failed (non-critical)", exc_info=True)
 
     await start_worker()
-    start_voice_worker()
+    start_voice_worker()  # pyright: ignore[reportCallIssue]
     notification_queue.start()
 
     from src.core.cache.manager import cache_manager
@@ -790,7 +790,7 @@ async def main() -> None:
             ("userbot", userbot_manager.shutdown()),
             ("background tasks", task_manager.stop_all()),
             ("memory worker", stop_worker()),
-            ("voice worker", stop_voice_worker()),
+            ("voice worker", stop_voice_worker()),  # pyright: ignore[reportCallIssue]
             ("notification queue", notification_queue.stop()),
             ("cache manager", cache_manager.stop_background_cleanup()),
             ("avito rotator", _shutdown_avito_rotator()),

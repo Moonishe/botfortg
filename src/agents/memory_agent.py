@@ -58,7 +58,7 @@ async def recall(
                     ChatMessage(role="user", content=user_msg),
                 ],
                 heavy=False,
-                max_tokens=effective_max_tokens,
+                max_tokens=effective_max_tokens,  # type: ignore
             ),
             timeout=_AGENT_TIMEOUT,
         )

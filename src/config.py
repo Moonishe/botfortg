@@ -888,5 +888,17 @@ class Settings(BaseSettings):
         600, description="Интервал поиска паттернов памяти (сек)"
     )
 
+    # ── Rate limiting — token bucket per user ──
+    rate_limit_per_min: int = Field(
+        0, description="0=disabled, >0=max messages per minute per user"
+    )
+
+    # ── Logging ──
+    log_format: str = Field("text", description="text|json — JSON for production")
+
+    # ── LLM retry ──
+    llm_retry_max: int = Field(3, description="Max retries on 429/503")
+    llm_retry_base_delay: float = Field(1.0, description="Base delay in seconds")
+
 
 settings = Settings()
