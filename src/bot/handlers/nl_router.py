@@ -47,7 +47,7 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"похож.*факт.*на\s+(.+)", re.I), "mem_similar", r"\1"),
     (re.compile(r"(теплова|уверенност).*(памят|факт)", re.I), "mem_heatmap", ""),
     (re.compile(r"истека.*факт", re.I), "mem_expire", ""),
-    (re.compile(r"теги?( памяти)?", re.I), "mem_tags", ""),
+    (re.compile(r"\bтеги?\b", re.I), "mem_tags", ""),
     # ── Planning ── (BEFORE chat — "напомни" must not be caught by "напиши")
     (re.compile(r"напомни\s+(.+)", re.I), "nlcron", r"\1"),
     (re.compile(r"напомнить\s+(.+)", re.I), "nlcron", r"\1"),
@@ -78,8 +78,8 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"настрой\s+(.+)", re.I), "settings", ""),
     (re.compile(r"включи\s+(.+)", re.I), "settings", r"\1"),
     (re.compile(r"выключи\s+(.+)", re.I), "settings", r"\1"),
-    (re.compile(r"(api|апи)?\s*ключ", re.I), "keys", ""),
-    (re.compile(r"модел", re.I), "models", ""),
+    (re.compile(r"\b(?:api\s+|апи\s+)?ключ\b", re.I), "keys", ""),
+    (re.compile(r"(покажи |мои |список )?модел(?:и|ей|ях)\b", re.I), "models", ""),
     # ── Analytics ──
     (re.compile(r"статистик", re.I), "stats", ""),
     (re.compile(r"сколько (фактов|контактов|сообщений)", re.I), "stats", ""),
