@@ -349,6 +349,18 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("tool_heatmap", "Топ инструментов", "analytics")
     registry.register("conv_depth", "Глубина диалогов", "analytics")
 
+    # ── Auto-reply Batch 2 ──
+    registry.register("personality", "Персона авто-ответов", "auto-reply")
+    registry.register("contact_personality", "Персона для контакта", "auto-reply")
+    registry.register("greeting", "Приветствие авто-ответа", "auto-reply")
+    registry.register("auto_reply_stats", "Статистика авто-ответов", "auto-reply")
+    registry.register("schedule_reply", "Расписание авто-ответов", "auto-reply")
+
+    # ── Tools Batch 3 ──
+    registry.register("url_summary", "Пересказ веб-страницы", "tools")
+    registry.register("weather_clothing", "Погода + одежда", "tools")
+    registry.register("sticker_search", "Поиск стикеров", "tools")
+
     # ── Admin ──
     registry.register("avito", "Поиск на Avito", "admin")
     registry.register("avito_list", "Список поисков Avito", "admin")

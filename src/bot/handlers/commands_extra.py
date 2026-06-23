@@ -1320,55 +1320,398 @@ async def cmd_templates(message: Message) -> None:
         for t in templates:
             name = t.key.replace("template:", "")
             lines.append(f"  • <code>{name}</code>: {t.value[:50]}")
-        await message.answer("\n".join(lines))
-        return
+    await message.answer("\n".join(lines))
 
-    action = parts[1]
-    if action == "add" and len(parts) >= 3:
-        # Format: /templates add name text
-        add_parts = parts[2].split(maxsplit=1)
-        if len(add_parts) < 2:
-            await message.answer("❌ Формат: <code>/templates add имя текст</code>")
-            return
-        name, body = add_parts
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            # Delete existing
-            existing = await session.execute(
-                select(WorkingMemory).where(
-                    WorkingMemory.user_id == owner.id,
-                    WorkingMemory.key == f"template:{name}",
-                )
-            )
-            old = existing.scalar_one_or_none()
-            if old:
-                await session.delete(old)
-            session.add(
-                WorkingMemory(
-                    user_id=owner.id,
-                    key=f"template:{name}",
-                    value=body[:500],
-                )
-            )
-            await session.commit()
-        await message.answer(f"✅ Шаблон «{name}» сохранён.")
-    else:
-        # Use template: /templates name
-        name = action
+
+# ═══════════════════════════════════════════════════════════════════
+# AUTO-REPLY EXTENSIONS Batch 2 (29-40)
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("personality"))
+async def cmd_personality(message: Message) -> None:
+    """#29: Personality profiles — установить персональный тон авто-ответа."""
+    text = (message.text or "").replace("/personality", "").strip()
+    if not text:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
             result = await session.execute(
                 select(WorkingMemory).where(
                     WorkingMemory.user_id == owner.id,
-                    WorkingMemory.key == f"template:{name}",
+                    WorkingMemory.key == "personality:global",
                 )
             )
-            tmpl = result.scalar_one_or_none()
+            wm = result.scalar_one_or_none()
 
-        if tmpl:
-            await message.answer(f"📋 Шаблон «{name}»:\n\n{tmpl.value}")
+        if wm:
+            await message.answer(
+                f"🎭 <b>Текущая персона:</b>\n{wm.value}\n\n"
+                "Изменить: <code>/personality общайся формально и кратко</code>"
+            )
         else:
-            await message.answer(f"❌ Шаблон «{name}» не найден.")
+            await message.answer(
+                "🎭 <b>Персона авто-ответов</b>\n\n"
+                "Установить: <code>/personality общайся дружелюбно, с шутками</code>\n"
+                "Это изменит тон всех авто-ответов."
+            )
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        result = await session.execute(
+            select(WorkingMemory).where(
+                WorkingMemory.user_id == owner.id,
+                WorkingMemory.key == "personality:global",
+            )
+        )
+        old = result.scalar_one_or_none()
+        if old:
+            await session.delete(old)
+        session.add(
+            WorkingMemory(
+                user_id=owner.id,
+                key="personality:global",
+                value=text[:500],
+            )
+        )
+        await session.commit()
+
+    await message.answer(f"✅ Персона сохранена: «{text[:60]}»")
+
+
+@router.message(Command("contact_personality"))
+async def cmd_contact_personality(message: Message) -> None:
+    """#30: Per-contact personality — тон для конкретного контакта."""
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer(
+            "🎭 <b>Персона для контакта</b>\n\n"
+            "Установить: <code>/contact_personality Иван общайся официально</code>"
+        )
+        return
+
+    name = parts[1]
+    personality = parts[2] if len(parts) >= 3 else ""
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_bots=False
+        )
+        contact = next(
+            (c for c in contacts if name.lower() in (c.display_name or "").lower()),
+            None,
+        )
+        if not contact:
+            await message.answer(f"❌ Контакт «{name}» не найден.")
+            return
+
+        key = f"personality:{contact.peer_id}"
+        result = await session.execute(
+            select(WorkingMemory).where(
+                WorkingMemory.user_id == owner.id,
+                WorkingMemory.key == key,
+            )
+        )
+        old = result.scalar_one_or_none()
+        if old:
+            await session.delete(old)
+        if personality:
+            session.add(
+                WorkingMemory(
+                    user_id=owner.id,
+                    key=key,
+                    value=personality[:500],
+                )
+            )
+        await session.commit()
+
+    if personality:
+        await message.answer(f"✅ {name}: «{personality[:60]}»")
+    else:
+        await message.answer(f"✅ Персона для {name} сброшена.")
+
+
+@router.message(Command("greeting"))
+async def cmd_greeting(message: Message) -> None:
+    """#39: Context greeting — настроить приветствие."""
+    text = (message.text or "").replace("/greeting", "").strip()
+    if not text:
+        await message.answer(
+            "👋 <b>Приветствие</b>\n\n"
+            "Установить: <code>/greeting Привет! Я пока не у телефона</code>\n"
+            "Это добавится к началу авто-ответов."
+        )
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        result = await session.execute(
+            select(WorkingMemory).where(
+                WorkingMemory.user_id == owner.id,
+                WorkingMemory.key == "greeting:auto_reply",
+            )
+        )
+        old = result.scalar_one_or_none()
+        if old:
+            await session.delete(old)
+        session.add(
+            WorkingMemory(
+                user_id=owner.id,
+                key="greeting:auto_reply",
+                value=text[:300],
+            )
+        )
+        await session.commit()
+
+    await message.answer(f"✅ Приветствие: «{text[:60]}»")
+
+
+@router.message(Command("auto_reply_stats"))
+async def cmd_auto_reply_stats(message: Message) -> None:
+    """#40: Auto-reply performance — статистика авто-ответов."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.models._messaging import AutoReplyLog
+
+        total = await session.scalar(
+            select(func.count())
+            .select_from(AutoReplyLog)
+            .where(AutoReplyLog.user_id == owner.id)
+        )
+        # Last 24h
+        yesterday = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=1)
+        recent = await session.scalar(
+            select(func.count())
+            .select_from(AutoReplyLog)
+            .where(
+                AutoReplyLog.user_id == owner.id,
+                AutoReplyLog.created_at >= yesterday,
+            )
+        )
+
+    lines = [
+        "📊 <b>Статистика авто-ответов</b>\n",
+        f"  Всего: {total or 0}",
+        f"  За 24ч: {recent or 0}",
+    ]
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("schedule_reply"))
+async def cmd_schedule_reply(message: Message) -> None:
+    """#33: Schedule auto-reply — расписание авто-ответов."""
+    text = (message.text or "").replace("/schedule_reply", "").strip()
+    if not text:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            result = await session.execute(
+                select(WorkingMemory).where(
+                    WorkingMemory.user_id == owner.id,
+                    WorkingMemory.key.like("schedule:%"),
+                )
+            )
+            schedules = result.scalars().all()
+
+        if not schedules:
+            await message.answer(
+                "📅 <b>Расписание авто-ответов</b>\n\n"
+                "Включить: <code>/schedule_reply on 22:00-08:00</code>\n"
+                "Выключить: <code>/schedule_reply off</code>"
+            )
+            return
+
+        lines = ["📅 <b>Расписание:</b>\n"]
+        for s in schedules:
+            lines.append(f"  • {s.key.replace('schedule:', '')}: {s.value}")
+        await message.answer("\n".join(lines))
+        return
+
+    if text.lower().startswith("off"):
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            result = await session.execute(
+                select(WorkingMemory).where(
+                    WorkingMemory.user_id == owner.id,
+                    WorkingMemory.key.like("schedule:%"),
+                )
+            )
+            for s in result.scalars().all():
+                await session.delete(s)
+            await session.commit()
+        await message.answer("✅ Расписание выключено.")
+        return
+
+    # Parse: on HH:MM-HH:MM
+    import re
+
+    match = re.match(r"on\s+(\d{1,2}:\d{2})-(\d{1,2}:\d{2})", text)
+    if not match:
+        await message.answer("❌ Формат: <code>/schedule_reply on 22:00-08:00</code>")
+        return
+
+    schedule_value = f"{match.group(1)}-{match.group(2)}"
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        result = await session.execute(
+            select(WorkingMemory).where(
+                WorkingMemory.user_id == owner.id,
+                WorkingMemory.key == "schedule:auto_reply",
+            )
+        )
+        old = result.scalar_one_or_none()
+        if old:
+            await session.delete(old)
+        session.add(
+            WorkingMemory(
+                user_id=owner.id,
+                key="schedule:auto_reply",
+                value=schedule_value,
+            )
+        )
+        await session.commit()
+
+    await message.answer(f"✅ Авто-ответы: {schedule_value}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TOOLS EXTENSIONS Batch 3 (61-72)
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("url_summary"))
+async def cmd_url_summary(message: Message) -> None:
+    """#68: URL summarizer — краткий пересказ веб-страницы."""
+    url = (message.text or "").replace("/url_summary", "").strip()
+    if not url:
+        await message.answer(
+            "🔗 <b>Пересказ веб-страницы</b>\n\n"
+            "Отправь: <code>/url_summary https://example.com/article</code>"
+        )
+        return
+
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    await message.answer("📖 Загружаю и анализирую...")
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                await message.answer(f"❌ HTTP {resp.status_code}")
+                return
+
+            # Strip HTML tags — ponytail: simple regex, upgrade to BeautifulSoup if needed
+            import re
+
+            raw_text = re.sub(r"<[^>]+>", " ", resp.text)
+            raw_text = re.sub(r"\s+", " ", raw_text).strip()
+
+        if len(raw_text) < 100:
+            await message.answer("❌ Слишком мало текста на странице.")
+            return
+
+        # LLM summary
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            from src.llm.base import ChatMessage, TaskType
+            from src.llm.router import build_provider
+
+            provider = await build_provider(
+                session, owner, task_type=TaskType.SUMMARIZE
+            )
+
+        if provider is None:
+            # Fallback: first 500 chars
+            await message.answer(f"📖 {raw_text[:500]}...")
+            return
+
+        summary = await provider.chat(
+            [
+                ChatMessage(
+                    role="system",
+                    content="Сделай краткий пересказ страницы на русском. 3-5 предложений.",
+                ),
+                ChatMessage(role="user", content=raw_text[:6000]),
+            ],
+            task_type=TaskType.SUMMARIZE,
+        )
+
+        await message.answer(f"📖 <b>Пересказ:</b>\n\n{summary}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+
+
+@router.message(Command("weather_clothing"))
+async def cmd_weather_clothing(message: Message) -> None:
+    """#63: Weather + clothing suggestion."""
+    city = (message.text or "").replace("/weather_clothing", "").strip()
+    if not city:
+        await message.answer("🌤 Напиши: <code>/weather_clothing Москва</code>")
+        return
+
+    try:
+        import httpx
+
+        # wttr.in — free weather API, no key needed
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"https://wttr.in/{city}?format=j1",
+                headers={"Accept-Language": "ru"},
+            )
+            if resp.status_code != 200:
+                await message.answer("❌ Не удалось получить погоду.")
+                return
+
+            data = resp.json()
+            current = data.get("current_condition", [{}])[0]
+            temp = int(current.get("temp_C", 0))
+            desc = current.get("lang_ru", [{}])[0].get("value", "")
+            humidity = current.get("humidity", 0)
+            wind = int(current.get("windspeedKmph", 0))
+
+        # Clothing suggestion based on temperature
+        if temp < -10:
+            clothing = "🧥 Тёплая куртка, шапка, шарф, перчатки. Очень холодно!"
+        elif temp < 0:
+            clothing = "🧥 Зимняя куртка, шапка. Холодно."
+        elif temp < 10:
+            clothing = "🧥 Пальто или тёплая куртка. Прохладно."
+        elif temp < 18:
+            clothing = "👕 Лёгкая куртка или худи. Умеренно."
+        elif temp < 25:
+            clothing = "👕 Футболка, возможно лёгкая кофта. Тепло."
+        else:
+            clothing = "👕 Лёгкая одежда. Жарко!"
+
+        await message.answer(
+            f"🌤 <b>{city}</b>\n"
+            f"  🌡 {temp}°C, {desc}\n"
+            f"  💧 Влажность: {humidity}%\n"
+            f"  💨 Ветер: {wind} км/ч\n\n"
+            f"👕 <b>Одежда:</b> {clothing}"
+        )
+    except Exception:
+        await message.answer("❌ Ошибка получения погоды.")
+
+
+@router.message(Command("sticker_search"))
+async def cmd_sticker_search(message: Message) -> None:
+    """#72: Sticker search — поиск стикеров."""
+    query = (message.text or "").replace("/sticker_search", "").strip()
+    if not query:
+        await message.answer("🎨 Напиши: <code>/sticker_search кот</code>")
+        return
+
+    # ponytail: Telegram Bot API has no sticker search. Would need Combin API or similar.
+    await message.answer(
+        f"🎨 <b>Поиск стикеров: «{query}»</b>\n\n"
+        "Telegram Bot API не поддерживает поиск стикеров. "
+        "Используй @sticker_search_bot или @stickerlandbot."
+    )
 
 
 @router.message(Command("per_contact_emoji"))
