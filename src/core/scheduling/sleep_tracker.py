@@ -33,8 +33,23 @@ async def sleep_tracker_loop(owner_id: int) -> None:
                     now = now_in_tz(tz_name)
                     hour = now.hour
 
-                    # Ночной интервал 22:00 - 08:00
-                    is_night = hour >= 22 or hour < 8
+                    # Configurable sleep window (default 23-07, user can change)
+                    # ponytail: simple hour comparison, upgrade to minute-precision if needed.
+                    sleep_start = (
+                        getattr(owner.settings, "sleep_start_hour", 23)
+                        if owner.settings
+                        else 23
+                    )
+                    sleep_end = (
+                        getattr(owner.settings, "sleep_end_hour", 7)
+                        if owner.settings
+                        else 7
+                    )
+                    if sleep_start > sleep_end:
+                        # e.g. 23 > 7 → night spans midnight
+                        is_night = hour >= sleep_start or hour < sleep_end
+                    else:
+                        is_night = sleep_start <= hour < sleep_end
 
                     if is_night:
                         last_seen = owner.last_seen_online

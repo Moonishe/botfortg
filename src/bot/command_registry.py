@@ -342,6 +342,7 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
 
     # ── Auto-reply extensions ──
     registry.register("away", "Статус отсутствия", "auto-reply")
+    registry.register("sleep", "Окно сна (часы)", "auto-reply")
     registry.register("templates", "Шаблоны ответов", "auto-reply")
     registry.register("per_contact_emoji", "Эмодзи для контакта", "auto-reply")
 

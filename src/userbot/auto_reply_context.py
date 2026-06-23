@@ -54,11 +54,25 @@ async def _check_and_track_offline(
             now = datetime.now(UTC).replace(tzinfo=None)
             last_seen = owner.last_seen_online
             if last_seen is None or (now - last_seen) > timedelta(minutes=10):
-                # Sleep detection — определяем, не спит ли владелец
+                # Sleep detection — configurable window in user's timezone
                 tz_name = get_user_tz(owner)
                 local_now = now_in_tz(tz_name)
                 hour = local_now.hour
-                is_night = hour >= 22 or hour < 8
+                # ponytail: configurable hours, default 23-07. Upgrade to adaptive if patterns tracked.
+                sleep_start = (
+                    getattr(owner.settings, "sleep_start_hour", 23)
+                    if owner.settings
+                    else 23
+                )
+                sleep_end = (
+                    getattr(owner.settings, "sleep_end_hour", 7)
+                    if owner.settings
+                    else 7
+                )
+                if sleep_start > sleep_end:
+                    is_night = hour >= sleep_start or hour < sleep_end
+                else:
+                    is_night = sleep_start <= hour < sleep_end
 
                 if is_night:
                     if last_seen is not None:

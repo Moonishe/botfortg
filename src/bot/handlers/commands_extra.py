@@ -1313,6 +1313,52 @@ async def cmd_away(message: Message) -> None:
     await message.answer(f"{status_emoji} Статус: {status}\nСообщение: {text[:80]}")
 
 
+@router.message(Command("sleep"))
+async def cmd_sleep_window(message: Message) -> None:
+    """Configure sleep detection window — hours when bot says you're sleeping."""
+    args = (message.text or "").replace("/sleep", "").strip()
+    if not args:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            start = (
+                getattr(owner.settings, "sleep_start_hour", 23)
+                if owner.settings
+                else 23
+            )
+            end = getattr(owner.settings, "sleep_end_hour", 7) if owner.settings else 7
+        await message.answer(
+            "😴 <b>Окно сна</b>\n\n"
+            f"Текущее: <b>{start}:00 — {end}:00</b> (по твоему времени)\n\n"
+            "Установить: <code>/sleep 23 7</code> (с 23:00 до 07:00)\n"
+            "Или: <code>/sleep 0 6</code> (с полуночи до 06:00)\n\n"
+            f"Таймзона: {getattr(owner.settings, 'timezone', 'UTC') if owner else 'UTC'}"
+        )
+        return
+
+    parts = args.split()
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        await message.answer("❌ Формат: <code>/sleep 23 7</code> (начало конец, 0-23)")
+        return
+
+    start_h = int(parts[0])
+    end_h = int(parts[1])
+    if not (0 <= start_h <= 23) or not (0 <= end_h <= 23):
+        await message.answer("❌ Часы должны быть 0-23")
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        if owner.settings:
+            owner.settings.sleep_start_hour = start_h
+            owner.settings.sleep_end_hour = end_h
+            await session.commit()
+
+    await message.answer(
+        f"✅ Окно сна: <b>{start_h}:00 — {end_h}:00</b>\n"
+        "В это время бот будет говорить что ты спишь 😴"
+    )
+
+
 @router.message(Command("templates"))
 async def cmd_templates(message: Message) -> None:
     """#31: Quick response templates — шаблоны быстрых ответов."""

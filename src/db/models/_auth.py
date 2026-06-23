@@ -54,6 +54,10 @@ class UserSettings(Base):
         default="Сейчас не у телефона, отвечу как только смогу.",
     )
     ignore_archived: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Sleep detection window (in user's local timezone). Default: 23:00 - 07:00.
+    # When owner is offline during this window, auto-reply says "спит".
+    sleep_start_hour: Mapped[int] = mapped_column(Integer, default=23)
+    sleep_end_hour: Mapped[int] = mapped_column(Integer, default=7)
     reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     reminder_lead_hours: Mapped[int] = mapped_column(Integer, default=2)
     reminder_overdue_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -183,7 +187,9 @@ class LlmKeySlot(Base):
         DateTime(timezone=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     usage_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
