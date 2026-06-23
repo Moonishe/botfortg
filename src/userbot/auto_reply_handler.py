@@ -120,16 +120,6 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                 if owner.settings is None or not owner.settings.auto_reply_enabled:
                     return
 
-                # ── Spam detection: garbage — mute reply ───────────────────
-                # AFTER auto_reply_enabled check to prevent unsolicited messages
-                sender_id = sender.id
-                if sender_id != settings.owner_telegram_id:
-                    _msg_text = (msg.text or msg.message or "").strip()
-                    _is_garbage = len(_msg_text) < 2 and not msg.sticker
-                    if _is_garbage:
-                        await event.reply("🚫🤡 Ты в муте. Сиди.")
-                        return
-
                 # запомним / обновим контакт до принятия решения
                 parts = [
                     getattr(sender, "first_name", None),
@@ -171,6 +161,20 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
                 # Определяем онлайн-статус владельца (и трекаем сон/absence)
                 owner_offline = await _check_and_track_offline(client, session, owner)
+
+                # ── Если владелец онлайн — не отвечаем вообще ──────────────
+                # Auto-reply only when owner is offline/away/sleeping.
+                if not owner_offline:
+                    return
+
+                # ── Garbage/spam filter: ignore very short messages silently ──
+                # ponytail: was "🚫🤡 Ты в муте. Сиди." — bad UX, bot shouldn't
+                # insult people. Just ignore silently.
+                sender_id = sender.id
+                if sender_id != settings.owner_telegram_id:
+                    _msg_text = (msg.text or msg.message or "").strip()
+                    if len(_msg_text) < 2 and not msg.sticker:
+                        return  # ignore silently, don't reply
 
                 # ── Единый вызов decision layer ────────────────────────────
                 choice = await decide(
