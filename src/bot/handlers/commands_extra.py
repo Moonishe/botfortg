@@ -907,3 +907,666 @@ async def cmd_currency(message: Message) -> None:
             )
     except Exception:
         await message.answer("❌ Ошибка получения курса валют.")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PLANNING EXTENSIONS (51-60): NL cron, smart context, meeting prep,
+# smart nudge timing, proactive topics, calendar
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("nlcron"))
+async def cmd_nlcron(message: Message) -> None:
+    """#51: NL cron — создать задачу через естественный язык."""
+    text = (message.text or "").replace("/nlcron", "").strip()
+    if not text:
+        await message.answer(
+            "🕐 <b>NL Cron</b>\n\n"
+            "Напиши что нужно сделать и когда:\n"
+            "<code>/nlcron напомни позвонить маме каждый вторник в 18:00</code>\n"
+            "<code>/nlcron будильник в 7:00 каждый день</code>\n"
+            "<code>/nlcron отчёт в пятницу в 17:00</code>"
+        )
+        return
+
+    # ponytail: simple regex parser for common patterns. Upgrade to LLM if complex.
+    import re
+
+    cron_expr: str | None = None
+    task_text = text
+
+    # Pattern: "в HH:MM каждый/каждую X"
+    time_match = re.search(r"в\s+(\d{1,2}):(\d{2})", text)
+    day_match = re.search(
+        r"кажд(ый|ую|ое|ые)\s+(понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье|день|неделю|час|месяц)",
+        text,
+        re.IGNORECASE,
+    )
+
+    if time_match:
+        hour, minute = int(time_match.group(1)), int(time_match.group(2))
+        if day_match:
+            day_word = day_match.group(2).lower()
+            day_map = {
+                "понедельник": "1",
+                "вторник": "2",
+                "среду": "3",
+                "четверг": "4",
+                "пятницу": "5",
+                "субботу": "6",
+                "воскресенье": "0",
+                "день": "*",
+                "неделю": "*",
+            }
+            dow = day_map.get(day_word, "*")
+            cron_expr = f"{minute} {hour} * * {dow}"
+        else:
+            cron_expr = f"{minute} {hour} * * *"
+
+    if cron_expr:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            from src.db.models import CronJob
+
+            job = CronJob(
+                user_id=owner.id,
+                name=text[:60],
+                cron_expression=cron_expr,
+                payload_type="message",
+                payload=json.dumps({"text": text[:200]}, ensure_ascii=False),
+                channel="notification_queue",
+                enabled=True,
+            )
+            session.add(job)
+            await session.commit()
+
+        await message.answer(
+            f"✅ Задача создана!\n📋 Cron: <code>{cron_expr}</code>\n📝 {text[:80]}"
+        )
+    else:
+        await message.answer(
+            "❌ Не распознал время. Пример:\n"
+            "<code>/nlcron напомни в 18:00 каждый вторник</code>"
+        )
+
+
+@router.message(Command("smart_reminder"))
+async def cmd_smart_reminder(message: Message) -> None:
+    """#52: Smart reminder with context — напоминание с контекстом из памяти."""
+    text = (message.text or "").replace("/smart_reminder", "").strip()
+    if not text:
+        await message.answer(
+            "⏰ <b>Smart Reminder</b>\n\n"
+            "Напиши: <code>/smart_reminder позвонить маме в 18:00</code>\n"
+            "Бот прикрепит факты из памяти о маме к напоминанию."
+        )
+        return
+
+    import re
+
+    time_match = re.search(r"в\s+(\d{1,2}):(\d{2})", text)
+    if not time_match:
+        await message.answer("❌ Укажи время: <code>/smart_reminder ... в 18:00</code>")
+        return
+
+    hour, minute = int(time_match.group(1)), int(time_match.group(2))
+    clean_text = re.sub(r"\s*в\s+\d{1,2}:\d{2}\s*", " ", text).strip()
+
+    # Search memory for context related to the reminder
+    context_facts: list[str] = []
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        # Simple keyword search in memories
+        keywords = clean_text.lower().split()[:3]
+        for kw in keywords:
+            if len(kw) < 3:
+                continue
+            result = await session.execute(
+                select(Memory.fact)
+                .where(
+                    Memory.user_id == owner.id,
+                    Memory.is_active,
+                    Memory.fact.ilike(f"%{kw}%"),
+                )
+                .limit(3)
+            )
+            for (fact,) in result.all():
+                if fact not in context_facts:
+                    context_facts.append(fact)
+
+    # Create reminder
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.models import CronJob
+
+        reminder_text = clean_text
+        if context_facts:
+            reminder_text += "\n\n📋 Контекст из памяти:\n" + "\n".join(
+                f"  • {f[:80]}" for f in context_facts[:3]
+            )
+
+        reminder_job = CronJob(
+            user_id=owner.id,
+            name=f"Напоминание: {clean_text[:40]}",
+            cron_expression=f"{minute} {hour} * * *",
+            payload_type="message",
+            payload=json.dumps({"text": reminder_text[:500]}, ensure_ascii=False),
+            channel="notification_queue",
+            enabled=True,
+        )
+        session.add(reminder_job)
+        await session.commit()
+
+    await message.answer(
+        f"✅ Напоминание на {hour:02d}:{minute:02d}\n"
+        f"📝 {clean_text[:60]}\n"
+        f"🧠 Контекст: {len(context_facts)} фактов"
+    )
+
+
+@router.message(Command("meeting_prep"))
+async def cmd_meeting_prep(message: Message) -> None:
+    """#53: Meeting prep — подготовка к встрече с контактом."""
+    name = (message.text or "").replace("/meeting_prep", "").strip()
+    if not name:
+        await message.answer(
+            "📅 <b>Подготовка к встрече</b>\n\n"
+            "Напиши: <code>/meeting_prep Иван</code>\n"
+            "Бот соберёт факты, последние темы, настроение."
+        )
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_bots=False
+        )
+        contact = next(
+            (c for c in contacts if name.lower() in (c.display_name or "").lower()),
+            None,
+        )
+
+        if not contact:
+            await message.answer(f"❌ Контакт «{name}» не найден.")
+            return
+
+        # Gather context
+        facts_result = await session.execute(
+            select(Memory.fact, Memory.sentiment, Memory.created_at)
+            .where(
+                Memory.user_id == owner.id,
+                Memory.is_active,
+                Memory.contact_id == contact.peer_id,
+            )
+            .order_by(desc(Memory.created_at))
+            .limit(10)
+        )
+        facts = facts_result.all()
+
+        from src.db.models import Message
+
+        msg_result = await session.execute(
+            select(Message.text)
+            .where(
+                Message.user_id == owner.id,
+                Message.peer_id == contact.peer_id,
+            )
+            .order_by(desc(Message.date))
+            .limit(5)
+        )
+        recent_msgs = [r[0] for r in msg_result.all() if r[0]]
+
+    lines = [f"📅 <b>Подготовка к встрече: {contact.display_name}</b>\n"]
+
+    if facts:
+        lines.append("🧠 <b>Факты из памяти:</b>")
+        for fact, sentiment, _ in facts[:5]:
+            emoji = (
+                "😊"
+                if sentiment == "positive"
+                else "😟"
+                if sentiment == "negative"
+                else "📝"
+            )
+            lines.append(f"  {emoji} {fact[:80]}")
+    else:
+        lines.append("🧠 Фактов не найдено.")
+
+    if recent_msgs:
+        lines.append("\n💬 <b>Последние темы:</b>")
+        for msg in recent_msgs[:3]:
+            lines.append(f"  • {msg[:60]}")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("nudge_timing"))
+async def cmd_nudge_timing(message: Message) -> None:
+    """#58: Smart nudge timing — лучшее время для напоминаний."""
+    await message.answer(
+        "⏰ <b>Анализ активности</b>\n\n"
+        "Команда в разработке — использует данные из памяти "
+        "для определения лучшего времени напоминаний.\n"
+        "Пока используй <code>/nlcron</code> для создания задач."
+    )
+
+
+@router.message(Command("topics"))
+async def cmd_topics(message: Message) -> None:
+    """#59: Proactive topic suggestions — темы для обсуждения."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_bots=False
+        )
+
+        suggestions: list[str] = []
+        for contact in contacts[:5]:
+            # Find contacts with no messages in last 3 days
+            from src.db.models import Message
+
+            last_msg = await session.scalar(
+                select(func.max(Message.date)).where(
+                    Message.user_id == owner.id,
+                    Message.peer_id == contact.peer_id,
+                )
+            )
+            if last_msg:
+                days = (datetime.now(UTC).replace(tzinfo=None) - last_msg).days
+                if days >= 3:
+                    name = contact.display_name or str(contact.peer_id)
+                    suggestions.append(f"  • {name} — не общались {days}д")
+
+        # Find unresolved tasks
+        task_result = await session.execute(
+            select(Memory.fact)
+            .where(
+                Memory.user_id == owner.id,
+                Memory.is_active,
+                Memory.memory_type == "task",
+            )
+            .limit(3)
+        )
+        tasks = [r[0] for r in task_result.all()]
+
+    lines = ["💡 <b>Темы для обсуждения</b>\n"]
+    if suggestions:
+        lines.append("📞 <b>Стоит написать:</b>")
+        lines.extend(suggestions)
+    else:
+        lines.append("✅ Все контакты активны.")
+
+    if tasks:
+        lines.append("\n📋 <b>Открытые задачи:</b>")
+        for t in tasks:
+            lines.append(f"  • {t[:60]}")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("calendar"))
+async def cmd_calendar(message: Message) -> None:
+    """#60: Calendar — показать предстоящие события."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.models import CronJob
+
+        result = await session.execute(
+            select(CronJob)
+            .where(CronJob.user_id == owner.id, CronJob.enabled)
+            .order_by(CronJob.next_run_at)
+            .limit(10)
+        )
+        jobs = result.scalars().all()
+
+    if not jobs:
+        await message.answer("📅 Нет запланированных задач.")
+        return
+
+    lines = ["📅 <b>Ближайшие события</b>\n"]
+    for job in jobs:
+        next_run = job.next_run_at
+        if next_run:
+            from src.core.infra.timeutil import get_user_tz, now_in_tz
+
+            tz = get_user_tz(owner)
+            local_time = (
+                next_run.replace(tzinfo=UTC) if next_run.tzinfo is None else next_run
+            )
+            time_str = local_time.strftime("%d.%m %H:%M")
+        else:
+            time_str = "?"
+
+        payload = json.loads(job.payload) if job.payload else {}
+        text = payload.get("text", job.name)[:40]
+        lines.append(f"  ⏰ {time_str} — {text}")
+
+    await message.answer("\n".join(lines))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AUTO-REPLY EXTENSIONS (29-40): personalities, templates, smart away
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("away"))
+async def cmd_away(message: Message) -> None:
+    """#32: Smart away — установить статус отсутствия."""
+    text = (message.text or "").replace("/away", "").strip()
+    if not text:
+        # Show current status
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            status = owner.absence_status or "онлайн"
+            msg = owner.absence_message or ""
+        await message.answer(
+            f"🏠 <b>Текущий статус:</b> {status}\n"
+            f"{'Сообщение: ' + msg if msg else ''}\n\n"
+            "Установить: <code>/away сплю</code> или <code>/away вернусь через час</code>\n"
+            "Сбросить: <code>/away off</code>"
+        )
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        if text.lower() == "off":
+            owner.absence_status = None
+            owner.absence_message = None
+            await session.commit()
+            await message.answer("✅ Статус сброшен. Ты онлайн.")
+            return
+
+        # Auto-detect type
+        if any(w in text.lower() for w in ["сплю", "сон", "sleep", "ноч"]):
+            status = "sleeping"
+        elif any(w in text.lower() for w in ["вернусь", "скоро", "минут", "soon"]):
+            status = "soon_back"
+        else:
+            status = "away"
+
+        owner.absence_status = status
+        owner.absence_message = text[:200]
+        await session.commit()
+
+    status_emoji = {"sleeping": "😴", "soon_back": "⏳", "away": "🏠"}.get(status, "🏠")
+    await message.answer(f"{status_emoji} Статус: {status}\nСообщение: {text[:80]}")
+
+
+@router.message(Command("templates"))
+async def cmd_templates(message: Message) -> None:
+    """#31: Quick response templates — шаблоны быстрых ответов."""
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        # List templates
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            result = await session.execute(
+                select(WorkingMemory).where(
+                    WorkingMemory.user_id == owner.id,
+                    WorkingMemory.key.like("template:%"),
+                )
+            )
+            templates = result.scalars().all()
+
+        if not templates:
+            await message.answer(
+                "📝 <b>Шаблоны ответов</b>\n\n"
+                "Сохранить: <code>/templates add привет Привет! Как дела?</code>\n"
+                "Использовать: <code>/templates привет</code>"
+            )
+            return
+
+        lines = ["📝 <b>Шаблоны:</b>\n"]
+        for t in templates:
+            name = t.key.replace("template:", "")
+            lines.append(f"  • <code>{name}</code>: {t.value[:50]}")
+        await message.answer("\n".join(lines))
+        return
+
+    action = parts[1]
+    if action == "add" and len(parts) >= 3:
+        # Format: /templates add name text
+        add_parts = parts[2].split(maxsplit=1)
+        if len(add_parts) < 2:
+            await message.answer("❌ Формат: <code>/templates add имя текст</code>")
+            return
+        name, body = add_parts
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            # Delete existing
+            existing = await session.execute(
+                select(WorkingMemory).where(
+                    WorkingMemory.user_id == owner.id,
+                    WorkingMemory.key == f"template:{name}",
+                )
+            )
+            old = existing.scalar_one_or_none()
+            if old:
+                await session.delete(old)
+            session.add(
+                WorkingMemory(
+                    user_id=owner.id,
+                    key=f"template:{name}",
+                    value=body[:500],
+                )
+            )
+            await session.commit()
+        await message.answer(f"✅ Шаблон «{name}» сохранён.")
+    else:
+        # Use template: /templates name
+        name = action
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            result = await session.execute(
+                select(WorkingMemory).where(
+                    WorkingMemory.user_id == owner.id,
+                    WorkingMemory.key == f"template:{name}",
+                )
+            )
+            tmpl = result.scalar_one_or_none()
+
+        if tmpl:
+            await message.answer(f"📋 Шаблон «{name}»:\n\n{tmpl.value}")
+        else:
+            await message.answer(f"❌ Шаблон «{name}» не найден.")
+
+
+@router.message(Command("per_contact_emoji"))
+async def cmd_per_contact_emoji(message: Message) -> None:
+    """#37: Per-contact emoji — эмодзи для каждого контакта."""
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer(
+            "😊 <b>Per-contact emoji</b>\n\n"
+            "Установить: <code>/per_contact_emoji Иван 🚀</code>\n"
+            "Бот будет использовать этот эмодзи в ответах Ивану."
+        )
+        return
+
+    name = parts[1]
+    emoji = parts[2] if len(parts) >= 3 else ""
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_bots=False
+        )
+        contact = next(
+            (c for c in contacts if name.lower() in (c.display_name or "").lower()),
+            None,
+        )
+        if not contact:
+            await message.answer(f"❌ Контакт «{name}» не найден.")
+            return
+
+        # Save emoji in WorkingMemory
+        result = await session.execute(
+            select(WorkingMemory).where(
+                WorkingMemory.user_id == owner.id,
+                WorkingMemory.key == f"emoji:{contact.peer_id}",
+            )
+        )
+        old = result.scalar_one_or_none()
+        if old:
+            await session.delete(old)
+        if emoji:
+            session.add(
+                WorkingMemory(
+                    user_id=owner.id,
+                    key=f"emoji:{contact.peer_id}",
+                    value=emoji[:10],
+                )
+            )
+        await session.commit()
+
+    if emoji:
+        await message.answer(f"✅ {name} → {emoji}")
+    else:
+        await message.answer(f"✅ Эмодзи для {name} сброшен.")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ANALYTICS EXTENSIONS (73-82): stats, tokens, response quality
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    """#73: Communication stats dashboard."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+
+        total_mem = await session.scalar(
+            select(func.count())
+            .select_from(Memory)
+            .where(Memory.user_id == owner.id, Memory.is_active)
+        )
+        total_contacts = await session.scalar(
+            select(func.count())
+            .select_from(Contact)
+            .where(Contact.user_id == owner.id, Contact.peer_kind == "user")
+        )
+        from src.db.models import Message
+
+        total_msgs = await session.scalar(
+            select(func.count()).select_from(Message).where(Message.user_id == owner.id)
+        )
+        from src.db.models import Episode
+
+        total_episodes = await session.scalar(
+            select(func.count()).select_from(Episode).where(Episode.user_id == owner.id)
+        )
+        from src.db.models import CronJob
+
+        active_crons = await session.scalar(
+            select(func.count())
+            .select_from(CronJob)
+            .where(CronJob.user_id == owner.id, CronJob.enabled)
+        )
+
+    lines = [
+        "📊 <b>Статистика</b>\n",
+        f"  🧠 Фактов: {total_mem or 0}",
+        f"  👥 Контактов: {total_contacts or 0}",
+        f"  💬 Сообщений: {total_msgs or 0}",
+        f"  📖 Эпизодов: {total_episodes or 0}",
+        f"  ⏰ Активных задач: {active_crons or 0}",
+    ]
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("tokens"))
+async def cmd_tokens(message: Message) -> None:
+    """#74: Token tracker — использование токенов."""
+    await message.answer(
+        "🔤 <b>Token tracker</b>\n\n"
+        "Отслеживание токенов будет добавлено в следующем обновлении.\n"
+        "Пока используй <code>/stats</code> для общей статистики."
+    )
+
+
+@router.message(Command("quality"))
+async def cmd_quality(message: Message) -> None:
+    """#75: Response quality — качество ответов на основе реакций."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.models import Trajectory
+
+        total = await session.scalar(
+            select(func.count())
+            .select_from(Trajectory)
+            .where(Trajectory.user_id == owner.id)
+        )
+        # Count positive reactions (thumbs up, etc)
+        positive = await session.scalar(
+            select(func.count())
+            .select_from(Trajectory)
+            .where(
+                Trajectory.user_id == owner.id,
+                Trajectory.reward_value.isnot(None),
+            )
+        )
+
+    total = total or 0
+    positive = positive or 0
+    rate = (positive / total * 100) if total > 0 else 0
+
+    await message.answer(
+        "📈 <b>Качество ответов</b>\n\n"
+        f"  Всего запросов: {total}\n"
+        f"  Положительных: {positive}\n"
+        f"  Рейтинг: {rate:.1f}%"
+    )
+
+
+@router.message(Command("tool_heatmap"))
+async def cmd_tool_heatmap(message: Message) -> None:
+    """#80: Tool heatmap — какие инструменты используются чаще."""
+    await message.answer(
+        "📊 <b>Tool heatmap</b>\n\n"
+        "Анализ использования инструментов будет добавлен в следующем обновлении.\n"
+        "Пока используй <code>/stats</code> для общей статистики."
+    )
+
+
+@router.message(Command("conv_depth"))
+async def cmd_conv_depth(message: Message) -> None:
+    """#81: Conversation depth — глубина диалогов."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.models import Message
+
+        # Average messages per contact
+        result = await session.execute(
+            select(
+                Message.peer_id,
+                func.count().label("msg_count"),
+            )
+            .where(Message.user_id == owner.id)
+            .group_by(Message.peer_id)
+            .order_by(desc(func.count()))
+            .limit(10)
+        )
+        top = result.all()
+
+    if not top:
+        await message.answer("📊 Нет данных.")
+        return
+
+    avg = sum(r[1] for r in top) / len(top)
+    lines = [
+        "📊 <b>Глубина диалогов</b>\n",
+        f"  Среднее сообщений на контакт: {avg:.0f}",
+        "\n<b>Топ-10:</b>",
+    ]
+    for peer_id, count in top:
+        async with get_session() as session:
+            name = await session.scalar(
+                select(Contact.display_name).where(
+                    Contact.user_id == owner.id, Contact.peer_id == peer_id
+                )
+            )
+        name = name or str(peer_id)
+        lines.append(f"  • {name}: {count}")
+
+    await message.answer("\n".join(lines))

@@ -329,6 +329,26 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("contact_health", "Здоровье контакта", "diagnostics")
     registry.register("memory_growth", "Рост памяти по дням", "diagnostics")
 
+    # ── Planning+Reminders (Batch 1) ──
+    registry.register("nlcron", "Задача через естественный язык", "planning")
+    registry.register("smart_reminder", "Напоминание с контекстом", "planning")
+    registry.register("meeting_prep", "Подготовка к встрече", "planning")
+    registry.register("topics", "Темы для обсуждения", "planning")
+    registry.register("calendar", "Ближайшие события", "planning")
+    registry.register("nudge_timing", "Лучшее время напоминаний", "planning")
+
+    # ── Auto-reply extensions ──
+    registry.register("away", "Статус отсутствия", "auto-reply")
+    registry.register("templates", "Шаблоны ответов", "auto-reply")
+    registry.register("per_contact_emoji", "Эмодзи для контакта", "auto-reply")
+
+    # ── Analytics extensions ──
+    registry.register("stats", "Общая статистика", "analytics")
+    registry.register("tokens", "Использование токенов", "analytics")
+    registry.register("quality", "Качество ответов", "analytics")
+    registry.register("tool_heatmap", "Топ инструментов", "analytics")
+    registry.register("conv_depth", "Глубина диалогов", "analytics")
+
     # ── Admin ──
     registry.register("avito", "Поиск на Avito", "admin")
     registry.register("avito_list", "Список поисков Avito", "admin")
