@@ -350,7 +350,11 @@ def _candidates_keyboard_chat(action: str, candidates):
 
 
 def memory_quick_keyboard(contact_name: str = "") -> InlineKeyboardMarkup:
-    """Inline-кнопки быстрых действий с памятью + quality score."""
+    """Inline-кнопки быстрых действий с памятью.
+
+    Quality feedback через Telegram-реакции (👍/👎/❤️ на сообщении бота),
+    не через inline-кнопки — меньше спама.
+    """
     explain_cb = f"memq:explain:{contact_name}" if contact_name else "memq:explain:"
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -359,10 +363,6 @@ def memory_quick_keyboard(contact_name: str = "") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="➕ Запомни", callback_data="memq:add"),
                 InlineKeyboardButton(text="❌ Забудь", callback_data="memq:forget"),
                 InlineKeyboardButton(text="🤔 Почему?", callback_data=explain_cb),
-            ],
-            [
-                InlineKeyboardButton(text="👍", callback_data="qf:good"),
-                InlineKeyboardButton(text="👎", callback_data="qf:bad"),
             ],
         ]
     )

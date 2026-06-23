@@ -646,22 +646,60 @@ async def cb_memq_explain(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-# ── Quality score feedback (👍/👎 on bot replies) ──
+# ── Quality feedback via Telegram reactions ──
+# User puts 👍/❤️/🔥/🎉 = good, 👎 = bad on bot's message → Trajectory.reward_value updated.
+# Replaces inline 👍/👎 buttons — less spam, more natural.
+
+_REACTIONS_POSITIVE = frozenset({"👍", "❤️", "🔥", "🎉", "👏", "💯"})
+_REACTIONS_NEGATIVE = frozenset({"👎", "🤔", "😢"})
 
 
-@router.callback_query(F.data.startswith("qf:"))
-async def cb_quality_feedback(callback: CallbackQuery) -> None:
-    """Record quality feedback from 👍/👎 buttons on bot replies."""
-    assert callback.data is not None
-    rating = callback.data.split(":", 1)[1]  # "good" or "bad"
-
+@router.message_reaction()
+async def on_reaction_update(reaction_update) -> None:
+    """Handle Telegram reactions on messages — record quality feedback."""
     try:
+        # aiogram MessageReactionUpdated has .new_reaction list and .user
+        new_reactions = getattr(reaction_update, "new_reaction", []) or []
+        if not new_reactions:
+            return
+
+        # Extract emoji from reaction types
+        emojis: list[str] = []
+        for r in new_reactions:
+            emoji = getattr(r, "emoji", None)
+            if emoji:
+                emojis.append(emoji)
+
+        # Determine rating
+        is_positive = any(e in _REACTIONS_POSITIVE for e in emojis)
+        is_negative = any(e in _REACTIONS_NEGATIVE for e in emojis)
+        if not is_positive and not is_negative:
+            return  # neutral reaction, ignore
+
+        # Get user who reacted
+        reactor = getattr(reaction_update, "user", None)
+        if reactor is None:
+            return
+        tg_id = getattr(reactor, "id", 0)
+        if tg_id == 0:
+            return
+
+        # Get message_id to find the Trajectory
+        msg_id = getattr(reaction_update, "message_id", None)
+        if msg_id is None:
+            # Fallback: message attribute
+            msg = getattr(reaction_update, "message", None)
+            if msg is not None:
+                msg_id = getattr(msg, "message_id", None)
+        if msg_id is None:
+            return
+
         from src.db.models import Trajectory
         from sqlalchemy import desc as sa_desc
 
         async with get_session() as session:
-            owner = await get_or_create_user(session, callback.from_user.id)
-            # Find most recent trajectory for this user
+            owner = await get_or_create_user(session, tg_id)
+            # Find trajectory by message_id (if stored) or most recent
             result = await session.execute(
                 select(Trajectory)
                 .where(Trajectory.user_id == owner.id)
@@ -670,10 +708,13 @@ async def cb_quality_feedback(callback: CallbackQuery) -> None:
             )
             traj = result.scalar_one_or_none()
             if traj is not None:
-                traj.reward_value = 1.0 if rating == "good" else -1.0
+                traj.reward_value = 1.0 if is_positive else -1.0
                 await session.commit()
 
-        emoji = "👍" if rating == "good" else "👎"
-        await callback.answer(f"{emoji} Записано!", show_alert=False)
+        logger.debug(
+            "Reaction feedback: %s → reward_value=%s",
+            emojis,
+            1.0 if is_positive else -1.0,
+        )
     except Exception:
-        await callback.answer("Ошибка записи", show_alert=True)
+        logger.debug("Reaction handler error", exc_info=True)
