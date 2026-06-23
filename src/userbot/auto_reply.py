@@ -139,6 +139,7 @@ async def _build_reply_text(
         owner_absence_message=owner_absence_message,
         owner_telegram_id=owner_telegram_id,
         peer_id=peer_id,
+        incoming_text=incoming_text,
     )
 
     user_prompt = (

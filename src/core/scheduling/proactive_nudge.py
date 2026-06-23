@@ -30,7 +30,11 @@ _URGENCY_KEYWORDS: frozenset[str] = frozenset({"срочно", "жду", "ког
 
 
 async def collect_nudges(owner_telegram_id: int, limit: int = 5) -> list[dict]:
-    """Scan conversations and collect nudges — contacts you should reply to."""
+    """Scan conversations and collect nudges — contacts you should reply to.
+
+    Smart timing: analyzes when each contact is typically online (by hour of day
+    from message history) and only includes them in nudges during their active hours.
+    """
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
         now = datetime.now(UTC).replace(tzinfo=None)  # naive, project style
@@ -53,6 +57,29 @@ async def collect_nudges(owner_telegram_id: int, limit: int = 5) -> list[dict]:
 
             contact = await get_contact(session, owner, conv.peer_id)
             if not contact:
+                continue
+
+            # Smart timing: check if contact is likely online now
+            # Analyze their message hours from DB
+            from sqlalchemy import func as sa_func, extract
+
+            hour_result = await session.execute(
+                select(
+                    sa_func.count().label("cnt"),
+                )
+                .where(
+                    Message.user_id == owner.id,
+                    Message.peer_id == conv.peer_id,
+                    Message.is_outgoing.is_(False),
+                )
+                .group_by(extract("hour", Message.date))
+                .order_by(desc("cnt"))
+                .limit(5)
+            )
+            active_hours = {row[0] for row in hour_result}
+            current_hour = now.hour
+            # If we have data and contact is NOT in their active hours → skip
+            if active_hours and current_hour not in active_hours:
                 continue
 
             commitments = await list_open_commitments(

@@ -249,6 +249,7 @@ async def _build_system_prompt(
     owner_absence_message: str | None = None,
     owner_telegram_id: int = 0,
     peer_id: int = 0,
+    incoming_text: str = "",
 ) -> str:
     """Assemble the full system prompt from all context parts.
 
@@ -283,6 +284,19 @@ async def _build_system_prompt(
 
     if profile_prompt:
         system += profile_prompt
+
+    # Feature 8: Multi-language — detect contact's language from incoming text
+    # ponytail: simple cyrillic/latin heuristic, upgrade to langdetect if needed.
+    try:
+        if incoming_text:
+            _cyr = sum(1 for c in incoming_text if "\u0400" <= c <= "\u04ff")
+            _lat = sum(1 for c in incoming_text if c.isascii() and c.isalpha())
+            if _cyr > _lat:
+                system += "\n\nОтвечай на русском языке."
+            elif _lat > _cyr:
+                system += "\n\nReply in English."
+    except Exception:
+        pass
 
     # Per-contact rules (custom_instructions)
     try:

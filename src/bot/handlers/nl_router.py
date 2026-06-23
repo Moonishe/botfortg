@@ -45,6 +45,7 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"экспорт.*памят", re.I), "mem_export", ""),
     (re.compile(r"дубликат.*факт", re.I), "mem_dedup", ""),
     (re.compile(r"похож.*факт.*на\s+(.+)", re.I), "mem_similar", r"\1"),
+    (re.compile(r"найди (факт|памят).*по смыслу\s*(.+)?", re.I), "mem_search", r"\2"),
     (re.compile(r"(теплова|уверенност).*(памят|факт)", re.I), "mem_heatmap", ""),
     (re.compile(r"истека.*факт", re.I), "mem_expire", ""),
     (re.compile(r"\bтеги?\b", re.I), "mem_tags", ""),

@@ -218,6 +218,7 @@ async def cmd_chat(
 
 async def _show_actions(message: Message, candidate: ContactCandidate) -> None:
     memory_line = ""
+    summary_line = ""
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         memories = await list_memories(session, owner, contact_id=candidate.peer_id)
@@ -226,9 +227,30 @@ async def _show_actions(message: Message, candidate: ContactCandidate) -> None:
             memory_line = "🧠 Память: " + ", ".join(facts_short)
         else:
             memory_line = "🧠 Память: пока пусто"
+
+        # Feature 2: Load conversation summary for context
+        try:
+            from sqlalchemy import select as sa_select, desc as sa_desc
+            from src.db.models._messaging import ConversationSummary
+
+            sum_result = await session.execute(
+                sa_select(ConversationSummary)
+                .where(
+                    ConversationSummary.user_id == owner.id,
+                    ConversationSummary.last_peer_id == candidate.peer_id,
+                )
+                .order_by(sa_desc(ConversationSummary.created_at))
+                .limit(1)
+            )
+            last_summary = sum_result.scalar_one_or_none()
+            if last_summary and last_summary.summary_text:
+                summary_line = f"\n📝 Последние темы: {last_summary.summary_text[:150]}"
+        except Exception:
+            pass
+
     label = candidate.label()
     await message.answer(
-        f"Выбран: <b>{label}</b>\n{memory_line}\n\nЧто сделать?",
+        f"Выбран: <b>{label}</b>\n{memory_line}{summary_line}\n\nЧто сделать?",
         reply_markup=_actions_keyboard(candidate.peer_id),
     )
 

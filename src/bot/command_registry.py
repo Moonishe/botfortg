@@ -249,6 +249,7 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("mem_expire", "Истекающие факты", "memory")
     registry.register("mem_export", "Экспорт памяти в JSON", "memory")
     registry.register("mem_similar", "Семантический поиск по памяти", "memory")
+    registry.register("mem_search", "Семантический поиск через Qdrant", "memory")
     registry.register("mem_working", "Рабочая память (TTL)", "memory")
     registry.register("mem_decay", "Граф удержания памяти", "memory")
     registry.register("mem_dedup", "Поиск дубликатов фактов", "memory")

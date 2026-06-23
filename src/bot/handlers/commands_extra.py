@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select, func, desc, Integer
 
 from src.bot.filters import OwnerOnly
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.models import (
     Memory,
     WorkingMemory,
@@ -1272,7 +1273,7 @@ async def cmd_calendar(message: Message) -> None:
 
 @router.message(Command("away"))
 async def cmd_away(message: Message) -> None:
-    """#32: Smart away — установить статус отсутствия."""
+    """#32: Smart away — установить статус отсутствия с опциональным таймером."""
     text = (message.text or "").replace("/away", "").strip()
     if not text:
         # Show current status
@@ -1284,6 +1285,7 @@ async def cmd_away(message: Message) -> None:
             f"🏠 <b>Текущий статус:</b> {status}\n"
             f"{'Сообщение: ' + msg if msg else ''}\n\n"
             "Установить: <code>/away сплю</code> или <code>/away вернусь через час</code>\n"
+            "С таймером: <code>/away 2h сплю</code> или <code>/away 30m скоро буду</code>\n"
             "Сбросить: <code>/away off</code>"
         )
         return
@@ -1296,6 +1298,22 @@ async def cmd_away(message: Message) -> None:
             await session.commit()
             await message.answer("✅ Статус сброшен. Ты онлайн.")
             return
+
+        # Parse timer: "2h", "30m", "1d", "45min" at start of text
+        import re
+
+        timer_match = re.match(r"^(\d+)([hмм]{1,2}|d|д|min|мин)\s+(.+)", text, re.I)
+        timer_minutes = 0
+        if timer_match:
+            num = int(timer_match.group(1))
+            unit = timer_match.group(2).lower()
+            if unit in ("h", "ч", "мм"):
+                timer_minutes = num * 60
+            elif unit in ("d", "д"):
+                timer_minutes = num * 1440
+            else:  # min, мин, m
+                timer_minutes = num
+            text = timer_match.group(3).strip()
 
         # Auto-detect type
         if any(w in text.lower() for w in ["сплю", "сон", "sleep", "ноч"]):
@@ -1310,7 +1328,31 @@ async def cmd_away(message: Message) -> None:
         await session.commit()
 
     status_emoji = {"sleeping": "😴", "soon_back": "⏳", "away": "🏠"}.get(status, "🏠")
-    await message.answer(f"{status_emoji} Статус: {status}\nСообщение: {text[:80]}")
+    timer_text = (
+        f"\n⏰ Авто-сброс через {timer_minutes} мин" if timer_minutes > 0 else ""
+    )
+    await message.answer(
+        f"{status_emoji} Статус: {status}\nСообщение: {text[:80]}{timer_text}"
+    )
+
+    # Schedule auto-reset if timer set
+    if timer_minutes > 0:
+        import asyncio
+
+        async def _auto_reset(tg_id: int, delay: int) -> None:
+            await asyncio.sleep(delay * 60)
+            try:
+                async with get_session() as s:
+                    o = await get_or_create_user(s, tg_id)
+                    o.absence_status = None
+                    o.absence_message = None
+                    await s.commit()
+            except Exception:
+                pass
+
+        import asyncio
+
+        asyncio.create_task(_auto_reset(message.from_user.id, timer_minutes))
 
 
 @router.message(Command("sleep"))
@@ -2721,6 +2763,77 @@ async def cmd_help_dynamic(message: Message) -> None:
     text = (
         "📖 <b>Справка</b>\n\n" + "\n".join(suggestions) + "\n\n" + "\n".join(sections)
     )
-    text += "\n\n🌐 Всего команд: 129. Напиши что хочешь — я пойму."
+    text += "\n\n🌐 Всего команд: 130. Напиши что хочешь — я пойму."
 
     await message.answer(text, disable_web_page_preview=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+# /mem_search — semantic memory search via Qdrant
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("mem_search"))
+async def cmd_mem_search(message: Message) -> None:
+    """Semantic memory search via Qdrant vector embeddings."""
+    query = (message.text or "").replace("/mem_search", "").strip()
+    if not query:
+        await message.answer(
+            "🔍 <b>Семантический поиск памяти</b>\n\n"
+            "Отправь: <code>/mem_search профессия Ильи</code>\n"
+            "Найдёт факты по смыслу, не по точному совпадению слов."
+        )
+        return
+
+    try:
+        from src.core.actions.vector_store import get_vector_store
+
+        vs = await get_vector_store()
+        if vs is None:
+            await message.answer("❌ Векторное хранилище недоступно.")
+            return
+
+        # Embed query
+        from src.llm.router import build_provider
+        from src.llm.base import TaskType
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            provider = await build_provider(
+                session, owner, purpose="background", task_type=TaskType.DEFAULT
+            )
+
+        if provider is None:
+            await message.answer("❌ LLM провайдер недоступен.")
+            return
+
+        query_embedding = await provider.embed(query)
+        if not query_embedding:
+            await message.answer("❌ Не удалось создать embedding для запроса.")
+            return
+
+        # Search Qdrant memory collection
+        hits = await vs.search_similar_memories(
+            user_id=owner.id,
+            embedding=query_embedding,
+            threshold=0.5,
+            limit=10,
+        )
+        if not hits:
+            await message.answer("📭 Ничего не найдено по смыслу.")
+            return
+
+        lines = [f"🔍 <b>Семантический поиск:</b> «{sanitize_html(query)}»\n"]
+        for h in hits[:8]:
+            fact = h.get("fact", "")
+            score = h.get("score", 0)
+            if fact:
+                lines.append(f"  • {fact[:80]} (score: {score:.2f})")
+
+        if len(lines) == 1:
+            await message.answer("📭 Факты не найдены в БД.")
+        else:
+            await message.answer("\n".join(lines))
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
