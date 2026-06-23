@@ -34,11 +34,48 @@ logger = logging.getLogger(__name__)
 # При повторном вызове attach_auto_reply на том же клиенте — не дублируем обработчик.
 _attached_auto_reply_clients: set[int] = set()
 
+# TOCTOU guard: prevent duplicate auto-replies when user sends multiple messages quickly.
+# decide() checks cooldown in DB, but AutoReplyLog is written AFTER LLM call (1-5s gap).
+# Without this lock, 2 messages → both pass cooldown → both get replies.
+# ponytail: in-memory per-peer lock, upgrade to DB flag if multi-process.
+_active_reply_locks: dict[int, asyncio.Lock] = {}
+_locks_guard = asyncio.Lock()
+
+
+async def _get_peer_lock(peer_id: int) -> asyncio.Lock:
+    async with _locks_guard:
+        if peer_id not in _active_reply_locks:
+            _active_reply_locks[peer_id] = asyncio.Lock()
+        return _active_reply_locks[peer_id]
+
 
 async def _make_handler(client: TelegramClient, owner_telegram_id: int):
     """Возвращает event handler, замкнутый на owner_telegram_id."""
 
     async def handler(event: events.NewMessage.Event) -> None:
+        try:
+            msg: TgMessage = event.message
+            if msg.out:
+                return
+            if getattr(msg, "sticker", None) or getattr(msg, "gif", None):
+                return  # stickers/GIFs don't need replies
+
+            # TOCTOU guard: acquire per-peer lock before any DB check.
+            # Prevents duplicate replies when multiple messages arrive quickly.
+            peer_lock = await _get_peer_lock(event.chat_id or 0)
+            if peer_lock.locked():
+                logger.debug(
+                    "Auto-reply skip: already processing for peer %s", event.chat_id
+                )
+                return
+            async with peer_lock:
+                await _handle_event(client, owner_telegram_id, event)
+        except Exception:
+            logger.exception("Auto-reply handler error")
+
+    async def _handle_event(
+        client: TelegramClient, owner_telegram_id: int, event: events.NewMessage.Event
+    ) -> None:
         try:
             msg: TgMessage = event.message
             if msg.out:

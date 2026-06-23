@@ -346,15 +346,20 @@ async def patterns_loop(owner_id: int) -> None:
                             text=text,
                             priority=Notification.PRIORITY_LOW,
                         )
-                    for ins, kb in zip(insights[:5], keyboards):
-                        detail = f"<b>{ins['title']}</b>\n{ins['detail']}\n💡 {ins['action']}"
+                    else:
+                        # Batch all insights into ONE message — was: separate messages with sleep(0.5)
+                        # ponytail: single notification, upgrade to carousel if keyboards needed.
+                        batch_lines = ["<b>🧠 Инсайты из памяти:</b>", ""]
+                        for i, ins in enumerate(insights[:5]):
+                            batch_lines.append(f"{i + 1}. {ins['title']}")
+                            batch_lines.append(f"   {ins['detail']}")
+                            batch_lines.append(f"   💡 {ins['action']}")
+                            batch_lines.append("")
                         await notification_queue.enqueue(
                             topic="memory_patterns",
-                            text=detail,
+                            text="\n".join(batch_lines),
                             priority=Notification.PRIORITY_MEDIUM,
-                            reply_markup=kb,
                         )
-                        await asyncio.sleep(0.5)
                     # P7: sleep moved outside _overlap_guard below
                     sleep_sec = settings.memory_patterns_poll_interval
             except Exception:
