@@ -44,10 +44,14 @@ _LOCK_CLEANUP_THRESHOLD = 200  # max locks before cleanup
 
 
 async def _get_peer_lock(peer_id: int) -> asyncio.Lock:
+    global _active_reply_locks
     async with _locks_guard:
-        # Cleanup: if dict too large, remove unlocked entries
+        # Cleanup: if dict too large, remove only UNLOCKED entries.
+        # Clearing all would break TOCTOU protection for in-flight replies.
         if len(_active_reply_locks) > _LOCK_CLEANUP_THRESHOLD:
-            _active_reply_locks.clear()  # ponytail: simplest cleanup, locks are cheap to recreate
+            _active_reply_locks = {
+                k: v for k, v in _active_reply_locks.items() if v.locked()
+            }
         if peer_id not in _active_reply_locks:
             _active_reply_locks[peer_id] = asyncio.Lock()
         return _active_reply_locks[peer_id]

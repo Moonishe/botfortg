@@ -2044,6 +2044,36 @@ async def cmd_url_summary(message: Message) -> None:
     if not url.startswith("http"):
         url = "https://" + url
 
+    # SSRF protection — block internal/loopback IPs
+    from urllib.parse import urlparse
+
+    _parsed = urlparse(url)
+    _host = _parsed.hostname or ""
+    if (
+        _host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+        or _host.startswith("169.254.")
+        or _host.startswith("10.")
+        or _host.startswith("192.168.")
+        or _host.startswith("172.16.")
+        or _host.startswith("172.17.")
+        or _host.startswith("172.18.")
+        or _host.startswith("172.19.")
+        or _host.startswith("172.20.")
+        or _host.startswith("172.21.")
+        or _host.startswith("172.22.")
+        or _host.startswith("172.23.")
+        or _host.startswith("172.24.")
+        or _host.startswith("172.25.")
+        or _host.startswith("172.26.")
+        or _host.startswith("172.27.")
+        or _host.startswith("172.28.")
+        or _host.startswith("172.29.")
+        or _host.startswith("172.30.")
+        or _host.startswith("172.31.")
+    ):
+        await message.answer("❌ Доступ к внутренним адресам запрещён.")
+        return
+
     await message.answer("📖 Загружаю и анализирую...")
 
     try:
