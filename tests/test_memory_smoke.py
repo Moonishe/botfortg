@@ -304,6 +304,17 @@ async def test_conflict_predictor_uses_historical_outgoing_before_negative():
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     async with get_session() as session:
         owner = await get_or_create_user(session, OWNER_TG_ID)
+        # Create Contact record — required for INNER JOIN in list_active_conversations
+        from src.db.repo import upsert_contact
+
+        await upsert_contact(
+            session,
+            owner,
+            peer_id=contact_id,
+            peer_kind="user",
+            display_name="TestContact",
+            is_bot=False,
+        )
         await upsert_message(
             session,
             user_id=owner.id,

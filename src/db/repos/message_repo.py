@@ -24,25 +24,25 @@ async def list_active_conversations(
     session: AsyncSession, user, status: str = "active", limit: int = 50
 ) -> list[ConversationState]:
     # Filter: only 1:1 private chats with real humans (no groups/channels/bots)
-    # LEFT JOIN: if no Contact record exists, include it (backward compat for tests)
+    # INNER JOIN: Contact MUST exist AND be peer_kind='user', is_bot=False.
+    # This excludes groups/channels/bots that have Contact records with peer_kind='chat'/'channel'.
     from sqlalchemy import and_
     from src.db.models import Contact
 
     result = await session.execute(
         select(ConversationState)
-        .outerjoin(
+        .join(
             Contact,
             and_(
                 Contact.user_id == ConversationState.user_id,
                 Contact.peer_id == ConversationState.peer_id,
+                Contact.peer_kind == "user",
+                Contact.is_bot.is_(False),
             ),
         )
         .where(
             ConversationState.user_id == user.id,
             ConversationState.status == status,
-            # Exclude groups/channels/bots only if Contact info is available
-            (Contact.peer_kind == "user") | (Contact.peer_kind.is_(None)),
-            (Contact.is_bot.is_(False)) | (Contact.is_bot.is_(None)),
         )
         .order_by(ConversationState.last_incoming_at.desc().nullslast())
         .limit(limit)
