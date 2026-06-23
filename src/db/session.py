@@ -41,11 +41,20 @@ _outer_session: ContextVar[_OuterSession | None] = ContextVar(
 _engine_kwargs: dict[str, Any] = {
     "future": True,
     "connect_args": {"check_same_thread": False},
+    # ponytail: pool sized for Semaphore(10) concurrent DB sessions + background tasks.
+    # 20+10=30 max connections. Upgrade to separate read/write pools if needed.
+    "pool_size": 20,
+    "max_overflow": 10,
+    "pool_timeout": 60,
+    "pool_recycle": 3600,
 }
 if str(settings.database_url).endswith(":memory:"):
     from sqlalchemy.pool import StaticPool
 
     _engine_kwargs["poolclass"] = StaticPool
+    # StaticPool doesn't support pool_size/max_overflow/timeout/recycle
+    for _k in ("pool_size", "max_overflow", "pool_timeout", "pool_recycle"):
+        _engine_kwargs.pop(_k, None)
 
 engine = create_async_engine(
     settings.database_url,
@@ -250,7 +259,6 @@ async def init_db() -> None:
     """
     settings.data_dir  # триггерит создание директории
     async with engine.begin() as conn:
-
         # --- Schema: Alembic-canonical, create_all as bootstrap fallback ---
         # Check if alembic_version table exists — the canonical marker
         # that the ORM schema has been applied. This is immune to FTS5

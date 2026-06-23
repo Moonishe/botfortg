@@ -5,6 +5,7 @@ import logging
 import math
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.memory.memory_recall import bump_recall_version
@@ -47,7 +48,14 @@ async def memory_decay_loop(owner_id: int) -> None:
                 await asyncio.sleep(
                     settings.memory_check_interval_sec
                 )  # каждые 10 минут проверка
-            except (ValueError, AttributeError, LookupError, OSError):
+            except (
+                ValueError,
+                AttributeError,
+                LookupError,
+                OSError,
+                SQLAlchemyError,
+                Exception,
+            ):
                 logger.exception("Memory decay error")
                 await asyncio.sleep(settings.memory_check_interval_sec)
 

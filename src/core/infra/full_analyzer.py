@@ -144,9 +144,9 @@ async def run_full_analysis(
             ),
         )
 
-    # ponytail: parallel processing with semaphore — 10 concurrent contacts.
-    # Upgrade: make concurrency configurable via settings if API rate limits vary.
-    _sem = asyncio.Semaphore(10)
+    # ponytail: 8 concurrent — pool_size=20 supports this with headroom.
+    # Was 10 but each contact opens 2 sessions (messages + commitments) = 16+ sessions.
+    _sem = asyncio.Semaphore(8)
     _counter = 0
     _counter_lock = asyncio.Lock()
 
