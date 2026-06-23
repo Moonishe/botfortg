@@ -1524,7 +1524,54 @@ async def cmd_schedule_reply(message: Message) -> None:
         lines = ["📅 <b>Расписание:</b>\n"]
         for s in schedules:
             lines.append(f"  • {s.key.replace('schedule:', '')}: {s.value}")
-    await message.answer("\n".join(lines))
+        await message.answer("\n".join(lines))
+        return
+
+    if text.lower().startswith("off"):
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            result = await session.execute(
+                select(WorkingMemory).where(
+                    WorkingMemory.user_id == owner.id,
+                    WorkingMemory.key.like("schedule:%"),
+                )
+            )
+            for s in result.scalars().all():
+                await session.delete(s)
+            await session.commit()
+        await message.answer("✅ Расписание выключено.")
+        return
+
+    # Parse: on HH:MM-HH:MM
+    import re
+
+    match = re.match(r"on\s+(\d{1,2}:\d{2})-(\d{1,2}:\d{2})", text)
+    if not match:
+        await message.answer("❌ Формат: <code>/schedule_reply on 22:00-08:00</code>")
+        return
+
+    schedule_value = f"{match.group(1)}-{match.group(2)}"
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        result = await session.execute(
+            select(WorkingMemory).where(
+                WorkingMemory.user_id == owner.id,
+                WorkingMemory.key == "schedule:auto_reply",
+            )
+        )
+        old = result.scalar_one_or_none()
+        if old:
+            await session.delete(old)
+        session.add(
+            WorkingMemory(
+                user_id=owner.id,
+                key="schedule:auto_reply",
+                value=schedule_value,
+            )
+        )
+        await session.commit()
+
+    await message.answer(f"✅ Авто-ответы: {schedule_value}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1847,53 +1894,6 @@ async def cmd_custom_tool(message: Message) -> None:
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
-        return
-
-    if text.lower().startswith("off"):
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            result = await session.execute(
-                select(WorkingMemory).where(
-                    WorkingMemory.user_id == owner.id,
-                    WorkingMemory.key.like("schedule:%"),
-                )
-            )
-            for s in result.scalars().all():
-                await session.delete(s)
-            await session.commit()
-        await message.answer("✅ Расписание выключено.")
-        return
-
-    # Parse: on HH:MM-HH:MM
-    import re
-
-    match = re.match(r"on\s+(\d{1,2}:\d{2})-(\d{1,2}:\d{2})", text)
-    if not match:
-        await message.answer("❌ Формат: <code>/schedule_reply on 22:00-08:00</code>")
-        return
-
-    schedule_value = f"{match.group(1)}-{match.group(2)}"
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        result = await session.execute(
-            select(WorkingMemory).where(
-                WorkingMemory.user_id == owner.id,
-                WorkingMemory.key == "schedule:auto_reply",
-            )
-        )
-        old = result.scalar_one_or_none()
-        if old:
-            await session.delete(old)
-        session.add(
-            WorkingMemory(
-                user_id=owner.id,
-                key="schedule:auto_reply",
-                value=schedule_value,
-            )
-        )
-        await session.commit()
-
-    await message.answer(f"✅ Авто-ответы: {schedule_value}")
 
 
 # ═══════════════════════════════════════════════════════════════════
