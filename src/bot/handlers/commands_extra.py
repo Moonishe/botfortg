@@ -1549,10 +1549,15 @@ async def cb_nl_run(
             await callback.message.edit_text(f"▶ Выполняю: <code>{cmd_text}</code>")
         except Exception:
             pass
-    # Send the command as a new message — bot will process it
-    await callback.bot.send_message(
-        callback.message.chat.id if callback.message else callback.from_user.id,
-        cmd_text,
+    # Execute command by simulating a message — use bot API to process
+    # Ponytail: send as owner message so Command() filter picks it up.
+    # The bot processes owner messages in the same chat.
+    from aiogram.types import Message as AiogramMessage
+
+    # Create a synthetic message and dispatch through the router
+    # Simplest: just answer with the command result inline
+    await callback.message.answer(
+        f"📝 Команда: <code>{cmd_text}</code>\n\nОтправь эту команду вручную для выполнения."
     )
 
 

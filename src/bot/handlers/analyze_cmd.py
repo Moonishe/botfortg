@@ -239,7 +239,7 @@ async def cb_analyze_run(callback: CallbackQuery, state=None, userbot_manager=No
         try:
             from src.bot.handlers.nl_router import generate_insights
 
-            insights = await generate_insights(result)
+            insights = await generate_insights(callback.from_user.id)
             if insights:
                 report += "\n\n<b>💡 Инсайты:</b>\n" + "\n".join(
                     f"  {i}" for i in insights

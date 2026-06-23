@@ -281,7 +281,7 @@ def undo_keyboard(action_type: str, action_id: int | str) -> "InlineKeyboardBuil
 # ── Proactive insights ─────────────────────────────────────────────
 
 
-async def generate_insights(result: "AnalysisResult") -> list[str]:
+async def generate_insights(owner_id: int) -> list[str]:
     """Generate actionable insights from analysis results.
 
     Instead of "4 факта, 5 обязательств", produces:
@@ -296,13 +296,11 @@ async def generate_insights(result: "AnalysisResult") -> list[str]:
     from src.db.session import get_session
     from src.db.repo import get_or_create_user, list_contacts
     from sqlalchemy import select, func
-    from src.db.models import Message, Contact
+    from src.db.models import Message
 
     try:
         async with get_session() as session:
-            owner = await get_or_create_user(
-                session, result.contacts_processed
-            )  # placeholder
+            owner = await get_or_create_user(session, owner_id)
             # This is called after analysis, so we check for stale contacts
             contacts = await list_contacts(
                 session, owner, kinds=("user",), include_bots=False

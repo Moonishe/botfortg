@@ -215,18 +215,15 @@ async def build_digest(owner_telegram_id: int) -> str:
 async def send_digest(owner_telegram_id: int) -> None:
     text = await build_digest(owner_telegram_id)
 
-    # Build inline keyboard for briefing actions
+    # Build inline keyboard for briefing actions — reuse payload from build_digest
+    # ponytail: separate call to avoid refactoring build_digest return signature.
     from src.bot.handlers.nl_router import briefing_keyboard
-    from src.db.session import get_session as _get_session
     from src.db.repo import get_or_create_user as _get_owner
 
     reply_markup = None
     try:
-        async with _get_session() as session:
+        async with get_session() as session:
             owner = await _get_owner(session, owner_telegram_id)
-        # Get waiting contacts for inline buttons
-        from src.core.scheduling.digest import _gather_payload
-
         payload = await _gather_payload(owner)
         waiting = payload.get("waiting", [])
         kb = briefing_keyboard(waiting)
