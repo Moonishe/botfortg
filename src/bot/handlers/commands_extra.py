@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, UTC
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, Integer
 
 from src.bot.filters import OwnerOnly
 from src.db.models import (
@@ -1524,7 +1524,329 @@ async def cmd_schedule_reply(message: Message) -> None:
         lines = ["📅 <b>Расписание:</b>\n"]
         for s in schedules:
             lines.append(f"  • {s.key.replace('schedule:', '')}: {s.value}")
-        await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BATCH 4: Tools (code, PDF, OCR), Analytics (skill_stats, reply_quality),
+#          Auto-reply toggles (reaction_reply, typing_sim, read_receipts),
+#          Custom tool creator
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("code"))
+async def cmd_code(message: Message) -> None:
+    """/code <язык> <код> — выполнить код в песочнице."""
+    raw = (message.text or "").strip()
+    parts = raw.split(None, 2)
+    if len(parts) < 3:
+        await message.answer(
+            "💻 <b>Выполнение кода</b>\n\n"
+            "Использование: <code>/code python print('hello')</code>\n"
+            "Код выполняется в изолированной песочнице.\n"
+            "Поддерживается: Python (через AST sandbox)."
+        )
+        return
+
+    lang = parts[1].lower()
+    code = parts[2]
+
+    if lang not in ("python", "py"):
+        await message.answer("❌ Поддерживается только Python.")
+        return
+
+    try:
+        from src.core.actions.sdd_executor import execute_code
+
+        result = await execute_code(code, timeout=5)
+        output = (
+            result.get("output", "")[:3000]
+            if isinstance(result, dict)
+            else str(result)[:3000]
+        )
+        await message.answer(f"💻 Результат:\n<code>{output}</code>")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+
+
+@router.message(Command("pdf"))
+async def cmd_pdf(message: Message) -> None:
+    """/pdf — извлечь текст из PDF (нужен PyPDF2 или pymupdf)."""
+    try:
+        import fitz  # type: ignore[import]  # pymupdf  # noqa: F401
+
+        _available = True
+    except ImportError:
+        try:
+            import PyPDF2  # type: ignore[import]  # noqa: F401
+
+            _available = True
+        except ImportError:
+            _available = False
+
+    if not _available:
+        await message.answer(
+            "📄 <b>PDF текст</b>\n\n"
+            "Не установлен PyPDF2 или pymupdf.\n"
+            "Установка: <code>pip install pymupdf</code>"
+        )
+        return
+
+    if not message.document:
+        await message.answer(
+            "📄 Пришли PDF файл вместе с командой /pdf для извлечения текста."
+        )
+        return
+
+    try:
+        file_id = message.document.file_id
+        file = await message.bot.get_file(file_id)
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            await message.bot.download_file(file.file_path or "", tmp.name)  # type: ignore[arg-type]
+            tmp_path = tmp.name
+
+        text = ""
+        try:
+            import fitz  # type: ignore[import]
+
+            doc = fitz.open(tmp_path)
+            for page in doc[:20]:
+                text += page.get_text()
+            doc.close()
+        except ImportError:
+            import PyPDF2  # type: ignore[import]
+
+            with open(tmp_path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages[:20]:
+                    text += page.extract_text() or ""
+
+        import os
+
+        os.unlink(tmp_path)
+
+        if not text.strip():
+            await message.answer("📄 PDF не содержит текста (возможно сканы).")
+        else:
+            await message.answer(f"📄 Извлечённый текст:\n\n{text[:3000]}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+
+
+@router.message(Command("ocr"))
+async def cmd_ocr(message: Message) -> None:
+    """/ocr — распознать текст на изображении (нужен pytesseract)."""
+    try:
+        import pytesseract  # type: ignore[import]  # noqa: F401
+
+        _available = True
+    except ImportError:
+        _available = False
+
+    if not _available:
+        await message.answer(
+            "🔍 <b>OCR</b>\n\n"
+            "Не установлен pytesseract.\n"
+            "Установка: <code>pip install pytesseract</code> + Tesseract OCR в системе."
+        )
+        return
+
+    if not message.photo:
+        await message.answer("🔍 Пришли фото вместе с командой /ocr.")
+        return
+
+    try:
+        import tempfile
+
+        photo = message.photo[-1]
+        file = await message.bot.get_file(photo.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            await message.bot.download_file(file.file_path or "", tmp.name)  # type: ignore[arg-type]
+            tmp_path = tmp.name
+
+        import pytesseract  # type: ignore[import]
+        from PIL import Image
+
+        text = pytesseract.image_to_string(Image.open(tmp_path), lang="rus+eng")
+
+        import os
+
+        os.unlink(tmp_path)
+
+        if not text.strip():
+            await message.answer("🔍 Текст не найден на изображении.")
+        else:
+            await message.answer(f"🔍 Распознанный текст:\n\n{text[:3000]}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+
+
+@router.message(Command("skill_stats"))
+async def cmd_skill_stats(message: Message) -> None:
+    """/skill_stats — эффективность навыков."""
+    from src.db.models import Skill, SkillUsage
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        result = await session.execute(
+            select(
+                Skill.name,
+                func.count(SkillUsage.id).label("total"),
+                func.sum(func.cast(SkillUsage.success, Integer)).label("successes"),
+            )
+            .select_from(SkillUsage)
+            .join(Skill, SkillUsage.skill_id == Skill.id)
+            .where(Skill.user_id == owner.id)
+            .group_by(Skill.name)
+            .order_by(desc(func.count(SkillUsage.id)))
+            .limit(15)
+        )
+        rows = result.all()
+
+    if not rows:
+        await message.answer("📊 Нет данных по навыкам.")
+        return
+
+    lines = ["📊 <b>Эффективность навыков</b>\n"]
+    for name, total, successes in rows:
+        rate = (successes / total * 100) if total and successes else 0
+        icon = "✅" if rate >= 70 else "⚠️" if rate >= 40 else "❌"
+        lines.append(f"  {icon} {name}: {successes or 0}/{total} ({rate:.0f}%)")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("reply_quality"))
+async def cmd_reply_quality(message: Message) -> None:
+    """/reply_quality — статистика авто-ответов."""
+    from src.db.models._messaging import AutoReplyLog
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        total = await session.scalar(
+            select(func.count())
+            .select_from(AutoReplyLog)
+            .where(AutoReplyLog.user_id == owner.id)
+        )
+        today = await session.scalar(
+            select(func.count())
+            .select_from(AutoReplyLog)
+            .where(
+                AutoReplyLog.user_id == owner.id,
+                AutoReplyLog.created_at >= datetime.now(UTC) - timedelta(days=1),
+            )
+        )
+        top_contacts = await session.execute(
+            select(
+                AutoReplyLog.peer_name,
+                func.count().label("cnt"),
+            )
+            .where(AutoReplyLog.user_id == owner.id)
+            .group_by(AutoReplyLog.peer_name)
+            .order_by(desc(func.count()))
+            .limit(5)
+        )
+        top = top_contacts.all()
+
+    if not total:
+        await message.answer("📊 Нет данных по авто-ответам.")
+        return
+
+    lines = [
+        "📊 <b>Статистика авто-ответов</b>\n",
+        f"  Всего: {total}",
+        f"  За сегодня: {today}",
+        "\n<b>Топ-5 контактов:</b>",
+    ]
+    for name, cnt in top:
+        lines.append(f"  • {name or 'неизвестно'}: {cnt}")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("reaction_reply"))
+async def cmd_reaction_reply(message: Message) -> None:
+    """/reaction_reply — вкл/выкл авто-ответ на реакции."""
+    from src.config import settings
+
+    current = getattr(settings, "_reaction_reply_enabled", False)
+    new_val = not current
+    # ponytail: in-memory flag, upgrade to DB config if persistence needed.
+    setattr(settings, "_reaction_reply_enabled", new_val)
+
+    status = "включены" if new_val else "выключены"
+    await message.answer(f"Reaction auto-reply: {status}")
+
+
+@router.message(Command("typing_sim"))
+async def cmd_typing_sim(message: Message) -> None:
+    """/typing_sim — вкл/выкл симуляцию набора."""
+    from src.config import settings
+
+    current = getattr(settings, "_typing_sim_enabled", False)
+    new_val = not current
+    setattr(settings, "_typing_sim_enabled", new_val)
+
+    status = "включена" if new_val else "выключена"
+    await message.answer(f"Typing simulation: {status}")
+
+
+@router.message(Command("read_receipts"))
+async def cmd_read_receipts(message: Message) -> None:
+    """/read_receipts — вкл/выкл отметку прочитано."""
+    from src.config import settings
+
+    current = getattr(settings, "_read_receipts_enabled", False)
+    new_val = not current
+    setattr(settings, "_read_receipts_enabled", new_val)
+
+    status = "включены" if new_val else "выключены"
+    await message.answer(f"Read receipts: {status}")
+
+
+@router.message(Command("custom_tool"))
+async def cmd_custom_tool(message: Message) -> None:
+    """/custom_tool <название> <описание> — создать навык из описания."""
+    raw = (message.text or "").strip()
+    parts = raw.split(None, 2)
+    if len(parts) < 3:
+        await message.answer(
+            "🔧 <b>Создание навыка</b>\n\n"
+            "Использование: <code>/custom_tool my_tool что делает этот инструмент</code>\n"
+            "Навык будет сохранён и доступен через систему skills."
+        )
+        return
+
+    name = parts[1]
+    description = parts[2]
+
+    try:
+        from src.core.intelligence.skills import record_skill_usage
+        from src.db.models import Skill
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            skill = Skill(
+                user_id=owner.id,
+                name=name,
+                body=description,
+                trigger_patterns_json=[name.lower()],
+                review_status="approved",
+                enabled=True,
+            )
+            session.add(skill)
+            await session.commit()
+            await session.refresh(skill)
+
+        await message.answer(
+            f"✅ Навык <b>{name}</b> создан (ID: {skill.id})\n"
+            f"Триггер: {name.lower()}\n"
+            f"Описание: {description[:200]}"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
         return
 
     if text.lower().startswith("off"):

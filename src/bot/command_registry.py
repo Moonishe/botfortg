@@ -361,6 +361,17 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("weather_clothing", "Погода + одежда", "tools")
     registry.register("sticker_search", "Поиск стикеров", "tools")
 
+    # ── Batch 4: Tools + Analytics + Auto-reply toggles ──
+    registry.register("code", "Выполнить код", "tools")
+    registry.register("pdf", "Текст из PDF", "tools")
+    registry.register("ocr", "Распознать текст с фото", "tools")
+    registry.register("skill_stats", "Эффективность навыков", "analytics")
+    registry.register("reply_quality", "Статистика авто-ответов", "analytics")
+    registry.register("reaction_reply", "Reaction auto-reply toggle", "auto-reply")
+    registry.register("typing_sim", "Typing simulation toggle", "auto-reply")
+    registry.register("read_receipts", "Read receipts toggle", "auto-reply")
+    registry.register("custom_tool", "Создать навык", "tools")
+
     # ── Admin ──
     registry.register("avito", "Поиск на Avito", "admin")
     registry.register("avito_list", "Список поисков Avito", "admin")
