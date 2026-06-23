@@ -13,7 +13,7 @@ from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.models import Notification
 from src.core.infra.timeutil import ensure_utc, fmt_local, now_in_tz
-from src.db.models import AutoReplyLog, Commitment, Message, User
+from src.db.models import AutoReplyLog, Commitment, Contact, Message, User
 from src.db.repo import get_or_create_user, list_open_commitments
 from src.db.session import get_session
 from src.llm.base import ChatMessage, TaskType
@@ -77,34 +77,48 @@ async def _gather_payload(owner: User) -> dict[str, Any]:
 
         waiting: list[tuple[int, str | None, str]] = []
         if by_peer:
+            # Filter: only private 1:1 chats with real humans (no groups/channels/bots)
             peer_ids = list(by_peer.keys())
-            # Batch: get last outgoing message date per peer in one query
-            subq = (
-                select(
-                    Message.peer_id,
-                    sa_func.max(Message.date).label("last_out_date"),
+            contact_result = await session.execute(
+                select(Contact.peer_id, Contact.display_name).where(
+                    Contact.user_id == owner.id,
+                    Contact.peer_id.in_(peer_ids),
+                    Contact.peer_kind == "user",
+                    Contact.is_bot.is_(False),
                 )
-                .where(
-                    Message.user_id == owner.id,
-                    Message.peer_id.in_(peer_ids),
-                    Message.is_outgoing.is_(True),
-                )
-                .group_by(Message.peer_id)
             )
-            result = await session.execute(subq)
-            last_outgoing = {row.peer_id: row.last_out_date for row in result}
+            valid_peers = {row.peer_id: row.display_name for row in contact_result}
+            by_peer = {k: v for k, v in by_peer.items() if k in valid_peers}
 
-            for peer_id, msgs in by_peer.items():
-                last_in = max(msgs, key=lambda x: x.date)
-                last_out = last_outgoing.get(peer_id)
-                if last_out is None or last_out <= last_in.date:
-                    snippet = (
-                        last_in.transcript
-                        or last_in.text
-                        or last_in.extracted_text
-                        or ""
-                    )[:200]
-                    waiting.append((peer_id, last_in.sender_name, snippet))
+            if by_peer:
+                peer_ids = list(by_peer.keys())
+                # Batch: get last outgoing message date per peer in one query
+                subq = (
+                    select(
+                        Message.peer_id,
+                        sa_func.max(Message.date).label("last_out_date"),
+                    )
+                    .where(
+                        Message.user_id == owner.id,
+                        Message.peer_id.in_(peer_ids),
+                        Message.is_outgoing.is_(True),
+                    )
+                    .group_by(Message.peer_id)
+                )
+                result = await session.execute(subq)
+                last_outgoing = {row.peer_id: row.last_out_date for row in result}
+
+                for peer_id, msgs in by_peer.items():
+                    last_in = max(msgs, key=lambda x: x.date)
+                    last_out = last_outgoing.get(peer_id)
+                    if last_out is None or last_out <= last_in.date:
+                        snippet = (
+                            last_in.transcript
+                            or last_in.text
+                            or last_in.extracted_text
+                            or ""
+                        )[:200]
+                        waiting.append((peer_id, last_in.sender_name, snippet))
 
         mine = await list_open_commitments(session, owner, direction="mine")
         theirs = await list_open_commitments(session, owner, direction="theirs")

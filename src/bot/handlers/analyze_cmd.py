@@ -1,5 +1,6 @@
 """Команда /analyze — полный анализ переписок."""
 
+import asyncio
 import logging
 from collections.abc import Sequence
 
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 router = Router(name="analyze_cmd")
 router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
+
+# R3: Debounce — prevent double-click starting two parallel /analyze runs
+_analyze_running = asyncio.Lock()
 
 
 async def _resolve_contact_names(
@@ -120,6 +124,11 @@ async def cb_analyze_run(callback: CallbackQuery, state=None, userbot_manager=No
     """Запускает анализ в выбранном режиме."""
     await callback.answer()
 
+    # R3: Debounce — prevent double-click starting two parallel runs
+    if _analyze_running.locked():
+        await callback.answer("⏳ Анализ уже идёт, подожди...", show_alert=True)
+        return
+
     parts = (callback.data or "").split(":")
     if len(parts) < 3:
         return
@@ -211,17 +220,18 @@ async def cb_analyze_run(callback: CallbackQuery, state=None, userbot_manager=No
             if userbot_manager
             else None
         )
-        result = await run_full_analysis(
-            owner_id=callback.from_user.id,
-            provider=provider,
-            client=client,
-            message_limit=message_limit,
-            folder_names=folders_to_analyze,
-            contact_ids=contact_ids_arg,
-            progress_callback=update_progress,
-            include_photos=include_photos,
-            incremental=incremental,
-        )
+        async with _analyze_running:
+            result = await run_full_analysis(
+                owner_id=callback.from_user.id,
+                provider=provider,
+                client=client,
+                message_limit=message_limit,
+                folder_names=folders_to_analyze,
+                contact_ids=contact_ids_arg,
+                progress_callback=update_progress,
+                include_photos=include_photos,
+                incremental=incremental,
+            )
 
         report = format_analysis_report(result)
         await status_msg.edit_text(report)

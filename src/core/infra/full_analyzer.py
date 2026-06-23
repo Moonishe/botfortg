@@ -323,12 +323,14 @@ async def run_full_analysis(
     tasks = [_process_one(c, i) for i, c in enumerate(contacts)]
     await asyncio.gather(*tasks)
 
-    # Save incremental state — persist max message ID per analyzed contact
+    # Save incremental state — atomic write to prevent corruption on concurrent /analyze
     if incremental or new_state:
         try:
-            _ANALYSIS_STATE.write_text(
-                json.dumps(new_state, ensure_ascii=False), "utf-8"
-            )
+            import tempfile
+
+            _tmp = _ANALYSIS_STATE.with_suffix(".tmp")
+            _tmp.write_text(json.dumps(new_state, ensure_ascii=False), "utf-8")
+            _tmp.replace(_ANALYSIS_STATE)  # atomic on same filesystem
         except Exception:
             logger.debug("Failed to save analysis state", exc_info=True)
 
