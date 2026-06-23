@@ -1299,19 +1299,19 @@ async def cmd_away(message: Message) -> None:
             await message.answer("✅ Статус сброшен. Ты онлайн.")
             return
 
-        # Parse timer: "2h", "30m", "1d", "45min" at start of text
+        # Parse timer: "2h", "30m", "1d", "45min", "2ч", "30м" at start of text
         import re
 
-        timer_match = re.match(r"^(\d+)([hмм]{1,2}|d|д|min|мин)\s+(.+)", text, re.I)
+        timer_match = re.match(r"^(\d+)\s*([hч]|d|д|min|мин|мм?)\s+(.+)", text, re.I)
         timer_minutes = 0
         if timer_match:
             num = int(timer_match.group(1))
             unit = timer_match.group(2).lower()
-            if unit in ("h", "ч", "мм"):
+            if unit in ("h", "ч"):
                 timer_minutes = num * 60
             elif unit in ("d", "д"):
                 timer_minutes = num * 1440
-            else:  # min, мин, m
+            else:  # m, м, мм, min, мин — all minutes
                 timer_minutes = num
             text = timer_match.group(3).strip()
 
@@ -1349,8 +1349,6 @@ async def cmd_away(message: Message) -> None:
                     await s.commit()
             except Exception:
                 pass
-
-        import asyncio
 
         asyncio.create_task(_auto_reset(message.from_user.id, timer_minutes))
 
