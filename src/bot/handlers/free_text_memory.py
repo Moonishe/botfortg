@@ -676,12 +676,18 @@ async def on_reaction_update(reaction_update) -> None:
         if not is_positive and not is_negative:
             return  # neutral reaction, ignore
 
-        # Get user who reacted
+        # Get user who reacted — must be owner
         reactor = getattr(reaction_update, "user", None)
         if reactor is None:
             return
         tg_id = getattr(reactor, "id", 0)
         if tg_id == 0:
+            return
+
+        # Security: only owner can record quality feedback
+        from src.config import settings as _cfg
+
+        if tg_id != _cfg.owner_telegram_id:
             return
 
         # Get message_id to find the Trajectory

@@ -2431,12 +2431,15 @@ async def cmd_mem_import(message: Message) -> None:
                 fact = (item.get("fact") or "").strip()
                 if len(fact) < 3:
                     continue
+                _conf = item.get("confidence", 0.7)
+                if not isinstance(_conf, (int, float)) or _conf is None:
+                    _conf = 0.7
                 await save_memory_single(
                     session,
                     owner,
                     fact=fact,
                     memory_type=item.get("type", "personal"),
-                    confidence=float(item.get("confidence", 0.7)),
+                    confidence=float(_conf),
                     source="import",
                 )
                 saved += 1
@@ -2507,6 +2510,15 @@ async def cmd_bulk_delete(message: Message) -> None:
     mem_type = filters.get("type")
     tag = filters.get("tag")
     inactive_only = filters.get("inactive", "0") == "1"
+
+    # Safety: require at least one valid filter (type or tag) to prevent
+    # accidental mass-deletion of ALL active memories.
+    if not mem_type and not tag:
+        await message.answer(
+            "❌ Укажи хотя бы один фильтр: <code>type:</code> или <code>tag:</code>\n"
+            "Пример: <code>/bulk_delete type:temporary</code>"
+        )
+        return
 
     from sqlalchemy import delete as sa_delete, or_, update as sa_update
 
