@@ -848,6 +848,11 @@ async def cmd_summarize(message: Message) -> None:
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+    finally:
+        try:
+            await provider.close()
+        except Exception:
+            pass
 
 
 @router.message(Command("translate"))
@@ -2250,6 +2255,11 @@ async def cmd_url_summary(message: Message) -> None:
         await message.answer(f"📖 <b>Пересказ:</b>\n\n{summary}")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+    finally:
+        try:
+            await provider.close()
+        except Exception:
+            pass
 
 
 @router.message(Command("weather_clothing"))
@@ -2835,3 +2845,8 @@ async def cmd_mem_search(message: Message) -> None:
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+    finally:
+        try:
+            await provider.close()
+        except Exception:
+            pass
