@@ -109,7 +109,19 @@ async def cmd_settings(message: Message, command: CommandObject) -> None:
         return
 
     text, kb = await _render_menu(message.from_user.id)
-    await message.answer(text, reply_markup=kb)
+
+    # Add quick toggles to the settings menu
+    try:
+        from src.bot.handlers.nl_router import settings_inline_menu
+
+        toggle_kb = await settings_inline_menu()
+        # Combine existing menu + toggle menu
+        await message.answer(text, reply_markup=kb)
+        await message.answer(
+            "⚙ <b>Быстрые переключатели:</b>", reply_markup=toggle_kb.as_markup()
+        )
+    except Exception:
+        await message.answer(text, reply_markup=kb)
 
 
 # =====================================================================

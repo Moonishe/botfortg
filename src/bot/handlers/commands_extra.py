@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, UTC
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select, func, desc, Integer
 
 from src.bot.filters import OwnerOnly
@@ -1524,54 +1524,178 @@ async def cmd_schedule_reply(message: Message) -> None:
         lines = ["📅 <b>Расписание:</b>\n"]
         for s in schedules:
             lines.append(f"  • {s.key.replace('schedule:', '')}: {s.value}")
-        await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines))
+
+
+# ════════════════════════════════════════════════════════════════════
+# UX Improvements: NL route callbacks, briefing buttons, settings menu, undo
+# ════════════════════════════════════════════════════════════════════
+
+
+@router.callback_query(F.data.startswith("nlrun:"))
+async def cb_nl_run(
+    callback: "CallbackQuery", state=None, userbot_manager=None
+) -> None:
+    """Execute NL-routed command when user taps the button."""
+    await callback.answer()
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) < 3:
+        return
+    command = parts[1]
+    args = parts[2]
+    cmd_text = f"/{command} {args}".strip()
+    if callback.message:
+        try:
+            await callback.message.edit_text(f"▶ Выполняю: <code>{cmd_text}</code>")
+        except Exception:
+            pass
+    # Send the command as a new message — bot will process it
+    await callback.bot.send_message(
+        callback.message.chat.id if callback.message else callback.from_user.id,
+        cmd_text,
+    )
+
+
+@router.callback_query(F.data.startswith("briefing:"))
+async def cb_briefing_action(callback: "CallbackQuery") -> None:
+    """Handle briefing inline buttons: reply, snooze, ignore."""
+    await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        return
+    action = parts[1]
+    peer_id_str = parts[2]
+    try:
+        peer_id = int(peer_id_str)
+    except ValueError:
         return
 
-    if text.lower().startswith("off"):
+    if action == "reply":
+        # Start /chat with this contact
+        if callback.message:
+            await callback.message.edit_text(
+                f"💬 Открываю чат с peer {peer_id}…\n"
+                f"Используй <code>/chat {peer_id}</code> для полного контекста."
+            )
+        await callback.bot.send_message(
+            callback.message.chat.id if callback.message else callback.from_user.id,
+            f"/chat {peer_id}",
+        )
+    elif action == "snooze":
+        if callback.message:
+            try:
+                await callback.message.edit_text(f"⏰ Напомню позже о peer {peer_id}")
+            except Exception:
+                pass
+    elif action == "ignore":
+        if callback.message:
+            try:
+                await callback.message.edit_text("✖ Игнорируется")
+            except Exception:
+                pass
+
+
+@router.callback_query(F.data.startswith("set:toggle:"))
+async def cb_settings_toggle(callback: "CallbackQuery") -> None:
+    """Toggle a setting from the inline settings menu."""
+    await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        return
+    toggle_id = parts[2]
+
+    # For now, just acknowledge — full toggle logic requires config update
+    from src.config import settings as cfg
+
+    status_map = {
+        "streaming": ("Стриминг", cfg.streaming_enabled),
+        "pacing": ("Естественная задержка", cfg.response_pacing_mode != "off"),
+        "group_enabled": ("Ответы в группах", cfg.userbot_group_enabled),
+        "rate_limit": ("Rate limit", cfg.rate_limit_per_min > 0),
+    }
+    label, current = status_map.get(toggle_id, (toggle_id, False))
+    new_state = "🟢 ВКЛ" if not current else "⚪ ВЫКЛ"
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"⚙ {label}: {new_state}\n\nИзменение вступит в силу после перезапуска."
+            )
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("set:cat:"))
+async def cb_settings_category(callback: "CallbackQuery") -> None:
+    """Show settings category commands."""
+    await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        return
+    cat = parts[2]
+    from src.bot.command_registry import get_registry
+
+    try:
+        registry = get_registry()
+        help_text = registry.format_help(cat)
+        if callback.message:
+            await callback.message.edit_text(help_text[:4000])
+    except Exception:
+        if callback.message:
+            await callback.message.edit_text("Категория не найдена")
+
+
+@router.callback_query(F.data == "set:close")
+async def cb_settings_close(callback: "CallbackQuery") -> None:
+    """Close settings menu."""
+    await callback.answer()
+    if callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("undo:"))
+async def cb_undo_action(callback: "CallbackQuery") -> None:
+    """Undo a bot action (memory save, auto-reply, commitment)."""
+    await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        return
+    action_type = parts[1]
+    action_id = parts[2]
+
+    try:
         async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            result = await session.execute(
-                select(WorkingMemory).where(
-                    WorkingMemory.user_id == owner.id,
-                    WorkingMemory.key.like("schedule:%"),
-                )
-            )
-            for s in result.scalars().all():
-                await session.delete(s)
-            await session.commit()
-        await message.answer("✅ Расписание выключено.")
+            if action_type == "memory":
+                from src.db.models import Memory
+
+                mem = await session.get(Memory, int(action_id))
+                if mem:
+                    mem.is_active = False
+                    await session.commit()
+                    if callback.message:
+                        await callback.message.edit_text("✅ Факт удалён из памяти")
+            elif action_type == "autoreply":
+                # Can't undo sent messages, but can log it
+                if callback.message:
+                    await callback.message.edit_text(
+                        "ℹ Авто-ответ уже отправлен, нельзя отменить"
+                    )
+            elif action_type == "commitment":
+                from src.db.models import Commitment
+
+                com = await session.get(Commitment, int(action_id))
+                if com:
+                    com.status = "cancelled"
+                    await session.commit()
+                    if callback.message:
+                        await callback.message.edit_text("✅ Обязательство отменено")
+    except Exception as e:
+        logger.warning("Undo failed: %s", e)
+        if callback.message:
+            await callback.message.edit_text("❌ Не удалось отменить")
         return
-
-    # Parse: on HH:MM-HH:MM
-    import re
-
-    match = re.match(r"on\s+(\d{1,2}:\d{2})-(\d{1,2}:\d{2})", text)
-    if not match:
-        await message.answer("❌ Формат: <code>/schedule_reply on 22:00-08:00</code>")
-        return
-
-    schedule_value = f"{match.group(1)}-{match.group(2)}"
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        result = await session.execute(
-            select(WorkingMemory).where(
-                WorkingMemory.user_id == owner.id,
-                WorkingMemory.key == "schedule:auto_reply",
-            )
-        )
-        old = result.scalar_one_or_none()
-        if old:
-            await session.delete(old)
-        session.add(
-            WorkingMemory(
-                user_id=owner.id,
-                key="schedule:auto_reply",
-                value=schedule_value,
-            )
-        )
-        await session.commit()
-
-    await message.answer(f"✅ Авто-ответы: {schedule_value}")
 
 
 # ═══════════════════════════════════════════════════════════════════

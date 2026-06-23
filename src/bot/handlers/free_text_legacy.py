@@ -438,6 +438,14 @@ async def _free_text_handler(
     """Обработчик свободного текста — передаёт в _process_text."""
     if message.text is None:
         return
+
+    # ── NL Router: check if message is a natural language command ──
+    from src.bot.handlers.nl_router import try_nl_route
+
+    handled = await try_nl_route(message.text, message, state, userbot_manager)
+    if handled:
+        return  # NL router handled it, don't proceed to LLM pipeline
+
     async with get_session() as session:
         await _process_text(
             message.text, message, state, userbot_manager, session=session

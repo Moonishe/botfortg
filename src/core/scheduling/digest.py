@@ -214,11 +214,33 @@ async def build_digest(owner_telegram_id: int) -> str:
 
 async def send_digest(owner_telegram_id: int) -> None:
     text = await build_digest(owner_telegram_id)
+
+    # Build inline keyboard for briefing actions
+    from src.bot.handlers.nl_router import briefing_keyboard
+    from src.db.session import get_session as _get_session
+    from src.db.repo import get_or_create_user as _get_owner
+
+    reply_markup = None
+    try:
+        async with _get_session() as session:
+            owner = await _get_owner(session, owner_telegram_id)
+        # Get waiting contacts for inline buttons
+        from src.core.scheduling.digest import _gather_payload
+
+        payload = await _gather_payload(owner)
+        waiting = payload.get("waiting", [])
+        kb = briefing_keyboard(waiting)
+        if kb:
+            reply_markup = kb.as_markup()
+    except Exception:
+        logger.debug("Failed to build briefing keyboard", exc_info=True)
+
     await notification_queue.enqueue(
         topic="digest",
         text=text,
         priority=Notification.PRIORITY_MEDIUM,
         category="morning_report",
+        reply_markup=reply_markup,
     )
 
 

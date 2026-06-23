@@ -234,6 +234,19 @@ async def cb_analyze_run(callback: CallbackQuery, state=None, userbot_manager=No
             )
 
         report = format_analysis_report(result)
+
+        # ── Proactive insights: actionable suggestions instead of just numbers ──
+        try:
+            from src.bot.handlers.nl_router import generate_insights
+
+            insights = await generate_insights(result)
+            if insights:
+                report += "\n\n<b>💡 Инсайты:</b>\n" + "\n".join(
+                    f"  {i}" for i in insights
+                )
+        except Exception:
+            logger.debug("Insight generation failed", exc_info=True)
+
         await status_msg.edit_text(report)
 
     except Exception as e:
