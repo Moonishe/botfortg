@@ -777,8 +777,29 @@ async def cmd_summarize(message: Message) -> None:
     await message.answer("📥 Загружаю страницу...")
 
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            # SSRF: check redirect target before following
+            if resp.is_redirect:
+                from urllib.parse import urlparse as _urlparse2
+
+                _rh = (
+                    _urlparse2(resp.headers.get("location", "")).hostname or ""
+                ).lower()
+                if (
+                    _rh in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+                    or _rh.startswith("169.254.")
+                    or _rh.startswith("10.")
+                    or _rh.startswith("192.168.")
+                    or any(_rh.startswith(f"172.{i}.") for i in range(16, 32))
+                ):
+                    await message.answer(
+                        "❌ Редирект на внутренний адрес заблокирован."
+                    )
+                    return
+                resp = await client.get(
+                    resp.headers["location"], headers={"User-Agent": "Mozilla/5.0"}
+                )
             content_type = resp.headers.get("content-type", "")
 
             if "text/html" not in content_type and "text/plain" not in content_type:
@@ -2079,8 +2100,27 @@ async def cmd_url_summary(message: Message) -> None:
     try:
         import httpx
 
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            # SSRF: if redirect, check target hostname before following
+            if resp.is_redirect:
+                location = resp.headers.get("location", "")
+                from urllib.parse import urlparse as _urlparse
+
+                _redir_host = (_urlparse(location).hostname or "").lower()
+                if (
+                    _redir_host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+                    or _redir_host.startswith("169.254.")
+                    or _redir_host.startswith("10.")
+                    or _redir_host.startswith("192.168.")
+                    or any(_redir_host.startswith(f"172.{i}.") for i in range(16, 32))
+                ):
+                    await message.answer(
+                        "❌ Редирект на внутренний адрес заблокирован."
+                    )
+                    return
+                # Safe redirect — follow manually
+                resp = await client.get(location, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code != 200:
                 await message.answer(f"❌ HTTP {resp.status_code}")
                 return
@@ -2431,6 +2471,12 @@ async def cmd_mem_import(message: Message) -> None:
                 fact = (item.get("fact") or "").strip()
                 if len(fact) < 3:
                     continue
+                # Security: scan imported facts for prompt injection
+                from src.core.security.prompt_injection_scanner import scan_content
+
+                _scan = scan_content(fact, "memory_import")
+                if _scan.blocked:
+                    continue  # skip injected facts
                 _conf = item.get("confidence", 0.7)
                 if not isinstance(_conf, (int, float)) or _conf is None:
                     _conf = 0.7
