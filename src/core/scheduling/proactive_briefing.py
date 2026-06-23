@@ -333,8 +333,21 @@ async def _collect_morning_digest(owner_id: int) -> str:
         lines.append("")
 
         # ── 2. Неотвеченные сообщения ──────────────────────────────
+        # Filter: only 1:1 private chats with real humans (no groups/channels/bots)
+        from src.db.models import Contact
+        from sqlalchemy import and_
+
         unanswered_r = await session.execute(
             select(ConversationState)
+            .join(
+                Contact,
+                and_(
+                    Contact.user_id == ConversationState.user_id,
+                    Contact.peer_id == ConversationState.peer_id,
+                    Contact.peer_kind == "user",
+                    Contact.is_bot.is_(False),
+                ),
+            )
             .where(
                 ConversationState.user_id == owner.id,
                 ConversationState.last_incoming_at >= seven_days_ago,
