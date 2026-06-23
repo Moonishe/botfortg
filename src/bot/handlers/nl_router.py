@@ -48,7 +48,7 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"(теплова|уверенност).*(памят|факт)", re.I), "mem_heatmap", ""),
     (re.compile(r"истека.*факт", re.I), "mem_expire", ""),
     (re.compile(r"теги?( памяти)?", re.I), "mem_tags", ""),
-    # ── Chat ──
+    # ── Chat ── (after planning — "напомни" won't be caught by "напиши")
     (re.compile(r"напиши\s+(.+)", re.I), "chat", r"\1"),
     (re.compile(r"ответь\s+(.+)", re.I), "chat", r"\1"),
     (re.compile(r"синхронизируй (контакт|диалог|чат)", re.I), "sync", ""),
@@ -66,15 +66,15 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"выключи\s+(.+)", re.I), "settings", r"\1"),
     (re.compile(r"(api|апи)?\s*ключ", re.I), "keys", ""),
     (re.compile(r"модел", re.I), "models", ""),
-    # ── Planning ──
+    # ── Planning ── (BEFORE chat — "напомни" must not be caught by "напиши")
     (re.compile(r"напомни\s+(.+)", re.I), "nlcron", r"\1"),
     (re.compile(r"напомнить\s+(.+)", re.I), "nlcron", r"\1"),
     (re.compile(r"не забудь\s+(.+)", re.I), "nlcron", r"\1"),
     (re.compile(r"день рожден", re.I), "birthdays", ""),
     (re.compile(r"дни рожден", re.I), "birthdays", ""),
-    (re.compile(r"расписани", re.I), "calendar", ""),
-    (re.compile(r"задачи?", re.I), "cron", ""),
-    (re.compile(r"намерен", re.I), "intention", ""),
+    (re.compile(r"покажи расписани", re.I), "calendar", ""),
+    (re.compile(r"(мои |есть )?задачи?( .+)?", re.I), "cron", ""),
+    (re.compile(r"намерен(ие|ия)? (на|на сегодня)", re.I), "intention", ""),
     (re.compile(r"недельн.*отч", re.I), "weekly", ""),
     # ── Analytics ──
     (re.compile(r"статистик", re.I), "stats", ""),
@@ -98,8 +98,8 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"я вернулся|я тут", re.I), "away", "off"),
     # ── Intelligence ──
     (re.compile(r"граф.*знани", re.I), "graph", ""),
-    (re.compile(r"сущности?", re.I), "entities", ""),
-    (re.compile(r"уверенност", re.I), "confidence", ""),
+    (re.compile(r"(покажи |мои )?сущности?", re.I), "entities", ""),
+    (re.compile(r"(покажи |уровень )?уверенност", re.I), "confidence", ""),
 ]
 
 

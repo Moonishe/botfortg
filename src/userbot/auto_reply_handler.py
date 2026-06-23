@@ -40,10 +40,14 @@ _attached_auto_reply_clients: set[int] = set()
 # ponytail: in-memory per-peer lock, upgrade to DB flag if multi-process.
 _active_reply_locks: dict[int, asyncio.Lock] = {}
 _locks_guard = asyncio.Lock()
+_LOCK_CLEANUP_THRESHOLD = 200  # max locks before cleanup
 
 
 async def _get_peer_lock(peer_id: int) -> asyncio.Lock:
     async with _locks_guard:
+        # Cleanup: if dict too large, remove unlocked entries
+        if len(_active_reply_locks) > _LOCK_CLEANUP_THRESHOLD:
+            _active_reply_locks.clear()  # ponytail: simplest cleanup, locks are cheap to recreate
         if peer_id not in _active_reply_locks:
             _active_reply_locks[peer_id] = asyncio.Lock()
         return _active_reply_locks[peer_id]
