@@ -28,6 +28,7 @@ from src.db.session import get_session
 from src.core.memory.memory_recall import bump_recall_version
 from src.core.security.prompt_injection_scanner import scan_content
 from src.userbot import get_active_telethon_client
+from sqlalchemy import select
 
 from .free_text_common import safe_answer
 
@@ -643,3 +644,36 @@ async def cb_memq_explain(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.answer(text)
     await callback.answer()
+
+
+# ── Quality score feedback (👍/👎 on bot replies) ──
+
+
+@router.callback_query(F.data.startswith("qf:"))
+async def cb_quality_feedback(callback: CallbackQuery) -> None:
+    """Record quality feedback from 👍/👎 buttons on bot replies."""
+    assert callback.data is not None
+    rating = callback.data.split(":", 1)[1]  # "good" or "bad"
+
+    try:
+        from src.db.models import Trajectory
+        from sqlalchemy import desc as sa_desc
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, callback.from_user.id)
+            # Find most recent trajectory for this user
+            result = await session.execute(
+                select(Trajectory)
+                .where(Trajectory.user_id == owner.id)
+                .order_by(sa_desc(Trajectory.id))
+                .limit(1)
+            )
+            traj = result.scalar_one_or_none()
+            if traj is not None:
+                traj.reward_value = 1.0 if rating == "good" else -1.0
+                await session.commit()
+
+        emoji = "👍" if rating == "good" else "👎"
+        await callback.answer(f"{emoji} Записано!", show_alert=False)
+    except Exception:
+        await callback.answer("Ошибка записи", show_alert=True)

@@ -2394,3 +2394,224 @@ async def cmd_conv_depth(message: Message) -> None:
         lines.append(f"  • {name}: {count}")
 
     await message.answer("\n".join(lines))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW COMMANDS: mem_import, mem_version, bulk_delete, help dynamic
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.message(Command("mem_import"))
+async def cmd_mem_import(message: Message) -> None:
+    """Import memory facts from JSON (reverse of /mem_export)."""
+    data_text = (message.text or "").replace("/mem_import", "").strip()
+    if not data_text:
+        await message.answer(
+            "📥 <b>Импорт памяти</b>\n\n"
+            "Отправь JSON после команды:\n"
+            '<code>/mem_import [{"fact": "...", "type": "personal"}, ...]</code>\n\n'
+            "Или ответь на сообщение с JSON-экспортом."
+        )
+        return
+
+    try:
+        items = json.loads(data_text)
+        if not isinstance(items, list):
+            await message.answer("❌ Ожидается JSON-список.")
+            return
+
+        from src.core.memory.memory_service import save_memory_single
+
+        saved = 0
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            for item in items[:100]:  # cap at 100
+                if not isinstance(item, dict):
+                    continue
+                fact = (item.get("fact") or "").strip()
+                if len(fact) < 3:
+                    continue
+                await save_memory_single(
+                    session,
+                    owner,
+                    fact=fact,
+                    memory_type=item.get("type", "personal"),
+                    confidence=float(item.get("confidence", 0.7)),
+                    source="import",
+                )
+                saved += 1
+
+        await message.answer(f"✅ Импортировано {saved} фактов.")
+    except json.JSONDecodeError:
+        await message.answer("❌ Неверный JSON.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+
+
+@router.message(Command("mem_version"))
+async def cmd_mem_version(message: Message) -> None:
+    """Show version history for a memory fact."""
+    fact_id_str = (message.text or "").replace("/mem_version", "").strip()
+    if not fact_id_str or not fact_id_str.isdigit():
+        await message.answer(
+            "📜 <b>История правок факта</b>\n\n"
+            "Отправь: <code>/mem_version 42</code>\n"
+            "Где 42 — ID факта (из /memory list)."
+        )
+        return
+
+    fact_id = int(fact_id_str)
+    from src.db.repos.memory_repo._versioning import get_memory_history
+
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            versions = await get_memory_history(session, owner, fact_id)
+
+        if not versions:
+            await message.answer(f"❌ Факт {fact_id} не найден или нет истории правок.")
+            return
+
+        lines = [f"📜 <b>История факта #{fact_id}</b> ({len(versions)} версий)\n"]
+        for v in versions[:10]:
+            ts = v.edited_at.strftime("%d.%m %H:%M") if v.edited_at else "?"
+            text = (v.fact_text or "")[:80]
+            who = v.edited_by or "?"
+            lines.append(f"  v{v.version} [{ts}] ({who}) {text}")
+
+        await message.answer("\n".join(lines))
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+
+
+@router.message(Command("bulk_delete"))
+async def cmd_bulk_delete(message: Message) -> None:
+    """Mass delete memories by tag or type."""
+    args = (message.text or "").replace("/bulk_delete", "").strip()
+    if not args:
+        await message.answer(
+            "🗑 <b>Массовое удаление</b>\n\n"
+            "По типу: <code>/bulk_delete type:temporary</code>\n"
+            "По тегу: <code>/bulk_delete tag:work</code>\n"
+            "Только неактивные: <code>/bulk_delete type:temporary inactive:1</code>"
+        )
+        return
+
+    # Parse args
+    filters: dict[str, str] = {}
+    for part in args.split():
+        if ":" in part:
+            k, v = part.split(":", 1)
+            filters[k.strip().lower()] = v.strip()
+
+    mem_type = filters.get("type")
+    tag = filters.get("tag")
+    inactive_only = filters.get("inactive", "0") == "1"
+
+    from sqlalchemy import delete as sa_delete, or_
+
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            stmt = select(Memory).where(Memory.user_id == owner.id)
+            if mem_type:
+                stmt = stmt.where(Memory.memory_type == mem_type)
+            if tag:
+                stmt = stmt.where(Memory.tags.contains(tag))
+            if inactive_only:
+                stmt = stmt.where(Memory.is_active.is_(False))
+            else:
+                stmt = stmt.where(Memory.is_active.is_(True))
+
+            result = await session.execute(stmt)
+            facts = result.scalars().all()
+            count = len(facts)
+
+            if count == 0:
+                await message.answer("📭 Нет фактов по этим критериям.")
+                return
+
+            # Deactivate (don't hard-delete — preserve audit trail)
+            for f in facts:
+                f.is_active = False
+            await session.commit()
+
+        await message.answer(
+            f"🗑 Деактивировано {count} фактов"
+            f"{' (type=' + mem_type + ')' if mem_type else ''}"
+            f"{' (tag=' + tag + ')' if tag else ''}"
+            f"{' (inactive)' if inactive_only else ''}"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+
+
+@router.message(Command("help"))
+async def cmd_help_dynamic(message: Message) -> None:
+    """Dynamic context-aware help — shows relevant commands based on user state."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        total_mem = await session.scalar(
+            select(func.count())
+            .select_from(Memory)
+            .where(Memory.user_id == owner.id, Memory.is_active)
+        )
+        total_contacts = await session.scalar(
+            select(func.count())
+            .select_from(Contact)
+            .where(Contact.user_id == owner.id, Contact.peer_kind == "user")
+        )
+
+    total_mem = total_mem or 0
+    total_contacts = total_contacts or 0
+
+    # Context-aware suggestions
+    suggestions: list[str] = []
+    if total_mem == 0:
+        suggestions.append(
+            "💡 <b>Память пуста</b> — отправь /analyze для извлечения фактов из переписок"
+        )
+    elif total_mem < 10:
+        suggestions.append(
+            "💡 Мало фактов — /analyze добавит больше. /memory для просмотра."
+        )
+    else:
+        suggestions.append(
+            "💡 /mem_heatmap — тепловая карта • /mem_export — экспорт • /mem_dedup — дедупликация"
+        )
+
+    if total_contacts == 0:
+        suggestions.append("💡 Нет контактов — /sync для синхронизации с Telegram")
+    elif total_contacts > 50:
+        suggestions.append("💡 /topics — кому написать • /stats — статистика общения")
+
+    # Always-relevant commands
+    sections = [
+        "\n🧠 <b>Память:</b>",
+        "  /memory — список фактов",
+        "  /analyze — анализ переписок",
+        "  /mem_tags — теги памяти",
+        "\n💬 <b>Общение:</b>",
+        "  /chat Имя — чат с контактом",
+        "  /threads — лента диалогов",
+        "  /inbox — входящие",
+        "\n📋 <b>Планирование:</b>",
+        "  /nlcron — задача на естественном языке",
+        "  /followup — напоминания",
+        "  /intention — намерение на день",
+        "\n🔧 <b>Инструменты:</b>",
+        "  /summarize — пересказ текста",
+        "  /translate — перевод",
+        "  /url_summary — пересказ веб-страницы",
+        "\n📊 <b>Аналитика:</b>",
+        "  /stats — общая статистика",
+        "  /quality — качество ответов",
+        "  /conv_depth — глубина диалогов",
+    ]
+
+    text = (
+        "📖 <b>Справка</b>\n\n" + "\n".join(suggestions) + "\n\n" + "\n".join(sections)
+    )
+    text += "\n\n🌐 Всего команд: 129. Напиши что хочешь — я пойму."
+
+    await message.answer(text, disable_web_page_preview=True)

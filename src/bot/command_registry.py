@@ -254,6 +254,9 @@ def register_all_commands(registry: CommandRegistry | None = None) -> CommandReg
     registry.register("mem_dedup", "Поиск дубликатов фактов", "memory")
     registry.register("mem_importance", "Изменить важность факта", "memory")
     registry.register("mem_tags", "Список тегов памяти", "memory")
+    registry.register("mem_import", "Импорт памяти из JSON", "memory")
+    registry.register("mem_version", "История правок факта", "memory")
+    registry.register("bulk_delete", "Массовое удаление фактов", "memory")
 
     # ── Chat ──
     registry.register("chat", "Начать диалог с контактом", "chat")
