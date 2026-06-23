@@ -55,7 +55,7 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"день рожден", re.I), "birthdays", ""),
     (re.compile(r"дни рожден", re.I), "birthdays", ""),
     (re.compile(r"покажи расписани", re.I), "calendar", ""),
-    (re.compile(r"(мои |есть )?задачи?( .+)?", re.I), "cron", ""),
+    (re.compile(r"(покажи |мои |есть )?задачи?( на| на сегодня)?", re.I), "cron", ""),
     (re.compile(r"намерен(ие|ия)? (на|на сегодня)", re.I), "intention", ""),
     (re.compile(r"недельн.*отч", re.I), "weekly", ""),
     # ── Chat ── (after planning — "напомни" won't be caught by "напиши")
@@ -98,7 +98,7 @@ _NL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"я вернулся|я тут", re.I), "away", "off"),
     # ── Intelligence ──
     (re.compile(r"граф.*знани", re.I), "graph", ""),
-    (re.compile(r"(покажи |мои )?сущности?", re.I), "entities", ""),
+    (re.compile(r"(покажи |мои )?сущност(и|ей|ь)", re.I), "entities", ""),
     (re.compile(r"(покажи |уровень )?уверенност", re.I), "confidence", ""),
 ]
 
