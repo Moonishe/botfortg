@@ -2508,32 +2508,37 @@ async def cmd_bulk_delete(message: Message) -> None:
     tag = filters.get("tag")
     inactive_only = filters.get("inactive", "0") == "1"
 
-    from sqlalchemy import delete as sa_delete, or_
+    from sqlalchemy import delete as sa_delete, or_, update as sa_update
 
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            stmt = select(Memory).where(Memory.user_id == owner.id)
+            # Build WHERE clause for bulk UPDATE (not SELECT+loop — avoids OOM on large datasets)
+            conditions = [Memory.user_id == owner.id]
             if mem_type:
-                stmt = stmt.where(Memory.memory_type == mem_type)
+                conditions.append(Memory.memory_type == mem_type)
             if tag:
-                stmt = stmt.where(Memory.tags.contains(tag))
+                conditions.append(Memory.tags.contains(tag))
             if inactive_only:
-                stmt = stmt.where(Memory.is_active.is_(False))
+                conditions.append(Memory.is_active.is_(False))
             else:
-                stmt = stmt.where(Memory.is_active.is_(True))
+                conditions.append(Memory.is_active.is_(True))
 
-            result = await session.execute(stmt)
-            facts = result.scalars().all()
-            count = len(facts)
+            # Count first for user feedback
+            from sqlalchemy import func as sa_func
+
+            count_result = await session.scalar(
+                select(sa_func.count()).select_from(Memory).where(*conditions)
+            )
+            count = count_result or 0
 
             if count == 0:
                 await message.answer("📭 Нет фактов по этим критериям.")
                 return
 
-            # Deactivate (don't hard-delete — preserve audit trail)
-            for f in facts:
-                f.is_active = False
+            # Bulk UPDATE — one SQL statement, no Python loop
+            stmt = sa_update(Memory).where(*conditions).values(is_active=False)
+            await session.execute(stmt)
             await session.commit()
 
         await message.answer(
