@@ -717,6 +717,32 @@ async def on_reaction_update(reaction_update) -> None:
                 traj.reward_value = 1.0 if is_positive else -1.0
                 await session.commit()
 
+                # S6: Negative reaction → lower confidence of facts used in this response
+                if is_negative and traj.request_text:
+                    try:
+                        from src.core.memory.memory_recall import recall
+                        from src.core.memory.memory_service import save_memory_single
+
+                        # Find facts that were recalled for this response
+                        recall_result = await recall(
+                            tg_id,
+                            query=traj.request_text[:200],
+                            limit=5,
+                            mode="light",
+                        )
+                        lowered = 0
+                        for fact in recall_result.facts:
+                            if fact.confidence and fact.confidence > 0.3:
+                                fact.confidence = max(0.1, fact.confidence * 0.9)
+                                lowered += 1
+                        if lowered:
+                            await session.commit()
+                            logger.info(
+                                "S6: lowered confidence on %d facts after 👎", lowered
+                            )
+                    except Exception:
+                        logger.debug("S6 confidence decay failed", exc_info=True)
+
         logger.debug(
             "Reaction feedback: %s → reward_value=%s",
             emojis,

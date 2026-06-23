@@ -629,6 +629,41 @@ async def auto_evolve_loop(owner_telegram_id: int) -> None:
                         text=text,
                     )
 
+            # S1+S4: Auto-skill creation from repeating patterns.
+            # If user asks similar things 5+ times, auto-create a skill.
+            # ponytail: reuses propose_skills_from_analysis + trajectory scan.
+            try:
+                from src.core.intelligence.skills import (
+                    propose_skills_from_analysis,
+                )
+                from src.db.repo import list_contacts
+                from src.db.models import Trajectory
+                from sqlalchemy import select as sa_select, func as sa_func
+
+                # Count recent trajectories — if 50+ since last run, propose skills
+                async with get_session() as _s_session:
+                    _owner = await get_or_create_user(_s_session, owner_telegram_id)
+                    _traj_count = await _s_session.scalar(
+                        sa_select(sa_func.count())
+                        .select_from(Trajectory)
+                        .where(Trajectory.user_id == _owner.id)
+                    )
+                if _traj_count and _traj_count >= 50:
+                    proposed = await propose_skills_from_analysis(owner_telegram_id)
+                    if proposed:
+                        logger.info(
+                            "S1+S4: auto-created %d skill(s) from patterns",
+                            len(proposed),
+                        )
+                        await notification_queue.enqueue(
+                            topic="skills",
+                            category="auto-skill-creation",
+                            priority=2,
+                            text=f"🧠 Автоматически создано {len(proposed)} нов. навык(ов) из повторяющихся запросов",
+                        )
+            except Exception:
+                logger.debug("S1+S4 auto-skill creation failed", exc_info=True)
+
             # 4. Sleep until next cycle (clock-based interval)
             elapsed = (datetime.now(UTC) - cycle_start).total_seconds()
             sleep_time = max(MIN_SLEEP_SEC, interval_sec - elapsed)

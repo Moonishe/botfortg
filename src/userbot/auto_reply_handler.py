@@ -307,6 +307,33 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                 priority=2,
                 category="auto_reply",
             )
+
+            # S7: Auto-contact profiling — update style profile after dialog.
+            # ponytail: best-effort, non-blocking, 1 LLM call per auto-reply.
+            try:
+                from src.core.contacts.style_profile import (
+                    update_style_profile_for_contact,
+                )
+                from src.llm.router import build_provider
+                from src.llm.base import TaskType
+
+                async with get_session() as _prof_session:
+                    _prof_owner = await get_or_create_user(
+                        _prof_session, owner_telegram_id
+                    )
+                    _prof_provider = await build_provider(
+                        _prof_session,
+                        _prof_owner,
+                        purpose="background",
+                        task_type=TaskType.SUMMARIZE,
+                    )
+                if _prof_provider:
+                    await update_style_profile_for_contact(
+                        _prof_provider, owner_telegram_id, sender.id, sample_size=20
+                    )
+                    await _prof_provider.close()
+            except Exception:
+                logger.debug("S7 auto-contact profiling failed", exc_info=True)
         except Exception:
             logger.exception("auto-reply handler failed")
 
