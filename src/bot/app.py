@@ -415,6 +415,10 @@ def _setup_bot_and_dispatcher(
     dp.include_router(free_text_settings.router)
     dp.include_router(confirm_router)
     dp.include_router(nudge.nudge_router)
+    # Extra commands: memory, intelligence, planning, tools, analytics
+    from src.bot.handlers.commands_extra import router as commands_extra_router
+
+    dp.include_router(commands_extra_router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text_legacy.router)
 
