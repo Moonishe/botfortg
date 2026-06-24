@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, UTC
@@ -31,6 +32,40 @@ from src.db.session import get_session
 logger = logging.getLogger(__name__)
 router = Router(name="commands_extra")
 router.message.filter(OwnerOnly())
+
+# ponytail: keep references to /away auto-reset tasks to prevent GC.
+_AWAY_RESET_TASKS: set[asyncio.Task] = set()
+
+
+def _is_internal_host(host: str) -> bool:
+    """SSRF check — blocks loopback, private, link-local, and decimal IPs."""
+    import ipaddress
+    import socket
+
+    h = (host or "").lower().strip()
+    if h in ("localhost", "0.0.0.0", "::1", "::"):
+        return True
+    # Try parsing as IP (handles dotted notation)
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    except ValueError:
+        pass
+    # Defence in depth: socket.inet_aton parses decimal/hex IPs that ipaddress doesn't
+    try:
+        packed = socket.inet_aton(h)
+        ip = ipaddress.ip_address(packed)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    except (ValueError, OSError):
+        pass
+    # Prefix checks for string-format IPs
+    return (
+        h.startswith("127.")
+        or h.startswith("10.")
+        or h.startswith("192.168.")
+        or h.startswith("169.254.")
+        or any(h.startswith(f"172.{i}.") for i in range(16, 32))
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -787,13 +822,7 @@ async def cmd_summarize(message: Message) -> None:
                 _rh = (
                     _urlparse2(resp.headers.get("location", "")).hostname or ""
                 ).lower()
-                if (
-                    _rh in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
-                    or _rh.startswith("169.254.")
-                    or _rh.startswith("10.")
-                    or _rh.startswith("192.168.")
-                    or any(_rh.startswith(f"172.{i}.") for i in range(16, 32))
-                ):
+                if _is_internal_host(_rh):
                     await message.answer(
                         "❌ Редирект на внутренний адрес заблокирован."
                     )
@@ -1355,7 +1384,10 @@ async def cmd_away(message: Message) -> None:
             except Exception:
                 pass
 
-        asyncio.create_task(_auto_reset(message.from_user.id, timer_minutes))
+        # Keep reference to prevent GC — ponytail: module-level set, cleanup on done.
+        _task = asyncio.create_task(_auto_reset(message.from_user.id, timer_minutes))
+        _AWAY_RESET_TASKS.add(_task)
+        _task.add_done_callback(_AWAY_RESET_TASKS.discard)
 
 
 @router.message(Command("sleep"))
@@ -2156,33 +2188,12 @@ async def cmd_url_summary(message: Message) -> None:
     if not url.startswith("http"):
         url = "https://" + url
 
-    # SSRF protection — block internal/loopback IPs
+    # SSRF protection — block internal/loopback IPs (including decimal IP format)
     from urllib.parse import urlparse
 
     _parsed = urlparse(url)
     _host = _parsed.hostname or ""
-    if (
-        _host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
-        or _host.startswith("169.254.")
-        or _host.startswith("10.")
-        or _host.startswith("192.168.")
-        or _host.startswith("172.16.")
-        or _host.startswith("172.17.")
-        or _host.startswith("172.18.")
-        or _host.startswith("172.19.")
-        or _host.startswith("172.20.")
-        or _host.startswith("172.21.")
-        or _host.startswith("172.22.")
-        or _host.startswith("172.23.")
-        or _host.startswith("172.24.")
-        or _host.startswith("172.25.")
-        or _host.startswith("172.26.")
-        or _host.startswith("172.27.")
-        or _host.startswith("172.28.")
-        or _host.startswith("172.29.")
-        or _host.startswith("172.30.")
-        or _host.startswith("172.31.")
-    ):
+    if _is_internal_host(_host):
         await message.answer("❌ Доступ к внутренним адресам запрещён.")
         return
 
@@ -2199,13 +2210,7 @@ async def cmd_url_summary(message: Message) -> None:
                 from urllib.parse import urlparse as _urlparse
 
                 _redir_host = (_urlparse(location).hostname or "").lower()
-                if (
-                    _redir_host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
-                    or _redir_host.startswith("169.254.")
-                    or _redir_host.startswith("10.")
-                    or _redir_host.startswith("192.168.")
-                    or any(_redir_host.startswith(f"172.{i}.") for i in range(16, 32))
-                ):
+                if _is_internal_host(_redir_host):
                     await message.answer(
                         "❌ Редирект на внутренний адрес заблокирован."
                     )
