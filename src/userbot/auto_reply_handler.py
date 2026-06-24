@@ -118,6 +118,10 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             if is_bot:
                 return
 
+            # ── Skip self: never auto-reply to own messages (Saved Messages, etc.)
+            if sender.id == owner_telegram_id:
+                return
+
             async with get_session() as session:
                 owner: User = await get_or_create_user(session, owner_telegram_id)
                 if owner.settings is None or not owner.settings.auto_reply_enabled:
