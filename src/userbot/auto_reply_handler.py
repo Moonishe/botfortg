@@ -70,7 +70,10 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
             # TOCTOU guard: acquire per-peer lock before any DB check.
             # Prevents duplicate replies when multiple messages arrive quickly.
-            peer_lock = await _get_peer_lock(event.chat_id or 0)
+            _lock_key = (
+                event.chat_id if event.chat_id is not None else event.sender_id or 0
+            )
+            peer_lock = await _get_peer_lock(_lock_key)
             if peer_lock.locked():
                 logger.debug(
                     "Auto-reply skip: already processing for peer %s", event.chat_id

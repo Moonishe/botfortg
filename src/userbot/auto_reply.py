@@ -182,7 +182,8 @@ async def _build_reply_text(
 
     try:
         parsed = _ar_json.loads(raw)
-        reply_text = parsed.get("reply", "").strip() if isinstance(parsed, dict) else ""
+        _reply_raw = parsed.get("reply", "") if isinstance(parsed, dict) else ""
+        reply_text = (_reply_raw or "").strip() if isinstance(_reply_raw, str) else ""
         confidence = (
             float(parsed.get("confidence", 0.5)) if isinstance(parsed, dict) else 0.5
         )
