@@ -918,6 +918,11 @@ async def cmd_translate(message: Message) -> None:
         await message.answer(f"🌐 {result}")
     except Exception:
         await message.answer("❌ Ошибка перевода.")
+    finally:
+        try:
+            await provider.close()
+        except Exception:
+            pass
 
 
 @router.message(Command("currency"))
@@ -1943,16 +1948,19 @@ async def cmd_pdf(message: Message) -> None:
                 for page in reader.pages[:20]:
                     text += page.extract_text() or ""
 
-        import os
-
-        os.unlink(tmp_path)
-
         if not text.strip():
             await message.answer("📄 PDF не содержит текста (возможно сканы).")
         else:
             await message.answer(f"📄 Извлечённый текст:\n\n{text[:3000]}")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+    finally:
+        import os
+
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 @router.message(Command("ocr"))
@@ -1991,16 +1999,19 @@ async def cmd_ocr(message: Message) -> None:
 
         text = pytesseract.image_to_string(Image.open(tmp_path), lang="rus+eng")
 
-        import os
-
-        os.unlink(tmp_path)
-
         if not text.strip():
             await message.answer("🔍 Текст не найден на изображении.")
         else:
             await message.answer(f"🔍 Распознанный текст:\n\n{text[:3000]}")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e.__class__.__name__}")
+    finally:
+        import os
+
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 @router.message(Command("skill_stats"))

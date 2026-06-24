@@ -199,4 +199,3 @@ async def _build_reply_text(
         if raw and raw.strip():
             return raw.strip()
         return None
-        return None
