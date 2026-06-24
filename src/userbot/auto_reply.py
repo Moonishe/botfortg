@@ -162,13 +162,41 @@ async def _build_reply_text(
         return None
 
     try:
-        return await provider.chat(
+        raw = await provider.chat(
             [
-                ChatMessage(role="system", content=system),
+                ChatMessage(
+                    role="system",
+                    content=system
+                    + '\n\nВАЖНО: Верни ответ в формате JSON: {"reply": "текст ответа", "confidence": 0.0-1.0}. confidence — насколько ты уверен что этот ответ уместен. Если не уверен — верни confidence < 0.5 и пустой reply.',
+                ),
                 ChatMessage(role="user", content=user_prompt),
             ],
             task_type=TaskType.DEFAULT,
         )
     except Exception:
         logger.exception("auto-reply: LLM call failed")
+        return None
+
+    # Feature #1: Confidence threshold — if LLM not confident, stay silent
+    import json as _ar_json
+
+    try:
+        parsed = _ar_json.loads(raw)
+        reply_text = parsed.get("reply", "").strip() if isinstance(parsed, dict) else ""
+        confidence = (
+            float(parsed.get("confidence", 0.5)) if isinstance(parsed, dict) else 0.5
+        )
+        if confidence < 0.5 or not reply_text:
+            logger.info(
+                "auto-reply: skipping low confidence reply (conf=%.2f) for peer %d",
+                confidence,
+                peer_id,
+            )
+            return None
+        return reply_text
+    except (_ar_json.JSONDecodeError, ValueError, TypeError):
+        # LLM didn't return JSON — use raw text directly (backward compat)
+        if raw and raw.strip():
+            return raw.strip()
+        return None
         return None

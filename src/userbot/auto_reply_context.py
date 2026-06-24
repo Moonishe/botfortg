@@ -257,6 +257,18 @@ async def _build_system_prompt(
     between auto_reply_context and auto_reply (facade).
     """
     system = base
+
+    # Feature #2: Contact reply length matching — mirror contact's message length
+    if incoming_text:
+        _in_len = len(incoming_text.strip())
+        if _in_len < 30:
+            system += "\n\nВАЖНО: Собеседник написал очень коротко. Ответь ТАК ЖЕ коротко — 1-2 слова или одно предложение."
+        elif _in_len < 100:
+            system += "\n\nВАЖНО: Собеседник пишет кратко. Ответь 1-2 предложениями, не растягивай."
+        elif _in_len > 500:
+            system += "\n\nВАЖНО: Собеседник написал развёрнуто. Можно ответить подробнее — 3-5 предложений."
+        # 100-500 chars — no instruction, let LLM decide naturally
+
     if memory_context:
         system = system + "\n\n" + memory_context
     if owner_absence_status == "away":
