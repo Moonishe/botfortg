@@ -129,12 +129,8 @@ async def _stage2_summarise(
                     )
     except Exception:
         logger.debug("Memory flush before offload failed (non-critical)", exc_info=True)
-    finally:
-        if flush_provider:
-            try:
-                await flush_provider.close()
-            except Exception:
-                pass
+    # NOTE: Do NOT close flush_provider — build_provider caches it for 300s.
+    # Closing would break subsequent calls that get the same cached instance.
 
     try:
         from src.llm.base import ChatMessage, TaskType
